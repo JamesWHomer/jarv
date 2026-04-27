@@ -30,7 +30,7 @@ Repository = "https://github.com/JamesWHomer/jarv"
 Issues = "https://github.com/JamesWHomer/jarv/issues"
 
 [project.scripts]
-jarv = "jarv:main"
+jarv = "jarv.cli:main"
 
-[tool.setuptools]
-py-modules = ["jarv"]
+[tool.setuptools.packages.find]
+include = ["jarv*"]
