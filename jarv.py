@@ -45,7 +45,7 @@ DEFAULT_SYSTEM_PROMPT = (
 
 DEFAULT_CONFIG = {
     "api_key": "",
-    "model": "gpt-4o-mini",
+    "model": "gpt-5.4-mini",
     "reasoning_effort": "",
     "max_history": 40,
     "command_timeout": 60,
@@ -519,7 +519,7 @@ def print_help() -> None:
     key_table.add_column(style="bold yellow", no_wrap=True)
     key_table.add_column(style="dim")
     key_table.add_row("api_key", "OpenAI API key")
-    key_table.add_row("model", "Model name (default: gpt-4o-mini)")
+    key_table.add_row("model", "Model name (default: gpt-5.4-mini)")
     key_table.add_row("reasoning_effort", "Reasoning effort value (empty to disable)")
     key_table.add_row("max_history", "Number of messages to keep as context")
     key_table.add_row("command_timeout", "Seconds before a shell command is killed")
