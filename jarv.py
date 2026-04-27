@@ -6,6 +6,8 @@ import json
 import os
 import platform
 import subprocess
+import threading
+import urllib.request
 from pathlib import Path
 from openai import OpenAI
 from rich.console import Console
@@ -22,6 +24,11 @@ console = Console()
 CONFIG_DIR = Path.home() / ".jarv"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 HISTORY_FILE = CONFIG_DIR / "history.json"
+SHA_FILE = CONFIG_DIR / "last_sha.txt"
+
+GITHUB_REPO = "JamesWHomer/jarv"
+GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/commits/main"
+INSTALL_URL = f"https://github.com/{GITHUB_REPO}.git"
 
 DEFAULT_CONFIG = {
     "api_key": "",
@@ -353,6 +360,7 @@ def print_help() -> None:
     cmd_table.add_row("jarv clear", "Clear conversation history")
     cmd_table.add_row("jarv history", "Show recent conversation history")
     cmd_table.add_row("jarv config", "Show current settings")
+    cmd_table.add_row("jarv update", "Update jarv to the latest version")
     cmd_table.add_row("jarv help", "Show this help")
 
     key_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
@@ -372,7 +380,64 @@ def print_help() -> None:
     console.print(f"[dim]History: {HISTORY_FILE}[/dim]")
 
 
+def _fetch_latest_sha() -> str | None:
+    try:
+        req = urllib.request.Request(GITHUB_API, headers={"User-Agent": "jarv-updater"})
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read())
+            return data["sha"]
+    except Exception:
+        return None
+
+
+def _load_known_sha() -> str:
+    if SHA_FILE.exists():
+        return SHA_FILE.read_text().strip()
+    return ""
+
+
+def _save_sha(sha: str) -> None:
+    CONFIG_DIR.mkdir(exist_ok=True)
+    SHA_FILE.write_text(sha)
+
+
+_update_available: list[str] = []
+
+
+def _check_update_background() -> None:
+    latest = _fetch_latest_sha()
+    if latest and latest != _load_known_sha():
+        _update_available.append(latest)
+
+
+def cmd_update() -> None:
+    console.print("[dim]Checking for updates...[/dim]")
+    latest = _fetch_latest_sha()
+    if latest is None:
+        console.print("[red]Could not reach GitHub.[/red]")
+        return
+    known = _load_known_sha()
+    if latest == known:
+        console.print("[green]Already up to date.[/green]")
+        return
+    console.print("[cyan]Update found. Installing...[/cyan]")
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--upgrade", f"git+https://github.com/{GITHUB_REPO}.git"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        _save_sha(latest)
+        console.print("[green]Updated successfully! Restart jarv to use the new version.[/green]")
+    else:
+        console.print("[red]Update failed:[/red]")
+        console.print(result.stderr.strip(), style="dim")
+
+
 def main() -> None:
+    update_thread = threading.Thread(target=_check_update_background, daemon=True)
+    update_thread.start()
+
     if len(sys.argv) < 2:
         print_help()
         sys.exit(0)
@@ -382,6 +447,10 @@ def main() -> None:
 
     if command == "help":
         print_help()
+        return
+
+    if command == "update":
+        cmd_update()
         return
 
     if command == "clear":
@@ -432,6 +501,18 @@ def main() -> None:
     if not api_key:
         console.print(f"[red]No API key found.[/red] Edit {CONFIG_FILE} or set OPENAI_API_KEY.")
         sys.exit(1)
+
+    update_thread.join(timeout=3)
+    if _update_available:
+        sha = _update_available[0]
+        if not _load_known_sha():
+            _save_sha(sha)
+        else:
+            console.print("[yellow]Update available![/yellow] Run [bold]jarv update[/bold] to install.")
+    elif not _load_known_sha():
+        latest = _fetch_latest_sha()
+        if latest:
+            _save_sha(latest)
 
     client = OpenAI(api_key=api_key)
     try:
