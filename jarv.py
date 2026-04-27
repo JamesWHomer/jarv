@@ -532,21 +532,19 @@ def get_system_info() -> str:
     return "\n".join(parts)
 
 
-def get_session_info(context: SessionContext) -> str:
-    previous_session = context.previous_user_session_label or context.previous_user_session_id or "unknown"
-    return "\n".join(
-        [
-            f"History scope: {context.scope}",
-            f"History file: {context.history_file}",
-            f"Current session: {context.session_label} ({context.session_source})",
-            f"Current session id: {context.session_id}",
-            f"New terminal/session: {'yes' if context.is_new_session else 'no'}",
-            f"Previous user message: {context.elapsed_since_previous_user} ago",
-            f"Previous user session: {previous_session}",
-            "Previous global message came from another terminal/session: "
-            f"{'yes' if context.previous_global_session_changed else 'no'}",
-        ]
-    )
+def new_terminal_context_input(context: SessionContext) -> dict | None:
+    if context.scope != "global" or not context.previous_global_session_changed:
+        return None
+    return {
+        "role": "user",
+        "content": "\n".join(
+            [
+                "<new_terminal>",
+                f"Terminal session: {context.session_label}",
+                "</new_terminal>",
+            ]
+        ),
+    }
 
 
 def validate_config(config: dict) -> bool:
@@ -606,13 +604,15 @@ def run_agent(
     history.append({"role": "user", "content": query, **metadata})
 
     input_items = build_input(history, max_history)
+    terminal_context = new_terminal_context_input(session_context)
+    if terminal_context is not None and input_items:
+        input_items.insert(len(input_items) - 1, terminal_context)
 
     kwargs = dict(
         model=config["model"],
         instructions=(
             config["system_prompt"]
             + f"\n\nSystem info:\n{get_system_info()}"
-            + f"\n\nSession context:\n{get_session_info(session_context)}"
         ),
         tools=TOOLS,
         input=input_items,
@@ -828,7 +828,7 @@ Run `jarv session` to start an independent interactive session. It uses a separa
 1. Loads config from `{CONFIG_FILE}`.
 2. Detects the current terminal/session and chooses the configured history scope.
 3. Loads recent conversation history from the active history file.
-4. Sends your query, recent history, the configured system prompt, system info, and session context to the OpenAI Responses API.
+4. Sends your query, recent history, the configured system prompt, and system info to the OpenAI Responses API. If global history moved to a different terminal, jarv inserts a small `<new_terminal>` marker before the new message.
 5. Streams the assistant response in the terminal.
 6. If the model calls the shell tool, jarv displays the command, runs it, shows stdout/stderr/exit status, and sends the full command result back to the model.
 7. Saves the final assistant response back to history, trimmed to `max_history` items.
