@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install *)",
+      "Bash(jarv help *)",
+      "Bash(jarv config *)",
+      "Bash(jarv set *)",
+      "Bash(jarv unset *)"
+    ]
+  }
+}
