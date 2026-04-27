@@ -159,8 +159,16 @@ def run_command(command: str) -> str:
 
 def build_input(history: list, max_history: int) -> list:
     """Convert stored history to Responses API input format."""
+    slice_ = history[-max_history:]
+    # Drop leading non-user items to avoid orphaned tool call pairs after truncation.
+    for i, m in enumerate(slice_):
+        if m.get("role") == "user":
+            slice_ = slice_[i:]
+            break
+    else:
+        slice_ = []
     items = []
-    for m in history[-max_history:]:
+    for m in slice_:
         role = m.get("role")
         typ = m.get("type")
         if role == "user":
@@ -218,63 +226,67 @@ def run_agent(query: str, config: dict, client: OpenAI) -> None:
     if effort := config.get("reasoning_effort"):
         kwargs["reasoning"] = {"effort": effort}
 
-    while True:
-        reply_text = ""
-        tool_calls = []
-        reasoning_items = []
-        got_text = False
+    try:
+        while True:
+            reply_text = ""
+            tool_calls = []
+            reasoning_items = []
+            got_text = False
 
-        with client.responses.stream(**kwargs) as stream:
-            with Live(
-                Spinner("dots", text=" Thinking..."),
-                refresh_per_second=15,
-                console=console,
-            ) as live:
-                for event in stream:
-                    if event.type == "response.output_text.delta":
-                        if not got_text:
-                            got_text = True
-                        reply_text += event.delta
-                        live.update(Markdown(flatten_headings(reply_text)))
-                    elif event.type == "response.output_item.done":
-                        if event.item.type == "function_call":
-                            tool_calls.append(event.item)
-                        elif event.item.type == "reasoning":
-                            reasoning_items.append(event.item)
+            with client.responses.stream(**kwargs) as stream:
+                with Live(
+                    Spinner("dots", text=" Thinking..."),
+                    refresh_per_second=15,
+                    console=console,
+                ) as live:
+                    for event in stream:
+                        if event.type == "response.output_text.delta":
+                            if not got_text:
+                                got_text = True
+                            reply_text += event.delta
+                            live.update(Markdown(flatten_headings(reply_text)))
+                        elif event.type == "response.output_item.done":
+                            if event.item.type == "function_call":
+                                tool_calls.append(event.item)
+                            elif event.item.type == "reasoning":
+                                reasoning_items.append(event.item)
 
-        if tool_calls:
-            new_items = []
-            for ri in reasoning_items:
-                rd = {"type": "reasoning", "id": ri.id, "summary": []}
-                history.append(rd)
-                new_items.append(rd)
-            for item in tool_calls:
-                cmd = json.loads(item.arguments)["command"]
-                console.print()
-                console.print(Rule(f"[bold yellow]$ {cmd}[/bold yellow]", style="yellow", align="left"))
-                output = run_command(cmd)
-                display_output(output)
-                console.print(Rule(style="bright_black"))
+            if tool_calls:
+                new_items = []
+                for ri in reasoning_items:
+                    rd = {"type": "reasoning", "id": ri.id, "summary": []}
+                    history.append(rd)
+                    new_items.append(rd)
+                for item in tool_calls:
+                    cmd = json.loads(item.arguments)["command"]
+                    console.print()
+                    console.print(Rule(f"[bold yellow]$ {cmd}[/bold yellow]", style="yellow", align="left"))
+                    output = run_command(cmd)
+                    display_output(output)
+                    console.print(Rule(style="bright_black"))
 
-                fc = {
-                    "type": "function_call",
-                    "id": item.id,
-                    "call_id": item.call_id,
-                    "name": item.name,
-                    "arguments": item.arguments,
-                }
-                fco = {
-                    "type": "function_call_output",
-                    "call_id": item.call_id,
-                    "output": output,
-                }
-                history.extend([fc, fco])
-                new_items.extend([fc, fco])
-            kwargs["input"] = kwargs["input"] + new_items
-        else:
-            history.append({"role": "assistant", "content": reply_text})
-            save_history(history[-max_history:])
-            break
+                    fc = {
+                        "type": "function_call",
+                        "id": item.id,
+                        "call_id": item.call_id,
+                        "name": item.name,
+                        "arguments": item.arguments,
+                    }
+                    fco = {
+                        "type": "function_call_output",
+                        "call_id": item.call_id,
+                        "output": output,
+                    }
+                    history.extend([fc, fco])
+                    new_items.extend([fc, fco])
+                kwargs["input"] = kwargs["input"] + new_items
+            else:
+                history.append({"role": "assistant", "content": reply_text})
+                save_history(history[-max_history:])
+                break
+    except KeyboardInterrupt:
+        console.print("\n[dim]Interrupted.[/dim]")
+        save_history(history[-max_history:])
 
 
 def coerce_value(value: str):
@@ -417,7 +429,11 @@ def main() -> None:
         sys.exit(1)
 
     client = OpenAI(api_key=api_key)
-    run_agent(query, config, client)
+    try:
+        run_agent(query, config, client)
+    except KeyboardInterrupt:
+        console.print("\n[dim]Interrupted.[/dim]")
+        sys.exit(130)
 
 
 if __name__ == "__main__":
