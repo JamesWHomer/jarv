@@ -11,6 +11,11 @@ from openai import OpenAI
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.live import Live
+from rich.spinner import Spinner
+from rich.table import Table
+from rich.panel import Panel
+from rich.rule import Rule
+from rich import box
 
 console = Console()
 
@@ -54,8 +59,8 @@ def load_config() -> dict:
     CONFIG_DIR.mkdir(exist_ok=True)
     if not CONFIG_FILE.exists():
         CONFIG_FILE.write_text(json.dumps(DEFAULT_CONFIG, indent=2))
-        print(f"Config created at {CONFIG_FILE}")
-        print("Set your OpenAI API key there or via the OPENAI_API_KEY env var.")
+        console.print(f"[green]Config created at[/green] {CONFIG_FILE}")
+        console.print("[dim]Set your OpenAI API key there or via the OPENAI_API_KEY env var.[/dim]")
         sys.exit(0)
     config = json.loads(CONFIG_FILE.read_text())
     for k, v in DEFAULT_CONFIG.items():
@@ -79,6 +84,24 @@ def load_history() -> list:
 
 def save_history(history: list) -> None:
     HISTORY_FILE.write_text(json.dumps(history, indent=2))
+
+
+DISPLAY_LINE_LIElastic License 2.0 = 30
+
+
+def flatten_headings(text: str) -> str:
+    import re
+    return re.sub(r"^#{1,6}\s+(.+)$", r"**\1**", text, flags=re.MULTILINE)
+
+
+def display_output(output: str) -> None:
+    lines = output.splitlines()
+    if len(lines) > DISPLAY_LINE_LIElastic License 2.0:
+        console.print("\n".join(lines[:DISPLAY_LINE_LIElastic License 2.0]), style="dim")
+        hidden = len(lines) - DISPLAY_LINE_LIElastic License 2.0
+        console.print(f"[dim italic]... {hidden} more lines hidden (full output sent to model)[/dim italic]")
+    else:
+        console.print(output, style="dim")
 
 
 def run_command(command: str) -> str:
@@ -165,13 +188,20 @@ def run_agent(query: str, config: dict, client: OpenAI) -> None:
         reply_text = ""
         tool_calls = []
         reasoning_items = []
+        got_text = False
 
         with client.responses.stream(**kwargs) as stream:
-            with Live(Markdown(""), refresh_per_second=15, console=console, vertical_overflow="visible") as live:
+            with Live(
+                Spinner("dots", text=" Thinking..."),
+                refresh_per_second=15,
+                console=console,
+            ) as live:
                 for event in stream:
                     if event.type == "response.output_text.delta":
+                        if not got_text:
+                            got_text = True
                         reply_text += event.delta
-                        live.update(Markdown(reply_text))
+                        live.update(Markdown(flatten_headings(reply_text)))
                     elif event.type == "response.output_item.done":
                         if event.item.type == "function_call":
                             tool_calls.append(event.item)
@@ -186,9 +216,11 @@ def run_agent(query: str, config: dict, client: OpenAI) -> None:
                 new_items.append(rd)
             for item in tool_calls:
                 cmd = json.loads(item.arguments)["command"]
-                console.print(f"\n[bold]$ {cmd}[/bold]")
+                console.print()
+                console.print(Rule(f"[bold yellow]$ {cmd}[/bold yellow]", style="yellow", align="left"))
                 output = run_command(cmd)
-                console.print(output)
+                display_output(output)
+                console.print(Rule(style="bright_black"))
 
                 fc = {
                     "type": "function_call",
@@ -229,56 +261,64 @@ def coerce_value(value: str):
 
 def cmd_set(args: list) -> None:
     if len(args) < 2:
-        print("Usage: jarv set <key> <value>")
-        print(f"Keys: {', '.join(DEFAULT_CONFIG.keys())}")
+        console.print("[red]Usage:[/red] jarv set <key> <value>")
+        console.print(f"[dim]Keys: {', '.join(DEFAULT_CONFIG.keys())}[/dim]")
         return
     key, raw = args[0], " ".join(args[1:])
     config = load_config()
     value = coerce_value(raw)
     config[key] = value
     save_config(config)
-    display = "***" if key == "api_key" else repr(value)
-    print(f"{key} = {display}")
+    display = "[dim]***[/dim]" if key == "api_key" else f"[green]{repr(value)}[/green]"
+    console.print(f"[bold cyan]{key}[/bold cyan] = {display}")
 
 
 def cmd_unset(args: list) -> None:
     if not args:
-        print("Usage: jarv unset <key>")
+        console.print("[red]Usage:[/red] jarv unset <key>")
         return
     key = args[0]
     config = load_config()
     if key not in config:
-        print(f"'{key}' is not set.")
+        console.print(f"[yellow]'{key}'[/yellow] is not set.")
         return
     if key in DEFAULT_CONFIG:
         config[key] = DEFAULT_CONFIG[key]
         save_config(config)
-        print(f"{key} reset to default: {repr(DEFAULT_CONFIG[key])}")
+        console.print(f"[bold cyan]{key}[/bold cyan] reset to default: [dim]{repr(DEFAULT_CONFIG[key])}[/dim]")
     else:
         del config[key]
         save_config(config)
-        print(f"{key} removed.")
+        console.print(f"[bold cyan]{key}[/bold cyan] removed.")
 
 
 def print_help() -> None:
-    print(
-        "Usage:\n"
-        "  jarv <question or task>      Ask jarv anything\n"
-        "  jarv set <key> <value>       Set a config value\n"
-        "  jarv unset <key>             Reset a config key to its default\n"
-        "  jarv clear                   Clear conversation history\n"
-        "  jarv history                 Show recent conversation history\n"
-        "  jarv config                  Show config file and current settings\n"
-        "  jarv help                    Show this help\n\n"
-        f"Config:  {CONFIG_FILE}\n"
-        f"History: {HISTORY_FILE}\n\n"
-        "Config keys:\n"
-        "  api_key           OpenAI API key\n"
-        "  model             Model name (e.g. gpt-5.4-mini, gpt-4o)\n"
-        "  reasoning_effort  Reasoning effort: low, medium, high (unset to disable)\n"
-        "  max_history       Number of messages to keep as context\n"
-        "  system_prompt     System prompt sent to the model"
-    )
+    cmd_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
+    cmd_table.add_column(style="bold cyan", no_wrap=True)
+    cmd_table.add_column(style="dim")
+    cmd_table.add_row("jarv <question>", "Ask jarv anything")
+    cmd_table.add_row("jarv set <key> <value>", "Set a config value")
+    cmd_table.add_row("jarv unset <key>", "Reset a config key to its default")
+    cmd_table.add_row("jarv clear", "Clear conversation history")
+    cmd_table.add_row("jarv history", "Show recent conversation history")
+    cmd_table.add_row("jarv config", "Show current settings")
+    cmd_table.add_row("jarv help", "Show this help")
+
+    key_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
+    key_table.add_column(style="bold yellow", no_wrap=True)
+    key_table.add_column(style="dim")
+    key_table.add_row("api_key", "OpenAI API key")
+    key_table.add_row("model", "Model name (e.g. gpt-5.4-mini, gpt-4o)")
+    key_table.add_row("reasoning_effort", "low, medium, high — or unset to disable")
+    key_table.add_row("max_history", "Number of messages to keep as context")
+    key_table.add_row("system_prompt", "System prompt sent to the model")
+
+    console.print(Panel(cmd_table, title="[bold]jarv[/bold]", border_style="bright_black", padding=(1, 2)))
+    console.print()
+    console.print("[bold]Config keys[/bold]")
+    console.print(key_table)
+    console.print(f"\n[dim]Config:  {CONFIG_FILE}[/dim]")
+    console.print(f"[dim]History: {HISTORY_FILE}[/dim]")
 
 
 def main() -> None:
@@ -295,20 +335,23 @@ def main() -> None:
 
     if command == "clear":
         save_history([])
-        print("History cleared.")
+        console.print("[dim]History cleared.[/dim]")
         return
 
     if command == "history":
         history = load_history()
         if not history:
-            print("No history yet.")
+            console.print("[dim]No history yet.[/dim]")
             return
         for m in history:
             role = m.get("role")
             if role == "user":
-                print(f"\nYou: {m.get('content', '')}")
+                console.print(f"\n[bold cyan]You[/bold cyan]  {m.get('content', '')}")
             elif role == "assistant":
-                print(f"\nJarv: {m.get('content', '')}")
+                content = m.get("content", "")
+                if content:
+                    console.print(f"\n[bold green]Jarv[/bold green]")
+                    console.print(Markdown(flatten_headings(content)))
         return
 
     if command == "set":
@@ -321,9 +364,14 @@ def main() -> None:
 
     if command == "config":
         config = load_config()
-        display = {k: ("***" if k == "api_key" and v else v) for k, v in config.items()}
-        print(f"Config file: {CONFIG_FILE}")
-        print(json.dumps(display, indent=2))
+        table = Table(box=box.SIMPLE, show_header=True, padding=(0, 2))
+        table.add_column("Key", style="bold cyan")
+        table.add_column("Value")
+        for k, v in config.items():
+            val = "[dim]***[/dim]" if k == "api_key" and v else repr(v)
+            table.add_row(k, val)
+        console.print(f"[dim]{CONFIG_FILE}[/dim]")
+        console.print(table)
         return
 
     query = " ".join(args)
@@ -331,7 +379,7 @@ def main() -> None:
 
     api_key = config.get("api_key") or os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
-        print(f"No API key found. Edit {CONFIG_FILE} or set OPENAI_API_KEY.")
+        console.print(f"[red]No API key found.[/red] Edit {CONFIG_FILE} or set OPENAI_API_KEY.")
         sys.exit(1)
 
     client = OpenAI(api_key=api_key)
