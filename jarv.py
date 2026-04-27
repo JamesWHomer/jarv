@@ -506,6 +506,7 @@ def print_help() -> None:
     cmd_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
     cmd_table.add_column(style="bold cyan", no_wrap=True)
     cmd_table.add_column(style="dim")
+    cmd_table.add_row("jarv", "Start heads-up mode for repeated prompts")
     cmd_table.add_row("jarv <question>", "Ask jarv anything")
     cmd_table.add_row("jarv set <key> <value>", "Set a config value")
     cmd_table.add_row("jarv unset <key>", "Reset a config key to its default")
@@ -513,6 +514,7 @@ def print_help() -> None:
     cmd_table.add_row("jarv history", "Show recent conversation history")
     cmd_table.add_row("jarv config", "Show current settings")
     cmd_table.add_row("jarv update", "Update jarv to the latest version")
+    cmd_table.add_row("jarv about", "Show detailed information about jarv")
     cmd_table.add_row("jarv help", "Show this help")
 
     key_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
@@ -531,6 +533,89 @@ def print_help() -> None:
     console.print(key_table)
     console.print(f"\n[dim]Config:  {CONFIG_FILE}[/dim]")
     console.print(f"[dim]History: {HISTORY_FILE}[/dim]")
+
+
+def print_about() -> None:
+    about = f"""# jarv
+
+jarv is a command-line AI assistant powered by OpenAI.
+
+## Basic usage
+
+- `jarv` - Start heads-up mode so you can keep sending prompts without rerunning the command.
+- `jarv <question>` - Ask jarv anything. Your words after `jarv` are sent as the user message.
+- `jarv help` - Show the short command overview.
+- `jarv about` - Show this detailed overview.
+- `jarv config` - Show current settings. The API key is masked.
+- `jarv set <key> <value>` - Set a config value. Values like `true`, `false`, integers, and floats are coerced.
+- `jarv unset <key>` - Reset a default config key, or remove a custom key.
+- `jarv history` - Show recent user and assistant messages.
+- `jarv clear` - Clear saved conversation history.
+- `jarv update` - Check GitHub for the latest main commit and install it with pip.
+
+## Heads-up mode
+
+Run `jarv` with no prompt to start an interactive session. Type a prompt and press Enter to send it. Type `exit` or `quit`, or press Ctrl+C, to leave.
+
+## How jarv works
+
+1. Loads config from `{CONFIG_FILE}`.
+2. Loads recent conversation history from `{HISTORY_FILE}`.
+3. Sends your query, recent history, the configured system prompt, and system info to the OpenAI Responses API.
+4. Streams the assistant response in the terminal.
+5. If the model calls the shell tool, jarv displays the command, runs it, shows stdout/stderr/exit status, and sends the full command result back to the model.
+6. Saves the final assistant response back to history, trimmed to `max_history` items.
+
+## Shell command behavior
+
+- jarv exposes one tool to the model: `run_command`.
+- Commands are run only when the model chooses to call that tool.
+- On Windows, commands run through PowerShell.
+- On other platforms, commands run through the system shell.
+- Command output shown in the terminal is shortened after 30 lines, but the full output is sent back to the model.
+- Commands are killed after `command_timeout` seconds.
+- Interrupted commands/process trees are terminated when possible.
+
+## Config
+
+Config file: `{CONFIG_FILE}`
+
+Keys:
+
+- `api_key` - OpenAI API key. Can also be provided with the `OPENAI_API_KEY` environment variable.
+- `model` - OpenAI model name. Default: `{DEFAULT_CONFIG['model']}`.
+- `reasoning_effort` - Optional reasoning effort value. Empty disables this setting.
+- `max_history` - Number of history items kept as context. Default: `{DEFAULT_CONFIG['max_history']}`.
+- `command_timeout` - Seconds before a shell command is killed. Default: `{DEFAULT_CONFIG['command_timeout']}`.
+- `system_prompt` - Instructions sent to the model before each request.
+
+If the config file does not exist, jarv creates it and exits so you can add an API key.
+If the config file is invalid JSON, jarv backs it up and creates a fresh default config.
+
+## History and context
+
+History file: `{HISTORY_FILE}`
+
+jarv stores recent conversation items locally, including user messages, assistant messages, and tool-call context needed by the Responses API. `jarv clear` empties this file. `jarv history` displays only readable user and assistant messages.
+
+## Updates
+
+- `jarv update` checks `{GITHUB_REPO}` on GitHub and installs the latest version from `{INSTALL_URL}`.
+- Normal question runs also do a quick background update check and tell you if an update is available.
+- After updating, run `jarv` again to use the new version.
+
+## Files
+
+- Config directory: `{CONFIG_DIR}`
+- Config file: `{CONFIG_FILE}`
+- History file: `{HISTORY_FILE}`
+- Last known update SHA: `{SHA_FILE}`
+
+## Version
+
+jarv {__version__}
+"""
+    console.print(Panel(Markdown(flatten_headings(about)), title="[bold]about jarv[/bold]", border_style="bright_black", padding=(1, 2)))
 
 
 def _fetch_latest_sha() -> str | None:
@@ -581,7 +666,7 @@ def cmd_update() -> None:
     )
     if result.returncode == 0:
         _save_sha(latest)
-        console.print("[green]Updated successfully! Restart jarv to use the new version.[/green]")
+        console.print("[green]Updated successfully! Run jarv again to use the new version.[/green]")
     else:
         console.print("[red]Update failed:[/red]")
         console.print(result.stderr.strip(), style="dim")
@@ -589,14 +674,26 @@ def cmd_update() -> None:
 
 def main() -> None:
     if len(sys.argv) < 2:
-        print_help()
-        sys.exit(0)
+        config = load_config()
+        if not validate_config(config):
+            sys.exit(1)
+        api_key = config.get("api_key") or os.environ.get("OPENAI_API_KEY", "")
+        if not api_key:
+            console.print(f"[red]No API key found.[/red] Edit {CONFIG_FILE} or set OPENAI_API_KEY.")
+            sys.exit(1)
+        client = OpenAI(api_key=api_key)
+        run_heads_up_mode(config, client)
+        return
 
     args = sys.argv[1:]
     command = args[0].lower()
 
     if command == "help":
         print_help()
+        return
+
+    if command == "about":
+        print_about()
         return
 
     if command == "update":
@@ -670,6 +767,25 @@ def main() -> None:
     except KeyboardInterrupt:
         console.print("\n[dim]Interrupted.[/dim]")
         sys.exit(130)
+
+
+def run_heads_up_mode(config: dict, client: OpenAI) -> None:
+    console.print("[bold cyan]jarv heads-up mode[/bold cyan]")
+    console.print("[dim]Type a prompt and press Enter. Type 'exit' or press Ctrl+C to leave.[/dim]")
+    while True:
+        try:
+            query = console.input("\n[bold cyan]jarv>[/bold cyan] ").strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[dim]Goodbye.[/dim]")
+            return
+
+        if not query:
+            continue
+        if query.lower() in {"exit", "quit"}:
+            console.print("[dim]Goodbye.[/dim]")
+            return
+
+        run_agent(query, config, client)
 
 
 if __name__ == "__main__":

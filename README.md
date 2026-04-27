@@ -5,11 +5,16 @@ Super simple OpenAI-powered CLI agent.
 Jarv uses the OpenAI Responses API, keeps a short local conversation history, and can run shell commands when the model decides they are useful. Command output is shown in your terminal and sent back to the model so it can continue the task.
 
 ```bash
+jarv
 jarv whats the meaning of life?
 jarv what did the fox say?
 jarv bring up the man page for the uhhh exponent function?
 jarv commit all these files
 ```
+
+Run `jarv` with no prompt to start heads-up mode, where you can keep sending prompts without rerunning the command each time.
+
+In heads-up mode, type a prompt and press Enter. Type `exit` or `quit`, or press Ctrl+C, to leave.
 
 ## Install
 
@@ -88,7 +93,8 @@ You can edit the JSON file directly or use `jarv set` / `jarv unset`.
 ## Commands
 
 | Command | Description |
-|---|---|
+| --- | --- |
+| `jarv` | Start heads-up mode for repeated prompts |
 | `jarv <anything>` | Ask Jarv a question or give it a task |
 | `jarv set <key> <value>` | Set a config value |
 | `jarv unset <key>` | Reset a config key to its default |
@@ -96,6 +102,7 @@ You can edit the JSON file directly or use `jarv set` / `jarv unset`.
 | `jarv history` | Show recent conversation history |
 | `jarv config` | Show current settings |
 | `jarv update` | Update Jarv to the latest version from GitHub |
+| `jarv about` | Show detailed information about Jarv |
 | `jarv help` | Show help |
 
 ## Files
