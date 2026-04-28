@@ -1,13 +1,16 @@
 import json
 import os
 import platform
+import time
 
 from openai import OpenAI, OpenAIError
+from rich import box
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.markup import escape
+from rich.panel import Panel
 from rich.rule import Rule
-from rich.spinner import Spinner
+from rich.text import Text
 
 from .config import DEFAULT_CONFIG
 from .display import console, flatten_headings
@@ -39,6 +42,34 @@ TOOLS = [
         },
     }
 ]
+
+
+_THINKING_FRAMES = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"]
+
+
+class ThinkingIndicator:
+    """Animated thinking bubble with live elapsed timer; re-renders on each Live refresh."""
+
+    def __init__(self, start_time: float):
+        self._start = start_time
+
+    def __rich_console__(self, console, options):
+        now = time.perf_counter()
+        elapsed = now - self._start
+        frame = _THINKING_FRAMES[int(now * 10) % len(_THINKING_FRAMES)]
+        yield Text(f"{frame}  Thinking\u2026  {int(elapsed)}s")
+
+
+def thought_complete_indicator(text: str) -> Text:
+    """Return the static completed-thinking bubble."""
+    return Text(f"\u2726 {text}", style="dim")
+
+
+def format_thought_duration(seconds: float) -> str:
+    """Return a compact human-readable duration for the thinking timer."""
+    rounded = round(max(0.0, seconds), 1)
+    unit = "second" if rounded == 1 else "seconds"
+    return f"{rounded:.1f} {unit}"
 
 
 def to_response_input_item(item: dict) -> dict | None:
@@ -169,24 +200,32 @@ def run_agent(
             # The spinner only animates when Live periodically refreshes.
             # Keep the refresh rate low to reduce Windows focus annoyances
             # while preserving visible "Thinking..." activity.
+            thought_started = time.perf_counter()
             with Live(
-                Spinner("dots", text=" Thinking..."),
+                ThinkingIndicator(thought_started),
                 refresh_per_second=4,
                 console=console,
                 auto_refresh=True,
+                transient=True,
             ) as live:
                 with client.responses.stream(**kwargs) as stream:
                     for event in stream:
                         if event.type == "response.output_text.delta":
                             if not got_text:
                                 got_text = True
+                            # Buffer text while the thinking indicator is visible.
+                            # Printing streamed text here would briefly show the answer
+                            # above the final "Thought for ..." line.
                             reply_text += event.delta
-                            live.update(Markdown(flatten_headings(reply_text)), refresh=True)
                         elif event.type == "response.output_item.done":
                             if event.item.type == "function_call":
                                 tool_calls.append(event.item)
                             elif event.item.type == "reasoning":
                                 reasoning_items.append(event.item)
+            thought_elapsed = time.perf_counter() - thought_started
+            console.print(thought_complete_indicator(f"Thought for {format_thought_duration(thought_elapsed)}."))
+            if reply_text:
+                console.print(Markdown(flatten_headings(reply_text)))
 
             if tool_calls:
                 new_input_items = []
@@ -254,3 +293,6 @@ def run_agent(
         console.print(f"[red]Unexpected error:[/red] {e}")
         save_history(history[-max_history:], session_context.history_file)
         raise SystemExit(1)
+
+
+
