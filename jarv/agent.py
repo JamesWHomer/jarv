@@ -65,6 +65,28 @@ def thought_complete_indicator(text: str) -> Text:
     return Text(f"\u2726 {text}", style="dim")
 
 
+def safe_flush_index(text: str) -> int:
+    """Return the largest index `i` such that `text[:i]` ends in a paragraph
+    break and contains a balanced number of ``` fences. Content up to `i`
+    can be committed to scrollback as standalone Markdown without breaking
+    a code block mid-render."""
+    fence_count = 0
+    last_safe = 0
+    i = 0
+    n = len(text)
+    while i < n - 1:
+        if text.startswith("```", i):
+            fence_count += 1
+            i += 3
+            continue
+        if fence_count % 2 == 0 and text[i] == "\n" and text[i + 1] == "\n":
+            last_safe = i + 2
+            i += 2
+            continue
+        i += 1
+    return last_safe
+
+
 def format_thought_duration(seconds: float) -> str:
     """Return a compact human-readable duration for the thinking timer."""
     rounded = round(max(0.0, seconds), 1)
@@ -197,35 +219,72 @@ def run_agent(
             reasoning_items = []
             got_text = False
 
-            # The spinner only animates when Live periodically refreshes.
-            # Keep the refresh rate low to reduce Windows focus annoyances
-            # while preserving visible "Thinking..." activity.
+            # Spinner runs at a low refresh rate to reduce Windows focus
+            # annoyances; once text starts streaming we swap to a faster
+            # Live that progressively renders the Markdown reply.
             thought_started = time.perf_counter()
-            with Live(
+            spinner_live = Live(
                 ThinkingIndicator(thought_started),
                 refresh_per_second=4,
                 console=console,
                 auto_refresh=True,
                 transient=True,
-            ) as live:
+            )
+            spinner_live.start()
+            stream_live: Live | None = None
+            flushed_to = 0
+            try:
                 with client.responses.stream(**kwargs) as stream:
                     for event in stream:
                         if event.type == "response.output_text.delta":
                             if not got_text:
                                 got_text = True
-                            # Buffer text while the thinking indicator is visible.
-                            # Printing streamed text here would briefly show the answer
-                            # above the final "Thought for ..." line.
+                                spinner_live.stop()
+                                spinner_live = None
+                                thought_elapsed = time.perf_counter() - thought_started
+                                console.print(
+                                    thought_complete_indicator(
+                                        f"Thought for {format_thought_duration(thought_elapsed)}."
+                                    )
+                                )
+                                stream_live = Live(
+                                    Markdown(""),
+                                    refresh_per_second=12,
+                                    console=console,
+                                    auto_refresh=True,
+                                    transient=False,
+                                    vertical_overflow="visible",
+                                )
+                                stream_live.start()
                             reply_text += event.delta
+                            # Commit settled paragraphs above the Live region so it
+                            # only has to redraw the trailing in-progress chunk.
+                            new_safe = safe_flush_index(reply_text)
+                            if new_safe > flushed_to:
+                                chunk = reply_text[flushed_to:new_safe]
+                                console.print(Markdown(flatten_headings(chunk)))
+                                flushed_to = new_safe
+                            if stream_live is not None:
+                                stream_live.update(
+                                    Markdown(flatten_headings(reply_text[flushed_to:]))
+                                )
                         elif event.type == "response.output_item.done":
                             if event.item.type == "function_call":
                                 tool_calls.append(event.item)
                             elif event.item.type == "reasoning":
                                 reasoning_items.append(event.item)
-            thought_elapsed = time.perf_counter() - thought_started
-            console.print(thought_complete_indicator(f"Thought for {format_thought_duration(thought_elapsed)}."))
-            if reply_text:
-                console.print(Markdown(flatten_headings(reply_text)))
+            finally:
+                if spinner_live is not None:
+                    spinner_live.stop()
+                if stream_live is not None:
+                    stream_live.stop()
+            if not got_text:
+                thought_elapsed = time.perf_counter() - thought_started
+                console.print(
+                    thought_complete_indicator(
+                        f"Thought for {format_thought_duration(thought_elapsed)}."
+                    )
+                )
 
             if tool_calls:
                 new_input_items = []
