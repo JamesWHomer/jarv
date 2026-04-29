@@ -69,13 +69,13 @@ FINISH_TOOL = {
     "type": "function",
     "name": "finish",
     "description": (
-        "Terminal. Call exactly once when your task is complete. "
-        "Argument order: longform first (full report), then tldr (1-2 sentence summary)."
+        "YOU MUST CALL THIS. It is the only way to return output — any text you write outside a tool call is invisible and discarded. "
+        "Call exactly once when your task is complete. No exceptions, even for trivial tasks."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "longform": {"type": "string", "description": "Full report. Parent reads this on demand via read_artifact."},
+            "longform": {"type": "string", "description": "Full report or result. Parent reads this on demand via read_artifact."},
             "tldr": {"type": "string", "description": "1-2 sentence summary inlined into the parent's next turn."},
         },
         "required": ["longform", "tldr"],
@@ -192,9 +192,9 @@ def run_subagent_loop(
     """
     instructions = (
         "You are a subagent in a recursive orchestration system. "
-        "Complete the task you were given, then call finish(longform, tldr) exactly once to terminate. "
-        "longform is the full report (parent fetches on demand via read_artifact). "
-        "tldr is a 1-2 sentence summary inlined into the parent's next turn."
+        "Complete your task, then call finish(longform, tldr) to terminate — this is mandatory. "
+        "Any text you write outside a tool call is invisible to the parent and will be discarded. "
+        "finish() is the only way your output is ever seen. You must call it even for the simplest task."
     ) + _format_deps_block(node, store)
 
     tools = build_subagent_tools(node.sterile)
@@ -271,6 +271,7 @@ def spawn_batch(
     store: ArtifactStore,
     client: OpenAI,
     config: dict,
+    on_child_done: Callable[[str, dict], None] | None = None,
 ) -> list[dict]:
     """Spawn N children in parallel, block until all finish, return status reports."""
     new_depth = parent.depth + 1
@@ -313,13 +314,16 @@ def spawn_batch(
             try:
                 longform, tldr_or_reason = fut.result()
             except Exception as e:
-                raw_results[n.label] = {"label": n.label, "status": "failed", "reason": f"unhandled exception: {e}"}
-                continue
-            if longform is not None:
-                store.put(n.label, longform, tldr_or_reason, n.label)
-                parent.visible_labels.add(n.label)
-                raw_results[n.label] = {"label": n.label, "status": "done", "tldr": tldr_or_reason}
+                result = {"label": n.label, "status": "failed", "reason": f"unhandled exception: {e}"}
             else:
-                raw_results[n.label] = {"label": n.label, "status": "failed", "reason": tldr_or_reason}
+                if longform is not None:
+                    store.put(n.label, longform, tldr_or_reason, n.label)
+                    parent.visible_labels.add(n.label)
+                    result = {"label": n.label, "status": "done", "tldr": tldr_or_reason}
+                else:
+                    result = {"label": n.label, "status": "failed", "reason": tldr_or_reason}
+            raw_results[n.label] = result
+            if on_child_done is not None:
+                on_child_done(n.label, result)
 
     return [raw_results[spec["label"]] for spec in child_specs if spec.get("label") in raw_results]

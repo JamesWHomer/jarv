@@ -1,10 +1,12 @@
 import json
 import os
 import platform
+import threading
 import time
 
 from openai import OpenAI, OpenAIError
 from rich import box
+from rich.console import Group
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.markup import escape
@@ -29,7 +31,9 @@ from .orchestrator import (
     RUN_COMMAND_TOOL,
     SPAWN_TOOL,
     AgentNode,
+    DepthExceeded,
     dispatch_tool,
+    spawn_batch,
 )
 from .shell import display_command_result, execute_command
 
@@ -185,29 +189,73 @@ def _dispatch_run_command_with_ui(args: dict, config: dict) -> str:
 
 
 def _dispatch_spawn_with_ui(args: dict, root_node, store, client, config) -> str:
-    children = args.get("children") or []
-    labels = [c.get("label", "?") for c in children if isinstance(c, dict)]
-    console.print()
-    console.print(Rule(f"[bold magenta]spawn → {', '.join(labels) or '(none)'}[/bold magenta]", style="magenta", align="left"))
-    output = dispatch_tool("spawn", args, root_node, store, client, config)
-    try:
-        parsed = json.loads(output)
-    except (json.JSONDecodeError, TypeError):
-        console.print(f"[red]{output}[/red]")
-    else:
-        if isinstance(parsed, list):
-            for entry in parsed:
-                lbl = entry.get("label", "?")
-                status = entry.get("status", "?")
-                if status == "done":
-                    tldr = entry.get("tldr", "")
-                    console.print(f"[green]✓[/green] [bold]{escape(lbl)}[/bold]: {escape(tldr)}")
+    children_raw = args.get("children")
+    if not isinstance(children_raw, list) or not children_raw:
+        msg = "[tool argument error: children must be a non-empty list]"
+        console.print(f"[red]{msg}[/red]")
+        return msg
+
+    labels = [c.get("label", "?") for c in children_raw if isinstance(c, dict)]
+    states: dict[str, dict] = {lbl: {"status": "running"} for lbl in labels}
+    lock = threading.Lock()
+
+    class SpawnPanel:
+        def __rich_console__(self, con, options):
+            now = time.perf_counter()
+            frame = _THINKING_FRAMES[int(now * 10) % len(_THINKING_FRAMES)]
+            with lock:
+                snap = {lbl: states.get(lbl, {"status": "running"}) for lbl in labels}
+            lines = []
+            for lbl in labels:
+                state = snap[lbl]
+                status = state["status"]
+                line = Text()
+                if status == "running":
+                    line.append(f" {frame} ", style="yellow")
+                    line.append(lbl, style="bold")
+                elif status == "done":
+                    line.append(" ✓ ", style="bold green")
+                    line.append(lbl, style="bold cyan")
+                    line.append(f"  {state.get('tldr', '')}", style="dim")
                 else:
-                    reason = entry.get("reason", "")
-                    console.print(f"[red]✗[/red] [bold]{escape(lbl)}[/bold]: {escape(reason)}")
-        else:
-            console.print(f"[yellow]{escape(output)}[/yellow]")
-    console.print(Rule(style="bright_black"))
+                    line.append(" ✗ ", style="bold red")
+                    line.append(lbl, style="bold cyan")
+                    line.append(f"  {state.get('reason', '')}", style="dim red")
+                lines.append(line)
+            done = sum(1 for s in snap.values() if s["status"] != "running")
+            n = len(labels)
+            yield Panel(
+                Group(*lines),
+                title=f"[bold magenta]spawn[/bold magenta] [dim]{done}/{n}[/dim]",
+                title_align="left",
+                border_style="magenta",
+                box=box.ROUNDED,
+                padding=(0, 1),
+            )
+
+    def on_child_done(label: str, result: dict) -> None:
+        with lock:
+            states[label] = result
+
+    console.print()
+    with Live(
+        SpawnPanel(),
+        refresh_per_second=10,
+        console=console,
+        auto_refresh=True,
+        transient=False,
+        vertical_overflow="visible",
+    ) as live:
+        try:
+            results = spawn_batch(root_node, children_raw, store, client, config, on_child_done=on_child_done)
+        except DepthExceeded as e:
+            output = f"[error: {e}]"
+            live.update(Text(output, style="red"))
+            return output
+        live.update(SpawnPanel())
+        output = json.dumps(results)
+
+    console.print()
     return output
 
 
