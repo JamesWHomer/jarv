@@ -16,13 +16,14 @@ from .config import DEFAULT_CONFIG
 from .display import console, flatten_headings
 from .history import (
     SessionContext,
+    artifact_file_for,
     get_shell_name,
     history_metadata,
     load_history,
     prepare_session_context,
     save_history,
 )
-from .artifacts import ArtifactStore
+from .artifacts import ArtifactStore, load_artifact_store, save_artifact_store
 from .orchestrator import (
     READ_ARTIFACT_TOOL,
     RUN_COMMAND_TOOL,
@@ -228,15 +229,15 @@ def run_agent(
     max_history = config.get("max_history", DEFAULT_CONFIG["max_history"])
     metadata = history_metadata(session_context)
 
-    # Root subagent state. Scoped per-invocation; artifacts do not persist
-    # across queries in v1.
-    artifact_store = ArtifactStore()
+    artifact_file = artifact_file_for(session_context.history_file)
+    artifact_store = load_artifact_store(artifact_file)
     root_node = AgentNode(
         label="root",
         depth=0,
         parent_label=None,
         task=query,
         sterile=False,
+        visible_labels=artifact_store.all_labels(),
     )
 
     history.append({"role": "user", "content": query, **metadata})
@@ -382,19 +383,23 @@ def run_agent(
             else:
                 history.append({"role": "assistant", "content": reply_text, **metadata})
                 save_history(history[-max_history:], session_context.history_file)
+                save_artifact_store(artifact_store, artifact_file)
                 break
     except KeyboardInterrupt:
         console.print("\n[dim]Interrupted.[/dim]")
         save_history(history[-max_history:], session_context.history_file)
+        save_artifact_store(artifact_store, artifact_file)
         if propagate_keyboard_interrupt:
             raise
     except OpenAIError as e:
         console.print(f"[red]OpenAI API error:[/red] {e}")
         save_history(history[-max_history:], session_context.history_file)
+        save_artifact_store(artifact_store, artifact_file)
         raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {e}")
         save_history(history[-max_history:], session_context.history_file)
+        save_artifact_store(artifact_store, artifact_file)
         raise SystemExit(1)
 
 

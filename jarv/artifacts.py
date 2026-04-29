@@ -1,4 +1,6 @@
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from threading import Lock
 
 
@@ -26,3 +28,45 @@ class ArtifactStore:
     def exists(self, label: str) -> bool:
         with self._lock:
             return label in self._items
+
+    def all_labels(self) -> set[str]:
+        with self._lock:
+            return set(self._items.keys())
+
+
+def load_artifact_store(path: Path) -> ArtifactStore:
+    store = ArtifactStore()
+    if not path.exists():
+        return store
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            for label, item in data.items():
+                if isinstance(item, dict):
+                    store.put(
+                        label,
+                        item.get("longform", ""),
+                        item.get("tldr", ""),
+                        item.get("owner_label", label),
+                    )
+    except Exception:
+        pass
+    return store
+
+
+def save_artifact_store(store: ArtifactStore, path: Path) -> None:
+    from .config import CONFIG_DIR
+    CONFIG_DIR.mkdir(exist_ok=True)
+    with store._lock:
+        data = {
+            label: {
+                "longform": art.longform,
+                "tldr": art.tldr,
+                "owner_label": art.owner_label,
+            }
+            for label, art in store._items.items()
+        }
+    try:
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except OSError:
+        pass

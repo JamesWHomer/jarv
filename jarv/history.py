@@ -140,6 +140,10 @@ def history_file_for_session(session_id: str) -> Path:
     return CONFIG_DIR / f"history-{short_hash(session_id)}.json"
 
 
+def artifact_file_for(history_path: Path) -> Path:
+    return history_path.with_name(history_path.name.replace("history", "artifacts", 1))
+
+
 def last_user_message(history: list) -> dict | None:
     for item in reversed(history):
         if isinstance(item, dict) and item.get("role") == "user":
