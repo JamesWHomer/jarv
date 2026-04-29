@@ -22,26 +22,18 @@ from .history import (
     prepare_session_context,
     save_history,
 )
+from .artifacts import ArtifactStore
+from .orchestrator import (
+    READ_ARTIFACT_TOOL,
+    RUN_COMMAND_TOOL,
+    SPAWN_TOOL,
+    AgentNode,
+    dispatch_tool,
+)
 from .shell import display_command_result, execute_command
 
 # Responses API tool format (flat, no "function" wrapper key)
-TOOLS = [
-    {
-        "type": "function",
-        "name": "run_command",
-        "description": "Run a shell command and return its output. Use this to interact with the filesystem, run scripts, check system info, etc.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "The shell command to execute",
-                }
-            },
-            "required": ["command"],
-        },
-    }
-]
+TOOLS = [RUN_COMMAND_TOOL, SPAWN_TOOL, READ_ARTIFACT_TOOL]
 
 
 _THINKING_FRAMES = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"]
@@ -174,6 +166,50 @@ def new_terminal_context_input(context: SessionContext) -> dict | None:
     }
 
 
+def _dispatch_run_command_with_ui(args: dict, config: dict) -> str:
+    cmd = args.get("command")
+    if not isinstance(cmd, str) or not cmd.strip():
+        msg = "[tool argument error: command must be a non-empty string]"
+        console.print(f"[red]{msg}[/red]")
+        return msg
+    console.print()
+    console.print(Rule(f"[bold yellow]$ {escape(cmd)}[/bold yellow]", style="yellow", align="left"))
+    # Avoid a constantly repainting spinner while a child process is running;
+    # on Windows this can cause focus annoyances in heads-up mode.
+    console.print("[dim]Running command...[/dim]")
+    result = execute_command(cmd, config.get("command_timeout", 60))
+    display_command_result(result)
+    console.print(Rule(style="bright_black"))
+    return result.to_model_output()
+
+
+def _dispatch_spawn_with_ui(args: dict, root_node, store, client, config) -> str:
+    children = args.get("children") or []
+    labels = [c.get("label", "?") for c in children if isinstance(c, dict)]
+    console.print()
+    console.print(Rule(f"[bold magenta]spawn → {', '.join(labels) or '(none)'}[/bold magenta]", style="magenta", align="left"))
+    output = dispatch_tool("spawn", args, root_node, store, client, config)
+    try:
+        parsed = json.loads(output)
+    except (json.JSONDecodeError, TypeError):
+        console.print(f"[red]{output}[/red]")
+    else:
+        if isinstance(parsed, list):
+            for entry in parsed:
+                lbl = entry.get("label", "?")
+                status = entry.get("status", "?")
+                if status == "done":
+                    tldr = entry.get("tldr", "")
+                    console.print(f"[green]✓[/green] [bold]{escape(lbl)}[/bold]: {escape(tldr)}")
+                else:
+                    reason = entry.get("reason", "")
+                    console.print(f"[red]✗[/red] [bold]{escape(lbl)}[/bold]: {escape(reason)}")
+        else:
+            console.print(f"[yellow]{escape(output)}[/yellow]")
+    console.print(Rule(style="bright_black"))
+    return output
+
+
 def run_agent(
     query: str,
     config: dict,
@@ -191,6 +227,17 @@ def run_agent(
     history = load_history(session_context.history_file)
     max_history = config.get("max_history", DEFAULT_CONFIG["max_history"])
     metadata = history_metadata(session_context)
+
+    # Root subagent state. Scoped per-invocation; artifacts do not persist
+    # across queries in v1.
+    artifact_store = ArtifactStore()
+    root_node = AgentNode(
+        label="root",
+        depth=0,
+        parent_label=None,
+        task=query,
+        sterile=False,
+    )
 
     history.append({"role": "user", "content": query, **metadata})
 
@@ -297,23 +344,20 @@ def run_agent(
                 for item in tool_calls:
                     try:
                         args = json.loads(item.arguments or "{}")
-                        cmd = args["command"]
-                        if not isinstance(cmd, str) or not cmd.strip():
-                            raise ValueError("command must be a non-empty string")
-                    except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
-                        output = f"[tool argument error: {e}]"
+                    except json.JSONDecodeError as e:
+                        output = f"[tool argument error: invalid JSON: {e}]"
                         console.print(f"[red]{output}[/red]")
                     else:
-                        console.print()
-                        console.print(Rule(f"[bold yellow]$ {escape(cmd)}[/bold yellow]", style="yellow", align="left"))
-                        # Avoid a constantly repainting spinner while a child
-                        # process is running; on Windows this can cause focus
-                        # annoyances in heads-up mode.
-                        console.print("[dim]Running command...[/dim]")
-                        result = execute_command(cmd, config.get("command_timeout", 60))
-                        display_command_result(result)
-                        output = result.to_model_output()
-                        console.print(Rule(style="bright_black"))
+                        if item.name == "run_command":
+                            output = _dispatch_run_command_with_ui(args, config)
+                        elif item.name == "spawn":
+                            output = _dispatch_spawn_with_ui(args, root_node, artifact_store, client, config)
+                        elif item.name == "read_artifact":
+                            output = dispatch_tool(item.name, args, root_node, artifact_store, client, config)
+                            console.print(f"[dim]read_artifact({args.get('label')!r})[/dim]")
+                        else:
+                            output = f"[unknown tool: {item.name}]"
+                            console.print(f"[red]{output}[/red]")
 
                     fc = {
                         "type": "function_call",

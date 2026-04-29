@@ -23,6 +23,8 @@ DEFAULT_CONFIG = {
     "command_timeout": 60,
     "history_scope": "global",
     "system_prompt": DEFAULT_SYSTEM_PROMPT,
+    "max_subagent_depth": 4,
+    "subagent_thread_pool_max_workers": 8,
 }
 
 

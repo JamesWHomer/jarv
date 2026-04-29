@@ -89,6 +89,8 @@ Default config:
   "max_history": 40,
   "command_timeout": 60,
   "history_scope": "global",
+  "max_subagent_depth": 4,
+  "subagent_thread_pool_max_workers": 8,
   "system_prompt": "You are Jarv, a helpful CLI assistant..."
 }
 ```
@@ -101,6 +103,8 @@ Config notes:
 - `max_history` is the number of recent messages Jarv keeps as context.
 - `command_timeout` is the number of seconds before a shell command is killed.
 - `history_scope` controls where normal Jarv history is stored. Use `global` for shared history or `terminal` for one history per detected terminal. The default is `global`.
+- `max_subagent_depth` is the maximum recursion depth for spawned subagents. The root agent is depth 0; each `spawn` call adds one level. Defaults to 4.
+- `subagent_thread_pool_max_workers` is the maximum number of subagents that can run in parallel within a single `spawn` call. Defaults to 8.
 - `system_prompt` is sent to the model along with basic system info like OS, current working directory, shell, and session context.
 
 You can edit the JSON file directly or use `jarv set` / `jarv unset`.
@@ -138,6 +142,17 @@ By default, Jarv uses global history, so all terminals share `~/.jarv/history.js
 Set `history_scope` to `terminal` to keep normal Jarv history per detected terminal. Jarv detects terminals from environment values such as `WT_SESSION`, `TERM_SESSION_ID`, `TMUX`, or `STY`, with a parent-process fallback.
 
 `jarv session` always starts an independent heads-up session with its own history file, regardless of `history_scope`.
+
+## Subagent orchestration
+
+For complex tasks, the model can fan out work to parallel subagents using the `spawn` tool. Each subagent runs the same agent loop independently, can run shell commands, and terminates by calling `finish` with a full report (`longform`) and a short summary (`tldr`).
+
+- **Parallel execution** — all children in a single `spawn` call run concurrently in a thread pool.
+- **Artifacts** — each child's output is stored as a named artifact. The parent (and any sibling that declares a dependency) can fetch the full content via `read_artifact`.
+- **Depth limit** — subagents can themselves spawn children up to `max_subagent_depth` levels deep (default 4). By default children are *sterile* (cannot spawn further) unless the parent explicitly sets `sterile: false`.
+- **Scoped per query** — the artifact store is created fresh for each top-level query; artifacts do not persist across separate `jarv` invocations.
+
+The terminal shows a summary of each spawn batch as children finish, with a green ✓ for success and red ✗ for failure.
 
 ## Notes
 
