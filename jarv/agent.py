@@ -32,6 +32,7 @@ from .orchestrator import (
     SPAWN_TOOL,
     AgentNode,
     DepthExceeded,
+    SpawnObserver,
     dispatch_tool,
     spawn_batch,
 )
@@ -61,27 +62,6 @@ def thought_complete_indicator(text: str) -> Text:
     """Return the static completed-thinking bubble."""
     return Text(f"\u2726 {text}", style="dim")
 
-
-def safe_flush_index(text: str) -> int:
-    """Return the largest index `i` such that `text[:i]` ends in a paragraph
-    break and contains a balanced number of ``` fences. Content up to `i`
-    can be committed to scrollback as standalone Markdown without breaking
-    a code block mid-render."""
-    fence_count = 0
-    last_safe = 0
-    i = 0
-    n = len(text)
-    while i < n - 1:
-        if text.startswith("```", i):
-            fence_count += 1
-            i += 3
-            continue
-        if fence_count % 2 == 0 and text[i] == "\n" and text[i + 1] == "\n":
-            last_safe = i + 2
-            i += 2
-            continue
-        i += 1
-    return last_safe
 
 
 def format_thought_duration(seconds: float) -> str:
@@ -195,21 +175,58 @@ def _dispatch_spawn_with_ui(args: dict, root_node, store, client, config) -> str
         console.print(f"[red]{msg}[/red]")
         return msg
 
-    labels = [c.get("label", "?") for c in children_raw if isinstance(c, dict)]
-    states: dict[str, dict] = {lbl: {"status": "running"} for lbl in labels}
+    top_labels = [c.get("label", "?") for c in children_raw if isinstance(c, dict)]
+    # state per label: {status, depth, tldr?, reason?}
+    states: dict[str, dict] = {}
+    # parent_label -> ordered child labels. Top-level entries live under root_node.label.
+    children_of: dict[str, list[str]] = {root_node.label: list(top_labels)}
+    for lbl in top_labels:
+        states[lbl] = {"status": "running", "depth": 0}
     lock = threading.Lock()
+
+    class PanelObserver(SpawnObserver):
+        def on_spawn_start(self, parent_label: str, child_labels: list[str]) -> None:
+            with lock:
+                if parent_label == root_node.label:
+                    parent_depth = -1
+                else:
+                    parent_depth = states.get(parent_label, {}).get("depth", 0)
+                bucket = children_of.setdefault(parent_label, [])
+                for cl in child_labels:
+                    if cl not in states:
+                        states[cl] = {"status": "running", "depth": parent_depth + 1}
+                        bucket.append(cl)
+
+        def on_child_done(self, parent_label: str, label: str, result: dict) -> None:
+            with lock:
+                existing = states.get(label, {"depth": 0})
+                states[label] = {**existing, **result}
+
+    observer = PanelObserver()
 
     class SpawnPanel:
         def __rich_console__(self, con, options):
             now = time.perf_counter()
             frame = _THINKING_FRAMES[int(now * 10) % len(_THINKING_FRAMES)]
             with lock:
-                snap = {lbl: states.get(lbl, {"status": "running"}) for lbl in labels}
+                # DFS in insertion order to display children directly under
+                # their parent, indented one level per depth.
+                ordered: list[str] = []
+
+                def walk(parent: str) -> None:
+                    for cl in children_of.get(parent, []):
+                        ordered.append(cl)
+                        walk(cl)
+
+                walk(root_node.label)
+                snap = {lbl: dict(states[lbl]) for lbl in ordered}
             lines = []
-            for lbl in labels:
+            for lbl in ordered:
                 state = snap[lbl]
                 status = state["status"]
+                indent = "  " * state.get("depth", 0)
                 line = Text()
+                line.append(indent)
                 if status == "running":
                     line.append(f" {frame} ", style="yellow")
                     line.append(lbl, style="bold")
@@ -222,20 +239,16 @@ def _dispatch_spawn_with_ui(args: dict, root_node, store, client, config) -> str
                     line.append(lbl, style="bold cyan")
                     line.append(f"  {state.get('reason', '')}", style="dim red")
                 lines.append(line)
+            total = len(snap)
             done = sum(1 for s in snap.values() if s["status"] != "running")
-            n = len(labels)
             yield Panel(
                 Group(*lines),
-                title=f"[bold magenta]spawn[/bold magenta] [dim]{done}/{n}[/dim]",
+                title=f"[bold magenta]spawn[/bold magenta] [dim]{done}/{total}[/dim]",
                 title_align="left",
                 border_style="magenta",
                 box=box.ROUNDED,
                 padding=(0, 1),
             )
-
-    def on_child_done(label: str, result: dict) -> None:
-        with lock:
-            states[label] = result
 
     console.print()
     with Live(
@@ -247,7 +260,7 @@ def _dispatch_spawn_with_ui(args: dict, root_node, store, client, config) -> str
         vertical_overflow="visible",
     ) as live:
         try:
-            results = spawn_batch(root_node, children_raw, store, client, config, on_child_done=on_child_done)
+            results = spawn_batch(root_node, children_raw, store, client, config, observer=observer)
         except DepthExceeded as e:
             output = f"[error: {e}]"
             live.update(Text(output, style="red"))
@@ -328,7 +341,6 @@ def run_agent(
             )
             spinner_live.start()
             stream_live: Live | None = None
-            flushed_to = 0
             try:
                 with client.responses.stream(**kwargs) as stream:
                     for event in stream:
@@ -348,22 +360,13 @@ def run_agent(
                                     refresh_per_second=12,
                                     console=console,
                                     auto_refresh=True,
-                                    transient=False,
+                                    transient=True,
                                     vertical_overflow="visible",
                                 )
                                 stream_live.start()
                             reply_text += event.delta
-                            # Commit settled paragraphs above the Live region so it
-                            # only has to redraw the trailing in-progress chunk.
-                            new_safe = safe_flush_index(reply_text)
-                            if new_safe > flushed_to:
-                                chunk = reply_text[flushed_to:new_safe]
-                                console.print(Markdown(flatten_headings(chunk)))
-                                flushed_to = new_safe
                             if stream_live is not None:
-                                stream_live.update(
-                                    Markdown(flatten_headings(reply_text[flushed_to:]))
-                                )
+                                stream_live.update(Markdown(flatten_headings(reply_text)))
                         elif event.type == "response.output_item.done":
                             if event.item.type == "function_call":
                                 tool_calls.append(event.item)
@@ -374,6 +377,8 @@ def run_agent(
                     spinner_live.stop()
                 if stream_live is not None:
                     stream_live.stop()
+                    if reply_text:
+                        console.print(Markdown(flatten_headings(reply_text)))
             if not got_text:
                 thought_elapsed = time.perf_counter() - thought_started
                 console.print(
