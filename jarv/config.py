@@ -25,6 +25,7 @@ DEFAULT_CONFIG = {
     "system_prompt": DEFAULT_SYSTEM_PROMPT,
     "max_subagent_depth": 4,
     "subagent_thread_pool_max_workers": 8,
+    "check_updates": True,
 }
 
 

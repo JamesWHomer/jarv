@@ -94,6 +94,7 @@ def print_help() -> None:
     key_table.add_row("command_timeout", "Seconds before a shell command is killed")
     key_table.add_row("history_scope", "History mode: global or terminal")
     key_table.add_row("system_prompt", "System prompt sent to the model")
+    key_table.add_row("check_updates", "Check for updates on each run (true/false)")
 
     console.print(Panel(cmd_table, title="[bold]jarv[/bold]", border_style="bright_black", padding=(1, 2)))
     console.print()
@@ -162,6 +163,7 @@ Keys:
 - `command_timeout` - Seconds before a shell command is killed. Default: `{DEFAULT_CONFIG['command_timeout']}`.
 - `history_scope` - History mode. Use `global` for shared history or `terminal` for one history per detected terminal. Default: `{DEFAULT_CONFIG['history_scope']}`.
 - `system_prompt` - Instructions sent to the model before each request.
+- `check_updates` - Whether to check for updates on each run. Default: `true`. Set to `false` to skip the background update check and avoid the ~200 ms network wait.
 
 If the config file does not exist, jarv creates it and exits so you can add an API key.
 If the config file is invalid JSON, jarv backs it up and creates a fresh default config.
@@ -181,6 +183,7 @@ When `history_scope` is `terminal`, jarv stores history in `history-<session-id>
 
 - `jarv update` checks `{GITHUB_REPO}` on GitHub and installs the latest version from `{INSTALL_URL}`.
 - Normal question runs also do a quick background update check and tell you if an update is available.
+- Set `check_updates` to `false` (`jarv set check_updates false`) to disable the background check and remove the ~200 ms latency it adds.
 - After updating, run `jarv` again to use the new version.
 
 ## Files

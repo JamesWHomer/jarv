@@ -94,10 +94,11 @@ def main() -> None:
         console.print(f"[red]No API key found.[/red] Edit {CONFIG_FILE} or set OPENAI_API_KEY.")
         sys.exit(1)
 
-    update_thread = threading.Thread(target=_check_update_background, daemon=True)
-    update_thread.start()
-    update_thread.join(timeout=0.2)
-    maybe_print_update_available()
+    if config.get("check_updates", True):
+        update_thread = threading.Thread(target=_check_update_background, daemon=True)
+        update_thread.start()
+        update_thread.join(timeout=0.2)
+        maybe_print_update_available()
 
     client = OpenAI(api_key=api_key)
     try:
