@@ -12,6 +12,7 @@ from rich.markdown import Markdown
 from rich.markup import escape
 from rich.panel import Panel
 from rich.rule import Rule
+from rich.segment import Segment
 from rich.text import Text
 
 from .config import DEFAULT_CONFIG
@@ -56,6 +57,38 @@ class ThinkingIndicator:
         elapsed = now - self._start
         frame = _THINKING_FRAMES[int(now * 10) % len(_THINKING_FRAMES)]
         yield Text(f"{frame}  Thinking\u2026  {int(elapsed)}s")
+
+
+class TailMarkdown:
+    """Renders Markdown but keeps only the last `max_lines` rendered rows.
+
+    Live can't move the cursor above the top of the terminal viewport, so if
+    the rendered content ever exceeds the visible height the redraw lands at
+    row 0 and the prior frame stays in scrollback — producing duplicates. By
+    pre-cropping to the viewport from the top we guarantee the live region
+    never overflows, while still showing the most recent (streaming) tail.
+    """
+
+    def __init__(self, text: str, max_lines: int):
+        self._text = text
+        self._max_lines = max(1, max_lines)
+
+    def __rich_console__(self, console, options):
+        md = Markdown(self._text)
+        lines = console.render_lines(md, options, pad=False)
+        hidden = max(0, len(lines) - self._max_lines)
+        if hidden:
+            # Reserve the top row for a hint so the user knows the head of
+            # the reply is scrolled off — full reply is reprinted on finish.
+            lines = lines[-(self._max_lines - 1):] if self._max_lines > 1 else []
+            hint = Text(
+                f"↑ {hidden} earlier line{'s' if hidden != 1 else ''} hidden — full reply will print when done",
+                style="dim italic",
+            )
+            yield from console.render(hint, options)
+        for line in lines:
+            yield from line
+            yield Segment.line()
 
 
 def thought_complete_indicator(text: str) -> Text:
@@ -356,17 +389,22 @@ def run_agent(
                                     )
                                 )
                                 stream_live = Live(
-                                    Markdown(""),
+                                    TailMarkdown("", console.size.height - 2),
                                     refresh_per_second=12,
                                     console=console,
                                     auto_refresh=True,
                                     transient=True,
-                                    vertical_overflow="visible",
+                                    vertical_overflow="crop",
                                 )
                                 stream_live.start()
                             reply_text += event.delta
                             if stream_live is not None:
-                                stream_live.update(Markdown(flatten_headings(reply_text)))
+                                stream_live.update(
+                                    TailMarkdown(
+                                        flatten_headings(reply_text),
+                                        console.size.height - 2,
+                                    )
+                                )
                         elif event.type == "response.output_item.done":
                             if event.item.type == "function_call":
                                 tool_calls.append(event.item)
@@ -377,8 +415,8 @@ def run_agent(
                     spinner_live.stop()
                 if stream_live is not None:
                     stream_live.stop()
-                    if reply_text:
-                        console.print(Markdown(flatten_headings(reply_text)))
+            if got_text:
+                console.print(Markdown(flatten_headings(reply_text)))
             if not got_text:
                 thought_elapsed = time.perf_counter() - thought_started
                 console.print(
