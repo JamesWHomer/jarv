@@ -86,7 +86,6 @@ Default config:
   "reasoning_effort": "",
   "max_history": 40,
   "command_timeout": 60,
-  "history_scope": "global",
   "max_subagent_depth": 4,
   "subagent_thread_pool_max_workers": 8,
   "system_prompt": "You are Jarv, a helpful CLI assistant..."
@@ -100,7 +99,6 @@ Config notes:
 - `reasoning_effort` is sent as `{ "effort": "..." }` when non-empty. Leave it empty to disable.
 - `max_history` is the number of recent messages Jarv keeps as context.
 - `command_timeout` is the number of seconds before a shell command is killed.
-- `history_scope` controls where normal Jarv history is stored. Use `global` for shared history or `terminal` for one history per detected terminal. The default is `global`.
 - `max_subagent_depth` is the maximum recursion depth for spawned subagents. The root agent is depth 0; each `spawn` call adds one level. Defaults to 4.
 - `subagent_thread_pool_max_workers` is the maximum number of subagents that can run in parallel within a single `spawn` call. Defaults to 8.
 - `system_prompt` is sent to the model along with basic system info like OS, current working directory, shell, and session context.
@@ -121,6 +119,7 @@ You can edit the JSON file directly or use `jarv /set` / `jarv /unset`.
 | `jarv /history` | Show recent conversation history |
 | `jarv /config` | Show current settings |
 | `jarv /update` | Update Jarv to the latest version from GitHub |
+| `jarv /cleanup` | Delete orphaned session files from `~/.jarv/sessions/` |
 | `jarv /about` | Show detailed information about Jarv |
 | `jarv /help` | Show help (`jarv help` also works) |
 
@@ -128,19 +127,23 @@ You can edit the JSON file directly or use `jarv /set` / `jarv /unset`.
 
 Jarv stores local state in `~/.jarv/`:
 
-- `config.json` - settings and optional API key
-- `history.json` - global conversation history
-- `history-<session-id>.json` - per-terminal or independent session history
-- `sessions.json` - terminal/session metadata
-- `last_sha.txt` - last seen GitHub commit SHA for update checks
+- `config.json` — settings and optional API key
+- `sessions.json` — terminal/session metadata
+- `last_sha.txt` — last seen GitHub commit SHA for update checks
+- `sessions/history-<hash>.json` — conversation history for each session
+- `sessions/artifacts-<hash>.json` — artifact store for each session
+- `archive/` — sessions archived by `jarv /clear`
 
 ## History and sessions
 
-By default, Jarv uses global history, so all terminals share `~/.jarv/history.json`. When a global-history prompt comes from a new or different terminal, Jarv sends that context internally to the model along with the time since the previous user message.
+Each terminal is bound to exactly one session at a time. By default a new terminal gets its own session (the id is derived from a terminal fingerprint). History for a session lives in `~/.jarv/sessions/history-<hash>.json`.
 
-Set `history_scope` to `terminal` to keep normal Jarv history per detected terminal. Jarv detects terminals from environment values such as `WT_SESSION`, `TERM_SESSION_ID`, `TMUX`, or `STY`, with a parent-process fallback.
+Jarv detects terminals from environment values such as `WT_SESSION`, `TERM_SESSION_ID`, `TMUX`, or `STY`, with a parent-process fallback.
 
-Use `jarv /clear` to archive the current session and start fresh, or `jarv /load` to switch to a different session.
+- `jarv /clear` archives the current session's history and artifacts, then starts a fresh session on the next prompt.
+- `jarv /load` binds this terminal to the most recently used session.
+- `jarv /load <id>` binds this terminal to a specific session id.
+- `jarv /cleanup` removes session files in `~/.jarv/sessions/` that no longer have a matching entry in `sessions.json`.
 
 ## Subagent orchestration
 

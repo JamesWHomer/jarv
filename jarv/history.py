@@ -9,6 +9,7 @@ from .config import CONFIG_DIR
 from .display import console
 
 SESSIONS_FILE = CONFIG_DIR / "sessions.json"
+SESSIONS_DIR = CONFIG_DIR / "sessions"
 
 
 def load_history(path: Path) -> list:
@@ -109,7 +110,24 @@ def detect_terminal() -> tuple[str, str]:
 
 
 def history_file_for_session(session_id: str) -> Path:
-    return CONFIG_DIR / f"history-{short_hash(session_id)}.json"
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    return SESSIONS_DIR / f"history-{short_hash(session_id)}.json"
+
+
+def migrate_flat_session_files() -> None:
+    """Move history-*.json and artifacts-*.json from ~/.jarv/ into ~/.jarv/sessions/."""
+    flat_history = list(CONFIG_DIR.glob("history-*.json"))
+    flat_artifacts = list(CONFIG_DIR.glob("artifacts-*.json"))
+    files_to_move = flat_history + flat_artifacts
+    if not files_to_move:
+        return
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    for src in files_to_move:
+        dest = SESSIONS_DIR / src.name
+        if not dest.exists():
+            src.rename(dest)
+        else:
+            src.unlink()
 
 
 def artifact_file_for(history_path: Path) -> Path:

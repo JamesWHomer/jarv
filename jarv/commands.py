@@ -12,6 +12,7 @@ from . import __version__
 from .config import CONFIG_DIR, CONFIG_FILE, DEFAULT_CONFIG, load_config, save_config, validate_config
 from .display import console, flatten_headings
 from .history import (
+    SESSIONS_DIR,
     SESSIONS_FILE,
     artifact_file_for,
     forget_current_session,
@@ -19,6 +20,7 @@ from .history import (
     load_sessions,
     prepare_session_context,
     set_terminal_session,
+    short_hash,
     utc_now,
 )
 
@@ -93,6 +95,7 @@ def print_help() -> None:
     cmd_table.add_row("jarv /history", "Show recent conversation history")
     cmd_table.add_row("jarv /config", "Show current settings")
     cmd_table.add_row("jarv /update", "Update jarv to the latest version")
+    cmd_table.add_row("jarv /cleanup", "Delete orphaned session files from ~/.jarv/sessions/")
     cmd_table.add_row("jarv /about", "Show detailed information about jarv")
     cmd_table.add_row("jarv /help", "Show this help")
 
@@ -151,7 +154,7 @@ Run `jarv` with no prompt to start an interactive session. Type a prompt and pre
 
 ## Shell command behavior
 
-- jarv exposes one tool to the model: `run_command`.
+- jarv exposes three tools to the model: `run_command`, `spawn`, and `read_artifact`.
 - Commands are run only when the model chooses to call that tool.
 - On Windows, commands run through PowerShell.
 - On other platforms, commands run through the system shell.
@@ -243,7 +246,7 @@ def maybe_print_update_available() -> None:
         if not _load_known_sha():
             _save_sha(sha)
         else:
-            console.print("[yellow]Update available![/yellow] Run [bold]jarv update[/bold] to install.")
+            console.print("[yellow]Update available![/yellow] Run [bold]jarv /update[/bold] to install.")
 
 
 def cmd_update() -> None:
@@ -295,6 +298,35 @@ def cmd_clear() -> None:
     forget_current_session()
     if archived_any:
         console.print("[green]Fresh session will start on the next message.[/green]")
+
+
+def cmd_cleanup() -> None:
+    """Delete session files in ~/.jarv/sessions/ that have no matching sessions.json entry."""
+    if not SESSIONS_DIR.exists():
+        console.print("[dim]No sessions directory found — nothing to clean up.[/dim]")
+        return
+
+    data = load_sessions()
+    known_hashes = {short_hash(sid) for sid in data["sessions"]}
+
+    removed = 0
+    for path in sorted(SESSIONS_DIR.iterdir()):
+        if path.suffix != ".json":
+            continue
+        stem = path.stem
+        for prefix in ("history-", "artifacts-"):
+            if stem.startswith(prefix):
+                file_hash = stem[len(prefix):]
+                if file_hash not in known_hashes:
+                    path.unlink()
+                    console.print(f"[dim]Removed[/dim] {path.name}")
+                    removed += 1
+                break
+
+    if removed:
+        console.print(f"[green]Removed {removed} orphaned file{'s' if removed != 1 else ''}.[/green]")
+    else:
+        console.print("[dim]No orphaned session files found.[/dim]")
 
 
 def cmd_load(args: list) -> None:

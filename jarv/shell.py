@@ -119,6 +119,3 @@ def display_command_result(result: CommandResult) -> None:
     if not result.stdout and not result.stderr:
         console.print("(no output)", style="dim")
 
-
-def run_command(command: str) -> str:
-    return execute_command(command).to_model_output()

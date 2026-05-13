@@ -30,6 +30,8 @@ DEFAULT_CONFIG = {
 
 def load_config() -> dict:
     CONFIG_DIR.mkdir(exist_ok=True)
+    from .history import migrate_flat_session_files
+    migrate_flat_session_files()
     if not CONFIG_FILE.exists():
         CONFIG_FILE.write_text(json.dumps(DEFAULT_CONFIG, indent=2), encoding="utf-8")
         console.print(f"[green]Config created at[/green] {CONFIG_FILE}")

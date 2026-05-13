@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 
+from .display import console
+
 
 @dataclass(frozen=True)
 class Artifact:
@@ -49,8 +51,8 @@ def load_artifact_store(path: Path) -> ArtifactStore:
                         item.get("tldr", ""),
                         item.get("owner_label", label),
                     )
-    except Exception:
-        pass
+    except Exception as e:
+        console.print(f"[yellow]Could not load artifact store:[/yellow] {e}")
     return store
 
 
@@ -68,5 +70,5 @@ def save_artifact_store(store: ArtifactStore, path: Path) -> None:
         }
     try:
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    except OSError:
-        pass
+    except OSError as e:
+        console.print(f"[yellow]Could not save artifact store:[/yellow] {e}")

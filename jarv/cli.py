@@ -7,6 +7,7 @@ from openai import OpenAI
 from .agent import run_agent
 from .commands import (
     _check_update_background,
+    cmd_cleanup,
     cmd_clear,
     cmd_config,
     cmd_history,
@@ -22,7 +23,7 @@ from .config import CONFIG_FILE, load_config, validate_config
 from .display import console
 
 
-SLASH_COMMANDS = {"/help", "/about", "/update", "/clear", "/load", "/history", "/set", "/unset", "/config"}
+SLASH_COMMANDS = {"/help", "/about", "/update", "/cleanup", "/clear", "/load", "/history", "/set", "/unset", "/config"}
 
 
 def _run_slash_command(command: str, rest: list[str]) -> bool:
@@ -33,6 +34,8 @@ def _run_slash_command(command: str, rest: list[str]) -> bool:
         print_about()
     elif command == "/update":
         cmd_update()
+    elif command == "/cleanup":
+        cmd_cleanup()
     elif command == "/clear":
         cmd_clear()
     elif command == "/load":
