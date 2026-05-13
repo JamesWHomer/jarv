@@ -210,3 +210,5 @@ __marimo__/
 # Project Specific
 .claude
 Feature-Ideas.txt
+
+*.bat
