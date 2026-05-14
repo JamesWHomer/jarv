@@ -1,7 +1,9 @@
+import argparse
 import os
 import sys
 import threading
 
+from . import __version__
 from .config import CONFIG_FILE, load_config, validate_config
 from .display import console
 
@@ -58,60 +60,81 @@ def _run_slash_command(command: str, rest: list[str]) -> bool:
     return True
 
 
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="jarv",
+        description="OpenAI-powered CLI agent",
+        add_help=True,
+    )
+    parser.add_argument("query", nargs="*", help="Prompt to run (omit for heads-up mode)")
+    parser.add_argument("-m", "--model", metavar="MODEL", help="Override model for this run (e.g. gpt-4o)")
+    parser.add_argument("-e", "--effort", metavar="EFFORT", help="Override reasoning effort (low/medium/high)")
+    parser.add_argument("--timeout", type=int, metavar="SECONDS", help="Override command timeout in seconds")
+    parser.add_argument("-s", "--system", metavar="PROMPT", help="Override system prompt for this run")
+    parser.add_argument("--no-history", action="store_true", help="Don't load or save session history")
+    parser.add_argument("--version", action="version", version=f"jarv {__version__}")
+    return parser
+
+
 def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(encoding="utf-8")
 
-    if len(sys.argv) < 2:
-        config = load_config()
-        if not validate_config(config):
-            sys.exit(1)
-        api_key = config.get("api_key") or os.environ.get("OPENAI_API_KEY", "")
-        if not api_key:
-            console.print(f"[red]No API key found.[/red] Edit {CONFIG_FILE} or set OPENAI_API_KEY.")
-            sys.exit(1)
-        from openai import OpenAI
-        client = OpenAI(api_key=api_key)
-        run_heads_up_mode(config, client)
-        return
+    parser = _build_parser()
+    args = parser.parse_args()
+    query_parts: list[str] = args.query
 
-    args = sys.argv[1:]
-    command = args[0].lower()
-
-    # "jarv help" is a permanent alias regardless of slash convention
-    if command == "help":
+    # "jarv help" permanent alias
+    if query_parts and query_parts[0].lower() == "help":
         from .commands import print_help
         print_help()
         return
 
-    if command.startswith("/"):
-        if not _run_slash_command(command, args[1:]):
+    # Slash commands — flags are silently ignored for these
+    if query_parts and query_parts[0].startswith("/"):
+        command = query_parts[0].lower()
+        if not _run_slash_command(command, query_parts[1:]):
             console.print(f"[red]Unknown command:[/red] {command}")
             console.print("[dim]Run [bold]jarv /help[/bold] for a list of commands.[/dim]")
         return
 
-    query = " ".join(args)
     config = load_config()
     if not validate_config(config):
         sys.exit(1)
+
+    # Apply flag overrides on top of config
+    if args.model:
+        config["model"] = args.model
+    if args.effort:
+        config["reasoning_effort"] = args.effort
+    if args.timeout is not None:
+        config["command_timeout"] = args.timeout
+    if args.system:
+        config["system_prompt"] = args.system
 
     api_key = config.get("api_key") or os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
         console.print(f"[red]No API key found.[/red] Edit {CONFIG_FILE} or set OPENAI_API_KEY.")
         sys.exit(1)
 
+    from openai import OpenAI
+    client = OpenAI(api_key=api_key)
+
+    if not query_parts:
+        run_heads_up_mode(config, client)
+        return
+
     if config.get("check_updates", True):
         from .commands import _check_update_background, maybe_print_update_available
         maybe_print_update_available()
         threading.Thread(target=_check_update_background, daemon=True).start()
 
-    from openai import OpenAI
     from .agent import run_agent
-    client = OpenAI(api_key=api_key)
+    query = " ".join(query_parts)
     try:
-        run_agent(query, config, client)
+        run_agent(query, config, client, no_history=args.no_history)
     except KeyboardInterrupt:
         console.print("\n[dim]Interrupted.[/dim]")
         sys.exit(130)

@@ -309,10 +309,11 @@ def run_agent(
     config: dict,
     client: OpenAI,
     propagate_keyboard_interrupt: bool = False,
+    no_history: bool = False,
 ) -> None:
     interactive = sys.stdout.isatty()
     session_context = prepare_session_context(mark_message=True)
-    history = load_history(session_context.history_file)
+    history = [] if no_history else load_history(session_context.history_file)
     max_history = config.get("max_history", DEFAULT_CONFIG["max_history"])
     metadata = history_metadata(session_context)
 
@@ -498,23 +499,27 @@ def run_agent(
                 kwargs["input"] = kwargs["input"] + new_input_items
             else:
                 history.append({"role": "assistant", "content": reply_text, **metadata})
-                save_history(history[-max_history:], session_context.history_file)
+                if not no_history:
+                    save_history(history[-max_history:], session_context.history_file)
                 save_artifact_store(artifact_store, artifact_file)
                 break
     except KeyboardInterrupt:
         console.print("\n[dim]Interrupted.[/dim]")
-        save_history(history[-max_history:], session_context.history_file)
+        if not no_history:
+            save_history(history[-max_history:], session_context.history_file)
         save_artifact_store(artifact_store, artifact_file)
         if propagate_keyboard_interrupt:
             raise
     except OpenAIError as e:
         console.print(f"[red]OpenAI API error:[/red] {e}")
-        save_history(history[-max_history:], session_context.history_file)
+        if not no_history:
+            save_history(history[-max_history:], session_context.history_file)
         save_artifact_store(artifact_store, artifact_file)
         raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {e}")
-        save_history(history[-max_history:], session_context.history_file)
+        if not no_history:
+            save_history(history[-max_history:], session_context.history_file)
         save_artifact_store(artifact_store, artifact_file)
         raise SystemExit(1)
 
