@@ -19,6 +19,7 @@ from .display import console, flatten_headings, jarv_panel, section_rule, status
 from .history import (
     SESSIONS_DIR,
     SESSIONS_FILE,
+    artifact_file_for,
     detect_terminal,
     forget_current_session,
     load_history,
@@ -41,6 +42,8 @@ from .usage import (
     load_usage,
     usage_file_for,
 )
+
+ARCHIVE_DIR = CONFIG_DIR / "archive"
 
 GITHUB_REPO = "JamesWHomer/jarv"
 GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/commits/main"
@@ -163,6 +166,7 @@ def print_help() -> None:
     cmd_table.add_row("jarv /set <key> <value>", "Set a config value")
     cmd_table.add_row("jarv /unset <key>", "Reset a config key to its default")
     cmd_table.add_row("jarv /clear", "Start a fresh session on the next message")
+    cmd_table.add_row("jarv /archive", "Archive this terminal's session and start a fresh one")
     cmd_table.add_row("jarv /sessions, /session", "List sessions (all in a TTY; 5 most recent when piped/non-TTY)")
     cmd_table.add_row("jarv /load", "Load the most recently used session into this terminal")
     cmd_table.add_row("jarv /load <id>", "Load a specific session into this terminal")
@@ -230,6 +234,7 @@ jarv is a command-line AI assistant powered by OpenAI.
 - `jarv /undo [n]` - Unsend the last n exchanges (default 1). The removed exchange is pushed onto a redo stack.
 - `jarv /redo [n]` - Restore the last n undone exchanges (default 1). Sending a new message clears the redo stack.
 - `jarv /clear` - Start a fresh session on the next message.
+- `jarv /archive` - Archive this terminal's session history and start a fresh one on the next message.
 - `jarv /sessions` / `jarv /session` - List sessions by recency. In an interactive terminal you can scroll through all of them; when stdout is not a TTY (e.g. piped), only the 5 most recent are listed.
 - `jarv /load` - Bind this terminal to the most recently used session.
 - `jarv /load <id>` - Bind this terminal to a specific session id.
@@ -287,6 +292,7 @@ Session metadata file: `{SESSIONS_FILE}`
 Each terminal is bound to exactly one session at a time. By default a fresh terminal gets its own session (id derived from terminal fingerprint). Per-session history and artifact sidecars live in `{SESSIONS_DIR}` as `history-<hash>.json` and `artifacts-<hash>.json`.
 
 - `jarv /clear` removes the terminal's session mapping. The next prompt starts a fresh session.
+- `jarv /archive` archives the current session's history+artifacts and removes the terminal's mapping. The next prompt starts a fresh session.
 - `jarv /sessions` / `jarv /session` lists sessions by recency (all in a TTY; 5 most recent when stdout is not a TTY).
 - `jarv /load` looks up the most recently used session anywhere and binds it to this terminal.
 - `jarv /load <id>` binds a specific session id to this terminal.
@@ -423,6 +429,42 @@ def cmd_update() -> None:
 def cmd_clear() -> None:
     forget_current_session()
     console.print("[bold green]✓[/bold green] [green]Fresh session will start on the next message.[/green]")
+
+
+def cmd_archive() -> None:
+    session_context = prepare_session_context()
+    history_path = session_context.history_file
+
+    archived_any = False
+    if history_path.exists() and load_history(history_path):
+        ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+        cleared_at = utc_now().strftime("%Y%m%dT%H%M%SZ")
+        stem_suffix = history_path.stem[len("history"):]
+        archived_history = ARCHIVE_DIR / f"history-{cleared_at}{stem_suffix}.json"
+        history_path.rename(archived_history)
+
+        artifact_path = artifact_file_for(history_path)
+        if artifact_path.exists():
+            archived_artifacts = ARCHIVE_DIR / f"artifacts-{cleared_at}{stem_suffix}.json"
+            artifact_path.rename(archived_artifacts)
+
+        usage_path = usage_file_for(history_path)
+        if usage_path.exists():
+            archived_usage = ARCHIVE_DIR / f"usage-{cleared_at}{stem_suffix}.json"
+            usage_path.rename(archived_usage)
+
+        redo_path = redo_file_for(history_path)
+        if redo_path.exists():
+            redo_path.unlink()
+
+        console.print(f"[bold cyan]▸[/bold cyan] [dim]Session archived to[/dim] [cyan]{archived_history}[/cyan]")
+        archived_any = True
+    else:
+        console.print("[dim]○ No history to archive.[/dim]")
+
+    forget_current_session()
+    if archived_any:
+        console.print("[bold green]✓[/bold green] [green]Fresh session will start on the next message.[/green]")
 
 
 
