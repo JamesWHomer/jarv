@@ -39,7 +39,7 @@ from .orchestrator import (
     spawn_batch,
 )
 from .shell import display_command_result, execute_command
-from .usage import record_response_usage, usage_file_for
+from .usage import estimate_context_breakdown, record_response_usage, usage_file_for
 
 # Responses API tool format (flat, no "function" wrapper key)
 TOOLS = [RUN_COMMAND_TOOL, SPAWN_TOOL, READ_ARTIFACT_TOOL]
@@ -358,6 +358,13 @@ def run_agent(
             reasoning_items = []
             got_text = False
 
+            _ctx_breakdown = estimate_context_breakdown(
+                config["model"],
+                kwargs.get("instructions", ""),
+                kwargs.get("tools", []),
+                kwargs.get("input", []),
+            )
+
             thought_started = time.perf_counter()
             spinner_live: Live | None = None
             stream_live: Live | None = None
@@ -423,6 +430,7 @@ def run_agent(
                     config["model"],
                     final_response,
                     "root",
+                    context_breakdown=_ctx_breakdown,
                 )
             finally:
                 if spinner_live is not None:

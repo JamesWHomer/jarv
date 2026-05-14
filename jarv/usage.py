@@ -1,3 +1,4 @@
+import importlib.util
 import json
 from pathlib import Path
 from threading import Lock
@@ -5,6 +6,79 @@ from typing import Any
 
 from .display import console
 from .history import isoformat_utc, utc_now
+
+_BREAKDOWN_KEYS = ("system", "tools", "history", "tool_io", "reasoning")
+
+
+def _litellm_token_count(model: str, text: str) -> int:
+    if not text:
+        return 0
+    try:
+        from litellm import token_counter
+        return max(0, int(token_counter(model=model, text=text)))
+    except Exception:
+        return max(1, len(text) // 4)
+
+
+def _item_text(item: dict) -> str:
+    """Extract meaningful text from an API input item for token estimation."""
+    role = item.get("role")
+    typ = item.get("type")
+    if role in ("user", "assistant"):
+        return str(item.get("content") or "")
+    if typ == "function_call":
+        return f"{item.get('name', '')} {item.get('arguments', '')}"
+    if typ == "function_call_output":
+        return str(item.get("output") or "")
+    if typ == "reasoning":
+        summary = item.get("summary") or []
+        return " ".join(str(s) for s in summary) if isinstance(summary, list) else str(summary)
+    return json.dumps(item)
+
+
+def estimate_context_breakdown(
+    model: str,
+    instructions: str,
+    tools: list,
+    input_items: list,
+) -> dict:
+    """Estimate token counts split by context category.
+
+    Returns a dict with keys: system, tools, history, tool_io, reasoning.
+    Uses LiteLLM's token_counter; falls back to a character-based heuristic.
+    """
+    try:
+        system_tokens = _litellm_token_count(model, instructions)
+        tools_tokens = _litellm_token_count(model, json.dumps(tools))
+
+        history_tokens = 0
+        tool_io_tokens = 0
+        reasoning_tokens = 0
+
+        for item in input_items:
+            if not isinstance(item, dict):
+                continue
+            role = item.get("role")
+            typ = item.get("type")
+            count = _litellm_token_count(model, _item_text(item))
+            if role in ("user", "assistant"):
+                history_tokens += count
+            elif typ in ("function_call", "function_call_output"):
+                tool_io_tokens += count
+            elif typ == "reasoning":
+                reasoning_tokens += count
+            else:
+                history_tokens += count
+
+        return {
+            "system": system_tokens,
+            "tools": tools_tokens,
+            "history": history_tokens,
+            "tool_io": tool_io_tokens,
+            "reasoning": reasoning_tokens,
+        }
+    except Exception:
+        return {k: 0 for k in _BREAKDOWN_KEYS}
 
 USAGE_VERSION = 1
 RECENT_REQUEST_LIElastic License 2.0 = 50
@@ -195,14 +269,63 @@ def _normalize_usage_data(data: dict) -> None:
                 _normalize_token_bucket(record)
 
 
+_price_map_cache: dict | None = None
+_price_map_lock = Lock()
+
+# Litellm ships the data under different filenames across versions.
+_PRICE_MAP_FILENAMES = [
+    "model_prices_and_context_window.json",
+    "model_prices_and_context_window_backup.json",
+]
+
+
+def _expand_aliases(price_map: dict) -> dict:
+    """Promote alias entries to top-level keys (mirrors litellm's own logic)."""
+    to_add: dict = {}
+    for entry in price_map.values():
+        if not isinstance(entry, dict):
+            continue
+        for alias in entry.get("aliases") or []:
+            if isinstance(alias, str) and alias not in price_map and alias not in to_add:
+                to_add[alias] = entry
+    price_map.update(to_add)
+    return price_map
+
+
+def _load_price_map() -> dict:
+    global _price_map_cache
+    if _price_map_cache is not None:
+        return _price_map_cache
+    with _price_map_lock:
+        if _price_map_cache is not None:
+            return _price_map_cache
+        try:
+            spec = importlib.util.find_spec("litellm")
+            if spec is not None and spec.origin:
+                pkg_dir = Path(spec.origin).parent
+                for filename in _PRICE_MAP_FILENAMES:
+                    json_path = pkg_dir / filename
+                    if json_path.exists():
+                        data = json.loads(json_path.read_text(encoding="utf-8"))
+                        if isinstance(data, dict) and data:
+                            _price_map_cache = _expand_aliases(data)
+                            return _price_map_cache
+        except Exception:
+            pass
+        _price_map_cache = {}
+        return _price_map_cache
+
+
 def _litellm_model_info(model: str | None) -> dict | None:
     if not model:
         return None
-    try:
-        from litellm import get_model_info
-        info = get_model_info(model=model)
-    except Exception:
-        return None
+    price_map = _load_price_map()
+    info = price_map.get(model)
+    if info is None:
+        # Try stripping provider prefix (e.g. "openai/gpt-4o" -> "gpt-4o")
+        short = model.split("/", 1)[-1] if "/" in model else None
+        if short:
+            info = price_map.get(short)
     return info if isinstance(info, dict) else None
 
 
@@ -278,6 +401,7 @@ def record_response_usage(
     model: str,
     response: Any,
     source: str,
+    context_breakdown: dict | None = None,
 ) -> None:
     try:
         if usage_path is None:
@@ -292,6 +416,8 @@ def record_response_usage(
             "source": source,
             **token_usage,
         }
+        if context_breakdown is not None and any(context_breakdown.get(k, 0) for k in _BREAKDOWN_KEYS):
+            record["context_breakdown"] = {k: int(context_breakdown.get(k, 0)) for k in _BREAKDOWN_KEYS}
         estimated_cost = estimate_token_cost_usd(record, model)
         if estimated_cost is not None:
             record["estimated_cost_usd"] = estimated_cost
