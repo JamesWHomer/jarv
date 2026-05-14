@@ -22,6 +22,8 @@ from .history import (
     artifact_file_for,
     detect_terminal,
     forget_current_session,
+    history_file_for_session,
+    isoformat_utc,
     load_history,
     load_redo_stack,
     load_sessions,
@@ -30,6 +32,7 @@ from .history import (
     redo_file_for,
     save_history,
     save_redo_stack,
+    save_sessions,
     set_terminal_session,
     split_last_exchange,
     utc_now,
@@ -72,6 +75,8 @@ def _read_key() -> str:
             }.get(second, "OTHER")
         if ch == "\r":
             return "ENTER"
+        if ch == "\t":
+            return "TAB"
         if ch in ("\x1b", "q", "Q"):
             return "ESC"
         if ch == "\x03":
@@ -99,6 +104,8 @@ def _read_key() -> str:
                 return "ESC"
             if ch in ("\r", "\n"):
                 return "ENTER"
+            if ch == "\t":
+                return "TAB"
             if ch in ("q", "Q"):
                 return "ESC"
             if ch == "\x03":
@@ -431,39 +438,78 @@ def cmd_clear() -> None:
     console.print("[bold green]✓[/bold green] [green]Fresh session will start on the next message.[/green]")
 
 
+def archive_session_files(history_path: Path) -> Path | None:
+    """Move history/artifacts/usage for a session into ARCHIVE_DIR.
+
+    Returns the new archived history path, or None if nothing was archived.
+    """
+    if not history_path.exists() or not load_history(history_path):
+        return None
+    ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    cleared_at = utc_now().strftime("%Y%m%dT%H%M%SZ")
+    stem_suffix = history_path.stem[len("history"):]
+    archived_history = ARCHIVE_DIR / f"history-{cleared_at}{stem_suffix}.json"
+    history_path.rename(archived_history)
+
+    artifact_path = artifact_file_for(history_path)
+    if artifact_path.exists():
+        artifact_path.rename(ARCHIVE_DIR / f"artifacts-{cleared_at}{stem_suffix}.json")
+
+    usage_path = usage_file_for(history_path)
+    if usage_path.exists():
+        usage_path.rename(ARCHIVE_DIR / f"usage-{cleared_at}{stem_suffix}.json")
+
+    redo_path = redo_file_for(history_path)
+    if redo_path.exists():
+        redo_path.unlink()
+
+    return archived_history
+
+
+def unarchive_session_files(archived_history_path: Path, session_id: str) -> Path | None:
+    """Reverse archive_session_files for the given session id."""
+    if not archived_history_path.exists():
+        return None
+    restored_history = history_file_for_session(session_id)
+    archived_history_path.rename(restored_history)
+
+    archived_dir = archived_history_path.parent
+    archived_tail = archived_history_path.stem[len("history"):]  # "-{ts}-{hash}"
+    restored_suffix = restored_history.stem[len("history"):]  # "-{hash}"
+    for kind in ("artifacts", "usage"):
+        sib = archived_dir / f"{kind}{archived_tail}.json"
+        if sib.exists():
+            sib.rename(SESSIONS_DIR / f"{kind}{restored_suffix}.json")
+    return restored_history
+
+
+def delete_session_files(history_path: Path) -> None:
+    """Permanently remove history/artifacts/usage/redo files for a session."""
+    for path in (
+        history_path,
+        artifact_file_for(history_path),
+        usage_file_for(history_path),
+        redo_file_for(history_path),
+    ):
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError:
+            pass
+
+
 def cmd_archive() -> None:
     session_context = prepare_session_context()
     history_path = session_context.history_file
 
-    archived_any = False
-    if history_path.exists() and load_history(history_path):
-        ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-        cleared_at = utc_now().strftime("%Y%m%dT%H%M%SZ")
-        stem_suffix = history_path.stem[len("history"):]
-        archived_history = ARCHIVE_DIR / f"history-{cleared_at}{stem_suffix}.json"
-        history_path.rename(archived_history)
-
-        artifact_path = artifact_file_for(history_path)
-        if artifact_path.exists():
-            archived_artifacts = ARCHIVE_DIR / f"artifacts-{cleared_at}{stem_suffix}.json"
-            artifact_path.rename(archived_artifacts)
-
-        usage_path = usage_file_for(history_path)
-        if usage_path.exists():
-            archived_usage = ARCHIVE_DIR / f"usage-{cleared_at}{stem_suffix}.json"
-            usage_path.rename(archived_usage)
-
-        redo_path = redo_file_for(history_path)
-        if redo_path.exists():
-            redo_path.unlink()
-
+    archived_history = archive_session_files(history_path)
+    if archived_history is not None:
         console.print(f"[bold cyan]▸[/bold cyan] [dim]Session archived to[/dim] [cyan]{archived_history}[/cyan]")
-        archived_any = True
     else:
         console.print("[dim]○ No history to archive.[/dim]")
 
     forget_current_session()
-    if archived_any:
+    if archived_history is not None:
         console.print("[bold green]✓[/bold green] [green]Fresh session will start on the next message.[/green]")
 
 
@@ -606,10 +652,20 @@ def cmd_sessions() -> None:
             "time_str": time_str,
             "snippet": snippet,
             "is_current": sid == current_session_id,
+            "archived": bool(meta.get("archived")),
         })
 
-    n = len(rows)
-    selected = next((i for i, r in enumerate(rows) if r["is_current"]), 0)
+    view_mode = "active"  # "active" | "all" | "archived"
+    arm_delete_sid: str | None = None
+    flash: tuple[str, str] | None = None  # (message, style) shown above the footer
+    selected_sid: str | None = next(
+        (r["sid"] for r in rows if r["is_current"] and not r["archived"]),
+        next((r["sid"] for r in rows if not r["archived"]), rows[0]["sid"] if rows else None),
+    )
+    offset = 0
+    preview_sid: str | None = None
+    preview_offset = 0
+    preview_cache: dict[str, list] = {}  # sid -> list[Text] of pre-built lines
 
     def _truncate(value: str, width: int) -> str:
         if width <= 0:
@@ -620,41 +676,243 @@ def cmd_sessions() -> None:
             return value[:width]
         return value[:width - 3] + "..."
 
-    def _visible_rows(term_h: int, include_footer: bool = True) -> int:
-        """Return the row count that fills the alternate screen without overflowing."""
-        # Panel border is 2 rows. The header consumes 1 content row, and the
-        # footer consumes 2 more (blank spacer + controls) when there is room.
-        content_rows = max(1, term_h - 2)
-        reserved = 3 if include_footer else 1
-        return max(1, content_rows - reserved)
+    def _content_rows(term_h: int, has_status: bool, show_footer: bool) -> int:
+        # Panel border = 2 rows. Header consumes 1 row. Footer = 2 rows (blank + controls).
+        content = max(1, term_h - 2 - 1)
+        if show_footer:
+            content -= 2
+        if has_status:
+            content -= 1
+        return max(1, content)
 
-    def _max_vis() -> int:
+    def _max_vis(has_status: bool = False) -> int:
         term_h = console.size.height
-        return _visible_rows(term_h, include_footer=term_h >= 6)
+        return _content_rows(term_h, has_status, show_footer=term_h >= 6)
 
-    def _clamp_offset(sel: int, off: int) -> int:
-        """Keep sel inside [off, off + max_vis). Scroll only when it leaves the window."""
-        mv = _max_vis()
+    def _visible_rows_list() -> list[dict]:
+        if view_mode == "active":
+            return [r for r in rows if not r["archived"]]
+        if view_mode == "archived":
+            return [r for r in rows if r["archived"]]
+        return list(rows)
+
+    def _selected_pos(visible: list[dict]) -> int:
+        for i, r in enumerate(visible):
+            if r["sid"] == selected_sid:
+                return i
+        return 0
+
+    def _clamp_offset(sel: int, off: int, mv: int, n: int) -> int:
+        if n == 0:
+            return 0
         if sel < off:
             return sel
         if sel >= off + mv:
             return sel - mv + 1
-        return off
+        return max(0, min(off, max(0, n - mv)))
 
-    offset = _clamp_offset(selected, 0)
+    def _subtitle() -> str:
+        n_active = sum(1 for r in rows if not r["archived"])
+        n_archived = len(rows) - n_active
+        if view_mode == "active":
+            return f"[dim]{n_active} active[/dim]"
+        if view_mode == "archived":
+            return f"[dim]{n_archived} archived[/dim]"
+        return f"[dim]{n_active} active · {n_archived} archived[/dim]"
 
-    def _render(sel: int, off: int) -> Panel:
+    def _footer_text() -> str:
+        cur_visible = _visible_rows_list()
+        cur = cur_visible[_selected_pos(cur_visible)] if cur_visible else None
+        a_hint = "a unarchive" if (cur and cur["archived"]) else "a archive"
+        return f"↑↓ navigate   Enter load   p preview   d delete   {a_hint}   Tab view: {view_mode}   q cancel"
+
+    def _build_preview_lines(sid: str) -> list[Text]:
+        meta = sessions.get(sid, {})
+        hp_str = meta.get("history_file")
+        if not hp_str:
+            return [Text("(no history file)", style="dim")]
+        hp = Path(hp_str)
+        if not hp.exists():
+            return [Text("(history file missing)", style="dim")]
+        history = load_history(hp)
+        if not history:
+            return [Text("(empty conversation)", style="dim")]
+
+        def _content_to_str(content) -> str:
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                parts: list[str] = []
+                for c in content:
+                    if isinstance(c, dict):
+                        if c.get("type") == "text" and isinstance(c.get("text"), str):
+                            parts.append(c["text"])
+                        elif "content" in c and isinstance(c["content"], str):
+                            parts.append(c["content"])
+                        else:
+                            parts.append(f"[{c.get('type', 'item')}]")
+                    else:
+                        parts.append(str(c))
+                return "\n".join(parts)
+            return str(content)
+
+        lines: list[Text] = []
+        for item in history:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role", "")).lower()
+            if role == "system":
+                continue
+            body = _content_to_str(item.get("content", "")).strip()
+            if not body:
+                continue
+            if role == "user":
+                label, label_style, body_style = "user", "bold cyan", "bold"
+            elif role == "assistant":
+                label, label_style, body_style = "jarv", "bold green", ""
+            else:
+                label, label_style, body_style = role or "?", "dim", "dim"
+            for j, raw in enumerate(body.splitlines() or [""]):
+                t = Text(no_wrap=False, overflow="fold")
+                if j == 0:
+                    t.append(f"{label}: ", style=label_style)
+                else:
+                    t.append("  ", style="")
+                t.append(raw, style=body_style)
+                lines.append(t)
+            lines.append(Text(""))
+        if lines and lines[-1].plain == "":
+            lines.pop()
+        return lines or [Text("(empty conversation)", style="dim")]
+
+    def _preview_lines(sid: str) -> list:
+        if sid not in preview_cache:
+            preview_cache[sid] = _build_preview_lines(sid)
+        return preview_cache[sid]
+
+    def _render_preview() -> Panel:
+        nonlocal preview_offset
+        term_h = console.size.height
+        term_w = console.size.width
+        panel_width = max(1, term_w)
+        inner_width = max(1, panel_width - 4)
+        show_footer = term_h >= 6
+        # Header (1 row) + footer (2 rows: blank + controls) inside the panel border (2 rows).
+        body_rows = max(1, term_h - 2 - 1 - (2 if show_footer else 0))
+
+        sid = preview_sid or ""
+        all_lines = _preview_lines(sid)
+        total = len(all_lines)
+        max_off = max(0, total - body_rows)
+        if preview_offset > max_off:
+            preview_offset = max_off
+        if preview_offset < 0:
+            preview_offset = 0
+        start = preview_offset
+        end = min(total, start + body_rows)
+
+        meta = sessions.get(sid, {})
+        short_id = _short_session_id(sid) if sid else ""
+        label = meta.get("label", "")
+
+        parts: list = []
+        parts.append(
+            Text(
+                _truncate(f"  {short_id}  {label}", inner_width),
+                style="dim",
+                no_wrap=True,
+                overflow="crop",
+            )
+        )
+        for i in range(start, end):
+            parts.append(all_lines[i])
+        if total == 0:
+            parts.append(Text(_truncate("  (empty)", inner_width), style="dim"))
+
+        if show_footer:
+            position = f"{start + 1}–{end} of {total}" if total else "0"
+            parts.append(Text(""))
+            parts.append(
+                Text(
+                    _truncate(
+                        f"↑↓ scroll   Enter load   p/Esc back   ·   {position}",
+                        inner_width,
+                    ),
+                    style="dim italic",
+                    no_wrap=True,
+                    overflow="crop",
+                )
+            )
+
+        return Panel(
+            Group(*parts),
+            title="[bold bright_white]jarv ▸ preview[/bold bright_white]",
+            title_align="left",
+            subtitle=f"[dim]{short_id}[/dim]" if short_id else None,
+            subtitle_align="right",
+            border_style="cyan",
+            box=box.ROUNDED,
+            padding=(0, 1),
+            width=panel_width,
+        )
+
+    def _render() -> Panel:
+        if preview_sid is not None:
+            return _render_preview()
+        nonlocal offset
         term_w = console.size.width
         term_h = console.size.height
         panel_width = max(1, term_w)
         inner_width = max(1, panel_width - 4)
         show_footer = term_h >= 6
-        mv = _visible_rows(term_h, include_footer=show_footer)
-        off = _clamp_offset(sel, off)
-        start = off
-        end = min(n, off + mv)
+
+        visible = _visible_rows_list()
+        n = len(visible)
+        sel = _selected_pos(visible)
+
+        status: Text | None = None
+        cur = visible[sel] if visible else None
+        if arm_delete_sid and cur and cur["sid"] == arm_delete_sid:
+            prompt = (
+                f"Delete {cur['short_id']} permanently? "
+                "Press d again to confirm · any other key cancels"
+            )
+            status = Text(_truncate(prompt, inner_width), style="bold red", no_wrap=True, overflow="crop")
+        elif flash is not None:
+            msg, style = flash
+            status = Text(_truncate(msg, inner_width), style=style, no_wrap=True, overflow="crop")
+
+        mv = _content_rows(term_h, has_status=status is not None, show_footer=show_footer)
+        offset = _clamp_offset(sel, offset, mv, n)
+        start = offset
+        end = min(n, offset + mv)
 
         parts: list = []
+        if n == 0:
+            parts.append(Text(_truncate("  (no sessions in this view)", inner_width), style="dim"))
+            if status is not None:
+                parts.append(status)
+            if show_footer:
+                parts.append(Text(""))
+                parts.append(
+                    Text(
+                        _truncate(_footer_text(), inner_width),
+                        style="dim italic",
+                        no_wrap=True,
+                        overflow="crop",
+                    )
+                )
+            return Panel(
+                Group(*parts),
+                title="[bold bright_white]jarv ▸ sessions[/bold bright_white]",
+                title_align="left",
+                subtitle=_subtitle(),
+                subtitle_align="right",
+                border_style="cyan",
+                box=box.ROUNDED,
+                padding=(0, 1),
+                width=panel_width,
+            )
 
         parts.append(
             Text(
@@ -666,11 +924,17 @@ def cmd_sessions() -> None:
         )
 
         for i in range(start, end):
-            r = rows[i]
+            r = visible[i]
             is_sel = i == sel
+            is_armed = is_sel and arm_delete_sid == r["sid"]
             t = Text(no_wrap=True, overflow="ellipsis")
             prefix = " › " if is_sel else "   "
-            marker = "● " if r["is_current"] else "  "
+            if r["is_current"]:
+                marker = "● "
+            elif r["archived"]:
+                marker = "⌫ "
+            else:
+                marker = "  "
             remaining = inner_width - len(prefix) - len(marker)
             id_width = max(0, min(24, remaining))
             remaining -= id_width
@@ -678,25 +942,66 @@ def cmd_sessions() -> None:
             remaining -= time_width
             snippet_width = max(0, remaining)
 
-            t.append(_truncate(prefix, inner_width), style="bold cyan" if is_sel else "")
+            if is_armed:
+                prefix_style = "bold red"
+            elif is_sel:
+                prefix_style = "bold cyan"
+            else:
+                prefix_style = ""
+            t.append(_truncate(prefix, inner_width), style=prefix_style)
+
             if inner_width > len(prefix):
-                t.append(_truncate(marker, inner_width - len(prefix)), style="green" if r["is_current"] else "")
+                if is_armed:
+                    marker_style = "bold red"
+                elif r["is_current"]:
+                    marker_style = "green"
+                elif r["archived"]:
+                    marker_style = "dim"
+                else:
+                    marker_style = ""
+                t.append(_truncate(marker, inner_width - len(prefix)), style=marker_style)
+
             if id_width:
                 short_id = _truncate(r["short_id"], id_width)
-                t.append(f"{short_id:<{id_width}}", style="bold cyan" if is_sel else "cyan")
+                if is_armed:
+                    id_style = "bold red"
+                elif is_sel:
+                    id_style = "bold cyan"
+                elif r["archived"]:
+                    id_style = "dim cyan"
+                else:
+                    id_style = "cyan"
+                t.append(f"{short_id:<{id_width}}", style=id_style)
+
             if time_width:
                 time_str = _truncate(r["time_str"], time_width)
-                t.append(f"{time_str:<{time_width}}", style="bold" if is_sel else "dim")
+                if is_armed:
+                    time_style = "bold red"
+                elif is_sel:
+                    time_style = "bold"
+                else:
+                    time_style = "dim"
+                t.append(f"{time_str:<{time_width}}", style=time_style)
+
             snip = r["snippet"] or "no messages"
             if snippet_width:
-                t.append(_truncate(snip, snippet_width), style="bold" if is_sel else "dim")
+                if is_armed:
+                    snip_style = "bold red"
+                elif is_sel:
+                    snip_style = "bold" if not r["archived"] else "dim"
+                else:
+                    snip_style = "dim"
+                t.append(_truncate(snip, snippet_width), style=snip_style)
             parts.append(t)
+
+        if status is not None:
+            parts.append(status)
 
         if show_footer:
             parts.append(Text(""))
             parts.append(
                 Text(
-                    _truncate("↑↓ navigate   Enter load   q cancel", inner_width),
+                    _truncate(_footer_text(), inner_width),
                     style="dim italic",
                     no_wrap=True,
                     overflow="crop",
@@ -707,7 +1012,7 @@ def cmd_sessions() -> None:
             Group(*parts),
             title="[bold bright_white]jarv \u25b8 sessions[/bold bright_white]",
             title_align="left",
-            subtitle=f"[dim]{sel + 1}/{n}[/dim]",
+            subtitle=_subtitle(),
             subtitle_align="right",
             border_style="cyan",
             box=box.ROUNDED,
@@ -716,8 +1021,9 @@ def cmd_sessions() -> None:
         )
 
     loaded_row: dict | None = None
+    auto_restored = False
     with Live(
-        get_renderable=lambda: _render(selected, offset),
+        get_renderable=_render,
         console=console,
         screen=True,
         auto_refresh=True,
@@ -732,32 +1038,166 @@ def cmd_sessions() -> None:
             except KeyboardInterrupt:
                 break
 
+            # Preview mode intercepts most keys.
+            if preview_sid is not None:
+                if key in ("p", "ESC"):
+                    preview_sid = None
+                    preview_offset = 0
+                elif key == "UP":
+                    preview_offset = max(0, preview_offset - 1)
+                elif key == "DOWN":
+                    preview_offset += 1
+                elif key == "PAGEUP":
+                    preview_offset = max(0, preview_offset - _max_vis())
+                elif key == "PAGEDOWN":
+                    preview_offset += _max_vis()
+                elif key == "HOME":
+                    preview_offset = 0
+                elif key == "END":
+                    preview_offset = max(0, len(_preview_lines(preview_sid)) - 1)
+                elif key == "ENTER":
+                    row = next((r for r in rows if r["sid"] == preview_sid), None)
+                    if row is not None:
+                        if row["archived"]:
+                            meta = sessions.get(row["sid"], {})
+                            hp_str = meta.get("history_file")
+                            if hp_str:
+                                restored = unarchive_session_files(Path(hp_str), row["sid"])
+                                if restored is not None:
+                                    meta["history_file"] = str(restored)
+                                    meta.pop("archived", None)
+                                    meta.pop("archived_at", None)
+                                    row["archived"] = False
+                                    save_sessions(data)
+                                    auto_restored = True
+                        set_terminal_session(row["sid"])
+                        loaded_row = row
+                        break
+                continue
+
+            if key != "d":
+                arm_delete_sid = None
+            flash = None
+
+            visible = _visible_rows_list()
+            n_vis = len(visible)
+            sel = _selected_pos(visible) if visible else 0
+            cur = visible[sel] if visible else None
+
             if key == "UP":
-                selected = max(0, selected - 1)
+                if visible:
+                    selected_sid = visible[max(0, sel - 1)]["sid"]
             elif key == "DOWN":
-                selected = min(n - 1, selected + 1)
+                if visible:
+                    selected_sid = visible[min(n_vis - 1, sel + 1)]["sid"]
             elif key == "HOME":
-                selected = 0
+                if visible:
+                    selected_sid = visible[0]["sid"]
             elif key == "END":
-                selected = n - 1
+                if visible:
+                    selected_sid = visible[n_vis - 1]["sid"]
             elif key == "PAGEUP":
-                selected = max(0, selected - _max_vis())
+                if visible:
+                    selected_sid = visible[max(0, sel - _max_vis())]["sid"]
             elif key == "PAGEDOWN":
-                selected = min(n - 1, selected + _max_vis())
+                if visible:
+                    selected_sid = visible[min(n_vis - 1, sel + _max_vis())]["sid"]
             elif key == "ENTER":
-                row = rows[selected]
-                set_terminal_session(row["sid"])
-                loaded_row = row
+                if cur is None:
+                    continue
+                if cur["archived"]:
+                    meta = sessions.get(cur["sid"], {})
+                    hp_str = meta.get("history_file")
+                    if hp_str:
+                        restored = unarchive_session_files(Path(hp_str), cur["sid"])
+                        if restored is not None:
+                            meta["history_file"] = str(restored)
+                            meta.pop("archived", None)
+                            meta.pop("archived_at", None)
+                            cur["archived"] = False
+                            save_sessions(data)
+                            auto_restored = True
+                set_terminal_session(cur["sid"])
+                loaded_row = cur
                 break
             elif key == "ESC":
                 break
-
-            offset = _clamp_offset(selected, offset)
+            elif key == "TAB":
+                view_mode = {"active": "all", "all": "archived", "archived": "active"}[view_mode]
+                offset = 0
+            elif key == "p":
+                if cur is not None:
+                    preview_sid = cur["sid"]
+                    preview_offset = 0
+            elif key == "a":
+                if cur is None:
+                    continue
+                sid = cur["sid"]
+                meta = sessions.get(sid, {})
+                hp_str = meta.get("history_file")
+                hp = Path(hp_str) if hp_str else None
+                if cur["archived"]:
+                    restored = unarchive_session_files(hp, sid) if hp else None
+                    if restored is not None:
+                        meta["history_file"] = str(restored)
+                        meta.pop("archived", None)
+                        meta.pop("archived_at", None)
+                        cur["archived"] = False
+                        save_sessions(data)
+                        flash = (f"✓ restored {cur['short_id']}", "green")
+                    else:
+                        meta.pop("archived", None)
+                        meta.pop("archived_at", None)
+                        cur["archived"] = False
+                        save_sessions(data)
+                        flash = (f"○ archive missing for {cur['short_id']} — marked active", "dim")
+                else:
+                    archived_path = archive_session_files(hp) if hp else None
+                    if archived_path is not None:
+                        meta["history_file"] = str(archived_path)
+                        meta["archived"] = True
+                        meta["archived_at"] = isoformat_utc(utc_now())
+                        for term_id, mapped_sid in list(terminals.items()):
+                            if mapped_sid == sid:
+                                terminals.pop(term_id)
+                        cur["archived"] = True
+                        cur["is_current"] = False
+                        save_sessions(data)
+                        flash = (f"✓ archived {cur['short_id']}", "cyan")
+                    else:
+                        flash = (f"○ nothing to archive for {cur['short_id']}", "dim")
+            elif key == "d":
+                if cur is None:
+                    continue
+                sid = cur["sid"]
+                if arm_delete_sid == sid:
+                    meta = sessions.get(sid, {})
+                    hp_str = meta.get("history_file")
+                    if hp_str:
+                        delete_session_files(Path(hp_str))
+                    sessions.pop(sid, None)
+                    for term_id, mapped_sid in list(terminals.items()):
+                        if mapped_sid == sid:
+                            terminals.pop(term_id)
+                    rows[:] = [r for r in rows if r["sid"] != sid]
+                    save_sessions(data)
+                    new_visible = _visible_rows_list()
+                    if new_visible:
+                        new_sel = min(sel, len(new_visible) - 1)
+                        selected_sid = new_visible[new_sel]["sid"]
+                    else:
+                        selected_sid = None
+                    flash = (f"✓ deleted {cur['short_id']}", "red")
+                    arm_delete_sid = None
+                else:
+                    arm_delete_sid = sid
 
     if loaded_row is not None:
-        label = sessions[loaded_row["sid"]].get("label", loaded_row["sid"])
+        label = sessions.get(loaded_row["sid"], {}).get("label", loaded_row["sid"])
+        prefix = "Restored & loaded" if auto_restored else "Loaded"
         console.print(
-            f"[bold green]✓[/bold green] [green]Loaded[/green] [bold cyan]{loaded_row['short_id']}[/bold cyan] [dim]({label})[/dim]"
+            f"[bold green]✓[/bold green] [green]{prefix}[/green] "
+            f"[bold cyan]{loaded_row['short_id']}[/bold cyan] [dim]({label})[/dim]"
         )
         return
     console.print("[dim]○ Cancelled.[/dim]")
