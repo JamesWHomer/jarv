@@ -114,12 +114,12 @@ You can edit the JSON file directly or use `jarv /set` / `jarv /unset`.
 | `jarv /set <key> <value>` | Set a config value |
 | `jarv /unset <key>` | Reset a config key to its default |
 | `jarv /clear` | Archive this terminal's session and start a fresh one |
+| `jarv /sessions` | List the 5 most recently active sessions |
 | `jarv /load` | Load the most recently used session into this terminal |
 | `jarv /load <id>` | Load a specific session into this terminal |
 | `jarv /history` | Show recent conversation history |
 | `jarv /config` | Show current settings |
 | `jarv /update` | Update Jarv to the latest version from GitHub |
-| `jarv /cleanup` | Delete orphaned session files from `~/.jarv/sessions/` |
 | `jarv /about` | Show detailed information about Jarv |
 | `jarv /help` | Show help (`jarv help` also works) |
 
@@ -141,9 +141,9 @@ Each terminal is bound to exactly one session at a time. By default a new termin
 Jarv detects terminals from environment values such as `WT_SESSION`, `TERM_SESSION_ID`, `TMUX`, or `STY`, with a parent-process fallback.
 
 - `jarv /clear` archives the current session's history and artifacts, then starts a fresh session on the next prompt.
+- `jarv /sessions` lists the 5 most recently active sessions.
 - `jarv /load` binds this terminal to the most recently used session.
 - `jarv /load <id>` binds this terminal to a specific session id.
-- `jarv /cleanup` removes session files in `~/.jarv/sessions/` that no longer have a matching entry in `sessions.json`.
 
 ## Subagent orchestration
 

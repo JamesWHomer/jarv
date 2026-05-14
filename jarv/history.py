@@ -207,3 +207,40 @@ def forget_current_session() -> None:
     if session_id:
         data["sessions"].pop(session_id, None)
     save_sessions(data)
+
+
+def split_last_exchange(history: list) -> tuple[list, list]:
+    """Return (history_without_last_exchange, last_exchange).
+
+    A frame starts at the last user message and extends to the end of history.
+    If there is no user message, the second element is an empty list.
+    """
+    for i in range(len(history) - 1, -1, -1):
+        item = history[i]
+        if isinstance(item, dict) and item.get("role") == "user":
+            return history[:i], history[i:]
+    return history, []
+
+
+def redo_file_for(history_path: Path) -> Path:
+    return history_path.with_name(history_path.name.replace("history", "redo", 1))
+
+
+def load_redo_stack(path: Path) -> list[list]:
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return [frame for frame in data if isinstance(frame, list)]
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        pass
+    return []
+
+
+def save_redo_stack(stack: list[list], path: Path) -> None:
+    CONFIG_DIR.mkdir(exist_ok=True)
+    try:
+        path.write_text(json.dumps(stack, indent=2), encoding="utf-8")
+    except OSError as e:
+        console.print(f"[yellow]Could not save redo stack:[/yellow] {e}")

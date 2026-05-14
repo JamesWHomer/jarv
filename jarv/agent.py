@@ -24,6 +24,7 @@ from .history import (
     history_metadata,
     load_history,
     prepare_session_context,
+    redo_file_for,
     save_history,
 )
 from .artifacts import ArtifactStore, load_artifact_store, save_artifact_store
@@ -77,15 +78,18 @@ class TailMarkdown:
         md = Markdown(self._text)
         lines = console.render_lines(md, options, pad=False)
         hidden = max(0, len(lines) - self._max_lines)
+        # Always emit exactly one top row (hint or blank spacer) so the live
+        # block has a fixed height from the first token to the last — no jump
+        # when the hint crosses the overflow threshold.
         if hidden:
-            # Reserve the top row for a hint so the user knows the head of
-            # the reply is scrolled off — full reply is reprinted on finish.
             lines = lines[-(self._max_lines - 1):] if self._max_lines > 1 else []
             hint = Text(
                 f"↑ {hidden} earlier line{'s' if hidden != 1 else ''} hidden — full reply will print when done",
                 style="dim italic",
             )
             yield from console.render(hint, options)
+        else:
+            yield Segment.line()
         for line in lines:
             yield from line
             yield Segment.line()
@@ -315,6 +319,10 @@ def run_agent(
 
     history.append({"role": "user", "content": query, **metadata})
 
+    redo_path = redo_file_for(session_context.history_file)
+    if redo_path.exists():
+        redo_path.unlink()
+
     input_items = build_input(history, max_history)
 
     kwargs = dict(
@@ -368,8 +376,9 @@ def run_agent(
                                             f"Thought for {format_thought_duration(thought_elapsed)}."
                                         )
                                     )
+                                    stream_max_lines = console.size.height - 2
                                     stream_live = Live(
-                                        TailMarkdown("", console.size.height - 2),
+                                        TailMarkdown("", stream_max_lines),
                                         refresh_per_second=12,
                                         console=console,
                                         auto_refresh=True,
@@ -382,7 +391,7 @@ def run_agent(
                                 stream_live.update(
                                     TailMarkdown(
                                         flatten_headings(reply_text),
-                                        console.size.height - 2,
+                                        stream_max_lines,
                                     )
                                 )
                         elif event.type == "response.output_item.done":
