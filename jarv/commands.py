@@ -412,7 +412,7 @@ def cmd_update() -> None:
         console.print(f"[bold cyan]↓[/bold cyan] Update found [dim]({short})[/dim]. Installing…")
     with console.status("[dim]Running pip install…[/dim]", spinner="dots"):
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--upgrade", f"git+https://github.com/{GITHUB_REPO}.git"],
+            [sys.executable, "-m", "pip", "install", "--force-reinstall", f"git+https://github.com/{GITHUB_REPO}.git"],
             capture_output=True,
             text=True,
         )
