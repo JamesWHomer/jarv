@@ -658,6 +658,9 @@ def cmd_sessions() -> None:
     view_mode = "active"  # "active" | "all" | "archived"
     arm_delete_sid: str | None = None
     flash: tuple[str, str] | None = None  # (message, style) shown above the footer
+    # When a row is archived/unarchived from a filtered view, keep it visible in
+    # place (with its new aesthetic) until the cursor moves.
+    ghost_sid: str | None = None
     selected_sid: str | None = next(
         (r["sid"] for r in rows if r["is_current"] and not r["archived"]),
         next((r["sid"] for r in rows if not r["archived"]), rows[0]["sid"] if rows else None),
@@ -690,11 +693,15 @@ def cmd_sessions() -> None:
         return _content_rows(term_h, has_status, show_footer=term_h >= 6)
 
     def _visible_rows_list() -> list[dict]:
-        if view_mode == "active":
-            return [r for r in rows if not r["archived"]]
-        if view_mode == "archived":
-            return [r for r in rows if r["archived"]]
-        return list(rows)
+        def keep(r: dict) -> bool:
+            if r["sid"] == ghost_sid:
+                return True
+            if view_mode == "active":
+                return not r["archived"]
+            if view_mode == "archived":
+                return r["archived"]
+            return True
+        return [r for r in rows if keep(r)]
 
     def _selected_pos(visible: list[dict]) -> int:
         for i, r in enumerate(visible):
@@ -1087,21 +1094,27 @@ def cmd_sessions() -> None:
             if key == "UP":
                 if visible:
                     selected_sid = visible[max(0, sel - 1)]["sid"]
+                ghost_sid = None
             elif key == "DOWN":
                 if visible:
                     selected_sid = visible[min(n_vis - 1, sel + 1)]["sid"]
+                ghost_sid = None
             elif key == "HOME":
                 if visible:
                     selected_sid = visible[0]["sid"]
+                ghost_sid = None
             elif key == "END":
                 if visible:
                     selected_sid = visible[n_vis - 1]["sid"]
+                ghost_sid = None
             elif key == "PAGEUP":
                 if visible:
                     selected_sid = visible[max(0, sel - _max_vis())]["sid"]
+                ghost_sid = None
             elif key == "PAGEDOWN":
                 if visible:
                     selected_sid = visible[min(n_vis - 1, sel + _max_vis())]["sid"]
+                ghost_sid = None
             elif key == "ENTER":
                 if cur is None:
                     continue
@@ -1125,6 +1138,7 @@ def cmd_sessions() -> None:
             elif key == "TAB":
                 view_mode = {"active": "all", "all": "archived", "archived": "active"}[view_mode]
                 offset = 0
+                ghost_sid = None
             elif key == "p":
                 if cur is not None:
                     preview_sid = cur["sid"]
@@ -1145,12 +1159,14 @@ def cmd_sessions() -> None:
                         cur["archived"] = False
                         save_sessions(data)
                         flash = (f"✓ restored {cur['short_id']}", "green")
+                        ghost_sid = sid if view_mode == "archived" else None
                     else:
                         meta.pop("archived", None)
                         meta.pop("archived_at", None)
                         cur["archived"] = False
                         save_sessions(data)
                         flash = (f"○ archive missing for {cur['short_id']} — marked active", "dim")
+                        ghost_sid = sid if view_mode == "archived" else None
                 else:
                     archived_path = archive_session_files(hp) if hp else None
                     if archived_path is not None:
@@ -1164,6 +1180,7 @@ def cmd_sessions() -> None:
                         cur["is_current"] = False
                         save_sessions(data)
                         flash = (f"✓ archived {cur['short_id']}", "cyan")
+                        ghost_sid = sid if view_mode == "active" else None
                     else:
                         flash = (f"○ nothing to archive for {cur['short_id']}", "dim")
             elif key == "d":
