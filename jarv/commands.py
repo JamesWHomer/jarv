@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import urllib.request
 from pathlib import Path
 
@@ -699,6 +700,9 @@ def cmd_sessions(args: list | None = None) -> None:
     search_query: str = ""
     search_active: bool = False  # input bar focused for typing
     search_text_cache: dict[str, str] = {}  # sid -> lowercased transcript text
+    last_action: dict | None = None  # most recent undoable action (5s window)
+    undo_lock = threading.Lock()
+    UNDO_WINDOW = 5.0
     # When a row is archived/unarchived from a filtered view, keep it visible in
     # place (with its new aesthetic) until the cursor moves.
     ghost_sid: str | None = None
@@ -844,10 +848,17 @@ def cmd_sessions(args: list | None = None) -> None:
         cur = cur_visible[_selected_pos(cur_visible)] if cur_visible else None
         a_hint = "a unarchive" if (cur and cur["archived"]) else "a archive"
         find_hint = "^F edit search" if search_query else "^F find"
-        return (
-            f"↑↓ navigate   Enter load   p preview   d delete   {a_hint}   "
-            f"Tab view: {view_mode}   {find_hint}   q cancel"
-        )
+        parts = [
+            "↑↓ navigate", "Enter load", "p preview", "d delete",
+            a_hint, f"Tab view: {view_mode}", find_hint,
+        ]
+        action = last_action
+        if action is not None:
+            remaining = action["deadline"] - time.time()
+            if remaining > 0:
+                parts.append(f"u undo ({int(remaining) + 1}s)")
+        parts.append("q cancel")
+        return "   ".join(parts)
 
     def _build_preview_lines(sid: str) -> list[Text]:
         meta = sessions.get(sid, {})
@@ -1177,6 +1188,120 @@ def cmd_sessions(args: list | None = None) -> None:
             width=panel_width,
         )
 
+    def _finalize_action(action: dict) -> None:
+        """Apply the irreversible part of an action that's leaving its window."""
+        if action["kind"] == "did_delete":
+            hp_str = action.get("history_path")
+            if hp_str:
+                delete_session_files(Path(hp_str))
+
+    def _expire_action(action: dict) -> None:
+        nonlocal last_action
+        with undo_lock:
+            if last_action is not action:
+                return
+            last_action = None
+        _finalize_action(action)
+
+    def _commit_pending() -> None:
+        nonlocal last_action
+        with undo_lock:
+            action = last_action
+            last_action = None
+        if action is None:
+            return
+        t = action.get("timer")
+        if t is not None:
+            t.cancel()
+        _finalize_action(action)
+
+    def _start_undo(action: dict) -> None:
+        nonlocal last_action
+        _commit_pending()
+        action["deadline"] = time.time() + UNDO_WINDOW
+        timer = threading.Timer(UNDO_WINDOW, _expire_action, args=(action,))
+        timer.daemon = True
+        action["timer"] = timer
+        with undo_lock:
+            last_action = action
+        timer.start()
+
+    def _take_last_action() -> dict | None:
+        """Atomically grab and clear the current undoable action if still valid."""
+        nonlocal last_action
+        with undo_lock:
+            action = last_action
+            if action is None:
+                return None
+            if time.time() >= action["deadline"]:
+                # Already expired — let the timer handle finalization.
+                return None
+            last_action = None
+        t = action.get("timer")
+        if t is not None:
+            t.cancel()
+        return action
+
+    def _do_undo() -> tuple[tuple[str, str], str | None] | None:
+        """Returns ((flash_msg, flash_style), restored_sid) or None."""
+        action = _take_last_action()
+        if action is None:
+            return None
+        kind = action["kind"]
+        if kind == "did_archive":
+            sid = action["sid"]
+            row = next((r for r in rows if r["sid"] == sid), None)
+            if row is None:
+                return (("○ session no longer exists", "dim"), None)
+            meta = sessions.get(sid, {})
+            hp_str = meta.get("history_file")
+            hp = Path(hp_str) if hp_str else None
+            restored = unarchive_session_files(hp, sid) if hp else None
+            if restored is not None:
+                meta["history_file"] = str(restored)
+            meta.pop("archived", None)
+            meta.pop("archived_at", None)
+            row["archived"] = False
+            save_sessions(data)
+            return ((f"↺ restored {row['short_id']}", "green"), sid)
+        if kind == "did_unarchive":
+            sid = action["sid"]
+            row = next((r for r in rows if r["sid"] == sid), None)
+            if row is None:
+                return (("○ session no longer exists", "dim"), None)
+            meta = sessions.get(sid, {})
+            hp_str = meta.get("history_file")
+            hp = Path(hp_str) if hp_str else None
+            archived_path = archive_session_files(hp) if hp else None
+            if archived_path is None:
+                return (("○ couldn't re-archive", "dim"), None)
+            meta["history_file"] = str(archived_path)
+            meta["archived"] = True
+            meta["archived_at"] = isoformat_utc(utc_now())
+            for term_id, mapped_sid in list(terminals.items()):
+                if mapped_sid == sid:
+                    terminals.pop(term_id)
+            row["archived"] = True
+            row["is_current"] = False
+            save_sessions(data)
+            return ((f"↺ archived {row['short_id']}", "cyan"), sid)
+        if kind == "did_delete":
+            sid = action["sid"]
+            snapshot_row = action["row"]
+            snapshot_meta = action["meta"]
+            row_index = action.get("row_index", len(rows))
+            removed_terminals = action.get("removed_terminals", [])
+            sessions[sid] = snapshot_meta
+            for term_id in removed_terminals:
+                terminals[term_id] = sid
+            if 0 <= row_index <= len(rows):
+                rows.insert(row_index, snapshot_row)
+            else:
+                rows.append(snapshot_row)
+            save_sessions(data)
+            return ((f"↺ restored {snapshot_row['short_id']}", "green"), sid)
+        return None
+
     loaded_row: dict | None = None
     auto_restored = False
     with Live(
@@ -1346,6 +1471,7 @@ def cmd_sessions(args: list | None = None) -> None:
                         save_sessions(data)
                         flash = (f"✓ restored {cur['short_id']}", "green")
                         ghost_sid = sid if view_mode == "archived" else None
+                        _start_undo({"kind": "did_unarchive", "sid": sid})
                     else:
                         meta.pop("archived", None)
                         meta.pop("archived_at", None)
@@ -1367,6 +1493,7 @@ def cmd_sessions(args: list | None = None) -> None:
                         save_sessions(data)
                         flash = (f"✓ archived {cur['short_id']}", "cyan")
                         ghost_sid = sid if view_mode == "active" else None
+                        _start_undo({"kind": "did_archive", "sid": sid})
                     else:
                         flash = (f"○ nothing to archive for {cur['short_id']}", "dim")
             elif key == "d":
@@ -1376,12 +1503,17 @@ def cmd_sessions(args: list | None = None) -> None:
                 if arm_delete_sid == sid:
                     meta = sessions.get(sid, {})
                     hp_str = meta.get("history_file")
-                    if hp_str:
-                        delete_session_files(Path(hp_str))
-                    sessions.pop(sid, None)
+                    snapshot_meta = dict(meta)
+                    snapshot_row = dict(cur)
+                    row_index = next(
+                        (i for i, r in enumerate(rows) if r["sid"] == sid), len(rows)
+                    )
+                    removed_terminals: list[str] = []
                     for term_id, mapped_sid in list(terminals.items()):
                         if mapped_sid == sid:
+                            removed_terminals.append(term_id)
                             terminals.pop(term_id)
+                    sessions.pop(sid, None)
                     rows[:] = [r for r in rows if r["sid"] != sid]
                     save_sessions(data)
                     new_visible = _visible_rows_list()
@@ -1392,10 +1524,27 @@ def cmd_sessions(args: list | None = None) -> None:
                         selected_sid = None
                     flash = (f"✓ deleted {cur['short_id']}", "red")
                     arm_delete_sid = None
+                    _start_undo({
+                        "kind": "did_delete",
+                        "sid": sid,
+                        "row": snapshot_row,
+                        "meta": snapshot_meta,
+                        "row_index": row_index,
+                        "removed_terminals": removed_terminals,
+                        "history_path": hp_str,
+                    })
                 else:
                     arm_delete_sid = sid
+            elif key == "u":
+                result = _do_undo()
+                if result is not None:
+                    flash, restored_sid = result
+                    if restored_sid is not None:
+                        selected_sid = restored_sid
+                        ghost_sid = restored_sid
 
     prefetch_stop.set()
+    _commit_pending()
 
     if loaded_row is not None:
         label = sessions.get(loaded_row["sid"], {}).get("label", loaded_row["sid"])
