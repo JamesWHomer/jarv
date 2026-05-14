@@ -61,6 +61,28 @@ jarv> /clear
 - Slash commands start with `/` — type `/help` to list them.
 - Exit with `exit`, `quit`, `/exit`, or Ctrl+C.
 
+### Flags
+
+Flags override config values for a single run and work in both one-shot and heads-up mode.
+
+| Flag | Short | Description |
+| --- | --- | --- |
+| `--model MODEL` | `-m` | Override the model (e.g. `gpt-4o`) |
+| `--effort EFFORT` | `-e` | Override reasoning effort (`low` / `medium` / `high`) |
+| `--timeout SECONDS` | | Override command timeout in seconds |
+| `--system PROMPT` | `-s` | Override the system prompt |
+| `--new` | | Start a fresh session (ignore prior history, but still save) |
+| `--incognito` | | Don't load or save session history |
+| `--version` | | Print the version and exit |
+
+```bash
+jarv -m gpt-4o "summarise this repo"
+jarv --effort high "refactor the auth module"
+jarv --new "start fresh without prior context"
+jarv --incognito "one-off task, leave no trace"
+jarv --timeout 120 --system "You are a poet" "write me a haiku"
+```
+
 ## How it works
 
 Jarv wraps the OpenAI Responses API with a tool-calling agent loop. The model can call three tools:
