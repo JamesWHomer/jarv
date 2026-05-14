@@ -9,18 +9,16 @@ from rich.console import Group
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.rule import Rule
 from rich.table import Table
 from rich.text import Text
 from rich import box
 
 from . import __version__
 from .config import CONFIG_DIR, CONFIG_FILE, DEFAULT_CONFIG, load_config, save_config, validate_config
-from .display import console, flatten_headings
+from .display import console, flatten_headings, jarv_panel, section_rule, status_line
 from .history import (
     SESSIONS_DIR,
     SESSIONS_FILE,
-    artifact_file_for,
     detect_terminal,
     forget_current_session,
     load_history,
@@ -32,7 +30,6 @@ from .history import (
     save_history,
     save_redo_stack,
     set_terminal_session,
-    short_hash,
     split_last_exchange,
     utc_now,
 )
@@ -45,12 +42,13 @@ from .usage import (
     usage_file_for,
 )
 
-ARCHIVE_DIR = CONFIG_DIR / "archive"
-
 GITHUB_REPO = "JamesWHomer/jarv"
 GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/commits/main"
 INSTALL_URL = f"https://github.com/{GITHUB_REPO}.git"
 SHA_FILE = CONFIG_DIR / "last_sha.txt"
+UPDATE_FLAG_FILE = CONFIG_DIR / "update_available.txt"
+LAST_CHECK_FILE = CONFIG_DIR / "last_update_check.txt"
+UPDATE_CHECK_INTERVAL_HOURS = 24
 
 
 def _read_key() -> str:
@@ -125,8 +123,8 @@ def coerce_value(value: str):
 
 def cmd_set(args: list) -> None:
     if len(args) < 2:
-        console.print("[red]Usage:[/red] jarv /set <key> <value>")
-        console.print(f"[dim]Keys: {', '.join(DEFAULT_CONFIG.keys())}[/dim]")
+        console.print(status_line("✗", "jarv /set <key> <value>", prefix_style="bold red", message_style="dim"))
+        console.print(f"  [dim]Keys: {', '.join(DEFAULT_CONFIG.keys())}[/dim]")
         return
     key, raw = args[0], " ".join(args[1:])
     config = load_config()
@@ -134,37 +132,37 @@ def cmd_set(args: list) -> None:
     config[key] = value
     save_config(config)
     display = "[dim]***[/dim]" if key == "api_key" else f"[green]{repr(value)}[/green]"
-    console.print(f"[bold cyan]{key}[/bold cyan] = {display}")
+    console.print(f"[bold cyan]✓[/bold cyan] [bold cyan]{key}[/bold cyan] [dim]=[/dim] {display}")
 
 
 def cmd_unset(args: list) -> None:
     if not args:
-        console.print("[red]Usage:[/red] jarv /unset <key>")
+        console.print(status_line("✗", "jarv /unset <key>", prefix_style="bold red", message_style="dim"))
         return
     key = args[0]
     config = load_config()
     if key not in config:
-        console.print(f"[yellow]'{key}'[/yellow] is not set.")
+        console.print(f"[yellow]○[/yellow] [bold]{key}[/bold] [dim]is not set.[/dim]")
         return
     if key in DEFAULT_CONFIG:
         config[key] = DEFAULT_CONFIG[key]
         save_config(config)
-        console.print(f"[bold cyan]{key}[/bold cyan] reset to default: [dim]{repr(DEFAULT_CONFIG[key])}[/dim]")
+        console.print(f"[bold cyan]↺[/bold cyan] [bold cyan]{key}[/bold cyan] [dim]reset to default →[/dim] [green]{repr(DEFAULT_CONFIG[key])}[/green]")
     else:
         del config[key]
         save_config(config)
-        console.print(f"[bold cyan]{key}[/bold cyan] removed.")
+        console.print(f"[bold cyan]✓[/bold cyan] [bold cyan]{key}[/bold cyan] [dim]removed.[/dim]")
 
 
 def print_help() -> None:
     cmd_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
     cmd_table.add_column(style="bold cyan", no_wrap=True)
-    cmd_table.add_column(style="dim")
+    cmd_table.add_column(style="white")
     cmd_table.add_row("jarv", "Start heads-up mode for repeated prompts")
     cmd_table.add_row("jarv <question>", "Ask jarv anything")
     cmd_table.add_row("jarv /set <key> <value>", "Set a config value")
     cmd_table.add_row("jarv /unset <key>", "Reset a config key to its default")
-    cmd_table.add_row("jarv /clear", "Archive this terminal's session and start a fresh one")
+    cmd_table.add_row("jarv /clear", "Start a fresh session on the next message")
     cmd_table.add_row("jarv /sessions, /session", "List sessions (all in a TTY; 5 most recent when piped/non-TTY)")
     cmd_table.add_row("jarv /load", "Load the most recently used session into this terminal")
     cmd_table.add_row("jarv /load <id>", "Load a specific session into this terminal")
@@ -179,7 +177,7 @@ def print_help() -> None:
 
     key_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
     key_table.add_column(style="bold yellow", no_wrap=True)
-    key_table.add_column(style="dim")
+    key_table.add_column(style="white")
     key_table.add_row("api_key", "OpenAI API key")
     key_table.add_row("model", "Model name (default: gpt-5.4-mini)")
     key_table.add_row("reasoning_effort", "Reasoning effort value (empty to disable)")
@@ -188,15 +186,29 @@ def print_help() -> None:
     key_table.add_row("system_prompt", "System prompt sent to the model")
     key_table.add_row("max_subagent_depth", "Max spawn depth for nested subagents")
     key_table.add_row("subagent_thread_pool_max_workers", "Parallel subagents per spawn call")
-    key_table.add_row("check_updates", "Background update check on one-shot runs (true/false)")
+    key_table.add_row("check_updates", "Non-blocking background update check on one-shot runs (true/false)")
 
-    console.print(Panel(cmd_table, title="[bold]jarv[/bold]", border_style="bright_black", padding=(1, 2)))
-    console.print()
-    console.print("[bold]Config keys[/bold]")
-    console.print(key_table)
-    console.print(f"\n[dim]Config:         {CONFIG_FILE}[/dim]")
-    console.print(f"[dim]Sessions index: {SESSIONS_FILE}[/dim]")
-    console.print(f"[dim]Session data:    {SESSIONS_DIR}[/dim]")
+    paths_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
+    paths_table.add_column(style="dim", no_wrap=True)
+    paths_table.add_column(style="dim")
+    paths_table.add_row("Config", str(CONFIG_FILE))
+    paths_table.add_row("Sessions index", str(SESSIONS_FILE))
+    paths_table.add_row("Session data", str(SESSIONS_DIR))
+
+    body = Group(
+        section_rule("commands"),
+        Text(""),
+        cmd_table,
+        Text(""),
+        section_rule("config keys"),
+        Text(""),
+        key_table,
+        Text(""),
+        section_rule("paths"),
+        Text(""),
+        paths_table,
+    )
+    console.print(jarv_panel(body, title="help"))
 
 
 def print_about() -> None:
@@ -217,7 +229,7 @@ jarv is a command-line AI assistant powered by OpenAI.
 - `jarv /usage` - Show token usage for the current session.
 - `jarv /undo [n]` - Unsend the last n exchanges (default 1). The removed exchange is pushed onto a redo stack.
 - `jarv /redo [n]` - Restore the last n undone exchanges (default 1). Sending a new message clears the redo stack.
-- `jarv /clear` - Archive this terminal's session and start a fresh one on the next message.
+- `jarv /clear` - Start a fresh session on the next message.
 - `jarv /sessions` / `jarv /session` - List sessions by recency. In an interactive terminal you can scroll through all of them; when stdout is not a TTY (e.g. piped), only the 5 most recent are listed.
 - `jarv /load` - Bind this terminal to the most recently used session.
 - `jarv /load <id>` - Bind this terminal to a specific session id.
@@ -262,7 +274,7 @@ Keys:
 - `system_prompt` - Instructions sent to the model before each request.
 - `max_subagent_depth` - Maximum recursion depth for `spawn` (root is 0). Default: `{DEFAULT_CONFIG['max_subagent_depth']}`.
 - `subagent_thread_pool_max_workers` - Max parallel children in one `spawn` batch. Default: `{DEFAULT_CONFIG['subagent_thread_pool_max_workers']}`.
-- `check_updates` - When `true`, a one-shot `jarv <question>` run performs a quick background GitHub check (~200 ms). Default: `true`. Set to `false` to skip that check. Heads-up mode (`jarv` with no args) and slash commands do not run this check.
+- `check_updates` - When `true`, a one-shot `jarv <question>` run fires a non-blocking background check against GitHub. If a new version is found it is flagged locally and shown at the start of the next run. Default: `true`. Set to `false` to disable entirely. Heads-up mode (`jarv` with no args) and slash commands do not run this check.
 - `/usage` model metadata comes from LiteLLM.
 
 If the config file does not exist, jarv creates it and exits so you can add an API key.
@@ -274,7 +286,7 @@ Session metadata file: `{SESSIONS_FILE}`
 
 Each terminal is bound to exactly one session at a time. By default a fresh terminal gets its own session (id derived from terminal fingerprint). Per-session history and artifact sidecars live in `{SESSIONS_DIR}` as `history-<hash>.json` and `artifacts-<hash>.json`.
 
-- `jarv /clear` archives the current session's history+artifacts and removes the terminal's mapping. The next prompt starts a fresh session.
+- `jarv /clear` removes the terminal's session mapping. The next prompt starts a fresh session.
 - `jarv /sessions` / `jarv /session` lists sessions by recency (all in a TTY; 5 most recent when stdout is not a TTY).
 - `jarv /load` looks up the most recently used session anywhere and binds it to this terminal.
 - `jarv /load <id>` binds a specific session id to this terminal.
@@ -282,8 +294,9 @@ Each terminal is bound to exactly one session at a time. By default a fresh term
 ## Updates
 
 - `jarv /update` checks `{GITHUB_REPO}` on GitHub and installs the latest version from `{INSTALL_URL}`.
-- A one-shot `jarv <question>` (arguments on the command line, not heads-up mode) can also do a quick background update check when `check_updates` is true, and prints a hint if an update is available.
-- Set `check_updates` to `false` (`jarv /set check_updates false`) to disable that background check and remove the ~200 ms latency it adds.
+- A one-shot `jarv <question>` (arguments on the command line, not heads-up mode) fires a fully non-blocking background check when `check_updates` is true. If an update is found it is saved locally; the next invocation shows the notification instantly with no network wait.
+- The background check is throttled to at most once every {UPDATE_CHECK_INTERVAL_HOURS} hours.
+- Set `check_updates` to `false` (`jarv /set check_updates false`) to disable the background check entirely.
 - After updating, run `jarv` again to use the new version.
 
 ## Files
@@ -298,7 +311,7 @@ Each terminal is bound to exactly one session at a time. By default a fresh term
 
 jarv {__version__}
 """
-    console.print(Panel(Markdown(flatten_headings(about)), title="[bold]about jarv[/bold]", border_style="bright_black", padding=(1, 2)))
+    console.print(jarv_panel(Markdown(flatten_headings(about)), title="about", subtitle=f"v{__version__}"))
 
 
 def _fetch_latest_sha() -> str | None:
@@ -322,39 +335,75 @@ def _save_sha(sha: str) -> None:
     SHA_FILE.write_text(sha)
 
 
-_update_available: list[str] = []
+def _should_check_now() -> bool:
+    """Return True if enough time has passed since the last update check."""
+    import time
+    if not LAST_CHECK_FILE.exists():
+        return True
+    try:
+        last = float(LAST_CHECK_FILE.read_text().strip())
+        return (time.time() - last) >= UPDATE_CHECK_INTERVAL_HOURS * 3600
+    except Exception:
+        return True
+
+
+def _record_check_time() -> None:
+    import time
+    CONFIG_DIR.mkdir(exist_ok=True)
+    LAST_CHECK_FILE.write_text(str(time.time()))
 
 
 def _check_update_background() -> None:
+    """Fetch the latest SHA from GitHub and write a flag file if an update is available.
+
+    Runs in a daemon thread — never blocks the main process. The flag is read
+    (and cleared) on the *next* jarv invocation so there is zero network wait
+    on the current run.
+    """
+    if not _should_check_now():
+        return
+    _record_check_time()
     latest = _fetch_latest_sha()
-    if latest and latest != _load_known_sha():
-        _update_available.append(latest)
+    if not latest:
+        return
+    known = _load_known_sha()
+    if not known:
+        # First run — just record the baseline SHA silently.
+        _save_sha(latest)
+        return
+    if latest != known:
+        CONFIG_DIR.mkdir(exist_ok=True)
+        UPDATE_FLAG_FILE.write_text(latest)
 
 
 def maybe_print_update_available() -> None:
-    if _update_available:
-        sha = _update_available[0]
-        if not _load_known_sha():
-            _save_sha(sha)
-        else:
+    """Show a pending update notification written by a previous run's background check."""
+    if not UPDATE_FLAG_FILE.exists():
+        return
+    try:
+        sha = UPDATE_FLAG_FILE.read_text().strip()
+        UPDATE_FLAG_FILE.unlink(missing_ok=True)
+        if sha and sha != _load_known_sha():
             console.print("[yellow]Update available![/yellow] Run [bold]jarv /update[/bold] to install.")
+    except Exception:
+        pass
 
 
 def cmd_update() -> None:
-    console.print("[dim]Checking for updates...[/dim]")
+    console.print("[dim]⟳ Checking for updates…[/dim]")
     latest = _fetch_latest_sha()
     if latest is None:
-        console.print("[red]Could not reach GitHub.[/red]")
+        console.print("[bold red]✗[/bold red] [red]Could not reach GitHub.[/red]")
         return
     known = _load_known_sha()
     if known and latest == known:
-        console.print("[green]Already up to date.[/green]")
+        console.print("[bold green]✓[/bold green] [green]Already up to date.[/green]")
         return
     short = latest[:12]
     if not known:
-        console.print(f"[cyan]Installing latest version[/cyan] [dim]({short})[/dim][cyan]...[/cyan]")
+        console.print(f"[bold cyan]↓[/bold cyan] Installing latest version [dim]({short})[/dim]…")
     else:
-        console.print(f"[cyan]Update found[/cyan] [dim]({short})[/dim][cyan]. Installing...[/cyan]")
+        console.print(f"[bold cyan]↓[/bold cyan] Update found [dim]({short})[/dim]. Installing…")
     with console.status("[dim]Running pip install…[/dim]", spinner="dots"):
         result = subprocess.run(
             [sys.executable, "-m", "pip", "install", "--upgrade", f"git+https://github.com/{GITHUB_REPO}.git"],
@@ -363,48 +412,17 @@ def cmd_update() -> None:
         )
     if result.returncode == 0:
         _save_sha(latest)
-        console.print("[green]Updated successfully! Run jarv again to use the new version.[/green]")
+        console.print("[bold green]✓[/bold green] [green]Updated successfully.[/green] [dim]Run jarv again to use the new version.[/dim]")
     else:
-        console.print("[red]Update failed:[/red]")
+        console.print("[bold red]✗[/bold red] [red]Update failed:[/red]")
         output = "\n".join(filter(None, [result.stdout.strip(), result.stderr.strip()]))
         if output:
             console.print(output, style="dim")
 
 
 def cmd_clear() -> None:
-    session_context = prepare_session_context()
-    history_path = session_context.history_file
-
-    archived_any = False
-    if history_path.exists() and load_history(history_path):
-        ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-        cleared_at = utc_now().strftime("%Y%m%dT%H%M%SZ")
-        stem_suffix = history_path.stem[len("history"):]
-        archived_history = ARCHIVE_DIR / f"history-{cleared_at}{stem_suffix}.json"
-        history_path.rename(archived_history)
-
-        artifact_path = artifact_file_for(history_path)
-        if artifact_path.exists():
-            archived_artifacts = ARCHIVE_DIR / f"artifacts-{cleared_at}{stem_suffix}.json"
-            artifact_path.rename(archived_artifacts)
-
-        usage_path = usage_file_for(history_path)
-        if usage_path.exists():
-            archived_usage = ARCHIVE_DIR / f"usage-{cleared_at}{stem_suffix}.json"
-            usage_path.rename(archived_usage)
-
-        redo_path = redo_file_for(history_path)
-        if redo_path.exists():
-            redo_path.unlink()
-
-        console.print(f"[dim]Session archived to[/dim] {archived_history}")
-        archived_any = True
-    else:
-        console.print("[dim]No history to archive.[/dim]")
-
     forget_current_session()
-    if archived_any:
-        console.print("[green]Fresh session will start on the next message.[/green]")
+    console.print("[bold green]✓[/bold green] [green]Fresh session will start on the next message.[/green]")
 
 
 
@@ -430,10 +448,10 @@ def _sessions_plain(sessions: dict, terminals: dict) -> None:
 
     sorted_sessions = sorted(sessions.keys(), key=sort_key, reverse=True)[:5]
 
-    table = Table(box=box.SIMPLE, show_header=True, padding=(0, 1))
+    table = Table(box=box.SIMPLE_HEAD, show_header=True, padding=(0, 2), header_style="bold cyan", pad_edge=False)
     table.add_column("", no_wrap=True, width=1)
     table.add_column("ID prefix", style="bold cyan", no_wrap=True)
-    table.add_column("Last active", no_wrap=True)
+    table.add_column("Last active", style="dim", no_wrap=True)
     table.add_column("First message")
 
     for sid in sorted_sessions:
@@ -474,10 +492,11 @@ def _sessions_plain(sessions: dict, terminals: dict) -> None:
 
     total = len(sessions)
     shown = len(sorted_sessions)
-    console.print(table)
+    footer_parts: list = [table]
     if total > shown:
-        console.print(f"[dim]Showing {shown} most recent of {total} sessions.[/dim]")
-    console.print("[dim]Run [bold]jarv /load <id>[/bold] to switch to a session.[/dim]")
+        footer_parts += [Text(""), Text(f"Showing {shown} most recent of {total} sessions.", style="dim")]
+    footer_parts += [Text("Run jarv /load <id> to switch to a session.", style="dim italic")]
+    console.print(jarv_panel(Group(*footer_parts), title="sessions", subtitle=f"{shown}/{total}"))
 
 
 def cmd_sessions() -> None:
@@ -644,8 +663,12 @@ def cmd_sessions() -> None:
 
         return Panel(
             Group(*parts),
-            title="[bold]sessions[/bold]",
-            border_style="bright_black",
+            title="[bold bright_white]jarv \u25b8 sessions[/bold bright_white]",
+            title_align="left",
+            subtitle=f"[dim]{sel + 1}/{n}[/dim]",
+            subtitle_align="right",
+            border_style="cyan",
+            box=box.ROUNDED,
             padding=(0, 1),
             width=panel_width,
         )
@@ -692,10 +715,10 @@ def cmd_sessions() -> None:
     if loaded_row is not None:
         label = sessions[loaded_row["sid"]].get("label", loaded_row["sid"])
         console.print(
-            f"[green]Loaded[/green] [bold cyan]{loaded_row['short_id']}[/bold cyan] [dim]({label})[/dim]"
+            f"[bold green]✓[/bold green] [green]Loaded[/green] [bold cyan]{loaded_row['short_id']}[/bold cyan] [dim]({label})[/dim]"
         )
         return
-    console.print("[dim]Cancelled.[/dim]")
+    console.print("[dim]○ Cancelled.[/dim]")
 
 
 def cmd_load(args: list) -> None:
@@ -712,13 +735,13 @@ def cmd_load(args: list) -> None:
         else:
             matches = [sid for sid in sessions if sid.startswith(prefix)]
             if not matches:
-                console.print(f"[red]No session matches:[/red] {prefix}")
-                console.print("[dim]Run [bold]jarv /sessions[/bold] to see available sessions.[/dim]")
+                console.print(f"[bold red]✗[/bold red] [red]No session matches:[/red] [bold]{prefix}[/bold]")
+                console.print("[dim]  Run [bold]jarv /sessions[/bold] to see available sessions.[/dim]")
                 return
             if len(matches) > 1:
-                console.print(f"[yellow]Ambiguous prefix[/yellow] [bold]{prefix}[/bold] [yellow]matches {len(matches)} sessions:[/yellow]")
+                console.print(f"[bold yellow]?[/bold yellow] [yellow]Ambiguous prefix[/yellow] [bold]{prefix}[/bold] [dim]matches {len(matches)} sessions:[/dim]")
                 for m in matches:
-                    console.print(f"  [dim]{m}[/dim]")
+                    console.print(f"  [dim]•[/dim] [cyan]{m}[/cyan]")
                 return
             session_id = matches[0]
     else:
@@ -729,24 +752,41 @@ def cmd_load(args: list) -> None:
 
     set_terminal_session(session_id)
     label = sessions[session_id].get("label", session_id)
-    console.print(f"[green]Loaded[/green] [bold cyan]{_short_session_id(session_id)}[/bold cyan] [dim]({label})[/dim]")
+    console.print(f"[bold green]✓[/bold green] [green]Loaded[/green] [bold cyan]{_short_session_id(session_id)}[/bold cyan] [dim]({label})[/dim]")
 
 
 def cmd_history() -> None:
     session_context = prepare_session_context()
     history = load_history(session_context.history_file)
     if not history:
-        console.print("[dim]No history yet.[/dim]")
+        console.print("[dim]○ No history yet.[/dim]")
         return
+
+    exchanges = sum(1 for m in history if isinstance(m, dict) and m.get("role") == "user")
+    parts: list = [
+        section_rule("conversation"),
+        Text(""),
+    ]
     for m in history:
         role = m.get("role")
         if role == "user":
-            console.print(f"\n[bold cyan]You[/bold cyan]  {m.get('content', '')}")
+            line = Text()
+            line.append("▌ ", style="bold cyan")
+            line.append("You", style="bold cyan")
+            parts.append(line)
+            parts.append(Text(f"  {m.get('content', '')}"))
+            parts.append(Text(""))
         elif role == "assistant":
             content = m.get("content", "")
             if content:
-                console.print(f"\n[bold green]Jarv[/bold green]")
-                console.print(Markdown(flatten_headings(content)))
+                line = Text()
+                line.append("▌ ", style="bold green")
+                line.append("Jarv", style="bold green")
+                parts.append(line)
+                parts.append(Markdown(flatten_headings(content)))
+                parts.append(Text(""))
+
+    console.print(jarv_panel(Group(*parts), title="history", subtitle=f"{exchanges} exchange(s)"))
 
 
 _BREAKDOWN_KEYS = ("system", "tools", "history", "tool_io", "reasoning")
@@ -948,48 +988,51 @@ def cmd_usage() -> None:
 
     breakdown = (last_root or {}).get("context_breakdown")
     panel_parts: list = [
-        Rule(title="[bold cyan]session overview[/bold cyan]", style="bright_black", align="left"),
+        section_rule("session overview"),
         Text(""),
         context_table,
     ]
     if isinstance(breakdown, dict) and any(breakdown.get(k, 0) for k in _BREAKDOWN_KEYS):
         panel_parts += [
             Text(""),
-            Rule(title="[bold cyan]context breakdown[/bold cyan] [dim](estimated)[/dim]", style="bright_black", align="left"),
+            section_rule("context breakdown [dim](estimated)[/dim]"),
             Text(""),
             _breakdown_section(breakdown),
         ]
     panel_parts += [
         Text(""),
-        Rule(title="[bold cyan]token totals[/bold cyan]", style="bright_black", align="left"),
+        section_rule("token totals"),
         Text(""),
         token_table,
     ]
 
-    console.print(
-        Panel(
-            Group(*panel_parts),
-            title="[bold bright_white]jarv ▸ usage[/bold bright_white]",
-            title_align="left",
-            subtitle=f"[dim]{usage_path}[/dim]",
-            subtitle_align="right",
-            border_style="cyan",
-            box=box.ROUNDED,
-            padding=(1, 2),
-        )
-    )
+    console.print(jarv_panel(Group(*panel_parts), title="usage", subtitle=str(usage_path)))
 
 
 def cmd_config() -> None:
     config = load_config()
-    table = Table(box=box.SIMPLE, show_header=True, padding=(0, 2))
-    table.add_column("Key", style="bold cyan")
-    table.add_column("Value")
+    table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
+    table.add_column("Key", style="bold cyan", no_wrap=True)
+    table.add_column("Value", overflow="fold")
     for k, v in config.items():
-        val = "[dim]***[/dim]" if k == "api_key" and v else repr(v)
+        if k == "api_key" and v:
+            val = Text("***", style="dim")
+        elif isinstance(v, bool):
+            val = Text(repr(v), style="bold magenta")
+        elif isinstance(v, (int, float)):
+            val = Text(repr(v), style="bold yellow")
+        elif isinstance(v, str):
+            val = Text(repr(v), style="green")
+        else:
+            val = Text(repr(v))
         table.add_row(k, val)
-    console.print(f"[dim]{CONFIG_FILE}[/dim]")
-    console.print(table)
+
+    body = Group(
+        section_rule("settings"),
+        Text(""),
+        table,
+    )
+    console.print(jarv_panel(body, title="config", subtitle=str(CONFIG_FILE)))
 
 
 def _parse_count(args: list, default: int = 1) -> int:
@@ -1024,7 +1067,7 @@ def cmd_undo(args: list) -> None:
         stack.append(frame)
 
     if not undone:
-        console.print("[dim]Nothing to undo.[/dim]")
+        console.print("[dim]○ Nothing to undo.[/dim]")
         return
 
     save_history(history, ctx.history_file)
@@ -1032,13 +1075,13 @@ def cmd_undo(args: list) -> None:
 
     if len(undone) == 1:
         text = _first_user_text(undone[0])
-        console.print(f"[bold]↶ Unsent:[/bold] [cyan]{text!r}[/cyan]")
-        console.print(f"[dim]Removed {len(undone[0])} item(s). Run [bold]/redo[/bold] to put it back.[/dim]")
+        console.print(f"[bold yellow]↶[/bold yellow] [bold]Unsent[/bold] [cyan]{text!r}[/cyan]")
+        console.print(f"[dim]  Removed {len(undone[0])} item(s). Run [bold]/redo[/bold] to put it back.[/dim]")
     else:
-        console.print(f"[bold]↶ Unsent {len(undone)} exchanges:[/bold]")
+        console.print(f"[bold yellow]↶[/bold yellow] [bold]Unsent {len(undone)} exchanges:[/bold]")
         for i, frame in enumerate(undone, 1):
-            console.print(f"  {i}. [cyan]{_first_user_text(frame)!r}[/cyan]")
-        console.print(f"[dim]Run [bold]/redo {len(undone)}[/bold] to put them back.[/dim]")
+            console.print(f"  [dim]{i}.[/dim] [cyan]{_first_user_text(frame)!r}[/cyan]")
+        console.print(f"[dim]  Run [bold]/redo {len(undone)}[/bold] to put them back.[/dim]")
 
 
 def cmd_redo(args: list) -> None:
@@ -1057,7 +1100,7 @@ def cmd_redo(args: list) -> None:
         restored.append(frame)
 
     if not restored:
-        console.print("[dim]Nothing to redo.[/dim]")
+        console.print("[dim]○ Nothing to redo.[/dim]")
         return
 
     save_history(history, ctx.history_file)
@@ -1065,6 +1108,6 @@ def cmd_redo(args: list) -> None:
 
     if len(restored) == 1:
         text = _first_user_text(restored[0])
-        console.print(f"[bold]↷ Restored:[/bold] [cyan]{text!r}[/cyan]")
+        console.print(f"[bold cyan]↷[/bold cyan] [bold]Restored[/bold] [cyan]{text!r}[/cyan]")
     else:
-        console.print(f"[bold]↷ Restored {len(restored)} exchange(s).[/bold]")
+        console.print(f"[bold cyan]↷[/bold cyan] [bold]Restored {len(restored)} exchange(s).[/bold]")
