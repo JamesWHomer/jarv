@@ -101,6 +101,7 @@ Config notes:
 - `command_timeout` is the number of seconds before a shell command is killed.
 - `max_subagent_depth` is the maximum recursion depth for spawned subagents. The root agent is depth 0; each `spawn` call adds one level. Defaults to 4.
 - `subagent_thread_pool_max_workers` is the maximum number of subagents that can run in parallel within a single `spawn` call. Defaults to 8.
+- `/usage` shows context and pricing metadata from LiteLLM when available.
 - `system_prompt` is sent to the model along with basic system info like OS, current working directory, shell, and session context.
 
 You can edit the JSON file directly or use `jarv /set` / `jarv /unset`.
@@ -114,10 +115,11 @@ You can edit the JSON file directly or use `jarv /set` / `jarv /unset`.
 | `jarv /set <key> <value>` | Set a config value |
 | `jarv /unset <key>` | Reset a config key to its default |
 | `jarv /clear` | Archive this terminal's session and start a fresh one |
-| `jarv /sessions` | List the 5 most recently active sessions |
+| `jarv /sessions`, `jarv /session` | List the 5 most recently active sessions |
 | `jarv /load` | Load the most recently used session into this terminal |
 | `jarv /load <id>` | Load a specific session into this terminal |
 | `jarv /history` | Show recent conversation history |
+| `jarv /usage` | Show token usage for the current session |
 | `jarv /config` | Show current settings |
 | `jarv /update` | Update Jarv to the latest version from GitHub |
 | `jarv /about` | Show detailed information about Jarv |
@@ -132,6 +134,7 @@ Jarv stores local state in `~/.jarv/`:
 - `last_sha.txt` — last seen GitHub commit SHA for update checks
 - `sessions/history-<hash>.json` — conversation history for each session
 - `sessions/artifacts-<hash>.json` — artifact store for each session
+- `sessions/usage-<hash>.json` — token usage totals for each session
 - `archive/` — sessions archived by `jarv /clear`
 
 ## History and sessions
@@ -141,7 +144,7 @@ Each terminal is bound to exactly one session at a time. By default a new termin
 Jarv detects terminals from environment values such as `WT_SESSION`, `TERM_SESSION_ID`, `TMUX`, or `STY`, with a parent-process fallback.
 
 - `jarv /clear` archives the current session's history and artifacts, then starts a fresh session on the next prompt.
-- `jarv /sessions` lists the 5 most recently active sessions.
+- `jarv /sessions` / `jarv /session` lists the 5 most recently active sessions.
 - `jarv /load` binds this terminal to the most recently used session.
 - `jarv /load <id>` binds this terminal to a specific session id.
 

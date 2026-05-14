@@ -27,7 +27,6 @@ DEFAULT_CONFIG = {
     "check_updates": True,
 }
 
-
 def load_config() -> dict:
     CONFIG_DIR.mkdir(exist_ok=True)
     from .history import migrate_flat_session_files

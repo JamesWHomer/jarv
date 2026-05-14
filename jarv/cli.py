@@ -17,6 +17,7 @@ from .commands import (
     cmd_undo,
     cmd_unset,
     cmd_update,
+    cmd_usage,
     maybe_print_update_available,
     print_about,
     print_help,
@@ -25,7 +26,7 @@ from .config import CONFIG_FILE, load_config, validate_config
 from .display import console
 
 
-SLASH_COMMANDS = {"/help", "/about", "/update", "/clear", "/load", "/sessions", "/history", "/set", "/unset", "/config", "/undo", "/redo"}
+SLASH_COMMANDS = {"/help", "/about", "/update", "/clear", "/load", "/session", "/sessions", "/history", "/usage", "/set", "/unset", "/config", "/undo", "/redo"}
 
 
 def _run_slash_command(command: str, rest: list[str]) -> bool:
@@ -38,12 +39,14 @@ def _run_slash_command(command: str, rest: list[str]) -> bool:
         cmd_update()
     elif command == "/clear":
         cmd_clear()
-    elif command == "/sessions":
+    elif command in {"/session", "/sessions"}:
         cmd_sessions()
     elif command == "/load":
         cmd_load(rest)
     elif command == "/history":
         cmd_history()
+    elif command == "/usage":
+        cmd_usage()
     elif command == "/set":
         cmd_set(rest)
     elif command == "/unset":

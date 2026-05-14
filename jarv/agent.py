@@ -39,6 +39,7 @@ from .orchestrator import (
     spawn_batch,
 )
 from .shell import display_command_result, execute_command
+from .usage import record_response_usage, usage_file_for
 
 # Responses API tool format (flat, no "function" wrapper key)
 TOOLS = [RUN_COMMAND_TOOL, SPAWN_TOOL, READ_ARTIFACT_TOOL]
@@ -282,7 +283,16 @@ def _dispatch_spawn_with_ui(args: dict, root_node, store, client, config) -> str
         vertical_overflow="visible",
     ) as live:
         try:
-            results = spawn_batch(root_node, children_raw, store, client, config, observer=observer)
+            results = spawn_batch(
+                root_node,
+                children_raw,
+                store,
+                client,
+                config,
+                observer=observer,
+                usage_path=root_node.usage_path,
+                session_id=root_node.session_id,
+            )
         except DepthExceeded as e:
             output = f"[error: {e}]"
             live.update(Text(output, style="red"))
@@ -308,6 +318,7 @@ def run_agent(
 
     artifact_file = artifact_file_for(session_context.history_file)
     artifact_store = load_artifact_store(artifact_file)
+    usage_path = usage_file_for(session_context.history_file)
     root_node = AgentNode(
         label="root",
         depth=0,
@@ -315,6 +326,8 @@ def run_agent(
         task=query,
         sterile=False,
         visible_labels=artifact_store.all_labels(),
+        usage_path=usage_path,
+        session_id=session_context.session_id,
     )
 
     history.append({"role": "user", "content": query, **metadata})
@@ -361,6 +374,7 @@ def run_agent(
                 )
                 spinner_live.start()
             try:
+                final_response = None
                 with client.responses.stream(**kwargs) as stream:
                     for event in stream:
                         if event.type == "response.output_text.delta":
@@ -399,6 +413,17 @@ def run_agent(
                                 tool_calls.append(event.item)
                             elif event.item.type == "reasoning":
                                 reasoning_items.append(event.item)
+                    try:
+                        final_response = stream.get_final_response()
+                    except Exception:
+                        final_response = None
+                record_response_usage(
+                    usage_path,
+                    session_context.session_id,
+                    config["model"],
+                    final_response,
+                    "root",
+                )
             finally:
                 if spinner_live is not None:
                     spinner_live.stop()

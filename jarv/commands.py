@@ -35,6 +35,14 @@ from .history import (
     split_last_exchange,
     utc_now,
 )
+from .usage import (
+    estimate_token_cost_usd,
+    format_cost,
+    format_int,
+    known_context_window,
+    load_usage,
+    usage_file_for,
+)
 
 ARCHIVE_DIR = CONFIG_DIR / "archive"
 
@@ -156,10 +164,11 @@ def print_help() -> None:
     cmd_table.add_row("jarv /set <key> <value>", "Set a config value")
     cmd_table.add_row("jarv /unset <key>", "Reset a config key to its default")
     cmd_table.add_row("jarv /clear", "Archive this terminal's session and start a fresh one")
-    cmd_table.add_row("jarv /sessions", "List sessions (all in a TTY; 5 most recent when piped/non-TTY)")
+    cmd_table.add_row("jarv /sessions, /session", "List sessions (all in a TTY; 5 most recent when piped/non-TTY)")
     cmd_table.add_row("jarv /load", "Load the most recently used session into this terminal")
     cmd_table.add_row("jarv /load <id>", "Load a specific session into this terminal")
     cmd_table.add_row("jarv /history", "Show recent conversation history")
+    cmd_table.add_row("jarv /usage", "Show token usage for this session")
     cmd_table.add_row("jarv /undo [n]", "Unsend the last n exchanges (default 1)")
     cmd_table.add_row("jarv /redo [n]", "Restore the last n undone exchanges (default 1)")
     cmd_table.add_row("jarv /config", "Show current settings")
@@ -204,10 +213,11 @@ jarv is a command-line AI assistant powered by OpenAI.
 - `jarv /set <key> <value>` - Set a config value. Values like `true`, `false`, integers, and floats are coerced.
 - `jarv /unset <key>` - Reset a default config key, or remove a custom key.
 - `jarv /history` - Show recent user and assistant messages.
+- `jarv /usage` - Show token usage for the current session.
 - `jarv /undo [n]` - Unsend the last n exchanges (default 1). The removed exchange is pushed onto a redo stack.
 - `jarv /redo [n]` - Restore the last n undone exchanges (default 1). Sending a new message clears the redo stack.
 - `jarv /clear` - Archive this terminal's session and start a fresh one on the next message.
-- `jarv /sessions` - List sessions by recency. In an interactive terminal you can scroll through all of them; when stdout is not a TTY (e.g. piped), only the 5 most recent are listed.
+- `jarv /sessions` / `jarv /session` - List sessions by recency. In an interactive terminal you can scroll through all of them; when stdout is not a TTY (e.g. piped), only the 5 most recent are listed.
 - `jarv /load` - Bind this terminal to the most recently used session.
 - `jarv /load <id>` - Bind this terminal to a specific session id.
 - `jarv /update` - Check GitHub for the latest main commit and install it with pip.
@@ -252,6 +262,7 @@ Keys:
 - `max_subagent_depth` - Maximum recursion depth for `spawn` (root is 0). Default: `{DEFAULT_CONFIG['max_subagent_depth']}`.
 - `subagent_thread_pool_max_workers` - Max parallel children in one `spawn` batch. Default: `{DEFAULT_CONFIG['subagent_thread_pool_max_workers']}`.
 - `check_updates` - When `true`, a one-shot `jarv <question>` run performs a quick background GitHub check (~200 ms). Default: `true`. Set to `false` to skip that check. Heads-up mode (`jarv` with no args) and slash commands do not run this check.
+- `/usage` model metadata comes from LiteLLM.
 
 If the config file does not exist, jarv creates it and exits so you can add an API key.
 If the config file is invalid JSON, jarv backs it up and creates a fresh default config.
@@ -263,7 +274,7 @@ Session metadata file: `{SESSIONS_FILE}`
 Each terminal is bound to exactly one session at a time. By default a fresh terminal gets its own session (id derived from terminal fingerprint). Per-session history and artifact sidecars live in `{SESSIONS_DIR}` as `history-<hash>.json` and `artifacts-<hash>.json`.
 
 - `jarv /clear` archives the current session's history+artifacts and removes the terminal's mapping. The next prompt starts a fresh session.
-- `jarv /sessions` lists sessions by recency (all in a TTY; 5 most recent when stdout is not a TTY).
+- `jarv /sessions` / `jarv /session` lists sessions by recency (all in a TTY; 5 most recent when stdout is not a TTY).
 - `jarv /load` looks up the most recently used session anywhere and binds it to this terminal.
 - `jarv /load <id>` binds a specific session id to this terminal.
 
@@ -335,21 +346,28 @@ def cmd_update() -> None:
         console.print("[red]Could not reach GitHub.[/red]")
         return
     known = _load_known_sha()
-    if latest == known:
+    if known and latest == known:
         console.print("[green]Already up to date.[/green]")
         return
-    console.print("[cyan]Update found. Installing...[/cyan]")
-    result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--upgrade", f"git+https://github.com/{GITHUB_REPO}.git"],
-        capture_output=True,
-        text=True,
-    )
+    short = latest[:12]
+    if not known:
+        console.print(f"[cyan]Installing latest version[/cyan] [dim]({short})[/dim][cyan]...[/cyan]")
+    else:
+        console.print(f"[cyan]Update found[/cyan] [dim]({short})[/dim][cyan]. Installing...[/cyan]")
+    with console.status("[dim]Running pip install…[/dim]", spinner="dots"):
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--upgrade", f"git+https://github.com/{GITHUB_REPO}.git"],
+            capture_output=True,
+            text=True,
+        )
     if result.returncode == 0:
         _save_sha(latest)
         console.print("[green]Updated successfully! Run jarv again to use the new version.[/green]")
     else:
         console.print("[red]Update failed:[/red]")
-        console.print(result.stderr.strip(), style="dim")
+        output = "\n".join(filter(None, [result.stdout.strip(), result.stderr.strip()]))
+        if output:
+            console.print(output, style="dim")
 
 
 def cmd_clear() -> None:
@@ -368,6 +386,11 @@ def cmd_clear() -> None:
         if artifact_path.exists():
             archived_artifacts = ARCHIVE_DIR / f"artifacts-{cleared_at}{stem_suffix}.json"
             artifact_path.rename(archived_artifacts)
+
+        usage_path = usage_file_for(history_path)
+        if usage_path.exists():
+            archived_usage = ARCHIVE_DIR / f"usage-{cleared_at}{stem_suffix}.json"
+            usage_path.rename(archived_usage)
 
         redo_path = redo_file_for(history_path)
         if redo_path.exists():
@@ -723,6 +746,101 @@ def cmd_history() -> None:
             if content:
                 console.print(f"\n[bold green]Jarv[/bold green]")
                 console.print(Markdown(flatten_headings(content)))
+
+
+def _plural(value: int, singular: str, plural: str | None = None) -> str:
+    word = singular if value == 1 else (plural or f"{singular}s")
+    return f"{value:,} {word}"
+
+
+def _percent_bar(percent: float | None, width: int = 24) -> str:
+    if percent is None:
+        return "[dim]" + ("░" * width) + "[/dim]"
+    filled = round((max(0.0, min(percent, 100.0)) / 100) * width)
+    return "[cyan]" + ("█" * filled) + "[/cyan][dim]" + ("░" * (width - filled)) + "[/dim]"
+
+
+def _context_size_text(last_root: dict | None) -> str:
+    if not isinstance(last_root, dict):
+        return "Unknown until a root request is recorded"
+    model = str(last_root.get("model") or "")
+    context_window = known_context_window(model)
+    input_tokens = int(last_root.get("input_tokens") or 0)
+    if context_window is None:
+        return "Unknown for this model"
+    percent = (input_tokens / context_window) * 100
+    return f"{percent:.1f}% full  {_percent_bar(percent)}  ({format_int(input_tokens)} / {format_int(context_window)})"
+
+
+def _estimated_total_cost(usage: dict) -> float | None:
+    models = usage.get("models") if isinstance(usage.get("models"), dict) else {}
+    total = 0.0
+    saw_model = False
+    for model, bucket in models.items():
+        if not isinstance(bucket, dict):
+            continue
+        if int(bucket.get("request_count") or 0) <= 0:
+            continue
+        saw_model = True
+        estimate = estimate_token_cost_usd(bucket, str(model))
+        if estimate is None:
+            return None
+        total += estimate
+    if saw_model:
+        return total
+    return None
+
+
+def cmd_usage() -> None:
+    ctx = prepare_session_context()
+    usage_path = usage_file_for(ctx.history_file)
+    usage = load_usage(usage_path, ctx.session_id)
+    totals = usage.get("totals") if isinstance(usage.get("totals"), dict) else {}
+    request_count = int(totals.get("request_count") or 0)
+    if request_count <= 0:
+        console.print("[dim]No token usage recorded for this session yet.[/dim]")
+        return
+
+    history = load_history(ctx.history_file)
+    exchanges = sum(1 for item in history if isinstance(item, dict) and item.get("role") == "user")
+    last_request = usage.get("last_request") if isinstance(usage.get("last_request"), dict) else None
+    last_root = usage.get("last_root_request") if isinstance(usage.get("last_root_request"), dict) else None
+    model = str((last_request or {}).get("model") or "unknown")
+    estimated_cost = _estimated_total_cost(usage)
+
+    context_table = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
+    context_table.add_column("Field", style="bold cyan", no_wrap=True)
+    context_table.add_column("Value")
+    context_table.add_row("Latest root model", str((last_root or {}).get("model") or "unknown"))
+    context_table.add_row("Context usage", _context_size_text(last_root))
+
+    token_table = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
+    token_table.add_column("Field", style="bold cyan", no_wrap=True)
+    token_table.add_column("Value")
+    token_table.add_row("Last model", model)
+    token_table.add_row("Messages", _plural(exchanges, "exchange"))
+    token_table.add_row("Requests", _plural(request_count, "request"))
+    token_table.add_row("Input tokens", format_int(totals.get("input_tokens")))
+    token_table.add_row("Cached input", format_int(totals.get("cached_input_tokens")))
+    token_table.add_row("New input", format_int(totals.get("uncached_input_tokens")))
+    token_table.add_row("Output tokens", format_int(totals.get("output_tokens")))
+    reasoning_tokens = int(totals.get("reasoning_output_tokens") or 0)
+    if reasoning_tokens:
+        token_table.add_row("Reasoning output", format_int(reasoning_tokens))
+    token_table.add_row("Total tokens", format_int(totals.get("total_tokens")))
+    token_table.add_row("Estimated cost", format_cost(estimated_cost))
+    if last_request is not None:
+        token_table.add_row(
+            "Last request",
+            (
+                f"{format_int(last_request.get('input_tokens'))} in "
+                f"({format_int(last_request.get('cached_input_tokens'))} cached) · "
+                f"{format_int(last_request.get('output_tokens'))} out"
+            ),
+        )
+
+    console.print(Panel(Group(context_table, Text(""), token_table), title="[bold]usage for current session[/bold]", border_style="bright_black", padding=(1, 2)))
+    console.print(f"[dim]{usage_path}[/dim]")
 
 
 def cmd_config() -> None:

@@ -9,12 +9,14 @@ tool; only the artifact persists, transcripts are discarded.
 import concurrent.futures
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 
 from openai import OpenAI, OpenAIError
 
 from .artifacts import ArtifactStore
 from .shell import execute_command
+from .usage import record_response_usage
 
 
 RUN_COMMAND_TOOL = {
@@ -108,6 +110,8 @@ class AgentNode:
     task: str
     sterile: bool
     visible_labels: set[str] = field(default_factory=set)
+    usage_path: Path | None = None
+    session_id: str | None = None
 
 
 def build_subagent_tools(sterile: bool) -> list[dict]:
@@ -216,6 +220,7 @@ def run_subagent_loop(
         tool_calls: list = []
         reasoning_items: list = []
         try:
+            final_response = None
             with client.responses.stream(**kwargs) as stream:
                 for event in stream:
                     if event.type == "response.output_item.done":
@@ -223,6 +228,17 @@ def run_subagent_loop(
                             tool_calls.append(event.item)
                         elif event.item.type == "reasoning":
                             reasoning_items.append(event.item)
+                try:
+                    final_response = stream.get_final_response()
+                except Exception:
+                    final_response = None
+            record_response_usage(
+                node.usage_path,
+                node.session_id,
+                config["model"],
+                final_response,
+                "subagent",
+            )
         except OpenAIError as e:
             return None, f"openai stream error: {e}"
         except Exception as e:
@@ -291,6 +307,8 @@ def spawn_batch(
     client: OpenAI,
     config: dict,
     observer: "SpawnObserver | None" = None,
+    usage_path: Path | None = None,
+    session_id: str | None = None,
 ) -> list[dict]:
     """Spawn N children in parallel, block until all finish, return status reports."""
     new_depth = parent.depth + 1
@@ -301,6 +319,8 @@ def spawn_batch(
         )
 
     nodes: list[AgentNode] = []
+    child_usage_path = usage_path if usage_path is not None else parent.usage_path
+    child_session_id = session_id if session_id is not None else parent.session_id
     for spec in child_specs:
         if not isinstance(spec, dict):
             raise ValueError(f"child spec must be an object, got {type(spec).__name__}")
@@ -322,6 +342,8 @@ def spawn_batch(
             task=task,
             sterile=sterile,
             visible_labels=valid_deps,
+            usage_path=child_usage_path,
+            session_id=child_session_id,
         ))
 
     if observer is not None:
