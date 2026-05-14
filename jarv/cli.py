@@ -6,7 +6,7 @@ from .config import CONFIG_FILE, load_config, validate_config
 from .display import console
 
 
-SLASH_COMMANDS = {"/help", "/about", "/update", "/clear", "/archive", "/load", "/session", "/sessions", "/history", "/usage", "/set", "/unset", "/config", "/undo", "/redo"}
+SLASH_COMMANDS = {"/help", "/about", "/update", "/clear", "/archive", "/session", "/sessions", "/history", "/usage", "/set", "/unset", "/config", "/undo", "/redo"}
 
 
 def _run_slash_command(command: str, rest: list[str]) -> bool:
@@ -17,7 +17,6 @@ def _run_slash_command(command: str, rest: list[str]) -> bool:
         cmd_clear,
         cmd_config,
         cmd_history,
-        cmd_load,
         cmd_redo,
         cmd_sessions,
         cmd_set,
@@ -39,9 +38,7 @@ def _run_slash_command(command: str, rest: list[str]) -> bool:
     elif command == "/archive":
         cmd_archive()
     elif command in {"/session", "/sessions"}:
-        cmd_sessions()
-    elif command == "/load":
-        cmd_load(rest)
+        cmd_sessions(rest)
     elif command == "/history":
         cmd_history()
     elif command == "/usage":

@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import urllib.request
 from pathlib import Path
 
@@ -57,11 +58,13 @@ LAST_CHECK_FILE = CONFIG_DIR / "last_update_check.txt"
 UPDATE_CHECK_INTERVAL_HOURS = 24
 
 
-def _read_key() -> str:
+def _read_key(text_mode: bool = False) -> str:
     """Read a single keypress and return a normalised token.
 
-    Returns one of: UP, DOWN, HOME, END, PAGEUP, PAGEDOWN, ENTER, ESC, or the
-    raw character.  Raises KeyboardInterrupt on Ctrl-C.
+    Returns one of: UP, DOWN, HOME, END, PAGEUP, PAGEDOWN, ENTER, ESC, TAB,
+    CTRL_F, BACKSPACE, or the raw character.  Raises KeyboardInterrupt on
+    Ctrl-C.  When ``text_mode`` is True, the convenience q/Q → ESC mapping is
+    disabled so a search query can include those letters.
     """
     if sys.platform == "win32":
         import msvcrt
@@ -77,8 +80,14 @@ def _read_key() -> str:
             return "ENTER"
         if ch == "\t":
             return "TAB"
-        if ch in ("\x1b", "q", "Q"):
+        if ch == "\x1b":
             return "ESC"
+        if not text_mode and ch in ("q", "Q"):
+            return "ESC"
+        if ch == "\x06":
+            return "CTRL_F"
+        if ch in ("\x08", "\x7f"):
+            return "BACKSPACE"
         if ch == "\x03":
             raise KeyboardInterrupt
         return ch
@@ -106,8 +115,12 @@ def _read_key() -> str:
                 return "ENTER"
             if ch == "\t":
                 return "TAB"
-            if ch in ("q", "Q"):
+            if not text_mode and ch in ("q", "Q"):
                 return "ESC"
+            if ch == "\x06":
+                return "CTRL_F"
+            if ch in ("\x7f", "\x08"):
+                return "BACKSPACE"
             if ch == "\x03":
                 raise KeyboardInterrupt
             return ch
@@ -175,8 +188,7 @@ def print_help() -> None:
     cmd_table.add_row("jarv /clear", "Start a fresh session on the next message")
     cmd_table.add_row("jarv /archive", "Archive this terminal's session and start a fresh one")
     cmd_table.add_row("jarv /sessions, /session", "List sessions (all in a TTY; 5 most recent when piped/non-TTY)")
-    cmd_table.add_row("jarv /load", "Load the most recently used session into this terminal")
-    cmd_table.add_row("jarv /load <id>", "Load a specific session into this terminal")
+    cmd_table.add_row("jarv /sessions <id>", "Load a specific session into this terminal by id prefix")
     cmd_table.add_row("jarv /history", "Show recent conversation history")
     cmd_table.add_row("jarv /usage", "Show token usage for this session")
     cmd_table.add_row("jarv /undo [n]", "Unsend the last n exchanges (default 1)")
@@ -243,8 +255,7 @@ jarv is a command-line AI assistant powered by OpenAI.
 - `jarv /clear` - Start a fresh session on the next message.
 - `jarv /archive` - Archive this terminal's session history and start a fresh one on the next message.
 - `jarv /sessions` / `jarv /session` - List sessions by recency. In an interactive terminal you can scroll through all of them; when stdout is not a TTY (e.g. piped), only the 5 most recent are listed.
-- `jarv /load` - Bind this terminal to the most recently used session.
-- `jarv /load <id>` - Bind this terminal to a specific session id.
+- `jarv /sessions <id>` - Bind this terminal to a specific session id (prefix match).
 - `jarv /update` - Check GitHub for the latest main commit and install it with pip.
 
 ## Heads-up mode
@@ -301,8 +312,7 @@ Each terminal is bound to exactly one session at a time. By default a fresh term
 - `jarv /clear` removes the terminal's session mapping. The next prompt starts a fresh session.
 - `jarv /archive` archives the current session's history+artifacts and removes the terminal's mapping. The next prompt starts a fresh session.
 - `jarv /sessions` / `jarv /session` lists sessions by recency (all in a TTY; 5 most recent when stdout is not a TTY).
-- `jarv /load` looks up the most recently used session anywhere and binds it to this terminal.
-- `jarv /load <id>` binds a specific session id to this terminal.
+- `jarv /sessions <id>` binds a specific session id (prefix match) to this terminal.
 
 ## Updates
 
@@ -435,7 +445,7 @@ def cmd_update() -> None:
 
 def cmd_clear() -> None:
     forget_current_session()
-    console.print("[bold green]✓[/bold green] [green]Fresh session will start on the next message.[/green]")
+    console.print("[bold green]✓[/bold green] [green]Cleared.[/green] [dim]New session starts on your next message.[/dim]")
 
 
 def archive_session_files(history_path: Path) -> Path | None:
@@ -510,7 +520,7 @@ def cmd_archive() -> None:
 
     forget_current_session()
     if archived_history is not None:
-        console.print("[bold green]✓[/bold green] [green]Fresh session will start on the next message.[/green]")
+        console.print("[bold green]✓[/bold green] [green]Cleared.[/green] [dim]New session starts on your next message.[/dim]")
 
 
 
@@ -583,11 +593,39 @@ def _sessions_plain(sessions: dict, terminals: dict) -> None:
     footer_parts: list = [table]
     if total > shown:
         footer_parts += [Text(""), Text(f"Showing {shown} most recent of {total} sessions.", style="dim")]
-    footer_parts += [Text("Run jarv /load <id> to switch to a session.", style="dim italic")]
+    footer_parts += [Text("Run jarv /sessions <id> to switch to a session.", style="dim italic")]
     console.print(jarv_panel(Group(*footer_parts), title="sessions", subtitle=f"{shown}/{total}"))
 
 
-def cmd_sessions() -> None:
+def _cmd_sessions_load(prefix: str) -> None:
+    data = load_sessions()
+    sessions = data["sessions"]
+    if not sessions:
+        console.print("[yellow]No sessions exist yet.[/yellow]")
+        return
+    if prefix in sessions:
+        session_id = prefix
+    else:
+        matches = [sid for sid in sessions if sid.startswith(prefix)]
+        if not matches:
+            console.print(f"[bold red]✗[/bold red] [red]No session matches:[/red] [bold]{prefix}[/bold]")
+            console.print("[dim]  Run [bold]jarv /sessions[/bold] to see available sessions.[/dim]")
+            return
+        if len(matches) > 1:
+            console.print(f"[bold yellow]?[/bold yellow] [yellow]Ambiguous prefix[/yellow] [bold]{prefix}[/bold] [dim]matches {len(matches)} sessions:[/dim]")
+            for m in matches:
+                console.print(f"  [dim]•[/dim] [cyan]{m}[/cyan]")
+            return
+        session_id = matches[0]
+    set_terminal_session(session_id)
+    label = sessions[session_id].get("label", session_id)
+    console.print(f"[bold green]✓[/bold green] [green]Loaded[/green] [bold cyan]{_short_session_id(session_id)}[/bold cyan] [dim]({label})[/dim]")
+
+
+def cmd_sessions(args: list | None = None) -> None:
+    if args:
+        _cmd_sessions_load(args[0])
+        return
     data = load_sessions()
     sessions = data["sessions"]
     terminals = data["terminals"]
@@ -658,6 +696,9 @@ def cmd_sessions() -> None:
     view_mode = "active"  # "active" | "all" | "archived"
     arm_delete_sid: str | None = None
     flash: tuple[str, str] | None = None  # (message, style) shown above the footer
+    search_query: str = ""
+    search_active: bool = False  # input bar focused for typing
+    search_text_cache: dict[str, str] = {}  # sid -> lowercased transcript text
     # When a row is archived/unarchived from a filtered view, keep it visible in
     # place (with its new aesthetic) until the cursor moves.
     ghost_sid: str | None = None
@@ -679,27 +720,96 @@ def cmd_sessions() -> None:
             return value[:width]
         return value[:width - 3] + "..."
 
-    def _content_rows(term_h: int, has_status: bool, show_footer: bool) -> int:
+    def _content_rows(term_h: int, has_status: bool, show_footer: bool, has_search: bool = False) -> int:
         # Panel border = 2 rows. Header consumes 1 row. Footer = 2 rows (blank + controls).
         content = max(1, term_h - 2 - 1)
         if show_footer:
             content -= 2
         if has_status:
             content -= 1
+        if has_search:
+            content -= 1
         return max(1, content)
 
     def _max_vis(has_status: bool = False) -> int:
         term_h = console.size.height
-        return _content_rows(term_h, has_status, show_footer=term_h >= 6)
+        has_search = bool(search_active or search_query)
+        return _content_rows(term_h, has_status, show_footer=term_h >= 6, has_search=has_search)
+
+    def _fast_search_text(r: dict) -> str:
+        # Cheap fields available without disk I/O — exact short id, full sid,
+        # the user's first-message snippet, and the session label.
+        meta = sessions.get(r["sid"], {})
+        label = meta.get("label", "") if isinstance(meta.get("label"), str) else ""
+        return f"{r['short_id']} {r['sid']} {r.get('snippet', '')} {label}".lower()
+
+    def _build_search_text(sid: str) -> str:
+        meta = sessions.get(sid, {})
+        hp_str = meta.get("history_file")
+        chunks: list[str] = []
+        label = meta.get("label")
+        if isinstance(label, str):
+            chunks.append(label)
+        if hp_str:
+            hp = Path(hp_str)
+            if hp.exists():
+                try:
+                    history = load_history(hp)
+                except Exception:
+                    history = []
+                for item in history:
+                    if not isinstance(item, dict):
+                        continue
+                    content = item.get("content", "")
+                    if isinstance(content, str):
+                        chunks.append(content)
+                    elif isinstance(content, list):
+                        for c in content:
+                            if isinstance(c, dict):
+                                t = c.get("text") if c.get("type") == "text" else c.get("content")
+                                if isinstance(t, str):
+                                    chunks.append(t)
+        return "\n".join(chunks).lower()
+
+    def _search_text(sid: str) -> str:
+        cached = search_text_cache.get(sid)
+        if cached is not None:
+            return cached
+        text = _build_search_text(sid)
+        search_text_cache[sid] = text
+        return text
+
+    def _prefetch_worker() -> None:
+        for r in rows:
+            if prefetch_stop.is_set():
+                return
+            sid = r["sid"]
+            if sid in search_text_cache:
+                continue
+            try:
+                text = _build_search_text(sid)
+            except Exception:
+                text = ""
+            search_text_cache[sid] = text
+
+    prefetch_stop = threading.Event()
+    prefetch_thread = threading.Thread(target=_prefetch_worker, daemon=True)
+    prefetch_thread.start()
 
     def _visible_rows_list() -> list[dict]:
+        q = search_query.lower().strip()
         def keep(r: dict) -> bool:
             if r["sid"] == ghost_sid:
                 return True
-            if view_mode == "active":
-                return not r["archived"]
-            if view_mode == "archived":
-                return r["archived"]
+            if view_mode == "active" and r["archived"]:
+                return False
+            if view_mode == "archived" and not r["archived"]:
+                return False
+            if q:
+                if q in _fast_search_text(r):
+                    return True
+                if q not in _search_text(r["sid"]):
+                    return False
             return True
         return [r for r in rows if keep(r)]
 
@@ -728,10 +838,16 @@ def cmd_sessions() -> None:
         return f"[dim]{n_active} active · {n_archived} archived[/dim]"
 
     def _footer_text() -> str:
+        if search_active:
+            return "type to filter   Enter apply   Esc cancel   Backspace delete"
         cur_visible = _visible_rows_list()
         cur = cur_visible[_selected_pos(cur_visible)] if cur_visible else None
         a_hint = "a unarchive" if (cur and cur["archived"]) else "a archive"
-        return f"↑↓ navigate   Enter load   p preview   d delete   {a_hint}   Tab view: {view_mode}   q cancel"
+        find_hint = "^F edit search" if search_query else "^F find"
+        return (
+            f"↑↓ navigate   Enter load   p preview   d delete   {a_hint}   "
+            f"Tab view: {view_mode}   {find_hint}   q cancel"
+        )
 
     def _build_preview_lines(sid: str) -> list[Text]:
         meta = sessions.get(sid, {})
@@ -889,14 +1005,44 @@ def cmd_sessions() -> None:
             msg, style = flash
             status = Text(_truncate(msg, inner_width), style=style, no_wrap=True, overflow="crop")
 
-        mv = _content_rows(term_h, has_status=status is not None, show_footer=show_footer)
+        has_search = bool(search_active or search_query)
+        mv = _content_rows(
+            term_h,
+            has_status=status is not None,
+            show_footer=show_footer,
+            has_search=has_search,
+        )
         offset = _clamp_offset(sel, offset, mv, n)
         start = offset
         end = min(n, offset + mv)
 
+        def _search_bar() -> Text:
+            cursor = "▌" if search_active else ""
+            shown = search_query + cursor
+            prefix = " › " if search_active else "   "
+            label_style = "bold cyan" if search_active else "cyan"
+            value_style = "bold cyan" if search_active else "bold"
+            placeholder_style = "bold cyan" if search_active else "dim italic"
+            line = Text(no_wrap=True, overflow="crop")
+            line.append(prefix, style="bold cyan" if search_active else "")
+            line.append("find: ", style=label_style)
+            avail = max(0, inner_width - len(prefix) - 6)
+            if shown:
+                line.append(_truncate(shown, avail), style=value_style)
+            else:
+                line.append(_truncate("(type to filter transcripts)", avail), style=placeholder_style)
+            return line
+
         parts: list = []
         if n == 0:
-            parts.append(Text(_truncate("  (no sessions in this view)", inner_width), style="dim"))
+            if has_search:
+                parts.append(_search_bar())
+            empty_msg = (
+                f"  (no sessions match \"{search_query}\")"
+                if search_query
+                else "  (no sessions in this view)"
+            )
+            parts.append(Text(_truncate(empty_msg, inner_width), style="dim"))
             if status is not None:
                 parts.append(status)
             if show_footer:
@@ -929,19 +1075,21 @@ def cmd_sessions() -> None:
                 overflow="crop",
             )
         )
+        if has_search:
+            parts.append(_search_bar())
 
         for i in range(start, end):
             r = visible[i]
-            is_sel = i == sel
+            is_sel = (i == sel) and not search_active
             is_armed = is_sel and arm_delete_sid == r["sid"]
             t = Text(no_wrap=True, overflow="ellipsis")
             prefix = " › " if is_sel else "   "
             if r["is_current"]:
-                marker = "● "
+                marker = "●  "
             elif r["archived"]:
-                marker = "⌫ "
+                marker = "⌫  "
             else:
-                marker = "  "
+                marker = "   "
             remaining = inner_width - len(prefix) - len(marker)
             id_width = max(0, min(24, remaining))
             remaining -= id_width
@@ -995,7 +1143,9 @@ def cmd_sessions() -> None:
                 if is_armed:
                     snip_style = "bold red"
                 elif is_sel:
-                    snip_style = "bold" if not r["archived"] else "dim"
+                    snip_style = "bold" if not r["archived"] else "dim strike"
+                elif r["archived"]:
+                    snip_style = "dim strike"
                 else:
                     snip_style = "dim"
                 t.append(_truncate(snip, snippet_width), style=snip_style)
@@ -1041,9 +1191,38 @@ def cmd_sessions() -> None:
         while True:
             live.refresh()
             try:
-                key = _read_key()
+                key = _read_key(text_mode=search_active and preview_sid is None)
             except KeyboardInterrupt:
                 break
+
+            # Search-input mode intercepts most keys (only outside preview).
+            if search_active and preview_sid is None:
+                if key == "ESC":
+                    search_active = False
+                    search_query = ""
+                    offset = 0
+                elif key in ("ENTER", "DOWN"):
+                    # Exit search mode, drop focus into the filtered list.
+                    search_active = False
+                    visible_now = _visible_rows_list()
+                    if visible_now and not any(r["sid"] == selected_sid for r in visible_now):
+                        selected_sid = visible_now[0]["sid"]
+                    offset = 0
+                elif key == "BACKSPACE":
+                    if search_query:
+                        search_query = search_query[:-1]
+                        offset = 0
+                elif key == "CTRL_F":
+                    search_active = False
+                elif isinstance(key, str) and len(key) == 1 and key.isprintable():
+                    search_query += key
+                    offset = 0
+                    visible_now = _visible_rows_list()
+                    if visible_now and not any(r["sid"] == selected_sid for r in visible_now):
+                        selected_sid = visible_now[0]["sid"]
+                # All other keys (UP, PAGEUP/DOWN, HOME/END, TAB, a, d, p, …)
+                # are swallowed while typing the query.
+                continue
 
             # Preview mode intercepts most keys.
             if preview_sid is not None:
@@ -1134,7 +1313,14 @@ def cmd_sessions() -> None:
                 loaded_row = cur
                 break
             elif key == "ESC":
+                if search_query:
+                    search_query = ""
+                    offset = 0
+                    continue
                 break
+            elif key == "CTRL_F":
+                search_active = True
+                continue
             elif key == "TAB":
                 view_mode = {"active": "all", "all": "archived", "archived": "active"}[view_mode]
                 offset = 0
@@ -1209,6 +1395,8 @@ def cmd_sessions() -> None:
                 else:
                     arm_delete_sid = sid
 
+    prefetch_stop.set()
+
     if loaded_row is not None:
         label = sessions.get(loaded_row["sid"], {}).get("label", loaded_row["sid"])
         prefix = "Restored & loaded" if auto_restored else "Loaded"
@@ -1219,39 +1407,6 @@ def cmd_sessions() -> None:
         return
     console.print("[dim]○ Cancelled.[/dim]")
 
-
-def cmd_load(args: list) -> None:
-    data = load_sessions()
-    sessions = data["sessions"]
-    if not sessions:
-        console.print("[yellow]No sessions exist yet.[/yellow]")
-        return
-
-    if args:
-        prefix = args[0]
-        if prefix in sessions:
-            session_id = prefix
-        else:
-            matches = [sid for sid in sessions if sid.startswith(prefix)]
-            if not matches:
-                console.print(f"[bold red]✗[/bold red] [red]No session matches:[/red] [bold]{prefix}[/bold]")
-                console.print("[dim]  Run [bold]jarv /sessions[/bold] to see available sessions.[/dim]")
-                return
-            if len(matches) > 1:
-                console.print(f"[bold yellow]?[/bold yellow] [yellow]Ambiguous prefix[/yellow] [bold]{prefix}[/bold] [dim]matches {len(matches)} sessions:[/dim]")
-                for m in matches:
-                    console.print(f"  [dim]•[/dim] [cyan]{m}[/cyan]")
-                return
-            session_id = matches[0]
-    else:
-        session_id = max(
-            sessions.keys(),
-            key=lambda sid: sessions[sid].get("last_used_at", ""),
-        )
-
-    set_terminal_session(session_id)
-    label = sessions[session_id].get("label", session_id)
-    console.print(f"[bold green]✓[/bold green] [green]Loaded[/green] [bold cyan]{_short_session_id(session_id)}[/bold cyan] [dim]({label})[/dim]")
 
 
 def cmd_history() -> None:
