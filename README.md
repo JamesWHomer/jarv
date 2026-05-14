@@ -1,52 +1,24 @@
 # jarv
 
-Super simple OpenAI-powered CLI agent.
-
-Jarv uses the OpenAI Responses API, keeps a short local conversation history, and can run shell commands when the model decides they are useful. Command output is shown in your terminal and sent back to the model so it can continue the task.
+An OpenAI-powered CLI agent that can run shell commands, fan out work to parallel subagents, and keep track of conversation history across terminal sessions.
 
 ```bash
-jarv
-jarv whats the meaning of life?
-jarv what did the fox say?
-jarv bring up the man page for the uhhh exponent function?
-jarv commit all these files
+jarv                                    # start an interactive session
+jarv whats the meaning of life?         # one-shot question
+jarv commit all these files             # let it run commands to do the job
+jarv refactor the auth module           # complex tasks get split across subagents
 ```
-
-## Heads-Up Mode
-
-Run `jarv` with no prompt to start heads-up mode: an interactive prompt loop for repeated questions and tasks.
-
-```bash
-jarv
-```
-
-In heads-up mode:
-
-- Type a prompt and press Enter to send it.
-- Keep sending prompts without rerunning `jarv`.
-- Commands start with `/` (e.g. `/clear`, `/history`). Type `/help` to see all commands.
-- Type `exit`, `quit`, or `/exit`, or press Ctrl+C, to leave.
 
 ## Install
 
-Requirements:
-
-- Python 3.10+
-- An OpenAI API key
-
-Install directly from GitHub with pip:
+Requires **Python 3.10+** and an **OpenAI API key**.
 
 ```bash
 pip install git+https://github.com/JamesWHomer/jarv.git
-```
-
-Then add your OpenAI API key:
-
-```bash
 jarv /set api_key YOUR_OPENAI_API_KEY
 ```
 
-Alternatively, clone the repo and install it locally first:
+Or clone and install locally:
 
 ```bash
 git clone https://github.com/JamesWHomer/jarv.git
@@ -55,111 +27,135 @@ pip install -e .
 jarv /set api_key YOUR_OPENAI_API_KEY
 ```
 
-You can verify the install with:
+The API key can also be set via the `OPENAI_API_KEY` environment variable.
 
-```bash
-jarv /help
-```
-
-The first run that needs config will create `~/.jarv/config.json` (on Windows, `%USERPROFILE%\.jarv\config.json`). You can also set the `OPENAI_API_KEY` environment variable instead of saving the key in Jarv config.
-
-To upgrade later:
+To upgrade:
 
 ```bash
 jarv /update
 ```
 
-or:
+## Usage
+
+### One-shot mode
+
+Pass a prompt as arguments. Jarv answers (running commands if needed) and exits.
 
 ```bash
-pip install --upgrade git+https://github.com/JamesWHomer/jarv.git
+jarv what process is using port 8080?
+jarv find all TODO comments in src/
 ```
 
-## Config (`~/.jarv/config.json`)
+### Heads-up mode
 
-Default config:
+Run `jarv` with no arguments to enter an interactive prompt loop.
 
-```json
-{
-  "api_key": "",
-  "model": "gpt-5.4-mini",
-  "reasoning_effort": "",
-  "max_history": 40,
-  "command_timeout": 60,
-  "max_subagent_depth": 4,
-  "subagent_thread_pool_max_workers": 8,
-  "system_prompt": "You are Jarv, a helpful CLI assistant..."
-}
+```
+jarv> what files changed today?
+jarv> now run the tests
+jarv> /history
+jarv> /clear
 ```
 
-Config notes:
+- Type a prompt and press Enter.
+- Slash commands start with `/` — type `/help` to list them.
+- Exit with `exit`, `quit`, `/exit`, or Ctrl+C.
 
-- `api_key` is read from config first. If it is empty, Jarv uses `OPENAI_API_KEY`.
-- `model` is the OpenAI model name to use.
-- `reasoning_effort` is sent as `{ "effort": "..." }` when non-empty. Leave it empty to disable.
-- `max_history` is the number of recent messages Jarv keeps as context.
-- `command_timeout` is the number of seconds before a shell command is killed.
-- `max_subagent_depth` is the maximum recursion depth for spawned subagents. The root agent is depth 0; each `spawn` call adds one level. Defaults to 4.
-- `subagent_thread_pool_max_workers` is the maximum number of subagents that can run in parallel within a single `spawn` call. Defaults to 8.
-- `/usage` shows context and pricing metadata from LiteLLM when available.
-- `system_prompt` is sent to the model along with basic system info like OS, current working directory, shell, and session context.
+## How it works
 
-You can edit the JSON file directly or use `jarv /set` / `jarv /unset`.
+Jarv wraps the OpenAI Responses API with a tool-calling agent loop. The model can call three tools:
+
+| Tool | Purpose |
+| --- | --- |
+| `run_command` | Execute a shell command and return stdout, stderr, and exit code |
+| `spawn` | Fan out work to parallel subagents, each with their own tool access |
+| `read_artifact` | Retrieve the full output of a completed subagent |
+
+On Windows, commands run through PowerShell. On other platforms, they run through the system shell.
+
+### Subagent orchestration
+
+When the model calls `spawn`, Jarv runs N child agents in parallel. Each child operates independently — running commands, reasoning through subtasks — and terminates by calling `finish` with a detailed report and a short summary. The parent agent can then read any child's full output via `read_artifact`.
+
+- **Parallel by default** — all children in a `spawn` call run concurrently in a thread pool.
+- **Artifacts** — each child's output is stored as a named artifact. The parent (or siblings that declare a dependency) can fetch the full content.
+- **Recursive** — children can themselves spawn further children, up to `max_subagent_depth` levels deep (default 4). Children are sterile by default; the parent must explicitly allow further spawning.
+- **Scoped per query** — the artifact store resets with each new top-level prompt.
+
+The terminal shows a live progress panel as children run, with a green checkmark or red cross as each finishes.
 
 ## Commands
 
 | Command | Description |
 | --- | --- |
-| `jarv` | Start heads-up mode: an interactive prompt loop for repeated prompts |
-| `jarv <anything>` | Ask Jarv a question or give it a task |
-| `jarv /set <key> <value>` | Set a config value |
-| `jarv /unset <key>` | Reset a config key to its default |
-| `jarv /clear` | Archive this terminal's session and start a fresh one |
-| `jarv /sessions`, `jarv /session` | List the 5 most recently active sessions |
-| `jarv /load` | Load the most recently used session into this terminal |
-| `jarv /load <id>` | Load a specific session into this terminal |
-| `jarv /history` | Show recent conversation history |
-| `jarv /usage` | Show token usage for the current session |
-| `jarv /config` | Show current settings |
-| `jarv /update` | Update Jarv to the latest version from GitHub |
-| `jarv /about` | Show detailed information about Jarv |
-| `jarv /help` | Show help (`jarv help` also works) |
+| `/help` | Show all commands |
+| `/about` | Detailed info and examples |
+| `/set <key> <value>` | Set a config value |
+| `/unset <key>` | Reset a config key to default |
+| `/config` | Show current settings |
+| `/clear` | Archive the current session and start fresh |
+| `/archive` | Archive session history and artifacts |
+| `/sessions` | Browse sessions (interactive when in a TTY) |
+| `/sessions <id>` | Load a specific session by ID prefix |
+| `/load` | Load the most recently used session |
+| `/load <id>` | Load a specific session |
+| `/history` | Show recent conversation history |
+| `/undo [n]` | Remove last *n* exchanges (default 1) |
+| `/redo [n]` | Restore last *n* undone exchanges (default 1) |
+| `/usage` | Show token usage, cost, and context breakdown |
+| `/update` | Update Jarv to the latest version |
 
-## Files
+All commands work both as `jarv /command` (one-shot) and inside heads-up mode.
 
-Jarv stores local state in `~/.jarv/`:
+## Sessions
 
-- `config.json` — settings and optional API key
-- `sessions.json` — terminal/session metadata
-- `last_sha.txt` — last seen GitHub commit SHA for update checks
-- `sessions/history-<hash>.json` — conversation history for each session
-- `sessions/artifacts-<hash>.json` — artifact store for each session
-- `sessions/usage-<hash>.json` — token usage totals for each session
-- `archive/` — sessions archived by `jarv /clear`
+Each terminal is automatically bound to its own session. Jarv identifies terminals using environment variables (`WT_SESSION`, `TERM_SESSION_ID`, `TMUX`, `STY`) with a parent-process fallback, so history persists across runs in the same terminal.
 
-## History and sessions
+- `/clear` archives the current session and starts fresh on the next prompt.
+- `/sessions` opens an interactive browser (arrow keys to navigate, Enter to load, `a` to archive, `d` to delete, `p` to preview, `Tab` to switch views, Ctrl+F to search).
+- `/undo` and `/redo` let you step through recent exchanges.
 
-Each terminal is bound to exactly one session at a time. By default a new terminal gets its own session (the id is derived from a terminal fingerprint). History for a session lives in `~/.jarv/sessions/history-<hash>.json`.
+## Config
 
-Jarv detects terminals from environment values such as `WT_SESSION`, `TERM_SESSION_ID`, `TMUX`, or `STY`, with a parent-process fallback.
+Settings live in `~/.jarv/config.json` (created on first run). Edit the file directly or use `/set` and `/unset`.
 
-- `jarv /clear` archives the current session's history and artifacts, then starts a fresh session on the next prompt.
-- `jarv /sessions` / `jarv /session` lists the 5 most recently active sessions.
-- `jarv /load` binds this terminal to the most recently used session.
-- `jarv /load <id>` binds this terminal to a specific session id.
+| Key | Default | Description |
+| --- | --- | --- |
+| `api_key` | `""` | OpenAI API key. Falls back to `OPENAI_API_KEY` env var if empty. |
+| `model` | `"gpt-5.4-mini"` | Model name passed to the API. |
+| `reasoning_effort` | `""` | Reasoning effort level. Leave empty to disable. |
+| `max_history` | `40` | Number of recent messages kept as context. |
+| `command_timeout` | `60` | Seconds before a shell command is killed. |
+| `max_subagent_depth` | `4` | Maximum nesting depth for spawned subagents. |
+| `subagent_thread_pool_max_workers` | `8` | Max parallel subagents per `spawn` call. |
+| `check_updates` | `true` | Background update check on startup (non-blocking, throttled to once per 24h). |
+| `system_prompt` | `"You are Jarv..."` | System instructions sent with each request. |
 
-## Subagent orchestration
+## Local files
 
-For complex tasks, the model can fan out work to parallel subagents using the `spawn` tool. Each subagent runs the same agent loop independently, can run shell commands, and terminates by calling `finish` with a full report (`longform`) and a short summary (`tldr`).
+All state is stored in `~/.jarv/` (on Windows, `%USERPROFILE%\.jarv\`):
 
-- **Parallel execution** — all children in a single `spawn` call run concurrently in a thread pool.
-- **Artifacts** — each child's output is stored as a named artifact. The parent (and any sibling that declares a dependency) can fetch the full content via `read_artifact`.
-- **Depth limit** — subagents can themselves spawn children up to `max_subagent_depth` levels deep (default 4). By default children are *sterile* (cannot spawn further) unless the parent explicitly sets `sterile: false`.
-- **Scoped per query** — the artifact store is created fresh for each top-level query; artifacts do not persist across separate `jarv` invocations.
+```
+~/.jarv/
+├── config.json                      # settings and optional API key
+├── sessions.json                    # terminal → session mappings
+├── last_sha.txt                     # last seen GitHub SHA for update checks
+├── sessions/
+│   ├── history-<hash>.json          # conversation history
+│   ├── artifacts-<hash>.json        # subagent artifacts
+│   ├── usage-<hash>.json            # token usage totals
+│   └── redo-<hash>.json             # undo/redo stack
+└── archive/                         # archived sessions
+```
 
-The terminal shows a summary of each spawn batch as children finish, with a green ✓ for success and red ✗ for failure.
+## Dependencies
 
-## Notes
+| Package | Role |
+| --- | --- |
+| [openai](https://pypi.org/project/openai/) | Responses API client |
+| [rich](https://pypi.org/project/rich/) | Terminal styling, live rendering, markdown |
+| [litellm](https://pypi.org/project/litellm/) | Token counting, model pricing, context window metadata |
 
-- Jarv may run commands if the model requests them. Review tasks you give it accordingly.
-- On Windows, commands are executed through PowerShell. On other platforms, commands run through the system shell.
+## License
+
+Elastic License 2.0
