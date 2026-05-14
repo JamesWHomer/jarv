@@ -2,9 +2,6 @@ import os
 import sys
 import threading
 
-from openai import OpenAI
-
-from .agent import run_agent
 from .commands import (
     _check_update_background,
     cmd_clear,
@@ -76,6 +73,7 @@ def main() -> None:
         if not api_key:
             console.print(f"[red]No API key found.[/red] Edit {CONFIG_FILE} or set OPENAI_API_KEY.")
             sys.exit(1)
+        from openai import OpenAI
         client = OpenAI(api_key=api_key)
         run_heads_up_mode(config, client)
         return
@@ -110,6 +108,8 @@ def main() -> None:
         update_thread.join(timeout=0.2)
         maybe_print_update_available()
 
+    from openai import OpenAI
+    from .agent import run_agent
     client = OpenAI(api_key=api_key)
     try:
         run_agent(query, config, client)
@@ -118,7 +118,7 @@ def main() -> None:
         sys.exit(130)
 
 
-def run_heads_up_mode(config: dict, client: OpenAI) -> None:
+def run_heads_up_mode(config: dict, client) -> None:
     console.print("[bold cyan]jarv heads-up mode[/bold cyan]")
     console.print("[dim]Type a prompt and press Enter. Use /help for commands. Press Ctrl+C to leave.[/dim]")
     while True:
@@ -146,6 +146,7 @@ def run_heads_up_mode(config: dict, client: OpenAI) -> None:
             continue
 
         try:
+            from .agent import run_agent
             run_agent(query, config, client, propagate_keyboard_interrupt=True)
         except KeyboardInterrupt:
             console.print("\n[dim]Goodbye.[/dim]")

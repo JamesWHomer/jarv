@@ -3,8 +3,6 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from litellm import get_model_info
-
 from .display import console
 from .history import isoformat_utc, utc_now
 
@@ -201,6 +199,7 @@ def _litellm_model_info(model: str | None) -> dict | None:
     if not model:
         return None
     try:
+        from litellm import get_model_info
         info = get_model_info(model=model)
     except Exception:
         return None
