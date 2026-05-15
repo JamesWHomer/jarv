@@ -421,6 +421,11 @@ def cmd_update() -> None:
 
 
 def cmd_new() -> None:
+    session_context = prepare_session_context()
+    history = load_history(session_context.history_file)
+    if not history:
+        console.print("[dim]○ Already on a new session.[/dim]")
+        return
     forget_current_session()
     console.print("[bold green]✓[/bold green] [green]New session starts on your next message.[/green]")
 
