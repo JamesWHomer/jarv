@@ -192,6 +192,42 @@ def _dispatch_run_command_with_ui(args: dict, config: dict) -> str:
     return result.to_model_output()
 
 
+def _read_user_input() -> str:
+    """Read a line of input without Windows console template recall.
+
+    On Windows, the console remembers the last ReadConsole input as a
+    "template" that the right-arrow key replays character by character.
+    Reading via msvcrt avoids that buffer entirely.
+    """
+    if sys.platform == "win32":
+        import msvcrt
+        chars: list[str] = []
+        while True:
+            ch = msvcrt.getwch()
+            if ch in ("\r", "\n"):
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                break
+            if ch == "\x03":
+                raise KeyboardInterrupt
+            if ch in ("\x04", "\x1a"):
+                raise EOFError
+            if ch in ("\b", "\x7f"):
+                if chars:
+                    chars.pop()
+                    sys.stdout.write("\b \b")
+                    sys.stdout.flush()
+                continue
+            if ch in ("\x00", "\xe0"):
+                msvcrt.getwch()
+                continue
+            chars.append(ch)
+            sys.stdout.write(ch)
+            sys.stdout.flush()
+        return "".join(chars)
+    return input()
+
+
 def _dispatch_ask_user(args: dict) -> str:
     question = args.get("question")
     if not isinstance(question, str) or not question.strip():
@@ -200,11 +236,12 @@ def _dispatch_ask_user(args: dict) -> str:
         return msg
     console.print()
     console.print(Panel(question, border_style="cyan", box=box.ROUNDED, padding=(0, 1)))
+    console.print("[bold cyan]> [/bold cyan]", end="")
     try:
-        answer = console.input("[bold cyan]> [/bold cyan]")
+        answer = _read_user_input()
     except (KeyboardInterrupt, EOFError):
         answer = "[no response]"
-        console.print(f"[dim]{answer}[/dim]")
+        console.print(f"\n[dim]{answer}[/dim]")
     console.print()
     return answer
 
