@@ -5,7 +5,6 @@ import sys
 import threading
 import time
 
-from openai import OpenAI, OpenAIError
 from rich import box
 from rich.console import Group
 from rich.live import Live
@@ -28,6 +27,14 @@ from .history import (
     save_history,
 )
 from .artifacts import ArtifactStore, load_artifact_store, save_artifact_store
+from .provider import (
+    ProviderError,
+    ReasoningDone,
+    StreamDone,
+    TextDelta,
+    ToolCallDone,
+    stream_response,
+)
 from .orchestrator import (
     ASK_USER_TOOL,
     READ_ARTIFACT_TOOL,
@@ -362,7 +369,7 @@ def _dispatch_spawn_with_ui(args: dict, root_node, store, client, config) -> str
 def run_agent(
     query: str,
     config: dict,
-    client: OpenAI,
+    client,
     propagate_keyboard_interrupt: bool = False,
     new_session: bool = False,
     incognito: bool = False,
@@ -439,48 +446,49 @@ def run_agent(
                 spinner_live.start()
             try:
                 final_response = None
-                with client.responses.stream(**kwargs) as stream:
-                    for event in stream:
-                        if event.type == "response.output_text.delta":
-                            if not got_text:
-                                got_text = True
-                                if spinner_live is not None:
-                                    spinner_live.stop()
-                                    spinner_live = None
-                                if interactive:
-                                    thought_elapsed = time.perf_counter() - thought_started
-                                    console.print(
-                                        thought_complete_indicator(
-                                            f"Thought for {format_thought_duration(thought_elapsed)}."
-                                        )
-                                    )
-                                    stream_max_lines = console.size.height - 2
-                                    stream_live = Live(
-                                        TailMarkdown("", stream_max_lines),
-                                        refresh_per_second=12,
-                                        console=console,
-                                        auto_refresh=True,
-                                        transient=True,
-                                        vertical_overflow="crop",
-                                    )
-                                    stream_live.start()
-                            reply_text += event.delta
-                            if stream_live is not None:
-                                stream_live.update(
-                                    TailMarkdown(
-                                        flatten_headings(reply_text),
-                                        stream_max_lines,
+                for event in stream_response(
+                    client, config,
+                    kwargs["model"], kwargs["instructions"],
+                    kwargs["tools"], kwargs["input"],
+                    reasoning=kwargs.get("reasoning"),
+                ):
+                    if isinstance(event, TextDelta):
+                        if not got_text:
+                            got_text = True
+                            if spinner_live is not None:
+                                spinner_live.stop()
+                                spinner_live = None
+                            if interactive:
+                                thought_elapsed = time.perf_counter() - thought_started
+                                console.print(
+                                    thought_complete_indicator(
+                                        f"Thought for {format_thought_duration(thought_elapsed)}."
                                     )
                                 )
-                        elif event.type == "response.output_item.done":
-                            if event.item.type == "function_call":
-                                tool_calls.append(event.item)
-                            elif event.item.type == "reasoning":
-                                reasoning_items.append(event.item)
-                    try:
-                        final_response = stream.get_final_response()
-                    except Exception:
-                        final_response = None
+                                stream_max_lines = console.size.height - 2
+                                stream_live = Live(
+                                    TailMarkdown("", stream_max_lines),
+                                    refresh_per_second=12,
+                                    console=console,
+                                    auto_refresh=True,
+                                    transient=True,
+                                    vertical_overflow="crop",
+                                )
+                                stream_live.start()
+                        reply_text += event.delta
+                        if stream_live is not None:
+                            stream_live.update(
+                                TailMarkdown(
+                                    flatten_headings(reply_text),
+                                    stream_max_lines,
+                                )
+                            )
+                    elif isinstance(event, ToolCallDone):
+                        tool_calls.append(event)
+                    elif isinstance(event, ReasoningDone):
+                        reasoning_items.append(event)
+                    elif isinstance(event, StreamDone):
+                        final_response = event.response
                 record_response_usage(
                     usage_path,
                     session_context.session_id,
@@ -568,8 +576,8 @@ def run_agent(
         save_artifact_store(artifact_store, artifact_file)
         if propagate_keyboard_interrupt:
             raise
-    except OpenAIError as e:
-        console.print(f"[red]OpenAI API error:[/red] {e}")
+    except ProviderError as e:
+        console.print(f"[red]API error:[/red] {e}")
         if not incognito:
             save_history(history[-max_history:], session_context.history_file)
         save_artifact_store(artifact_store, artifact_file)

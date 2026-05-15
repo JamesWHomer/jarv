@@ -190,7 +190,10 @@ def usage_from_response(response: Any) -> dict | None:
     if usage is None:
         return None
 
-    input_tokens = _int_value(usage, "input_tokens")
+    input_tokens = _first_present(
+        _int_value(usage, "input_tokens"),
+        _int_value(usage, "prompt_tokens"),
+    )
     input_details = _value(usage, "input_tokens_details") or _value(usage, "prompt_tokens_details")
     cached_input_tokens = _first_present(
         _int_value(usage, "cached_input_tokens"),
@@ -206,7 +209,10 @@ def usage_from_response(response: Any) -> dict | None:
     if input_tokens is not None:
         uncached_input_tokens = max(input_tokens - cached_input_tokens, 0)
 
-    output_tokens = _int_value(usage, "output_tokens")
+    output_tokens = _first_present(
+        _int_value(usage, "output_tokens"),
+        _int_value(usage, "completion_tokens"),
+    )
     output_details = _value(usage, "output_tokens_details") or _value(usage, "completion_tokens_details")
     reasoning_output_tokens = _first_present(
         _int_value(usage, "reasoning_output_tokens"),

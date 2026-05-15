@@ -16,7 +16,9 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 
 DEFAULT_CONFIG = {
+    "provider": "openai",
     "api_key": "",
+    "base_url": "",
     "model": "gpt-5.4-mini",
     "reasoning_effort": "",
     "max_history": 40,
@@ -64,14 +66,21 @@ def load_config() -> dict:
 
 def is_setup_complete() -> bool:
     import os
-    if os.environ.get("OPENAI_API_KEY", ""):
-        return True
+    from .provider import PROVIDERS, LOCAL_PROVIDERS, resolve_api_key
+
     if CONFIG_FILE.exists():
         try:
             config = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-            return bool(config.get("api_key"))
         except (json.JSONDecodeError, OSError):
-            pass
+            config = {}
+    else:
+        config = {}
+
+    provider = config.get("provider", "openai")
+    if provider in LOCAL_PROVIDERS:
+        return True
+    if resolve_api_key(config):
+        return True
     return False
 
 

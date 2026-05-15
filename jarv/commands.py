@@ -201,7 +201,9 @@ def print_help() -> None:
     key_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
     key_table.add_column(style="bold yellow", no_wrap=True)
     key_table.add_column(style="white")
-    key_table.add_row("api_key", "OpenAI API key")
+    key_table.add_row("provider", "API provider (openai, openrouter, anthropic, gemini, groq, deepseek, ...)")
+    key_table.add_row("api_key", "API key (or use provider-specific env var)")
+    key_table.add_row("base_url", "Custom API base URL (overrides provider default)")
     key_table.add_row("model", "Model name (default: gpt-5.4-mini)")
     key_table.add_row("reasoning_effort", "Reasoning effort value (empty to disable)")
     key_table.add_row("max_history", "Number of messages to keep as context")
@@ -237,7 +239,7 @@ def print_help() -> None:
 def print_about() -> None:
     about = f"""# jarv
 
-jarv is a command-line AI assistant powered by OpenAI.
+jarv is a command-line AI assistant that supports multiple AI providers including OpenAI, Anthropic, Google Gemini, OpenRouter, Groq, DeepSeek, and more.
 
 ## Basic usage
 
@@ -267,7 +269,7 @@ Run `jarv` with no prompt to start an interactive session. Type a prompt and pre
 1. Loads config from `{CONFIG_FILE}`.
 2. Detects the current terminal and resolves its active session (default: one session per terminal).
 3. Loads recent conversation history from that session's history file.
-4. Sends your query, recent history, the configured system prompt, and system info to the OpenAI Responses API.
+4. Sends your query, recent history, the configured system prompt, and system info to the configured provider's API.
 5. Streams the assistant response in the terminal.
 6. When the model issues tool calls, jarv runs the matching handler and feeds results back into the model (for `run_command`, that means showing the command, running it, printing stdout/stderr/exit status, and returning the full output).
 7. Saves the final assistant response back to history, trimmed to `max_history` items.
@@ -289,8 +291,10 @@ Config file: `{CONFIG_FILE}`
 
 Keys:
 
-- `api_key` - OpenAI API key. Can also be provided with the `OPENAI_API_KEY` environment variable.
-- `model` - OpenAI model name. Default: `{DEFAULT_CONFIG['model']}`.
+- `provider` - API provider. Options: openai, openrouter, anthropic, gemini, groq, deepseek, together, fireworks, ollama, lm_studio, vllm. Default: `openai`.
+- `api_key` - API key. Can also be provided via provider-specific env vars (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.).
+- `base_url` - Custom API base URL. Overrides the provider's default endpoint.
+- `model` - Model name. Default: `{DEFAULT_CONFIG['model']}`.
 - `reasoning_effort` - Optional reasoning effort value. Empty disables this setting.
 - `max_history` - Number of history items kept as context. Default: `{DEFAULT_CONFIG['max_history']}`.
 - `command_timeout` - Seconds before a shell command is killed. Default: `{DEFAULT_CONFIG['command_timeout']}`.

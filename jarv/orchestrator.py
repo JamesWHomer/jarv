@@ -12,9 +12,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from openai import OpenAI, OpenAIError
-
 from .artifacts import ArtifactStore
+from .provider import (
+    ProviderError,
+    StreamDone,
+    TextDelta,
+    ToolCallDone,
+    ReasoningDone,
+    stream_response,
+)
 from .shell import execute_command
 from .usage import record_response_usage
 
@@ -159,7 +165,7 @@ def dispatch_tool(
     args: dict,
     node: AgentNode,
     store: ArtifactStore,
-    client: OpenAI,
+    client,
     config: dict,
     on_run_command: Callable[[str], str] | None = None,
     spawn_observer: "SpawnObserver | None" = None,
@@ -205,7 +211,7 @@ def dispatch_tool(
 def run_subagent_loop(
     node: AgentNode,
     store: ArtifactStore,
-    client: OpenAI,
+    client,
     config: dict,
     spawn_observer: "SpawnObserver | None" = None,
 ) -> tuple[str | None, str]:
@@ -238,17 +244,18 @@ def run_subagent_loop(
         reasoning_items: list = []
         try:
             final_response = None
-            with client.responses.stream(**kwargs) as stream:
-                for event in stream:
-                    if event.type == "response.output_item.done":
-                        if event.item.type == "function_call":
-                            tool_calls.append(event.item)
-                        elif event.item.type == "reasoning":
-                            reasoning_items.append(event.item)
-                try:
-                    final_response = stream.get_final_response()
-                except Exception:
-                    final_response = None
+            for event in stream_response(
+                client, config,
+                kwargs["model"], kwargs["instructions"],
+                kwargs["tools"], kwargs["input"],
+                reasoning=kwargs.get("reasoning"),
+            ):
+                if isinstance(event, ToolCallDone):
+                    tool_calls.append(event)
+                elif isinstance(event, ReasoningDone):
+                    reasoning_items.append(event)
+                elif isinstance(event, StreamDone):
+                    final_response = event.response
             record_response_usage(
                 node.usage_path,
                 node.session_id,
@@ -256,8 +263,8 @@ def run_subagent_loop(
                 final_response,
                 "subagent",
             )
-        except OpenAIError as e:
-            return None, f"openai stream error: {e}"
+        except ProviderError as e:
+            return None, f"provider error: {e}"
         except Exception as e:
             return None, f"stream error: {e}"
 
@@ -321,7 +328,7 @@ def spawn_batch(
     parent: AgentNode,
     child_specs: list[dict],
     store: ArtifactStore,
-    client: OpenAI,
+    client,
     config: dict,
     observer: "SpawnObserver | None" = None,
     usage_path: Path | None = None,

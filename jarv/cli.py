@@ -88,7 +88,7 @@ def cmd_setup() -> None:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="jarv",
-        description="OpenAI-powered CLI agent",
+        description="AI-powered CLI agent",
         add_help=True,
     )
     parser.add_argument("query", nargs="*", help="Prompt to run (omit for heads-up mode)")
@@ -147,13 +147,15 @@ def main() -> None:
     if args.system:
         config["system_prompt"] = args.system
 
-    api_key = config.get("api_key") or os.environ.get("OPENAI_API_KEY", "")
-    if not api_key:
+    from .provider import resolve_api_key, create_client, LOCAL_PROVIDERS
+
+    provider_name = config.get("provider", "openai")
+    api_key = resolve_api_key(config)
+    if not api_key and provider_name not in LOCAL_PROVIDERS:
         console.print("[red]No API key found.[/red] Run [bold cyan]jarv /setup[/bold cyan] to get started.")
         sys.exit(1)
 
-    from openai import OpenAI
-    client = OpenAI(api_key=api_key)
+    client = create_client(config)
 
     if not query_parts:
         run_heads_up_mode(config, client)
