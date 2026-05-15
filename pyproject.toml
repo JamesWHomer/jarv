@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jarv"
-version = "0.3.1"
+version = "0.3.2"
 description = "A simple OpenAI-powered CLI agent"
 readme = "README.md"
 requires-python = ">=3.10"
