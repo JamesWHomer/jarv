@@ -84,6 +84,23 @@ FINISH_TOOL = {
     },
 }
 
+ASK_USER_TOOL = {
+    "type": "function",
+    "name": "ask_user",
+    "description": (
+        "Ask the user a question and wait for their response. "
+        "Use when you need clarification, a choice between options, or confirmation before proceeding. "
+        "The conversation pauses until the user replies."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "question": {"type": "string", "description": "The question to present to the user."},
+        },
+        "required": ["question"],
+    },
+}
+
 READ_ARTIFACT_TOOL = {
     "type": "function",
     "name": "read_artifact",

@@ -29,6 +29,7 @@ from .history import (
 )
 from .artifacts import ArtifactStore, load_artifact_store, save_artifact_store
 from .orchestrator import (
+    ASK_USER_TOOL,
     READ_ARTIFACT_TOOL,
     RUN_COMMAND_TOOL,
     SPAWN_TOOL,
@@ -42,7 +43,7 @@ from .shell import display_command_result, execute_command
 from .usage import estimate_context_breakdown, record_response_usage, usage_file_for
 
 # Responses API tool format (flat, no "function" wrapper key)
-TOOLS = [RUN_COMMAND_TOOL, SPAWN_TOOL, READ_ARTIFACT_TOOL]
+TOOLS = [RUN_COMMAND_TOOL, SPAWN_TOOL, READ_ARTIFACT_TOOL, ASK_USER_TOOL]
 
 
 _THINKING_FRAMES = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"]
@@ -189,6 +190,23 @@ def _dispatch_run_command_with_ui(args: dict, config: dict) -> str:
     display_command_result(result)
     console.print(Rule(style="bright_black"))
     return result.to_model_output()
+
+
+def _dispatch_ask_user(args: dict) -> str:
+    question = args.get("question")
+    if not isinstance(question, str) or not question.strip():
+        msg = "[tool argument error: question must be a non-empty string]"
+        console.print(f"[red]{msg}[/red]")
+        return msg
+    console.print()
+    console.print(Panel(question, border_style="cyan", box=box.ROUNDED, padding=(0, 1)))
+    try:
+        answer = console.input("[bold cyan]> [/bold cyan]")
+    except (KeyboardInterrupt, EOFError):
+        answer = "[no response]"
+        console.print(f"[dim]{answer}[/dim]")
+    console.print()
+    return answer
 
 
 def _dispatch_spawn_with_ui(args: dict, root_node, store, client, config) -> str:
@@ -474,6 +492,8 @@ def run_agent(
                         elif item.name == "read_artifact":
                             output = dispatch_tool(item.name, args, root_node, artifact_store, client, config)
                             console.print(f"[dim]read_artifact({args.get('label')!r})[/dim]")
+                        elif item.name == "ask_user":
+                            output = _dispatch_ask_user(args)
                         else:
                             output = f"[unknown tool: {item.name}]"
                             console.print(f"[red]{output}[/red]")
