@@ -15,10 +15,10 @@ Requires **Python 3.10+** and an **OpenAI API key**.
 
 ```bash
 pip install jarv
-jarv /set api_key YOUR_OPENAI_API_KEY
+jarv /setup
 ```
 
-The API key can also be set via the `OPENAI_API_KEY` environment variable.
+The setup wizard will walk you through entering your API key and choosing a model. The key can also be set via the `OPENAI_API_KEY` environment variable or `jarv /set api_key ...`.
 
 To upgrade:
 
@@ -106,12 +106,11 @@ The terminal shows a live progress panel as children run, with a green checkmark
 | `/set <key> <value>` | Set a config value |
 | `/unset <key>` | Reset a config key to default |
 | `/config` | Show current settings |
+| `/setup` | Run the setup wizard |
 | `/new` | Start a fresh session on the next prompt |
 | `/archive` | Archive session history and artifacts |
 | `/sessions` | Browse sessions (interactive when in a TTY) |
 | `/sessions <id>` | Load a specific session by ID prefix |
-| `/load` | Load the most recently used session |
-| `/load <id>` | Load a specific session |
 | `/history` | Show recent conversation history |
 | `/undo [n]` | Remove last *n* exchanges (default 1) |
 | `/redo [n]` | Restore last *n* undone exchanges (default 1) |
