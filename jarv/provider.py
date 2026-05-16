@@ -111,7 +111,7 @@ PROVIDERS = {
         "base_url": None,
         "env_key": None,
         "key_url": None,
-        "label": "Ollama (local)",
+        "label": "Ollama",
         "litellm_prefix": "ollama",
     },
     "lm_studio": {
@@ -119,14 +119,14 @@ PROVIDERS = {
         "base_url": "http://localhost:1234/v1",
         "env_key": None,
         "key_url": None,
-        "label": "LM Studio (local)",
+        "label": "LM Studio",
     },
     "vllm": {
         "backend": "openai_compat",
         "base_url": "http://localhost:8000/v1",
         "env_key": None,
         "key_url": None,
-        "label": "vLLM (local)",
+        "label": "vLLM",
     },
 }
 

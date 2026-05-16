@@ -11,6 +11,10 @@ PANEL_BORDER_STYLE = "cyan"
 ACCENT_STYLE = "bold cyan"
 TITLE_STYLE = "bold bright_white"
 
+STEP_DOT_DONE = "\u25cf"
+STEP_DOT_ACTIVE = "\u25cf"
+STEP_DOT_PENDING = "\u25cb"
+
 
 def jarv_panel(body: RenderableType, title: str, subtitle: str | None = None, padding: tuple = (1, 2)) -> Panel:
     """Return a Panel using the shared jarv aesthetic."""
@@ -26,8 +30,21 @@ def jarv_panel(body: RenderableType, title: str, subtitle: str | None = None, pa
     )
 
 
-def section_rule(label: str) -> Rule:
-    return Rule(title=f"[{ACCENT_STYLE}]{label}[/{ACCENT_STYLE}]", style="bright_black", align="left")
+def section_rule(label: str, step: int | None = None, total: int | None = None) -> Rule:
+    if step is not None and total is not None:
+        dots = []
+        for i in range(1, total + 1):
+            if i < step:
+                dots.append(f"[green]{STEP_DOT_DONE}[/green]")
+            elif i == step:
+                dots.append(f"[bold cyan]{STEP_DOT_ACTIVE}[/bold cyan]")
+            else:
+                dots.append(f"[bright_black]{STEP_DOT_PENDING}[/bright_black]")
+        progress = " ".join(dots)
+        title_text = f"[{ACCENT_STYLE}]{label}[/{ACCENT_STYLE}]  {progress}"
+    else:
+        title_text = f"[{ACCENT_STYLE}]{label}[/{ACCENT_STYLE}]"
+    return Rule(title=title_text, style="bright_black", align="left")
 
 
 def status_line(prefix: str, message: str, prefix_style: str = "bold cyan", message_style: str = "") -> str:
@@ -46,8 +63,8 @@ def flatten_headings(text: str) -> str:
 def display_output(output: str) -> None:
     lines = output.splitlines()
     if len(lines) > DISPLAY_LINE_LIElastic License 2.0:
-        console.print("\n".join(lines[:DISPLAY_LINE_LIElastic License 2.0]), style="dim")
+        console.print("\n".join(lines[:DISPLAY_LINE_LIElastic License 2.0]), style="dim", markup=False)
         hidden = len(lines) - DISPLAY_LINE_LIElastic License 2.0
         console.print(f"[dim italic]... {hidden} more lines hidden (full output sent to model)[/dim italic]")
     else:
-        console.print(output, style="dim")
+        console.print(output, style="dim", markup=False)

@@ -15,16 +15,16 @@ class GoBack(Exception):
 
 PROVIDER_CHOICES = [
     ("openai", "OpenAI", "gpt-5.4-mini"),
-    ("openrouter", "OpenRouter (200+ models)", "anthropic/claude-sonnet-4.6"),
+    ("openrouter", "OpenRouter (200+ models)", "tencent/hy3-preview"),
     ("anthropic", "Anthropic", "claude-sonnet-4-6"),
     ("gemini", "Google Gemini", "gemini-3-flash-preview"),
     ("groq", "Groq", "openai/gpt-oss-120b"),
     ("deepseek", "DeepSeek", "deepseek-v4-flash"),
     ("together", "Together AI", "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"),
     ("fireworks", "Fireworks AI", "accounts/fireworks/models/kimi-k2p6"),
-    ("ollama", "Ollama (local)", "llama3.3"),
-    ("lm_studio", "LM Studio (local)", "local-model"),
-    ("vllm", "vLLM (local)", "local-model"),
+    ("ollama", "Ollama", "llama3.3"),
+    ("lm_studio", "LM Studio", "local-model"),
+    ("vllm", "vLLM", "local-model"),
 ]
 
 PROVIDER_MODELS = {
@@ -39,63 +39,22 @@ PROVIDER_MODELS = {
         ("claude-haiku-4-5", "Budget — fastest, cheapest"),
     ],
     "openrouter": [
-        # Anthropic
-        ("anthropic/claude-opus-4-7", "Anthropic — Claude Opus 4.7 (flagship)"),
-        ("anthropic/claude-sonnet-4-6", "Anthropic — Claude Sonnet 4.6 (balanced)"),
-        ("anthropic/claude-haiku-4-5", "Anthropic — Claude Haiku 4.5 (fast)"),
-        ("anthropic/claude-3-7-sonnet", "Anthropic — Claude 3.7 Sonnet (extended thinking)"),
-        ("anthropic/claude-3-5-sonnet", "Anthropic — Claude 3.5 Sonnet"),
-        ("anthropic/claude-3-opus", "Anthropic — Claude 3 Opus"),
-        # OpenAI
-        ("openai/gpt-5.5", "OpenAI — GPT-5.5 (flagship)"),
-        ("openai/gpt-5.4-mini", "OpenAI — GPT-5.4 Mini (balanced)"),
-        ("openai/gpt-4o", "OpenAI — GPT-4o"),
-        ("openai/gpt-4o-mini", "OpenAI — GPT-4o Mini"),
-        ("openai/o3", "OpenAI — o3 (reasoning)"),
-        ("openai/o4-mini", "OpenAI — o4 Mini (fast reasoning)"),
-        # Google Gemini
-        ("google/gemini-3.1-pro-preview", "Google — Gemini 3.1 Pro (2M context)"),
-        ("google/gemini-3-flash-preview", "Google — Gemini 3 Flash"),
-        ("google/gemini-2.5-pro-preview", "Google — Gemini 2.5 Pro"),
-        ("google/gemini-2.5-flash-preview", "Google — Gemini 2.5 Flash"),
-        ("google/gemini-2.0-flash", "Google — Gemini 2.0 Flash"),
-        # Meta Llama
-        ("meta-llama/llama-4-maverick", "Meta — Llama 4 Maverick (1M context)"),
-        ("meta-llama/llama-4-scout", "Meta — Llama 4 Scout (10M context)"),
-        ("meta-llama/llama-3.3-70b-instruct", "Meta — Llama 3.3 70B Instruct"),
-        ("meta-llama/llama-3.1-405b-instruct", "Meta — Llama 3.1 405B Instruct"),
-        ("meta-llama/llama-3.1-8b-instruct", "Meta — Llama 3.1 8B Instruct (fast)"),
-        # DeepSeek
-        ("deepseek/deepseek-v4-pro", "DeepSeek — V4 Pro (1M context)"),
-        ("deepseek/deepseek-v4-flash", "DeepSeek — V4 Flash (budget)"),
-        ("deepseek/deepseek-r1", "DeepSeek — R1 (reasoning)"),
-        ("deepseek/deepseek-r1-distill-llama-70b", "DeepSeek — R1 Distill Llama 70B"),
-        # Mistral
-        ("mistralai/mistral-large", "Mistral — Large (flagship)"),
-        ("mistralai/mistral-medium", "Mistral — Medium (balanced)"),
-        ("mistralai/mistral-small", "Mistral — Small (budget)"),
-        ("mistralai/codestral", "Mistral — Codestral (code)"),
-        ("mistralai/mixtral-8x22b-instruct", "Mistral — Mixtral 8x22B MoE"),
-        # Qwen
-        ("qwen/qwen3-235b-instruct", "Qwen — Qwen3 235B (flagship)"),
-        ("qwen/qwen-2.5-72b-instruct", "Qwen — Qwen 2.5 72B"),
-        ("qwen/qwq-32b", "Qwen — QwQ 32B (reasoning)"),
-        ("qwen/qwen-2.5-coder-32b-instruct", "Qwen — Qwen 2.5 Coder 32B"),
-        # xAI
-        ("x-ai/grok-3", "xAI — Grok 3 (flagship)"),
-        ("x-ai/grok-3-mini", "xAI — Grok 3 Mini (reasoning, budget)"),
-        # Together / open weights
-        ("together/deepseek-ai/DeepSeek-V4-Pro", "Together — DeepSeek V4 Pro"),
-        ("together/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8", "Together — Llama 4 Maverick FP8"),
-        # Cohere
-        ("cohere/command-r-plus", "Cohere — Command R+ (retrieval)"),
-        ("cohere/command-r7b", "Cohere — Command R7B (fast)"),
-        # Microsoft
-        ("microsoft/phi-4", "Microsoft — Phi-4 (small, capable)"),
-        ("microsoft/phi-4-multimodal-instruct", "Microsoft — Phi-4 Multimodal"),
-        # Fireworks
-        ("fireworks/accounts/fireworks/models/kimi-k2p6", "Fireworks — Kimi K2.6"),
-        ("fireworks/accounts/fireworks/models/minimax-m2p7", "Fireworks — MiniMax M2.7"),
+        # Top 15 by weekly token usage (openrouter.ai/models?order=top-weekly)
+        ("tencent/hy3-preview", "Tencent — Hunyuan H3 (Hy3) Preview"),
+        ("deepseek/deepseek-v4-flash", "DeepSeek — V4 Flash"),
+        ("anthropic/claude-opus-4.7", "Anthropic — Claude Opus 4.7"),
+        ("anthropic/claude-sonnet-4.6", "Anthropic — Claude Sonnet 4.6"),
+        ("moonshotai/kimi-k2.6", "MoonshotAI — Kimi K2.6"),
+        ("google/gemini-3-flash-preview", "Google — Gemini 3 Flash Preview"),
+        ("deepseek/deepseek-v3.2", "DeepSeek — V3.2"),
+        ("deepseek/deepseek-v4-pro", "DeepSeek — V4 Pro"),
+        ("minimax/minimax-m2.7", "MiniMax — M2.7"),
+        ("openrouter/owl-alpha", "OpenRouter — Owl Alpha"),
+        ("stepfun/step-3.5-flash", "StepFun — Step 3.5 Flash"),
+        ("nvidia/nemotron-3-super-120b-a12b:free", "NVIDIA — Nemotron 3 Super"),
+        ("anthropic/claude-opus-4.6", "Anthropic — Claude Opus 4.6"),
+        ("google/gemini-2.5-flash-lite", "Google — Gemini 2.5 Flash Lite"),
+        ("google/gemini-2.5-flash", "Google — Gemini 2.5 Flash"),
     ],
     "gemini": [
         ("gemini-3.1-pro-preview", "Flagship — Gemini 3.1 Pro, 2M context"),
@@ -124,6 +83,7 @@ PROVIDER_MODELS = {
 }
 
 SETUP_STEPS = {"provider", "key", "model", "base_url"}
+TOTAL_STEPS = 4
 
 
 # ---------------------------------------------------------------------------
@@ -169,17 +129,25 @@ def _show_env_instructions(provider_name: str) -> None:
 
 def setup_provider(config: dict) -> dict:
     console.print()
-    console.print(section_rule("Provider"))
+    console.print(section_rule("Provider", step=1, total=TOTAL_STEPS))
     console.print()
 
-    for i, (key, label, _) in enumerate(PROVIDER_CHOICES, 1):
-        default_tag = " [bold green](default)[/bold green]" if i == 1 else ""
-        console.print(f"  [bold cyan]{i:>2}.[/bold cyan] [bold]{label}[/bold]{default_tag}")
+    cloud_providers = [(i, k, l) for i, (k, l, _) in enumerate(PROVIDER_CHOICES, 1) if k not in LOCAL_PROVIDERS]
+    local_providers = [(i, k, l) for i, (k, l, _) in enumerate(PROVIDER_CHOICES, 1) if k in LOCAL_PROVIDERS]
+
+    for i, key, label in cloud_providers:
+        default_tag = " [green]← default[/green]" if i == 1 else ""
+        console.print(f"  [bold cyan]{i:>2}.[/bold cyan] {label}{default_tag}")
+
+    console.print()
+    console.print("  [dim]── Local ──[/dim]")
+    for i, key, label in local_providers:
+        console.print(f"  [bold cyan]{i:>2}.[/bold cyan] {label}")
     console.print()
 
     while True:
         choice = Prompt.ask(
-            "  Pick a provider [dim](number or name, Enter for default, b=back)[/dim]",
+            "  [bold]Pick a provider[/bold] [dim](number or name, b=back)[/dim]",
             default="1",
             console=console,
         ).strip()
@@ -202,10 +170,10 @@ def setup_api_key(config: dict) -> dict:
     provider_name = config.get("provider", "openai")
 
     console.print()
-    console.print(section_rule("API Key"))
+    console.print(section_rule("API Key", step=2, total=TOTAL_STEPS))
 
     if provider_name in LOCAL_PROVIDERS:
-        console.print(f"\n  [green]No API key needed[/green] for {PROVIDERS[provider_name]['label']}.")
+        console.print(f"\n  [green]✓[/green] No API key needed for {PROVIDERS[provider_name]['label']}.")
         return config
 
     env_key_name = PROVIDERS.get(provider_name, {}).get("env_key", "")
@@ -215,13 +183,13 @@ def setup_api_key(config: dict) -> dict:
         if env_key_name and os.environ.get(env_key_name, ""):
             source = f"from {env_key_name}"
         elif config.get("api_keys", {}).get(provider_name):
-            source = "from config (per-provider)"
+            source = "per-provider config"
         else:
-            source = "from config"
-        console.print(f"\n  [green]Found[/green] API key [dim]({masked}, {source})[/dim]")
+            source = "config"
+        console.print(f"\n  [green]✓[/green] Found key [dim]{masked}[/dim] [dim italic]({source})[/dim italic]")
         console.print()
         action = Prompt.ask(
-            "  Use existing key or enter a new one? [dim](b=back)[/dim]",
+            "  [bold]Use existing key or enter a new one?[/bold] [dim](b=back)[/dim]",
             choices=["use", "overwrite", "b"],
             default="use",
             console=console,
@@ -233,7 +201,7 @@ def setup_api_key(config: dict) -> dict:
             config.setdefault("api_keys", {})[provider_name] = api_key
     else:
         label = PROVIDERS.get(provider_name, {}).get("label", provider_name)
-        console.print(f"\n  [yellow]No API key found[/yellow] for {label}.")
+        console.print(f"\n  [yellow]![/yellow] No API key found for {label}.")
         console.print()
         api_key = _prompt_api_key(provider_name)
         config.setdefault("api_keys", {})[provider_name] = api_key
@@ -245,19 +213,19 @@ def setup_model(config: dict) -> dict:
     provider_name = config.get("provider", "openai")
 
     console.print()
-    console.print(section_rule("Model"))
+    console.print(section_rule("Model", step=3, total=TOTAL_STEPS))
     console.print()
 
     models = PROVIDER_MODELS.get(provider_name)
     if models:
         for i, (name, desc) in enumerate(models, 1):
-            default_tag = " [bold green](default)[/bold green]" if i == 1 else ""
-            console.print(f"  [bold cyan]{i}.[/bold cyan] [bold]{name}[/bold] — [dim]{desc}[/dim]{default_tag}")
+            default_tag = " [green]← default[/green]" if i == 1 else ""
+            console.print(f"  [bold cyan]{i}.[/bold cyan] [bold]{name}[/bold] [dim]— {desc}[/dim]{default_tag}")
         console.print()
 
         while True:
             model_choice = Prompt.ask(
-                "  Pick a model [dim](number or name, Enter for default, b=back)[/dim]",
+                "  [bold]Pick a model[/bold] [dim](number or name, b=back)[/dim]",
                 default="1",
                 console=console,
             ).strip()
@@ -287,7 +255,7 @@ def setup_model(config: dict) -> dict:
         console.print()
         while True:
             model_choice = Prompt.ask(
-                "  Model name [dim](Enter for default, b=back)[/dim]",
+                "  [bold]Model name[/bold] [dim](b=back)[/dim]",
                 default=default_model,
                 console=console,
             ).strip()
@@ -312,7 +280,7 @@ def setup_base_url(config: dict) -> dict:
         return config
 
     console.print()
-    console.print(section_rule("Base URL"))
+    console.print(section_rule("Base URL", step=4, total=TOTAL_STEPS))
 
     info = PROVIDERS.get(provider_name, {})
     default_url = info.get("base_url") or ""
@@ -331,7 +299,7 @@ def setup_base_url(config: dict) -> dict:
     console.print(f"  [dim]Default:[/dim] [bold]{display_default}[/bold]")
     console.print()
     url = Prompt.ask(
-        "  Base URL [dim](Enter for default, b=back)[/dim]",
+        "  [bold]Base URL[/bold] [dim](b=back)[/dim]",
         default=display_default,
         console=console,
     ).strip()
@@ -354,57 +322,53 @@ def test_connection(config: dict) -> bool:
         return False
 
     console.print()
-    console.print("  [dim]Testing connection...[/dim]", end="")
 
     try:
         backend = get_backend(config)
 
-        if provider_name in LOCAL_PROVIDERS:
-            import urllib.request
-            import urllib.error
-            base_url = config.get("base_url", "")
-            if not base_url:
-                info = PROVIDERS.get(provider_name, {})
-                base_url = info.get("base_url", "http://localhost:11434")
-            health_url = base_url.rstrip("/")
-            if "/v1" in health_url:
-                health_url = health_url.rsplit("/v1", 1)[0]
-            req = urllib.request.Request(health_url, method="GET")
-            urllib.request.urlopen(req, timeout=5)
-            console.print(" [bold green]connected![/bold green]")
-            return True
+        with console.status("  [dim]Testing connection...[/dim]", spinner="dots"):
+            if provider_name in LOCAL_PROVIDERS:
+                import urllib.request
+                import urllib.error
+                base_url = config.get("base_url", "")
+                if not base_url:
+                    info = PROVIDERS.get(provider_name, {})
+                    base_url = info.get("base_url", "http://localhost:11434")
+                health_url = base_url.rstrip("/")
+                if "/v1" in health_url:
+                    health_url = health_url.rsplit("/v1", 1)[0]
+                req = urllib.request.Request(health_url, method="GET")
+                urllib.request.urlopen(req, timeout=5)
 
-        if backend in ("responses", "openai_compat"):
-            client = create_client(config)
-            client.models.list()
-            console.print(" [bold green]connected![/bold green]")
-            return True
+            elif backend in ("responses", "openai_compat"):
+                client = create_client(config)
+                client.models.list()
 
-        if backend == "litellm":
-            import litellm
-            api_key = resolve_api_key(config)
-            model = config.get("model", "")
-            prefix = PROVIDERS.get(provider_name, {}).get("litellm_prefix")
-            litellm_model = f"{prefix}/{model}" if prefix and "/" not in model else model
-            litellm.completion(
-                model=litellm_model,
-                messages=[{"role": "user", "content": "hi"}],
-                max_tokens=1,
-                api_key=api_key,
-            )
-            console.print(" [bold green]connected![/bold green]")
-            return True
+            elif backend == "litellm":
+                import litellm
+                api_key = resolve_api_key(config)
+                model = config.get("model", "")
+                prefix = PROVIDERS.get(provider_name, {}).get("litellm_prefix")
+                litellm_model = f"{prefix}/{model}" if prefix and "/" not in model else model
+                litellm.completion(
+                    model=litellm_model,
+                    messages=[{"role": "user", "content": "hi"}],
+                    max_tokens=1,
+                    api_key=api_key,
+                )
+
+        console.print("  [green]✓[/green] [bold green]Connected![/bold green]")
+        return True
 
     except Exception as e:
         err = str(e)
         if len(err) > 120:
             err = err[:120] + "..."
-        console.print(f" [yellow]failed[/yellow]")
-        console.print(f"  [dim]{err}[/dim]")
-        console.print("  [dim]Your settings are saved — fix and retry with[/dim] [bold cyan]jarv /setup[/bold cyan]")
+        console.print(f"  [yellow]✗[/yellow] [yellow]Connection failed[/yellow]")
+        console.print(f"    [dim]{err}[/dim]")
+        console.print()
+        console.print("  [dim]Settings saved — fix the issue and run[/dim] [bold cyan]jarv /setup[/bold cyan]")
         return False
-
-    return False
 
 
 # ---------------------------------------------------------------------------
@@ -442,7 +406,8 @@ def run_setup_wizard(step: str | None = None) -> dict | None:
                 if step_idx > 0:
                     step_idx -= 1
                 else:
-                    console.print("  [dim]Already at the first step.[/dim]")
+                    console.print("\n[dim]Setup cancelled.[/dim]\n")
+                    return None
         save_config(config)
         test_connection(config)
     elif step == "provider":
@@ -475,9 +440,9 @@ def run_setup_wizard(step: str | None = None) -> dict | None:
         console.print(jarv_panel(
             Text.from_markup(
                 f"[bold green]You're all set![/bold green]\n\n"
-                f"  Provider  [bold]{provider_label}[/bold]\n"
-                f"  Model     [bold]{model}[/bold]\n\n"
-                f"[dim]Run [bold]jarv /config[/bold] to view settings or [bold]jarv /set <key> <value>[/bold] to change them.[/dim]"
+                f"  [dim]Provider[/dim]  [bold]{provider_label}[/bold]\n"
+                f"  [dim]Model   [/dim]  [bold]{model}[/bold]\n\n"
+                f"[dim]Type [bold]jarv[/bold] to start chatting, or [bold]jarv /config[/bold] to tweak settings.[/dim]"
             ),
             title="ready",
         ))
@@ -485,9 +450,9 @@ def run_setup_wizard(step: str | None = None) -> dict | None:
         console.print(jarv_panel(
             Text.from_markup(
                 f"[bold yellow]Almost there![/bold yellow]\n\n"
-                f"  Provider  [bold]{provider_label}[/bold]\n"
-                f"  API key   [bold red]missing[/bold red]\n"
-                f"  Model     [bold]{model}[/bold] [green]saved[/green]"
+                f"  [dim]Provider[/dim]  [bold]{provider_label}[/bold]\n"
+                f"  [dim]API key [/dim]  [bold red]missing[/bold red]\n"
+                f"  [dim]Model   [/dim]  [bold]{model}[/bold] [green]✓ saved[/green]"
             ),
             title="setup",
         ))
