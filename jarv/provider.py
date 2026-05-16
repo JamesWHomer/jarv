@@ -352,6 +352,7 @@ def _stream_chat_completions(
         model=model,
         messages=messages,
         stream=True,
+        stream_options={"include_usage": True},
     )
     if tools:
         kwargs["tools"] = _to_chat_tools(tools)
@@ -406,6 +407,7 @@ def _stream_litellm(
         model=litellm_model,
         messages=messages,
         stream=True,
+        stream_options={"include_usage": True},
     )
     if tools:
         kwargs["tools"] = _to_chat_tools(tools)
