@@ -8,9 +8,6 @@ from .config import load_config, validate_config
 from .display import console
 
 
-SLASH_COMMANDS = {"/help", "/about", "/update", "/new", "/archive", "/session", "/sessions", "/history", "/usage", "/set", "/unset", "/config", "/undo", "/redo", "/setup"}
-
-
 def _setup_nudge() -> None:
     """Print a one-line nudge if the env key is missing."""
     from .config import is_setup_complete
@@ -18,10 +15,8 @@ def _setup_nudge() -> None:
         console.print("[dim]Tip: run [bold cyan]jarv /setup[/bold cyan] to configure your API key and get started.[/dim]\n")
 
 
-def _run_slash_command(command: str, rest: list[str]) -> bool:
-    """Run a slash command. Returns True if handled, False if unknown."""
+def _lazy_commands():
     from .commands import (
-        _check_update_background,
         cmd_archive,
         cmd_new,
         cmd_config,
@@ -36,53 +31,57 @@ def _run_slash_command(command: str, rest: list[str]) -> bool:
         print_about,
         print_help,
     )
+    return {
+        "/setup":    (cmd_setup, False, True),
+        "/help":     (print_help, True, False),
+        "/about":    (print_about, True, False),
+        "/update":   (cmd_update, True, False),
+        "/new":      (cmd_new, True, False),
+        "/archive":  (cmd_archive, True, False),
+        "/session":  (cmd_sessions, True, True),
+        "/sessions": (cmd_sessions, True, True),
+        "/history":  (cmd_history, True, False),
+        "/usage":    (cmd_usage, True, False),
+        "/set":      (cmd_set, True, True),
+        "/unset":    (cmd_unset, True, True),
+        "/config":   (cmd_config, True, False),
+        "/undo":     (cmd_undo, True, True),
+        "/redo":     (cmd_redo, True, True),
+    }
 
-    # /setup is handled directly — no nudge needed
-    if command == "/setup":
-        cmd_setup()
-        return True
 
-    # For all other commands, nudge if setup is incomplete
-    _setup_nudge()
-
-    if command == "/help":
-        print_help()
-    elif command == "/about":
-        print_about()
-    elif command == "/update":
-        cmd_update()
-    elif command == "/new":
-        cmd_new()
-    elif command == "/archive":
-        cmd_archive()
-    elif command in {"/session", "/sessions"}:
-        cmd_sessions(rest)
-    elif command == "/history":
-        cmd_history()
-    elif command == "/usage":
-        cmd_usage()
-    elif command == "/set":
-        cmd_set(rest)
-    elif command == "/unset":
-        cmd_unset(rest)
-    elif command == "/config":
-        cmd_config()
-    elif command == "/undo":
-        cmd_undo(rest)
-    elif command == "/redo":
-        cmd_redo(rest)
-    else:
+def _run_slash_command(command: str, rest: list[str]) -> bool:
+    """Run a slash command. Returns True if handled, False if unknown."""
+    dispatch = _lazy_commands()
+    entry = dispatch.get(command)
+    if entry is None:
         return False
+
+    handler, needs_nudge, takes_rest = entry
+    if needs_nudge:
+        _setup_nudge()
+    if takes_rest:
+        handler(rest)
+    else:
+        handler()
     return True
 
 
-def cmd_setup() -> None:
-    """Run the interactive setup wizard."""
-    from .setup import run_setup_wizard
+def cmd_setup(rest: list[str] | None = None) -> dict | None:
+    """Run the interactive setup wizard. Returns config or None."""
+    from .setup import run_setup_wizard, SETUP_STEPS
+    step = None
+    if rest:
+        step = rest[0].lower().lstrip("-")
+        if step not in SETUP_STEPS:
+            console.print(f"[red]Unknown setup step '{step}'.[/red]")
+            console.print(f"[dim]Available: {', '.join(sorted(SETUP_STEPS))}[/dim]")
+            return None
     try:
-        run_setup_wizard()
+        return run_setup_wizard(step=step)
     except (EOFError, KeyboardInterrupt):
         console.print("\n[dim]Setup cancelled.[/dim]")
+        return None
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -127,13 +126,13 @@ def main() -> None:
         return
 
     # First-run: auto-trigger setup wizard if no config exists yet
-    from .config import CONFIG_FILE as _cf, is_setup_complete
-    if not _cf.exists():
-        cmd_setup()
-        if not is_setup_complete():
-            sys.exit(1)
-
     config = load_config()
+    from .config import is_setup_complete
+    if not is_setup_complete(config):
+        result = cmd_setup()
+        if result is None or not is_setup_complete(result):
+            sys.exit(1)
+        config = result
     if not validate_config(config):
         sys.exit(1)
 

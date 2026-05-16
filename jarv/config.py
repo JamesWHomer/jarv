@@ -18,6 +18,7 @@ DEFAULT_SYSTEM_PROMPT = (
 DEFAULT_CONFIG = {
     "provider": "openai",
     "api_key": "",
+    "api_keys": {},
     "base_url": "",
     "model": "gpt-5.4-mini",
     "reasoning_effort": "",
@@ -58,23 +59,30 @@ def load_config() -> dict:
             config[k] = v
             changed = True
 
+    # Migrate legacy flat api_key → per-provider api_keys
+    if config.get("api_key") and not config.get("api_keys"):
+        provider = config.get("provider", "openai")
+        config.setdefault("api_keys", {})[provider] = config["api_key"]
+        config["api_key"] = ""
+        changed = True
+
     if changed:
         save_config(config)
 
     return config
 
 
-def is_setup_complete() -> bool:
-    import os
-    from .provider import PROVIDERS, LOCAL_PROVIDERS, resolve_api_key
+def is_setup_complete(config: dict | None = None) -> bool:
+    from .provider import LOCAL_PROVIDERS, resolve_api_key
 
-    if CONFIG_FILE.exists():
-        try:
-            config = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+    if config is None:
+        if CONFIG_FILE.exists():
+            try:
+                config = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                config = {}
+        else:
             config = {}
-    else:
-        config = {}
 
     provider = config.get("provider", "openai")
     if provider in LOCAL_PROVIDERS:

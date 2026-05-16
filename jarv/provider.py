@@ -132,16 +132,28 @@ PROVIDERS = {
 
 LOCAL_PROVIDERS = {"ollama", "lm_studio", "vllm"}
 
+KEY_PATTERNS: dict[str, str] = {
+    "openai": r"^sk-.{20,}",
+    "anthropic": r"^sk-ant-.{20,}",
+    "openrouter": r"^sk-or-.{20,}",
+}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 def resolve_api_key(config: dict) -> str:
+    provider_name = config.get("provider", "openai")
+    # Per-provider key takes priority
+    per_provider = config.get("api_keys", {}).get(provider_name, "")
+    if per_provider:
+        return per_provider
+    # Legacy flat key
     key = config.get("api_key", "")
     if key:
         return key
-    provider_name = config.get("provider", "openai")
+    # Environment variable
     info = PROVIDERS.get(provider_name, {})
     env_key = info.get("env_key")
     if env_key:

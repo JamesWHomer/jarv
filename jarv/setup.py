@@ -1,11 +1,12 @@
 import os
+import re
 import sys
 
 from rich.prompt import Prompt
 from rich.text import Text
 
 from .display import console, jarv_panel, section_rule
-from .provider import PROVIDERS, LOCAL_PROVIDERS
+from .provider import PROVIDERS, LOCAL_PROVIDERS, KEY_PATTERNS
 
 
 PROVIDER_CHOICES = [
@@ -64,6 +65,12 @@ PROVIDER_MODELS = {
     ],
 }
 
+SETUP_STEPS = {"provider", "key", "model", "base_url"}
+
+
+# ---------------------------------------------------------------------------
+# Shell / env helpers
+# ---------------------------------------------------------------------------
 
 def _detect_shell_and_profile() -> tuple[str, str, str]:
     if sys.platform == "win32":
@@ -98,22 +105,11 @@ def _show_env_instructions(provider_name: str) -> None:
     console.print()
 
 
-def run_setup_wizard() -> dict | None:
-    """Run the interactive setup wizard. Returns updated config or None if the
-    user needs to set their env var first."""
-    from .config import load_config, save_config
-    from .provider import resolve_api_key
+# ---------------------------------------------------------------------------
+# Individual setup steps
+# ---------------------------------------------------------------------------
 
-    console.print()
-    console.print(jarv_panel(
-        Text.from_markup(
-            "[bold]Welcome to jarv![/bold]\n\n"
-            "Let's get you set up. This will only take a moment."
-        ),
-        title="setup",
-    ))
-
-    # --- Provider ---
+def setup_provider(config: dict) -> dict:
     console.print()
     console.print(section_rule("Provider"))
     console.print()
@@ -123,38 +119,68 @@ def run_setup_wizard() -> dict | None:
         console.print(f"  [bold cyan]{i:>2}.[/bold cyan] [bold]{label}[/bold]{default_tag}")
     console.print()
 
-    choice = Prompt.ask(
-        "  Pick a provider [dim](number or name, Enter for default)[/dim]",
-        default="1",
-        console=console,
-    ).strip()
+    while True:
+        choice = Prompt.ask(
+            "  Pick a provider [dim](number or name, Enter for default)[/dim]",
+            default="1",
+            console=console,
+        ).strip()
 
-    provider_name = _resolve_provider(choice)
-    config = load_config()
+        provider_name = _resolve_provider(choice)
+        if provider_name is not None:
+            break
+        console.print(f"  [red]Unknown provider '{choice}'. Please pick again.[/red]")
+
     config["provider"] = provider_name
+    return config
 
-    # --- API key ---
+
+def setup_api_key(config: dict) -> dict:
+    from .provider import resolve_api_key
+
+    provider_name = config.get("provider", "openai")
+
     console.print()
     console.print(section_rule("API Key"))
 
     if provider_name in LOCAL_PROVIDERS:
         console.print(f"\n  [green]No API key needed[/green] for {PROVIDERS[provider_name]['label']}.")
-    else:
-        config_snapshot = {**config, "provider": provider_name}
-        env_key_name = PROVIDERS.get(provider_name, {}).get("env_key", "")
-        api_key = resolve_api_key(config_snapshot)
-        if api_key:
-            masked = api_key[:7] + "..." + api_key[-4:] if len(api_key) > 11 else "***"
-            source = f"from {env_key_name}" if env_key_name and os.environ.get(env_key_name, "") else "from config"
-            console.print(f"\n  [green]Found[/green] API key [dim]({masked}, {source})[/dim]")
-        else:
-            label = PROVIDERS.get(provider_name, {}).get("label", provider_name)
-            console.print(f"\n  [yellow]No API key found[/yellow] for {label}.")
-            console.print()
-            api_key = _prompt_api_key(provider_name)
-            config["api_key"] = api_key
+        return config
 
-    # --- Model ---
+    env_key_name = PROVIDERS.get(provider_name, {}).get("env_key", "")
+    api_key = resolve_api_key(config)
+    if api_key:
+        masked = api_key[:7] + "..." + api_key[-4:] if len(api_key) > 11 else "***"
+        if env_key_name and os.environ.get(env_key_name, ""):
+            source = f"from {env_key_name}"
+        elif config.get("api_keys", {}).get(provider_name):
+            source = "from config (per-provider)"
+        else:
+            source = "from config"
+        console.print(f"\n  [green]Found[/green] API key [dim]({masked}, {source})[/dim]")
+        console.print()
+        action = Prompt.ask(
+            "  Use existing key or enter a new one?",
+            choices=["use", "overwrite"],
+            default="use",
+            console=console,
+        )
+        if action == "overwrite":
+            api_key = _prompt_api_key(provider_name)
+            config.setdefault("api_keys", {})[provider_name] = api_key
+    else:
+        label = PROVIDERS.get(provider_name, {}).get("label", provider_name)
+        console.print(f"\n  [yellow]No API key found[/yellow] for {label}.")
+        console.print()
+        api_key = _prompt_api_key(provider_name)
+        config.setdefault("api_keys", {})[provider_name] = api_key
+
+    return config
+
+
+def setup_model(config: dict) -> dict:
+    provider_name = config.get("provider", "openai")
+
     console.print()
     console.print(section_rule("Model"))
     console.print()
@@ -165,12 +191,27 @@ def run_setup_wizard() -> dict | None:
             default_tag = " [bold green](default)[/bold green]" if i == 1 else ""
             console.print(f"  [bold cyan]{i}.[/bold cyan] [bold]{name}[/bold] — [dim]{desc}[/dim]{default_tag}")
         console.print()
-        model_choice = Prompt.ask(
-            "  Pick a model [dim](number or name, Enter for default)[/dim]",
-            default="1",
-            console=console,
-        ).strip()
-        model = _resolve_model(provider_name, model_choice)
+
+        while True:
+            model_choice = Prompt.ask(
+                "  Pick a model [dim](number or name, Enter for default)[/dim]",
+                default="1",
+                console=console,
+            ).strip()
+            model = _resolve_model(provider_name, model_choice)
+            if model is not None:
+                break
+            try:
+                int(model_choice)
+                console.print(f"  [red]Invalid number. Please pick again.[/red]")
+                continue
+            except ValueError:
+                pass
+            console.print(f"  [yellow]Model '{model_choice}' not found.[/yellow] Are you sure it's correct?")
+            confirm = Prompt.ask("  ", choices=["continue", "retry"], default="retry", console=console)
+            if confirm == "continue":
+                model = model_choice
+                break
     else:
         default_model = next(
             (m for k, _, m in PROVIDER_CHOICES if k == provider_name),
@@ -179,19 +220,177 @@ def run_setup_wizard() -> dict | None:
         provider_label = PROVIDERS.get(provider_name, {}).get("label", provider_name)
         console.print(f"  [dim]Default for {provider_label}:[/dim] [bold]{default_model}[/bold]")
         console.print()
-        model_choice = Prompt.ask(
-            "  Model name [dim](Enter for default)[/dim]",
-            default=default_model,
-            console=console,
-        ).strip()
-        model = model_choice or default_model
+        while True:
+            model_choice = Prompt.ask(
+                "  Model name [dim](Enter for default)[/dim]",
+                default=default_model,
+                console=console,
+            ).strip()
+            model = model_choice or default_model
+            if _is_known_litellm_model(model):
+                break
+            console.print(f"  [yellow]Model '{model}' not found.[/yellow] Are you sure it's correct?")
+            confirm = Prompt.ask("  ", choices=["continue", "retry"], default="retry", console=console)
+            if confirm == "continue":
+                break
 
     config["model"] = model
-    save_config(config)
+    return config
 
-    # --- Done ---
+
+def setup_base_url(config: dict) -> dict:
+    provider_name = config.get("provider", "openai")
+
+    if provider_name not in LOCAL_PROVIDERS:
+        return config
+
     console.print()
+    console.print(section_rule("Base URL"))
+
+    info = PROVIDERS.get(provider_name, {})
+    default_url = info.get("base_url") or ""
+
+    if provider_name == "ollama":
+        default_url = default_url or "http://localhost:11434"
+    elif provider_name == "lm_studio":
+        default_url = default_url or "http://localhost:1234/v1"
+    elif provider_name == "vllm":
+        default_url = default_url or "http://localhost:8000/v1"
+
+    current = config.get("base_url", "")
+    display_default = current or default_url
+
+    console.print()
+    console.print(f"  [dim]Default:[/dim] [bold]{display_default}[/bold]")
+    console.print()
+    url = Prompt.ask(
+        "  Base URL [dim](Enter for default)[/dim]",
+        default=display_default,
+        console=console,
+    ).strip()
+
+    config["base_url"] = url or display_default
+    return config
+
+
+def test_connection(config: dict) -> bool:
+    from .provider import resolve_api_key, create_client, get_backend
+
+    provider_name = config.get("provider", "openai")
+    needs_key = provider_name not in LOCAL_PROVIDERS
+    has_key = bool(resolve_api_key(config)) if needs_key else True
+
+    if needs_key and not has_key:
+        return False
+
+    console.print()
+    console.print("  [dim]Testing connection...[/dim]", end="")
+
+    try:
+        backend = get_backend(config)
+
+        if provider_name in LOCAL_PROVIDERS:
+            import urllib.request
+            import urllib.error
+            base_url = config.get("base_url", "")
+            if not base_url:
+                info = PROVIDERS.get(provider_name, {})
+                base_url = info.get("base_url", "http://localhost:11434")
+            health_url = base_url.rstrip("/")
+            if "/v1" in health_url:
+                health_url = health_url.rsplit("/v1", 1)[0]
+            req = urllib.request.Request(health_url, method="GET")
+            urllib.request.urlopen(req, timeout=5)
+            console.print(" [bold green]connected![/bold green]")
+            return True
+
+        if backend in ("responses", "openai_compat"):
+            client = create_client(config)
+            client.models.list()
+            console.print(" [bold green]connected![/bold green]")
+            return True
+
+        if backend == "litellm":
+            import litellm
+            api_key = resolve_api_key(config)
+            model = config.get("model", "")
+            prefix = PROVIDERS.get(provider_name, {}).get("litellm_prefix")
+            litellm_model = f"{prefix}/{model}" if prefix and "/" not in model else model
+            litellm.completion(
+                model=litellm_model,
+                messages=[{"role": "user", "content": "hi"}],
+                max_tokens=1,
+                api_key=api_key,
+            )
+            console.print(" [bold green]connected![/bold green]")
+            return True
+
+    except Exception as e:
+        err = str(e)
+        if len(err) > 120:
+            err = err[:120] + "..."
+        console.print(f" [yellow]failed[/yellow]")
+        console.print(f"  [dim]{err}[/dim]")
+        console.print("  [dim]Your settings are saved — fix and retry with[/dim] [bold cyan]jarv /setup[/bold cyan]")
+        return False
+
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Full wizard
+# ---------------------------------------------------------------------------
+
+def run_setup_wizard(step: str | None = None) -> dict | None:
+    """Run the interactive setup wizard.
+
+    If *step* is given, run only that step (provider, key, model, base_url).
+    Returns updated config on success, None if cancelled/incomplete.
+    """
+    from .config import load_config, save_config
+    from .provider import resolve_api_key
+
+    config = load_config()
+
+    if step is None:
+        console.print()
+        console.print(jarv_panel(
+            Text.from_markup(
+                "[bold]Welcome to jarv![/bold]\n\n"
+                "Let's get you set up. This will only take a moment."
+            ),
+            title="setup",
+        ))
+
+        config = setup_provider(config)
+        config = setup_api_key(config)
+        config = setup_model(config)
+        config = setup_base_url(config)
+        save_config(config)
+        test_connection(config)
+    elif step == "provider":
+        config = setup_provider(config)
+        save_config(config)
+    elif step == "key":
+        config = setup_api_key(config)
+        save_config(config)
+    elif step == "model":
+        config = setup_model(config)
+        save_config(config)
+    elif step == "base_url":
+        config = setup_base_url(config)
+        save_config(config)
+        test_connection(config)
+    else:
+        console.print(f"  [red]Unknown setup step '{step}'.[/red]")
+        console.print(f"  [dim]Available: provider, key, model, base_url[/dim]")
+        return config
+
+    # --- Done summary ---
+    console.print()
+    provider_name = config.get("provider", "openai")
     provider_label = PROVIDERS.get(provider_name, {}).get("label", provider_name)
+    model = config.get("model", "")
     needs_key = provider_name not in LOCAL_PROVIDERS
     has_key = bool(resolve_api_key(config)) if needs_key else True
 
@@ -215,10 +414,15 @@ def run_setup_wizard() -> dict | None:
             ),
             title="setup",
         ))
+        _show_env_instructions(provider_name)
     console.print()
 
     return config
 
+
+# ---------------------------------------------------------------------------
+# Input helpers
+# ---------------------------------------------------------------------------
 
 def _prompt_api_key(provider_name: str) -> str:
     label = PROVIDERS.get(provider_name, {}).get("label", provider_name)
@@ -228,33 +432,65 @@ def _prompt_api_key(provider_name: str) -> str:
         console.print()
     while True:
         key = Prompt.ask(f"  Enter your {label} API key", console=console).strip()
-        if len(key) > 5:
-            return key
-        console.print("  [red]That doesn't look like a valid key[/red]")
+        if len(key) <= 5:
+            console.print("  [red]That doesn't look like a valid key.[/red]")
+            continue
+        pattern = KEY_PATTERNS.get(provider_name)
+        if pattern and not re.match(pattern, key):
+            expected_prefix = pattern.split(".")[0].replace("^", "").replace("\\", "")
+            console.print(f"  [yellow]Key doesn't match expected format for {label} (expected prefix '{expected_prefix}').[/yellow]")
+            use_anyway = Prompt.ask("  Use anyway?", choices=["y", "n"], default="n", console=console)
+            if use_anyway == "n":
+                continue
+        return key
 
 
-def _resolve_provider(choice: str) -> str:
+def _resolve_provider(choice: str) -> str | None:
     try:
         idx = int(choice)
         if 1 <= idx <= len(PROVIDER_CHOICES):
             return PROVIDER_CHOICES[idx - 1][0]
+        return None
     except ValueError:
         pass
+    needle = choice.lower().replace(" ", "").replace("_", "")
     for key, label, _ in PROVIDER_CHOICES:
-        if choice.lower() in (key.lower(), label.lower()):
+        if needle in (key.lower(), label.lower()):
             return key
-    return PROVIDER_CHOICES[0][0]
+    for key, label, _ in PROVIDER_CHOICES:
+        key_norm = key.lower().replace("_", "")
+        label_norm = label.lower().replace(" ", "").replace("_", "")
+        if needle in key_norm or needle in label_norm or key_norm.startswith(needle):
+            return key
+    return None
 
 
-def _resolve_model(provider_name: str, choice: str) -> str:
+def _is_known_litellm_model(model_name: str) -> bool:
+    try:
+        import json
+        from importlib.resources import files
+        data = json.loads(
+            files("litellm")
+            .joinpath("model_prices_and_context_window_backup.json")
+            .read_text(encoding="utf-8")
+        )
+        return model_name in data
+    except Exception:
+        return False
+
+
+def _resolve_model(provider_name: str, choice: str) -> str | None:
     models = PROVIDER_MODELS.get(provider_name, [])
     try:
         idx = int(choice)
         if 1 <= idx <= len(models):
             return models[idx - 1][0]
+        return None
     except ValueError:
         pass
     for name, _ in models:
         if choice.lower() == name.lower():
             return name
-    return models[0][0] if models else choice
+    if _is_known_litellm_model(choice):
+        return choice
+    return None
