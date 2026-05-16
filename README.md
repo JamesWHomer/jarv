@@ -169,4 +169,4 @@ All state is stored in `~/.jarv/` (on Windows, `%USERPROFILE%\.jarv\`):
 
 ## License
 
-Elastic License 2.0
+[Elastic License 2.0 (ELv2)](LICENSE) — free to use, modify, and redistribute. You may not offer jarv as a hosted/managed service.
