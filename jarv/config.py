@@ -12,7 +12,7 @@ DEFAULT_SYSTEM_PROMPT = (
     "You can run shell commands when needed to answer questions or complete tasks. "
     "Be concise and direct. "
     "When the user asks about jarv commands, behavior, config, updating, or usage, "
-    "run `jarv help` before answering. Do not invent unsupported commands."
+    "run `jarv /help` before answering. Do not invent unsupported commands."
 )
 
 DEFAULT_CONFIG = {
