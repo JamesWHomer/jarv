@@ -67,6 +67,41 @@ def _run_slash_command(command: str, rest: list[str]) -> bool:
     return True
 
 
+def _maybe_command(first_word: str, rest: list[str]) -> tuple[bool, str, list[str]] | None:
+    """Check if the first word looks like a slash command without the slash.
+
+    Only prompts when usage matches the command signature: commands that don't
+    take arguments only match when used alone, commands that take arguments
+    match regardless.
+
+    Returns (is_command, command, rest) if the user confirms it's a command,
+    None if they want to treat it as a regular message.
+    """
+    name = first_word.lower()
+    dispatch = _lazy_commands()
+    entry = dispatch.get(f"/{name}")
+    if entry is None:
+        return None
+
+    _, _, takes_rest = entry
+    if not takes_rest and rest:
+        return None
+
+    full_input = " ".join([first_word] + rest) if rest else first_word
+    console.print(f"\n[yellow]Did you mean the command [bold]/{name}[/bold] or a message to jarv?[/yellow]")
+    console.print(f"  [bold]1.[/bold] Run command [cyan]/{name}[/cyan]")
+    console.print(f"  [bold]2.[/bold] Send as message: [dim]{full_input}[/dim]")
+
+    try:
+        choice = console.input("[bold yellow]>[/bold yellow] ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+
+    if choice == "1":
+        return (True, f"/{name}", rest)
+    return None
+
+
 def cmd_setup(rest: list[str] | None = None) -> dict | None:
     """Run the interactive setup wizard. Returns config or None."""
     from .setup import run_setup_wizard, SETUP_STEPS
@@ -124,6 +159,15 @@ def main() -> None:
             console.print(f"[red]Unknown command:[/red] {command}")
             console.print("[dim]Run [bold]jarv /help[/bold] for a list of commands.[/dim]")
         return
+
+    # Check if user typed a command name without the slash (e.g. "jarv set" instead of "jarv /set")
+    if query_parts and not query_parts[0].startswith("/"):
+        result = _maybe_command(query_parts[0], query_parts[1:])
+        if result is not None:
+            _, command, rest = result
+            if not _run_slash_command(command, rest):
+                console.print(f"[red]Unknown command:[/red] {command}")
+            return
 
     # First-run: auto-trigger setup wizard if no config exists yet
     config = load_config()
@@ -199,6 +243,15 @@ def run_heads_up_mode(config: dict, client) -> None:
             if not _run_slash_command(command, parts[1:]):
                 console.print(f"[red]Unknown command:[/red] {command}")
                 console.print("[dim]Run [bold]/help[/bold] for a list of commands.[/dim]")
+            continue
+
+        # Check if user typed a command name without the slash
+        parts = query.split()
+        result = _maybe_command(parts[0], parts[1:])
+        if result is not None:
+            _, command, rest = result
+            if not _run_slash_command(command, rest):
+                console.print(f"[red]Unknown command:[/red] {command}")
             continue
 
         try:
