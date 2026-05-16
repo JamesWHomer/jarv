@@ -577,13 +577,13 @@ def run_agent(
         if propagate_keyboard_interrupt:
             raise
     except ProviderError as e:
-        console.print(f"[red]API error:[/red] {e}")
+        console.print(f"[red]API error:[/red] {escape(str(e))}")
         if not incognito:
             save_history(history[-max_history:], session_context.history_file)
         save_artifact_store(artifact_store, artifact_file)
         raise SystemExit(1)
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {e}")
+        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         if not incognito:
             save_history(history[-max_history:], session_context.history_file)
         save_artifact_store(artifact_store, artifact_file)
