@@ -58,7 +58,7 @@ Flags override config values for a single run and work in both one-shot and head
 
 | Flag | Short | Description |
 | --- | --- | --- |
-| `--model MODEL` | `-m` | Override the model (e.g. `gpt-4o`) |
+| `--model MODEL` | `-m` | Override the model (e.g. `gpt-5.4-mini`) |
 | `--effort EFFORT` | `-e` | Override reasoning effort (`low` / `medium` / `high`) |
 | `--timeout SECONDS` | | Override command timeout in seconds |
 | `--system PROMPT` | `-s` | Override the system prompt |
@@ -67,7 +67,7 @@ Flags override config values for a single run and work in both one-shot and head
 | `--version` | | Print the version and exit |
 
 ```bash
-jarv -m gpt-4o "summarise this repo"
+jarv -m gpt-5.4-mini "summarise this repo"
 jarv --effort high "refactor the auth module"
 jarv --new "start fresh without prior context"
 jarv --incognito "one-off task, leave no trace"
