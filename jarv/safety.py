@@ -422,6 +422,14 @@ def _live_audit_poll(body, audit_state: dict, *, auto_approve: bool = True) -> b
                     prefilled = True
                     live.refresh()
 
+                # Auto-approve: skip the prompt entirely when enabled and the
+                # auditor has finished with an allow decision.
+                if auto_approve and audit_state["done"] and audit_state["allow"] and prefilled:
+                    renderable.answered = True
+                    live.refresh()
+                    approved = True
+                    break
+
                 ch = _read_key()
                 if ch is not None:
                     if ch in ("\r", "\n"):
