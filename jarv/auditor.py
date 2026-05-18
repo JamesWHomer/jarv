@@ -126,17 +126,32 @@ def _call_openai_compat(
 
     client = OpenAI(**kwargs)
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
+    kwargs = {
+        "model": model,
+        "messages": [
             {"role": "system", "content": AUDITOR_SYSTEM_PROMPT},
             {"role": "user", "content": user_message},
         ],
-        temperature=0,
-        max_tokens=100,
-    )
+    }
+    if _uses_max_completion_tokens(config, model, info):
+        kwargs["max_completion_tokens"] = 100
+    else:
+        kwargs["temperature"] = 0
+        kwargs["max_tokens"] = 100
+
+    response = client.chat.completions.create(**kwargs)
 
     return _parse_response(response.choices[0].message.content or "")
+
+
+def _uses_max_completion_tokens(config: dict, model: str, info: dict) -> bool:
+    """Return True for OpenAI Chat models that reject max_tokens."""
+    provider = config.get("provider", "openai")
+    is_openai = provider == "openai" and not (config.get("base_url") or info.get("base_url"))
+    if not is_openai:
+        return False
+    model = model.lower()
+    return model.startswith(("gpt-5", "o1", "o3", "o4"))
 
 
 def _call_litellm(
