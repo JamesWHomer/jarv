@@ -983,6 +983,14 @@ def cmd_sessions(args: list | None = None) -> None:
             preview_cache[cache_key] = _build_preview_lines(sid, width)
         return preview_cache[cache_key]
 
+    def _append_bottom_footer(parts: list, term_h: int, footer: Text) -> None:
+        footer_rows = 2  # spacer + controls
+        target_rows_before_footer = max(0, term_h - 2 - footer_rows)
+        while len(parts) < target_rows_before_footer:
+            parts.append(Text(""))
+        parts.append(Text(""))
+        parts.append(footer)
+
     def _render_preview() -> Panel:
         nonlocal preview_offset
         term_h = console.size.height
@@ -1024,8 +1032,9 @@ def cmd_sessions(args: list | None = None) -> None:
 
         if show_footer:
             position = f"{start + 1}–{end} of {total}" if total else "0"
-            parts.append(Text(""))
-            parts.append(
+            _append_bottom_footer(
+                parts,
+                term_h,
                 Text(
                     _truncate(
                         f"↑↓ scroll   ←→ session   Enter load   p/Esc back   ·   {position}",
@@ -1034,7 +1043,7 @@ def cmd_sessions(args: list | None = None) -> None:
                     style="dim italic",
                     no_wrap=True,
                     overflow="crop",
-                )
+                ),
             )
 
         return Panel(
@@ -1047,6 +1056,7 @@ def cmd_sessions(args: list | None = None) -> None:
             box=box.ROUNDED,
             padding=(0, 1),
             width=panel_width,
+            height=term_h,
         )
 
     def _render() -> Panel:
@@ -1116,14 +1126,15 @@ def cmd_sessions(args: list | None = None) -> None:
             if status is not None:
                 parts.append(status)
             if show_footer:
-                parts.append(Text(""))
-                parts.append(
+                _append_bottom_footer(
+                    parts,
+                    term_h,
                     Text(
                         _truncate(_footer_text(), inner_width),
                         style="dim italic",
                         no_wrap=True,
                         overflow="crop",
-                    )
+                    ),
                 )
             return Panel(
                 Group(*parts),
@@ -1135,6 +1146,7 @@ def cmd_sessions(args: list | None = None) -> None:
                 box=box.ROUNDED,
                 padding=(0, 1),
                 width=panel_width,
+                height=term_h,
             )
 
         parts.append(
@@ -1225,14 +1237,15 @@ def cmd_sessions(args: list | None = None) -> None:
             parts.append(status)
 
         if show_footer:
-            parts.append(Text(""))
-            parts.append(
+            _append_bottom_footer(
+                parts,
+                term_h,
                 Text(
                     _truncate(_footer_text(), inner_width),
                     style="dim italic",
                     no_wrap=True,
                     overflow="crop",
-                )
+                ),
             )
 
         return Panel(
@@ -1245,6 +1258,7 @@ def cmd_sessions(args: list | None = None) -> None:
             box=box.ROUNDED,
             padding=(0, 1),
             width=panel_width,
+            height=term_h,
         )
 
     def _finalize_action(action: dict) -> None:
