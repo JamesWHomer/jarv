@@ -60,8 +60,8 @@ UPDATE_CHECK_INTERVAL_HOURS = 24
 def _read_key(text_mode: bool = False) -> str:
     """Read a single keypress and return a normalised token.
 
-    Returns one of: UP, DOWN, HOME, END, PAGEUP, PAGEDOWN, ENTER, ESC, TAB,
-    CTRL_F, BACKSPACE, or the raw character.  Raises KeyboardInterrupt on
+    Returns one of: UP, DOWN, LEFT, RIGHT, HOME, END, PAGEUP, PAGEDOWN,
+    ENTER, ESC, TAB, CTRL_F, BACKSPACE, or the raw character.  Raises KeyboardInterrupt on
     Ctrl-C.  When ``text_mode`` is True, the convenience q/Q → ESC mapping is
     disabled so a search query can include those letters.
     """
@@ -71,7 +71,7 @@ def _read_key(text_mode: bool = False) -> str:
         if ch in ("\x00", "\xe0"):
             second = msvcrt.getwch()
             return {
-                "H": "UP", "P": "DOWN",
+                "H": "UP", "P": "DOWN", "K": "LEFT", "M": "RIGHT",
                 "G": "HOME", "O": "END",
                 "I": "PAGEUP", "Q": "PAGEDOWN",
             }.get(second, "OTHER")
@@ -105,7 +105,7 @@ def _read_key(text_mode: bool = False) -> str:
                     if ch3 in ("5", "6"):
                         sys.stdin.read(1)  # consume trailing ~
                     return {
-                        "A": "UP", "B": "DOWN",
+                        "A": "UP", "B": "DOWN", "D": "LEFT", "C": "RIGHT",
                         "H": "HOME", "F": "END",
                         "5": "PAGEUP", "6": "PAGEDOWN",
                     }.get(ch3, "OTHER")
@@ -523,6 +523,81 @@ def unarchive_session_files(archived_history_path: Path, session_id: str) -> Pat
     return restored_history
 
 
+def _history_content_to_str(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        chunks: list[str] = []
+        for c in content:
+            if isinstance(c, dict):
+                if c.get("type") == "text" and isinstance(c.get("text"), str):
+                    chunks.append(c["text"])
+                elif "content" in c and isinstance(c["content"], str):
+                    chunks.append(c["content"])
+                else:
+                    chunks.append(f"[{c.get('type', 'item')}]")
+            else:
+                chunks.append(str(c))
+        return "\n".join(chunks)
+    return str(content)
+
+
+def _rendered_text_lines(renderable, width: int) -> list[Text]:
+    options = console.options.update(width=max(1, width))
+    rendered = console.render_lines(renderable, options, pad=False)
+    lines: list[Text] = []
+    for rendered_line in rendered:
+        line = Text(no_wrap=True, overflow="crop")
+        for segment in rendered_line:
+            if segment.text:
+                line.append(segment.text, style=segment.style)
+        lines.append(line)
+    return lines
+
+
+def _markdown_to_text_lines(content: str, width: int) -> list[Text]:
+    return _rendered_text_lines(Markdown(flatten_headings(content)), width)
+
+
+def _history_visual_lines(history: list, width: int) -> list[Text]:
+    lines: list[Text] = []
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role", "")).lower()
+        if role == "system":
+            continue
+        body = _history_content_to_str(item.get("content", "")).strip()
+        if not body:
+            continue
+        if role == "user":
+            for j, raw in enumerate(body.splitlines() or [""]):
+                t = Text(no_wrap=False, overflow="fold")
+                if j == 0:
+                    t.append("user: ", style="bold cyan")
+                else:
+                    t.append("  ")
+                t.append(raw, style="bold")
+                lines.extend(_rendered_text_lines(t, width))
+        elif role == "assistant":
+            lines.append(Text("jarv:", style="bold green", no_wrap=True, overflow="crop"))
+            lines.extend(_markdown_to_text_lines(body, width))
+        else:
+            label = role or "?"
+            for j, raw in enumerate(body.splitlines() or [""]):
+                t = Text(no_wrap=False, overflow="fold")
+                if j == 0:
+                    t.append(f"{label}: ", style="dim")
+                else:
+                    t.append("  ")
+                t.append(raw, style="dim")
+                lines.extend(_rendered_text_lines(t, width))
+        lines.append(Text(""))
+    if lines and lines[-1].plain == "":
+        lines.pop()
+    return lines
+
+
 def delete_session_files(history_path: Path) -> None:
     """Permanently remove history/artifacts/usage/redo files for a session."""
     for path in (
@@ -742,7 +817,7 @@ def cmd_sessions(args: list | None = None) -> None:
     offset = 0
     preview_sid: str | None = None
     preview_offset = 0
-    preview_cache: dict[str, list] = {}  # sid -> list[Text] of pre-built lines
+    preview_cache: dict[tuple[str, int], list[Text]] = {}  # (sid, width) -> pre-built visual lines
 
     def _truncate(value: str, width: int) -> str:
         if width <= 0:
@@ -878,7 +953,7 @@ def cmd_sessions(args: list | None = None) -> None:
         a_hint = "a unarchive" if (cur and cur["archived"]) else "a archive"
         find_hint = "^F edit search" if search_query else "^F find"
         parts = [
-            "↑↓ navigate", "Enter load", "p preview", "d delete",
+            "←→/↑↓ navigate", "Enter load", "p preview", "d delete",
             a_hint, f"Tab view: {view_mode}", find_hint,
         ]
         action = last_action
@@ -889,7 +964,7 @@ def cmd_sessions(args: list | None = None) -> None:
         parts.append("q cancel")
         return "   ".join(parts)
 
-    def _build_preview_lines(sid: str) -> list[Text]:
+    def _build_preview_lines(sid: str, width: int) -> list[Text]:
         meta = sessions.get(sid, {})
         hp_str = meta.get("history_file")
         if not hp_str:
@@ -900,58 +975,13 @@ def cmd_sessions(args: list | None = None) -> None:
         history = load_history(hp)
         if not history:
             return [Text("(empty conversation)", style="dim")]
+        return _history_visual_lines(history, width) or [Text("(empty conversation)", style="dim")]
 
-        def _content_to_str(content) -> str:
-            if isinstance(content, str):
-                return content
-            if isinstance(content, list):
-                parts: list[str] = []
-                for c in content:
-                    if isinstance(c, dict):
-                        if c.get("type") == "text" and isinstance(c.get("text"), str):
-                            parts.append(c["text"])
-                        elif "content" in c and isinstance(c["content"], str):
-                            parts.append(c["content"])
-                        else:
-                            parts.append(f"[{c.get('type', 'item')}]")
-                    else:
-                        parts.append(str(c))
-                return "\n".join(parts)
-            return str(content)
-
-        lines: list[Text] = []
-        for item in history:
-            if not isinstance(item, dict):
-                continue
-            role = str(item.get("role", "")).lower()
-            if role == "system":
-                continue
-            body = _content_to_str(item.get("content", "")).strip()
-            if not body:
-                continue
-            if role == "user":
-                label, label_style, body_style = "user", "bold cyan", "bold"
-            elif role == "assistant":
-                label, label_style, body_style = "jarv", "bold green", ""
-            else:
-                label, label_style, body_style = role or "?", "dim", "dim"
-            for j, raw in enumerate(body.splitlines() or [""]):
-                t = Text(no_wrap=False, overflow="fold")
-                if j == 0:
-                    t.append(f"{label}: ", style=label_style)
-                else:
-                    t.append("  ", style="")
-                t.append(raw, style=body_style)
-                lines.append(t)
-            lines.append(Text(""))
-        if lines and lines[-1].plain == "":
-            lines.pop()
-        return lines or [Text("(empty conversation)", style="dim")]
-
-    def _preview_lines(sid: str) -> list:
-        if sid not in preview_cache:
-            preview_cache[sid] = _build_preview_lines(sid)
-        return preview_cache[sid]
+    def _preview_lines(sid: str, width: int) -> list[Text]:
+        cache_key = (sid, width)
+        if cache_key not in preview_cache:
+            preview_cache[cache_key] = _build_preview_lines(sid, width)
+        return preview_cache[cache_key]
 
     def _render_preview() -> Panel:
         nonlocal preview_offset
@@ -964,7 +994,7 @@ def cmd_sessions(args: list | None = None) -> None:
         body_rows = max(1, term_h - 2 - 1 - (2 if show_footer else 0))
 
         sid = preview_sid or ""
-        all_lines = _preview_lines(sid)
+        all_lines = _preview_lines(sid, inner_width)
         total = len(all_lines)
         max_off = max(0, total - body_rows)
         if preview_offset > max_off:
@@ -998,7 +1028,7 @@ def cmd_sessions(args: list | None = None) -> None:
             parts.append(
                 Text(
                     _truncate(
-                        f"↑↓ scroll   Enter load   p/Esc back   ·   {position}",
+                        f"↑↓ scroll   ←→ session   Enter load   p/Esc back   ·   {position}",
                         inner_width,
                     ),
                     style="dim italic",
@@ -1382,6 +1412,18 @@ def cmd_sessions(args: list | None = None) -> None:
                 if key in ("p", "ESC"):
                     preview_sid = None
                     preview_offset = 0
+                elif key in ("LEFT", "RIGHT"):
+                    visible_now = _visible_rows_list()
+                    if visible_now:
+                        pos = next(
+                            (i for i, r in enumerate(visible_now) if r["sid"] == preview_sid),
+                            _selected_pos(visible_now),
+                        )
+                        delta = -1 if key == "LEFT" else 1
+                        pos = max(0, min(len(visible_now) - 1, pos + delta))
+                        preview_sid = visible_now[pos]["sid"]
+                        selected_sid = preview_sid
+                        preview_offset = 0
                 elif key == "UP":
                     preview_offset = max(0, preview_offset - 1)
                 elif key == "DOWN":
@@ -1393,7 +1435,7 @@ def cmd_sessions(args: list | None = None) -> None:
                 elif key == "HOME":
                     preview_offset = 0
                 elif key == "END":
-                    preview_offset = max(0, len(_preview_lines(preview_sid)) - 1)
+                    preview_offset = max(0, len(_preview_lines(preview_sid, max(1, console.size.width - 4))) - 1)
                 elif key == "ENTER":
                     row = next((r for r in rows if r["sid"] == preview_sid), None)
                     if row is not None:
@@ -1423,11 +1465,11 @@ def cmd_sessions(args: list | None = None) -> None:
             sel = _selected_pos(visible) if visible else 0
             cur = visible[sel] if visible else None
 
-            if key == "UP":
+            if key in ("UP", "LEFT"):
                 if visible:
                     selected_sid = visible[max(0, sel - 1)]["sid"]
                 ghost_sid = None
-            elif key == "DOWN":
+            elif key in ("DOWN", "RIGHT"):
                 if visible:
                     selected_sid = visible[min(n_vis - 1, sel + 1)]["sid"]
                 ghost_sid = None
@@ -1618,52 +1660,6 @@ def cmd_history() -> None:
         console.print(jarv_panel(Group(*parts), title="history", subtitle=f"{exchanges} exchange(s)"))
         return
 
-    def _content_to_str(content) -> str:
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            chunks: list[str] = []
-            for c in content:
-                if isinstance(c, dict):
-                    if c.get("type") == "text" and isinstance(c.get("text"), str):
-                        chunks.append(c["text"])
-                    elif "content" in c and isinstance(c["content"], str):
-                        chunks.append(c["content"])
-                    else:
-                        chunks.append(f"[{c.get('type', 'item')}]")
-                else:
-                    chunks.append(str(c))
-            return "\n".join(chunks)
-        return str(content)
-
-    lines: list[Text] = []
-    for item in history:
-        if not isinstance(item, dict):
-            continue
-        role = str(item.get("role", "")).lower()
-        if role == "system":
-            continue
-        body = _content_to_str(item.get("content", "")).strip()
-        if not body:
-            continue
-        if role == "user":
-            label, label_style, body_style = "user", "bold cyan", "bold"
-        elif role == "assistant":
-            label, label_style, body_style = "jarv", "bold green", ""
-        else:
-            label, label_style, body_style = role or "?", "dim", "dim"
-        for j, raw in enumerate(body.splitlines() or [""]):
-            t = Text(no_wrap=False, overflow="fold")
-            if j == 0:
-                t.append(f"{label}: ", style=label_style)
-            else:
-                t.append("  ")
-            t.append(raw, style=body_style)
-            lines.append(t)
-        lines.append(Text(""))
-    if lines and lines[-1].plain == "":
-        lines.pop()
-
     offset = 0
 
     def _body_rows() -> int:
@@ -1676,6 +1672,8 @@ def cmd_history() -> None:
         panel_width = max(1, term_w)
         show_footer = console.size.height >= 6
         body = _body_rows()
+        inner_width = max(1, panel_width - 4)
+        lines = _history_visual_lines(history, inner_width)
         total = len(lines)
         max_off = max(0, total - body)
         offset = max(0, min(offset, max_off))
@@ -1726,7 +1724,7 @@ def cmd_history() -> None:
                 key = _read_key()
             except KeyboardInterrupt:
                 break
-            total = len(lines)
+            total = len(_history_visual_lines(history, max(1, console.size.width - 4)))
             page = max(1, _body_rows() - 1)
             max_off = max(0, total - _body_rows())
             if key == "ESC":
