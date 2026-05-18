@@ -561,8 +561,9 @@ def _markdown_to_text_lines(content: str, width: int) -> list[Text]:
     return _rendered_text_lines(Markdown(flatten_headings(content)), width)
 
 
-def _history_visual_lines(history: list, width: int) -> list[Text]:
+def _history_visual_lines_and_anchors(history: list, width: int) -> tuple[list[Text], list[int]]:
     lines: list[Text] = []
+    anchors: list[int] = []
     for item in history:
         if not isinstance(item, dict):
             continue
@@ -572,6 +573,7 @@ def _history_visual_lines(history: list, width: int) -> list[Text]:
         body = _history_content_to_str(item.get("content", "")).strip()
         if not body:
             continue
+        start = len(lines)
         if role == "user":
             for j, raw in enumerate(body.splitlines() or [""]):
                 t = Text(no_wrap=False, overflow="fold")
@@ -594,9 +596,16 @@ def _history_visual_lines(history: list, width: int) -> list[Text]:
                     t.append("  ")
                 t.append(raw, style="dim")
                 lines.extend(_rendered_text_lines(t, width))
+        if len(lines) > start:
+            anchors.append(start)
         lines.append(Text(""))
     if lines and lines[-1].plain == "":
         lines.pop()
+    return lines, anchors
+
+
+def _history_visual_lines(history: list, width: int) -> list[Text]:
+    lines, _ = _history_visual_lines_and_anchors(history, width)
     return lines
 
 
@@ -1677,20 +1686,45 @@ def cmd_history() -> None:
         return
 
     offset = 0
-    lines_cache: dict[int, list[Text]] = {}
+    visual_cache: dict[int, tuple[list[Text], list[int]]] = {}
+
+    def _visual(width: int) -> tuple[list[Text], list[int]]:
+        width = max(1, width)
+        cached = visual_cache.get(width)
+        if cached is None:
+            cached = _history_visual_lines_and_anchors(history, width)
+            visual_cache[width] = cached
+        return cached
 
     def _lines(width: int) -> list[Text]:
-        width = max(1, width)
-        cached = lines_cache.get(width)
-        if cached is None:
-            cached = _history_visual_lines(history, width)
-            lines_cache[width] = cached
-        return cached
+        lines, _ = _visual(width)
+        return lines
+
+    def _anchors(width: int) -> list[int]:
+        _, anchors = _visual(width)
+        return anchors
 
     def _body_rows() -> int:
         term_h = console.size.height
         show_footer = term_h >= 6
         return max(1, term_h - 2 - (2 if show_footer else 0))  # panel border + footer
+
+    def _max_offset(width: int) -> int:
+        return max(0, len(_lines(width)) - _body_rows())
+
+    def _jump_to_message(delta: int) -> None:
+        nonlocal offset
+        width = max(1, console.size.width - 4)
+        anchors = _anchors(width)
+        if not anchors:
+            return
+        if delta < 0:
+            candidates = [anchor for anchor in anchors if anchor < offset]
+            target = candidates[-1] if candidates else anchors[0]
+        else:
+            candidates = [anchor for anchor in anchors if anchor > offset]
+            target = candidates[0] if candidates else anchors[-1]
+        offset = min(_max_offset(width), max(0, target))
 
     def _render() -> Panel:
         nonlocal offset
@@ -1721,7 +1755,7 @@ def cmd_history() -> None:
             parts.append(Text(""))
             parts.append(
                 Text(
-                    f"↑↓ scroll   PgUp/PgDn   Home/End   q exit   ·   {position}",
+                    f"←→ chat/reply   ↑↓ scroll   PgUp/PgDn   Home/End   q exit   ·   {position}",
                     style="dim italic",
                     no_wrap=True,
                     overflow="crop",
@@ -1755,7 +1789,8 @@ def cmd_history() -> None:
                 key = _read_key()
             except KeyboardInterrupt:
                 break
-            total = len(_lines(console.size.width - 4))
+            width = max(1, console.size.width - 4)
+            total = len(_lines(width))
             page = max(1, _body_rows() - 1)
             max_off = max(0, total - _body_rows())
             if key == "ESC":
@@ -1764,6 +1799,10 @@ def cmd_history() -> None:
                 offset = max(0, offset - 1)
             elif key == "DOWN":
                 offset = min(max_off, offset + 1)
+            elif key == "LEFT":
+                _jump_to_message(-1)
+            elif key == "RIGHT":
+                _jump_to_message(1)
             elif key == "PAGEUP":
                 offset = max(0, offset - page)
             elif key == "PAGEDOWN":

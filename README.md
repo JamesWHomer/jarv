@@ -144,6 +144,7 @@ Each terminal is automatically bound to its own session. Jarv identifies termina
 
 - `/new` starts a fresh session on the next prompt without archiving the current session.
 - `/sessions` opens an interactive browser (arrow keys to navigate, Enter to load, `a` to archive, `d` to delete, `p` to preview, `Tab` to switch views, Ctrl+F to search).
+- `/history` opens an interactive transcript where Up/Down scroll and Left/Right jump to the previous or next chat/reply.
 - `/undo` and `/redo` let you step through recent exchanges.
 
 ## Config
