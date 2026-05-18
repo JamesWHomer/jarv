@@ -191,7 +191,7 @@ def _dispatch_run_command_with_ui(args: dict, config: dict, history: list | None
         return msg
 
     safety_level = config.get("command_safety", "risky")
-    audit = config.get("audit", False)
+    audit = config.get("audit", True)
     allowed, denial = check_command(
         cmd, safety_level, audit=audit, config=config, history=history
     )

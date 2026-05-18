@@ -96,7 +96,7 @@ Before executing a shell command, jarv can prompt you for confirmation. The `com
 | `all` | Every command requires your explicit approval before running. |
 | `none` | Commands run immediately with no confirmation prompt. |
 
-Set the level during setup (`jarv /setup`) or at any time with:
+Set the level in the settings menu (`jarv /settings`) or at any time with:
 
 ```bash
 jarv /set command_safety risky    # default — confirm dangerous commands
@@ -123,7 +123,8 @@ The terminal shows a live progress panel as children run, with a green checkmark
 | `/about` | Detailed info and examples |
 | `/set <key> <value>` | Set a config value |
 | `/unset <key>` | Reset a config key to default |
-| `/config` | Show current settings |
+| `/settings` | Open the interactive settings menu |
+| `/config` | Show raw config values |
 | `/setup` | Run the setup wizard |
 | `/new` | Start a fresh session on the next prompt |
 | `/archive` | Archive session history and artifacts |
@@ -147,7 +148,7 @@ Each terminal is automatically bound to its own session. Jarv identifies termina
 
 ## Config
 
-Settings live in `~/.jarv/config.json` (created on first run). Edit the file directly or use `/set` and `/unset`.
+Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` for the common controls, or edit the file directly with `/set` and `/unset`.
 
 | Key | Default | Description |
 | --- | --- | --- |
@@ -157,6 +158,9 @@ Settings live in `~/.jarv/config.json` (created on first run). Edit the file dir
 | `max_history` | `40` | Number of recent messages kept as context. |
 | `command_timeout` | `60` | Seconds before a shell command is killed. |
 | `command_safety` | `"risky"` | Command confirmation level: `all` (confirm every command), `risky` (confirm dangerous commands only), `none` (no confirmation). |
+| `audit` | `true` | LLM auditor for flagged commands. |
+| `auditor_auto_approve` | `true` | Let the auditor auto-approve commands it deems safe. |
+| `auditor_model` | `""` | Auditor model. Empty uses the active `model`. |
 | `max_subagent_depth` | `4` | Maximum nesting depth for spawned subagents. |
 | `subagent_thread_pool_max_workers` | `8` | Max parallel subagents per `spawn` call. |
 | `check_updates` | `true` | Background update check on startup (non-blocking, throttled to once per 24h). |

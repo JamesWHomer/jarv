@@ -192,7 +192,8 @@ def print_help() -> None:
     cmd_table.add_row("jarv /usage", "Show token usage for this session")
     cmd_table.add_row("jarv /undo [n]", "Unsend the last n exchanges (default 1)")
     cmd_table.add_row("jarv /redo [n]", "Restore the last n undone exchanges (default 1)")
-    cmd_table.add_row("jarv /config", "Show current settings")
+    cmd_table.add_row("jarv /settings", "Open the interactive settings menu")
+    cmd_table.add_row("jarv /config", "Show raw config values")
     cmd_table.add_row("jarv /update", "Update jarv to the latest version")
     cmd_table.add_row("jarv /about", "Show detailed information about jarv")
     cmd_table.add_row("jarv /setup", "Run the setup wizard")
@@ -211,7 +212,7 @@ def print_help() -> None:
     key_table.add_row("command_safety", "Command confirmation level (all, risky, none)")
     key_table.add_row("audit", "LLM auditor for flagged commands (true/false)")
     key_table.add_row("auditor_auto_approve", "Let auditor auto-approve safe commands (true/false)")
-    key_table.add_row("auditor_model", "Model for auditor (empty = auto-select fast model)")
+    key_table.add_row("auditor_model", "Model for auditor (empty = active model)")
     key_table.add_row("system_prompt", "System prompt sent to the model")
     key_table.add_row("max_subagent_depth", "Max spawn depth for nested subagents")
     key_table.add_row("subagent_thread_pool_max_workers", "Parallel subagents per spawn call")
@@ -251,13 +252,14 @@ jarv is a command-line AI assistant that supports multiple AI providers includin
 - `jarv <question>` - Ask jarv anything. Your words after `jarv` are sent as the user message.
 - `jarv /help` - Show the short command overview. (`jarv help` also works as a permanent alias.)
 - `jarv /about` - Show this detailed overview.
-- `jarv /config` - Show current settings. The API key is masked.
+- `jarv /config` - Show raw config values. The API key is masked.
 - `jarv /set <key> <value>` - Set a config value. Values like `true`, `false`, integers, and floats are coerced.
 - `jarv /unset <key>` - Reset a default config key, or remove a custom key.
 - `jarv /history` - Show recent user and assistant messages.
 - `jarv /usage` - Show token usage for the current session.
 - `jarv /undo [n]` - Unsend the last n exchanges (default 1). The removed exchange is pushed onto a redo stack.
 - `jarv /redo [n]` - Restore the last n undone exchanges (default 1). Sending a new message clears the redo stack.
+- `jarv /settings` - Open an interactive settings menu for provider/model, command review, audit, runtime, and updates.
 - `jarv /new` - Start a fresh session on the next message.
 - `jarv /archive` - Archive this terminal's session history and start a fresh one on the next message.
 - `jarv /sessions` / `jarv /session` - List sessions by recency. In an interactive terminal you can scroll through all of them; when stdout is not a TTY (e.g. piped), only the 5 most recent are listed.
@@ -303,9 +305,9 @@ Keys:
 - `max_history` - Number of history items kept as context. Default: `{DEFAULT_CONFIG['max_history']}`.
 - `command_timeout` - Seconds before a shell command is killed. Default: `{DEFAULT_CONFIG['command_timeout']}`.
 - `command_safety` - Command confirmation level. `all` = confirm every command, `risky` = confirm only dangerous commands (destructive ops, privilege escalation, network exfil, etc.), `none` = no confirmation. Default: `risky`.
-- `audit` - When `true`, flagged commands are sent to a fast LLM auditor (uses extra tokens). The auditor's verdict appears inside the safety panel. Works with both `risky` and `all` safety levels. Default: `false`.
+- `audit` - When `true`, flagged commands are sent to a fast LLM auditor (uses extra tokens). The auditor's verdict appears inside the safety panel. Works with both `risky` and `all` safety levels. Default: `true`.
 - `auditor_auto_approve` - When `true`, the auditor auto-approves commands it deems safe. When `false`, the auditor only shows a recommendation and the user always decides. Default: `true`.
-- `auditor_model` - Model used for the auditor. Empty = auto-select a fast/cheap model for the current provider. Default: empty.
+- `auditor_model` - Model used for the auditor. Empty = use the active model. Default: empty.
 - `system_prompt` - Instructions sent to the model before each request.
 - `max_subagent_depth` - Maximum recursion depth for `spawn` (root is 0). Default: `{DEFAULT_CONFIG['max_subagent_depth']}`.
 - `subagent_thread_pool_max_workers` - Max parallel children in one `spawn` batch. Default: `{DEFAULT_CONFIG['subagent_thread_pool_max_workers']}`.
@@ -1675,19 +1677,30 @@ def cmd_history() -> None:
         return
 
     offset = 0
+    lines_cache: dict[int, list[Text]] = {}
+
+    def _lines(width: int) -> list[Text]:
+        width = max(1, width)
+        cached = lines_cache.get(width)
+        if cached is None:
+            cached = _history_visual_lines(history, width)
+            lines_cache[width] = cached
+        return cached
 
     def _body_rows() -> int:
         term_h = console.size.height
-        return max(1, term_h - 2 - 1 - 2)  # panel border + header + footer
+        show_footer = term_h >= 6
+        return max(1, term_h - 2 - (2 if show_footer else 0))  # panel border + footer
 
     def _render() -> Panel:
         nonlocal offset
         term_w = console.size.width
+        term_h = console.size.height
         panel_width = max(1, term_w)
-        show_footer = console.size.height >= 6
+        show_footer = term_h >= 6
         body = _body_rows()
         inner_width = max(1, panel_width - 4)
-        lines = _history_visual_lines(history, inner_width)
+        lines = _lines(inner_width)
         total = len(lines)
         max_off = max(0, total - body)
         offset = max(0, min(offset, max_off))
@@ -1701,6 +1714,9 @@ def cmd_history() -> None:
             parts.append(Text("  (empty)", style="dim"))
 
         if show_footer:
+            target_rows_before_footer = max(0, term_h - 2 - 2)
+            while len(parts) < target_rows_before_footer:
+                parts.append(Text(""))
             position = f"{start + 1}–{end} of {total}" if total else "0"
             parts.append(Text(""))
             parts.append(
@@ -1722,6 +1738,7 @@ def cmd_history() -> None:
             box=box.ROUNDED,
             padding=(0, 1),
             width=panel_width,
+            height=term_h,
         )
 
     with Live(
@@ -1738,7 +1755,7 @@ def cmd_history() -> None:
                 key = _read_key()
             except KeyboardInterrupt:
                 break
-            total = len(_history_visual_lines(history, max(1, console.size.width - 4)))
+            total = len(_lines(console.size.width - 4))
             page = max(1, _body_rows() - 1)
             max_off = max(0, total - _body_rows())
             if key == "ESC":
@@ -2001,6 +2018,866 @@ def cmd_config() -> None:
         table,
     )
     console.print(jarv_panel(body, title="config", subtitle=str(CONFIG_FILE)))
+
+
+_SETTINGS_SAFETY_CHOICES = (
+    ("risky", "flag risky"),
+    ("all", "confirm all"),
+    ("none", "no prompts"),
+)
+
+_SETTINGS_REASONING_CHOICES = (
+    ("", "off"),
+    ("minimal", "minimal"),
+    ("low", "low"),
+    ("medium", "medium"),
+    ("high", "high"),
+    ("xhigh", "xhigh"),
+)
+
+
+def _clip_text(value: str, width: int) -> str:
+    if width <= 0:
+        return ""
+    if len(value) <= width:
+        return value
+    if width <= 1:
+        return value[:width]
+    return value[: width - 1] + "\u2026"
+
+
+def _settings_choice_label(value, choices: tuple[tuple[str, str], ...]) -> str:
+    for key, label in choices:
+        if value == key:
+            return label
+    return str(value)
+
+
+def _settings_has_api_key(config: dict) -> tuple[bool, str]:
+    from .provider import LOCAL_PROVIDERS, PROVIDERS, resolve_api_key
+
+    provider = config.get("provider", "openai")
+    if provider in LOCAL_PROVIDERS:
+        return True, "not needed"
+    if resolve_api_key(config):
+        return True, "configured"
+    label = PROVIDERS.get(provider, {}).get("label", provider)
+    return False, f"missing for {label}"
+
+
+def _settings_rows(config: dict) -> list[dict]:
+    return [
+        {
+            "section": "account",
+            "label": "Provider",
+            "key": "provider",
+            "kind": "setup",
+            "step": "provider",
+            "desc": "choose an API provider",
+        },
+        {
+            "section": "account",
+            "label": "API key",
+            "key": "api_key",
+            "kind": "setup",
+            "step": "key",
+            "desc": "store or replace the active provider key",
+        },
+        {
+            "section": "account",
+            "label": "Model",
+            "key": "model",
+            "kind": "setup",
+            "step": "model",
+            "desc": "pick from the provider presets or enter a model",
+        },
+        {
+            "section": "account",
+            "label": "Base URL",
+            "key": "base_url",
+            "kind": "text",
+            "empty": "provider default",
+            "desc": "optional custom endpoint",
+        },
+        {
+            "section": "command review",
+            "label": "Command safety",
+            "key": "command_safety",
+            "kind": "choice",
+            "choices": _SETTINGS_SAFETY_CHOICES,
+            "desc": "default: flag only risky commands",
+        },
+        {
+            "section": "command review",
+            "label": "Auditor",
+            "key": "audit",
+            "kind": "bool",
+            "desc": "LLM reviews flagged commands first",
+        },
+        {
+            "section": "command review",
+            "label": "Audit auto-accept",
+            "key": "auditor_auto_approve",
+            "kind": "bool",
+            "desc": "auto-run commands the auditor marks safe",
+        },
+        {
+            "section": "command review",
+            "label": "Auditor model",
+            "key": "auditor_model",
+            "kind": "text",
+            "empty": "auto",
+            "desc": "empty uses the active model",
+        },
+        {
+            "section": "runtime",
+            "label": "Reasoning effort",
+            "key": "reasoning_effort",
+            "kind": "choice",
+            "choices": _SETTINGS_REASONING_CHOICES,
+            "desc": "optional effort hint",
+        },
+        {
+            "section": "runtime",
+            "label": "Command timeout",
+            "key": "command_timeout",
+            "kind": "int",
+            "desc": "seconds before shell commands are killed",
+        },
+        {
+            "section": "runtime",
+            "label": "History limit",
+            "key": "max_history",
+            "kind": "int",
+            "desc": "messages kept as context",
+        },
+        {
+            "section": "subagents",
+            "label": "Max depth",
+            "key": "max_subagent_depth",
+            "kind": "int",
+            "desc": "maximum nested spawn depth",
+        },
+        {
+            "section": "subagents",
+            "label": "Parallel workers",
+            "key": "subagent_thread_pool_max_workers",
+            "kind": "int",
+            "desc": "subagents per spawn batch",
+        },
+        {
+            "section": "updates",
+            "label": "Update checks",
+            "key": "check_updates",
+            "kind": "bool",
+            "desc": "background check on one-shot runs",
+        },
+    ]
+
+
+def _settings_value_text(row: dict, config: dict, *, selected: bool = False) -> Text:
+    from .provider import PROVIDERS
+
+    key = row["key"]
+    kind = row["kind"]
+    value = config.get(key, DEFAULT_CONFIG.get(key, ""))
+
+    if key == "provider":
+        label = PROVIDERS.get(value, {}).get("label", str(value))
+        return Text(label, style="bold magenta" if selected else "magenta")
+    if key == "api_key":
+        ok, label = _settings_has_api_key(config)
+        return Text(label, style=("bold green" if ok and selected else "green") if ok else "bold red")
+    if kind == "bool":
+        enabled = bool(value)
+        label = "on" if enabled else "off"
+        if enabled:
+            return Text(label, style="bold green" if selected else "green")
+        return Text(label, style="bold yellow" if selected else "yellow")
+    if kind == "choice":
+        label = _settings_choice_label(value, row["choices"])
+        style = "bold cyan" if selected else "cyan"
+        if key == "command_safety" and value == "none":
+            style = "bold red" if selected else "red"
+        elif key == "command_safety" and value == "all":
+            style = "bold yellow" if selected else "yellow"
+        return Text(label, style=style)
+    if kind == "int":
+        return Text(str(value), style="bold yellow" if selected else "yellow")
+    if kind == "text":
+        if value:
+            return Text(str(value), style="bold green" if selected else "green")
+        return Text(row.get("empty", "empty"), style="dim italic")
+    return Text(str(value), style="bold" if selected else "")
+
+
+def _settings_apply_quick(row: dict, config: dict) -> tuple[dict, str] | None:
+    key = row["key"]
+    kind = row["kind"]
+
+    if kind == "bool":
+        config[key] = not bool(config.get(key, DEFAULT_CONFIG.get(key, False)))
+        save_config(config)
+        state = "on" if config[key] else "off"
+        return config, f"saved {row['label']}: {state}"
+
+    if kind == "choice":
+        choices = row["choices"]
+        current = config.get(key, DEFAULT_CONFIG.get(key, choices[0][0]))
+        idx = next((i for i, (value, _) in enumerate(choices) if value == current), -1)
+        config[key] = choices[(idx + 1) % len(choices)][0]
+        save_config(config)
+        return config, f"saved {row['label']}: {_settings_choice_label(config[key], choices)}"
+
+    return None
+
+
+def _settings_reset_row(row: dict, config: dict) -> tuple[dict, str]:
+    key = row["key"]
+    if key == "api_key":
+        provider = config.get("provider", "openai")
+        changed = False
+        api_keys = config.get("api_keys")
+        if isinstance(api_keys, dict) and provider in api_keys:
+            api_keys.pop(provider, None)
+            changed = True
+        if config.get("api_key"):
+            config["api_key"] = ""
+            changed = True
+        if changed:
+            save_config(config)
+            return config, "cleared stored API key"
+        return config, "no stored API key"
+    if key not in DEFAULT_CONFIG:
+        return config, f"{row['label']} has no default"
+    config[key] = DEFAULT_CONFIG[key]
+    save_config(config)
+    return config, f"reset {row['label']}"
+
+
+def _settings_provider_choices() -> list[tuple[str, str, str]]:
+    from .setup import PROVIDER_CHOICES
+
+    return list(PROVIDER_CHOICES)
+
+
+def _settings_model_choices(config: dict) -> list[tuple[str, str]]:
+    from .setup import PROVIDER_MODELS
+
+    return list(PROVIDER_MODELS.get(config.get("provider", "openai"), []))
+
+
+def _settings_default_model(config: dict) -> str:
+    return _settings_default_model_for_provider(config.get("provider", "openai"))
+
+
+def _settings_default_model_for_provider(provider: str) -> str:
+    for key, _label, model in _settings_provider_choices():
+        if key == provider:
+            return model
+    return DEFAULT_CONFIG["model"]
+
+
+def _settings_resolve_provider(choice: str) -> str | None:
+    raw = choice.strip()
+    if not raw:
+        return None
+    try:
+        idx = int(raw)
+        choices = _settings_provider_choices()
+        if 1 <= idx <= len(choices):
+            return choices[idx - 1][0]
+        return None
+    except ValueError:
+        pass
+
+    lowered = raw.lower()
+    for key, label, _model in _settings_provider_choices():
+        compact_label = label.split("(", 1)[0].strip().lower()
+        if lowered in (key.lower(), label.lower(), compact_label):
+            return key
+    return None
+
+
+def _settings_resolve_model(config: dict, choice: str) -> str:
+    raw = choice.strip()
+    if not raw:
+        return str(config.get("model") or _settings_default_model(config))
+    models = _settings_model_choices(config)
+    try:
+        idx = int(raw)
+        if models and 1 <= idx <= len(models):
+            return models[idx - 1][0]
+    except ValueError:
+        pass
+    for name, _desc in models:
+        if raw.lower() == name.lower():
+            return name
+    return raw
+
+
+def _settings_choice_grid_lines(
+    items: list[tuple[int, str, str]],
+    inner_width: int,
+    *,
+    max_lines: int | None = None,
+    max_columns: int = 1,
+    more_hint: str = "type a number/name",
+) -> list[Text]:
+    if not items:
+        return []
+    if max_lines is not None and max_lines <= 0:
+        return []
+
+    indent = "  "
+    gap = "  "
+    usable_width = max(1, inner_width - len(indent))
+    if max_columns >= 3 and usable_width >= 96:
+        columns = 3
+    elif max_columns >= 2 and usable_width >= 58:
+        columns = 2
+    else:
+        columns = 1
+    columns = max(1, min(columns, max_columns, len(items)))
+    row_count = (len(items) + columns - 1) // columns
+    cell_width = max(8, (usable_width - (columns - 1) * len(gap)) // columns)
+
+    def _cell(idx: int, primary: str, secondary: str) -> str:
+        marker = f"{idx:>2}. "
+        body_width = max(1, cell_width - len(marker))
+        if not secondary or body_width < 18:
+            return marker + _clip_text(primary or secondary, body_width)
+
+        secondary_width = min(18, max(8, body_width // 3))
+        primary_width = max(1, body_width - secondary_width - 1)
+        if primary_width < 10:
+            return marker + _clip_text(primary, body_width)
+        return (
+            marker
+            + f"{_clip_text(primary, primary_width):<{primary_width}}"
+            + " "
+            + _clip_text(secondary, secondary_width)
+        )
+
+    rows: list[list[str]] = []
+    for row_idx in range(row_count):
+        cells: list[str] = []
+        for col_idx in range(columns):
+            item_idx = row_idx + col_idx * row_count
+            if item_idx < len(items):
+                cells.append(_cell(*items[item_idx]))
+        rows.append(cells)
+
+    hidden = 0
+    if max_lines is not None and len(rows) > max_lines:
+        visible_rows = max(0, max_lines - 1)
+        hidden = sum(len(row) for row in rows[visible_rows:])
+        rows = rows[:visible_rows]
+
+    lines = [
+        Text(_clip_text(indent + gap.join(cells), inner_width), style="dim", no_wrap=True, overflow="crop")
+        for cells in rows
+    ]
+    if hidden:
+        label = "option" if hidden == 1 else "options"
+        lines.append(Text(_clip_text(f"  ... {hidden} more {label}; {more_hint}", inner_width), style="dim"))
+    return lines
+
+
+def _settings_begin_edit(row: dict, config: dict) -> dict:
+    key = row["key"]
+    buffer = ""
+    if row["kind"] in ("int", "text"):
+        buffer = str(config.get(key, DEFAULT_CONFIG.get(key, "")))
+
+    if key == "api_key":
+        from .provider import LOCAL_PROVIDERS
+
+        provider = config.get("provider", "openai")
+        readonly = provider in LOCAL_PROVIDERS
+        return {"row": row, "buffer": "", "secret": True, "readonly": readonly, "error": ""}
+
+    return {"row": row, "buffer": buffer, "secret": False, "readonly": False, "error": ""}
+
+
+def _settings_editor_lines(
+    edit: dict | None,
+    config: dict,
+    inner_width: int,
+    *,
+    max_lines: int | None = None,
+) -> list[Text]:
+    if edit is None:
+        return []
+
+    from .provider import PROVIDERS
+
+    row = edit["row"]
+    key = row["key"]
+    provider = config.get("provider", "openai")
+    provider_label = PROVIDERS.get(provider, {}).get("label", provider)
+    intro: list[Text] = []
+    choices: list[Text] = []
+    tail: list[Text] = []
+
+    if key == "provider":
+        current = _settings_value_text(row, config).plain
+        intro.append(Text(_clip_text(f"  current: {current}", inner_width), style="dim"))
+        intro.append(Text(_clip_text("  choose by number or provider name", inner_width), style="dim"))
+        choice_items = [
+            (idx, label, provider_key)
+            for idx, (provider_key, label, _model) in enumerate(_settings_provider_choices(), 1)
+        ]
+        prompt = "Provider number/name"
+    elif key == "model":
+        models = _settings_model_choices(config)
+        if models:
+            intro.append(Text(_clip_text(f"  provider: {provider_label}", inner_width), style="dim"))
+            choice_items = [(idx, name, desc) for idx, (name, desc) in enumerate(models, 1)]
+            prompt = "Model number/name/custom"
+        else:
+            intro.append(Text(_clip_text(f"  default for {provider_label}: {_settings_default_model(config)}", inner_width), style="dim"))
+            choice_items = []
+            prompt = "Model name"
+    elif key == "api_key":
+        if edit.get("readonly"):
+            lines = [
+                Text(_clip_text(f"  {provider_label} does not need an API key.", inner_width), style="green"),
+                Text(_clip_text("  Esc closes this editor.", inner_width), style="dim italic"),
+            ]
+            return lines[:max_lines] if max_lines is not None else lines
+        env_key = PROVIDERS.get(provider, {}).get("env_key") or "provider env var"
+        intro.append(Text(_clip_text(f"  provider: {provider_label}   env: {env_key}", inner_width), style="dim"))
+        intro.append(Text(_clip_text("  type a new key, or type clear to remove the stored key", inner_width), style="dim"))
+        choice_items = []
+        prompt = "API key"
+    elif row["kind"] == "int":
+        choice_items = []
+        prompt = "Positive integer"
+    else:
+        empty_label = row.get("empty", "empty")
+        intro.append(Text(_clip_text(f"  type clear for {empty_label}", inner_width), style="dim"))
+        choice_items = []
+        prompt = row["label"]
+
+    display = edit["buffer"]
+    if edit.get("secret") and display.lower() != "clear":
+        display = "*" * len(display)
+
+    line = Text(no_wrap=True, overflow="crop")
+    line.append(_clip_text(f"  {prompt}: ", inner_width), style="bold")
+    remaining = max(1, inner_width - len(line.plain) - 1)
+    line.append(_clip_text(display, remaining), style="green" if display else "dim")
+    line.append("_", style="bold cyan")
+    tail.append(line)
+
+    if edit.get("error"):
+        tail.append(Text(_clip_text(f"  {edit['error']}", inner_width), style="red"))
+    tail.append(Text(_clip_text("  Enter save   Esc cancel   Backspace edit", inner_width), style="dim italic"))
+
+    fixed_count = len(intro) + len(tail)
+    if max_lines is not None and fixed_count > max_lines:
+        compact = intro[:1] + tail
+        return compact[-max(1, max_lines):]
+
+    choice_line_budget = None if max_lines is None else max(0, max_lines - fixed_count)
+    if key == "provider":
+        choices = _settings_choice_grid_lines(
+            choice_items,
+            inner_width,
+            max_lines=choice_line_budget,
+            max_columns=3,
+            more_hint="type a number/name",
+        )
+    elif key == "model" and choice_items:
+        choices = _settings_choice_grid_lines(
+            choice_items,
+            inner_width,
+            max_lines=choice_line_budget,
+            max_columns=1,
+            more_hint="type a number/name/custom",
+        )
+
+    return intro + choices + tail
+
+
+def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, bool]:
+    row = edit["row"]
+    key = row["key"]
+    raw = edit["buffer"].strip()
+
+    if edit.get("readonly"):
+        return config, f"{row['label']} unchanged", "dim", True
+
+    if key == "provider":
+        if not raw:
+            return config, f"{row['label']} unchanged", "dim", True
+        old_provider = config.get("provider", "openai")
+        old_model = str(config.get("model") or "")
+        old_default = _settings_default_model_for_provider(old_provider)
+        provider = _settings_resolve_provider(raw)
+        if provider is None:
+            edit["error"] = "Unknown provider. Enter a listed number or provider name."
+            return config, edit["error"], "red", False
+        config["provider"] = provider
+        provider_models = [name for name, _desc in _settings_model_choices(config)]
+        if (
+            provider != old_provider
+            and (
+                not old_model
+                or old_model == old_default
+                or (provider_models and old_model not in provider_models)
+            )
+        ):
+            config["model"] = _settings_default_model_for_provider(provider)
+        save_config(config)
+        message = f"saved Provider: {_settings_value_text(row, config).plain}"
+        if config.get("model") != old_model:
+            message += f" (model: {config.get('model')})"
+        return config, message, "green", True
+
+    if key == "api_key":
+        provider = config.get("provider", "openai")
+        if not raw:
+            return config, "API key unchanged", "dim", True
+        if raw.lower() == "clear":
+            api_keys = config.get("api_keys")
+            if isinstance(api_keys, dict):
+                api_keys.pop(provider, None)
+            config["api_key"] = ""
+            save_config(config)
+            return config, "cleared stored API key", "cyan", True
+        config.setdefault("api_keys", {})[provider] = raw
+        config["api_key"] = ""
+        save_config(config)
+        return config, "saved API key", "green", True
+
+    if key == "model":
+        model = _settings_resolve_model(config, raw)
+        if not model.strip():
+            edit["error"] = "Model must not be empty."
+            return config, edit["error"], "red", False
+        config["model"] = model
+        save_config(config)
+        return config, f"saved Model: {model}", "green", True
+
+    if row["kind"] == "int":
+        try:
+            value = int(raw)
+            if value <= 0:
+                raise ValueError
+        except ValueError:
+            edit["error"] = "Enter a positive integer."
+            return config, edit["error"], "red", False
+        config[key] = value
+        save_config(config)
+        return config, f"saved {row['label']}: {value}", "green", True
+
+    value = "" if raw.lower() == "clear" else raw
+    config[key] = value
+    save_config(config)
+    display = value if value else row.get("empty", "empty")
+    return config, f"saved {row['label']}: {display}", "green", True
+
+
+def _settings_plain(config: dict) -> None:
+    rows = _settings_rows(config)
+    parts: list = []
+    current_section = None
+    table = None
+
+    for row in rows:
+        if row["section"] != current_section:
+            if table is not None:
+                parts.extend([Text(""), table, Text("")])
+            current_section = row["section"]
+            parts.append(section_rule(current_section))
+            table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
+            table.add_column("Setting", style="bold cyan", no_wrap=True)
+            table.add_column("Value", overflow="fold")
+            table.add_column("Notes", style="dim", overflow="fold")
+        table.add_row(row["label"], _settings_value_text(row, config), row["desc"])
+
+    if table is not None:
+        parts.extend([Text(""), table])
+
+    console.print(jarv_panel(Group(*parts), title="settings", subtitle=str(CONFIG_FILE)))
+
+
+def _settings_interactive(config: dict) -> None:
+    rows = _settings_rows(config)
+    selected = 0
+    scroll_start = 0
+    flash: tuple[str, str] | None = None
+    edit: dict | None = None
+
+    def _footer() -> str:
+        return "\u2191\u2193 select   Enter edit/toggle   r reset   q exit"
+
+    def _append_bottom_footer(parts: list, height: int, footer: Text) -> None:
+        footer_rows = 2  # spacer + controls
+        target_rows_before_footer = max(0, height - 2 - footer_rows)
+        if len(parts) > target_rows_before_footer:
+            del parts[target_rows_before_footer:]
+        while len(parts) < target_rows_before_footer:
+            parts.append(Text(""))
+        parts.append(Text(""))
+        parts.append(footer)
+
+    def _settings_rendered_row_count(start: int, end: int) -> int:
+        line_count = 0
+        last_section = None
+        for idx in range(start, end):
+            row = rows[idx]
+            if row["section"] != last_section:
+                if idx != start:
+                    line_count += 1
+                line_count += 1
+                last_section = row["section"]
+            line_count += 1
+        return line_count
+
+    def _settings_window_end(start: int, max_lines: int) -> int:
+        end = start
+        while end < len(rows):
+            candidate = end + 1
+            if candidate > start + 1 and _settings_rendered_row_count(start, candidate) > max_lines:
+                break
+            end = candidate
+            if _settings_rendered_row_count(start, end) >= max_lines:
+                break
+        return end
+
+    def _settings_visible_window(max_lines: int) -> tuple[int, int]:
+        nonlocal scroll_start
+        if not rows:
+            return 0, 0
+
+        max_lines = max(1, max_lines)
+        scroll_start = max(0, min(scroll_start, len(rows) - 1))
+        if selected < scroll_start:
+            scroll_start = selected
+
+        while scroll_start < selected and _settings_rendered_row_count(scroll_start, selected + 1) > max_lines:
+            scroll_start += 1
+
+        end = _settings_window_end(scroll_start, max_lines)
+        while selected >= end and scroll_start < selected:
+            scroll_start += 1
+            end = _settings_window_end(scroll_start, max_lines)
+
+        if end == len(rows):
+            while scroll_start > 0 and _settings_rendered_row_count(scroll_start - 1, end) <= max_lines:
+                scroll_start -= 1
+
+        return scroll_start, _settings_window_end(scroll_start, max_lines)
+
+    def _render_settings_panel(height: int) -> Panel:
+        nonlocal selected
+        term_w = console.size.width
+        panel_width = max(1, term_w)
+        inner_width = max(1, panel_width - 4)
+        height = max(3, height)
+        show_footer = edit is None and height >= 8
+        content_rows = max(1, height - 2)
+        reserved = 1
+        if flash is not None:
+            reserved += 2
+        if show_footer:
+            reserved += 2
+        body_rows = max(1, content_rows - reserved)
+        start, end = _settings_visible_window(body_rows)
+
+        parts: list = []
+        parts.append(Text(_clip_text(f"  showing {start + 1}-{end} of {len(rows)}", inner_width), style="dim"))
+
+        last_section = None
+        for idx in range(start, end):
+            row = rows[idx]
+            if row["section"] != last_section:
+                last_section = row["section"]
+                if idx != start:
+                    parts.append(Text(""))
+                parts.append(Text(f"  {last_section}", style="bold cyan"))
+
+            is_selected = idx == selected
+            prefix = " \u203a " if is_selected else "   "
+            label_width = min(22, max(10, inner_width // 4))
+            value_width = min(28, max(10, inner_width // 3))
+            desc_width = max(0, inner_width - len(prefix) - label_width - value_width - 4)
+
+            line = Text(no_wrap=True, overflow="crop")
+            line.append(prefix, style="bold cyan" if is_selected else "")
+            label_style = "bold bright_white" if is_selected else "white"
+            line.append(f"{_clip_text(row['label'], label_width):<{label_width}}", style=label_style)
+            line.append("  ", style="dim")
+
+            value = _settings_value_text(row, config, selected=is_selected)
+            value_plain = _clip_text(value.plain, value_width)
+            line.append(f"{value_plain:<{value_width}}", style=value.style)
+            line.append("  ", style="dim")
+
+            desc_style = "bold" if is_selected else "dim"
+            line.append(_clip_text(row["desc"], desc_width), style=desc_style)
+            parts.append(line)
+
+        if flash is not None:
+            msg, style = flash
+            parts.append(Text(""))
+            parts.append(Text(_clip_text(f"  {msg}", inner_width), style=style, no_wrap=True, overflow="crop"))
+
+        if show_footer:
+            _append_bottom_footer(
+                parts,
+                height,
+                Text(
+                    _clip_text(_footer(), inner_width),
+                    style="dim italic",
+                    no_wrap=True,
+                    overflow="crop",
+                ),
+            )
+
+        audit_state = "auditor on" if config.get("audit", True) else "auditor off"
+        return Panel(
+            Group(*parts),
+            title="[bold bright_white]jarv \u25b8 settings[/bold bright_white]",
+            title_align="left",
+            subtitle=f"[dim]{audit_state}[/dim]",
+            subtitle_align="right",
+            border_style="cyan",
+            box=box.ROUNDED,
+            padding=(0, 1),
+            width=panel_width,
+            height=height,
+        )
+
+    def _render_editor_panel(height: int) -> Panel:
+        term_w = console.size.width
+        panel_width = max(1, term_w)
+        inner_width = max(1, panel_width - 4)
+        height = max(3, height)
+        content_rows = max(1, height - 2)
+        row = edit["row"] if edit is not None else {"label": "setting"}
+        editor_parts = _settings_editor_lines(edit, config, inner_width, max_lines=content_rows)
+        if not editor_parts:
+            editor_parts = [Text("")]
+        return Panel(
+            Group(*editor_parts),
+            title=f"[bold bright_white]jarv \u25b8 edit {row['label']}[/bold bright_white]",
+            title_align="left",
+            subtitle="[dim]Enter save   Esc cancel[/dim]",
+            subtitle_align="right",
+            border_style="cyan",
+            box=box.ROUNDED,
+            padding=(0, 1),
+            width=panel_width,
+            height=height,
+        )
+
+    def _render():
+        term_h = max(3, console.size.height)
+        if edit is None:
+            return _render_settings_panel(term_h)
+
+        term_w = console.size.width
+        inner_width = max(1, max(1, term_w) - 4)
+        desired_editor_height = len(_settings_editor_lines(edit, config, inner_width)) + 2
+        desired_editor_height = max(7, min(desired_editor_height, term_h))
+        settings_min_height = 8
+        editor_min_height = 9
+
+        if term_h >= desired_editor_height + settings_min_height:
+            editor_height = desired_editor_height
+            settings_height = term_h - editor_height
+        elif term_h - settings_min_height >= editor_min_height:
+            settings_height = settings_min_height
+            editor_height = term_h - settings_height
+        else:
+            settings_height = 0
+            editor_height = term_h
+
+        if settings_height:
+            return Group(
+                _render_settings_panel(settings_height),
+                _render_editor_panel(editor_height),
+            )
+        return _render_editor_panel(editor_height)
+
+    with Live(
+        get_renderable=_render,
+        console=console,
+        screen=True,
+        auto_refresh=False,
+        transient=False,
+        vertical_overflow="crop",
+    ) as live:
+        while True:
+            live.refresh()
+            try:
+                key = _read_key(text_mode=edit is not None)
+            except KeyboardInterrupt:
+                break
+
+            if edit is not None:
+                if key == "ESC":
+                    edit = None
+                    flash = (f"{rows[selected]['label']} unchanged", "dim")
+                elif key == "ENTER":
+                    config, message, style, done = _settings_commit_edit(edit, config)
+                    if done:
+                        rows = _settings_rows(config)
+                        edit = None
+                        flash = (message, style)
+                    else:
+                        flash = None
+                elif key == "BACKSPACE":
+                    if edit["buffer"]:
+                        edit["buffer"] = edit["buffer"][:-1]
+                    edit["error"] = ""
+                elif isinstance(key, str) and len(key) == 1 and key.isprintable():
+                    edit["buffer"] += key
+                    edit["error"] = ""
+                continue
+
+            if key == "ESC":
+                break
+            if key in ("UP", "k"):
+                selected = max(0, selected - 1)
+                flash = None
+            elif key in ("DOWN", "j"):
+                selected = min(len(rows) - 1, selected + 1)
+                flash = None
+            elif key == "HOME":
+                selected = 0
+                flash = None
+            elif key == "END":
+                selected = len(rows) - 1
+                flash = None
+            elif key == "ENTER":
+                row = rows[selected]
+                quick = _settings_apply_quick(row, config)
+                if quick is None:
+                    edit = _settings_begin_edit(row, config)
+                    flash = None
+                    continue
+                config, message = quick
+                rows = _settings_rows(config)
+                flash = (message, "green")
+            elif key == "r":
+                config, message = _settings_reset_row(rows[selected], config)
+                rows = _settings_rows(config)
+                flash = (message, "cyan")
+
+    console.print("[dim]\u25cb Settings closed.[/dim]")
+
+
+def cmd_settings() -> None:
+    config = load_config()
+    if not sys.stdin.isatty() or not console.is_terminal:
+        _settings_plain(config)
+        return
+    _settings_interactive(config)
 
 
 def _parse_count(args: list, default: int = 1) -> int:

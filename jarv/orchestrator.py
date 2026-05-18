@@ -181,7 +181,7 @@ def dispatch_tool(
         if not isinstance(cmd, str) or not cmd.strip():
             return "[tool argument error: command must be a non-empty string]"
         safety_level = config.get("command_safety", "risky")
-        audit = config.get("audit", False)
+        audit = config.get("audit", True)
         allowed, denial = check_command(
             cmd, safety_level, audit=audit, config=config
         )

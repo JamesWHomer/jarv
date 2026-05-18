@@ -25,7 +25,7 @@ DEFAULT_CONFIG = {
     "max_history": 40,
     "command_timeout": 60,
     "command_safety": "risky",
-    "audit": False,
+    "audit": True,
     "auditor_auto_approve": True,
     "auditor_model": "",
     "system_prompt": DEFAULT_SYSTEM_PROMPT,

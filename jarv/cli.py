@@ -23,6 +23,7 @@ def _lazy_commands():
         cmd_history,
         cmd_redo,
         cmd_sessions,
+        cmd_settings,
         cmd_set,
         cmd_undo,
         cmd_unset,
@@ -45,6 +46,7 @@ def _lazy_commands():
         "/set":      (cmd_set, True, True),
         "/unset":    (cmd_unset, True, True),
         "/config":   (cmd_config, True, False),
+        "/settings": (cmd_settings, True, False),
         "/undo":     (cmd_undo, True, True),
         "/redo":     (cmd_redo, True, True),
     }

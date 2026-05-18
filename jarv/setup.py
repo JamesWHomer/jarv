@@ -82,8 +82,8 @@ PROVIDER_MODELS = {
     ],
 }
 
-SETUP_STEPS = {"provider", "key", "model", "safety", "audit", "base_url"}
-TOTAL_STEPS = 6
+SETUP_STEPS = {"provider", "key", "model", "safety", "base_url"}
+TOTAL_STEPS = 5
 
 
 # ---------------------------------------------------------------------------
@@ -319,84 +319,6 @@ def _resolve_safety(choice: str, choices: list) -> str | None:
     return None
 
 
-def setup_audit(config: dict) -> dict:
-    console.print()
-    console.print(section_rule("Command Audit", step=5, total=TOTAL_STEPS))
-    console.print()
-
-    current = config.get("audit", False)
-    current_label = "on" if current else "off"
-
-    console.print(
-        "  [bold]Command audit[/bold] sends flagged commands to a fast LLM for review."
-    )
-    console.print(
-        "  The auditor's verdict appears inside the safety panel."
-    )
-    console.print()
-    console.print(
-        "  [yellow]⚠  This uses extra API tokens on each flagged command.[/yellow]"
-    )
-    console.print()
-
-    choices = [
-        ("off", "Off", "Flagged commands always prompt you directly"),
-        ("on", "On", "LLM reviews flagged commands first (uses tokens)"),
-    ]
-    for i, (key, label, desc) in enumerate(choices, 1):
-        default_tag = f" [green]← current[/green]" if key == current_label else ""
-        console.print(f"  [bold cyan]{i}.[/bold cyan] [bold]{label}[/bold] [dim]— {desc}[/dim]{default_tag}")
-    console.print()
-
-    while True:
-        choice = Prompt.ask(
-            "  [bold]Enable command audit?[/bold] [dim](1/2 or on/off, b=back)[/dim]",
-            default="1" if not current else "2",
-            console=console,
-        ).strip().lower()
-        if choice in ("b", "back"):
-            raise GoBack()
-        if choice in ("1", "off", "no", "n"):
-            config["audit"] = False
-            break
-        if choice in ("2", "on", "yes", "y"):
-            config["audit"] = True
-            break
-        console.print("  [red]Invalid choice. Please pick again.[/red]")
-
-    if config["audit"]:
-        console.print()
-        auto = config.get("auditor_auto_approve", True)
-        auto_label = "on" if auto else "off"
-
-        auto_choices = [
-            ("on", "On", "Auditor auto-approves safe commands"),
-            ("off", "Off", "Auditor only recommends, you always decide"),
-        ]
-        for i, (key, label, desc) in enumerate(auto_choices, 1):
-            default_tag = f" [green]← current[/green]" if key == auto_label else ""
-            console.print(f"  [bold cyan]{i}.[/bold cyan] [bold]{label}[/bold] [dim]— {desc}[/dim]{default_tag}")
-        console.print()
-
-        while True:
-            aa_choice = Prompt.ask(
-                "  [bold]Auto-approve safe commands?[/bold] [dim](1/2 or on/off, b=back)[/dim]",
-                default="1" if auto else "2",
-                console=console,
-            ).strip().lower()
-            if aa_choice in ("b", "back"):
-                raise GoBack()
-            if aa_choice in ("1", "on", "yes", "y"):
-                config["auditor_auto_approve"] = True
-                break
-            if aa_choice in ("2", "off", "no", "n"):
-                config["auditor_auto_approve"] = False
-                break
-            console.print("  [red]Invalid choice. Please pick again.[/red]")
-
-    return config
-
-
 def setup_base_url(config: dict) -> dict:
     provider_name = config.get("provider", "openai")
 
@@ -404,7 +326,7 @@ def setup_base_url(config: dict) -> dict:
         return config
 
     console.print()
-    console.print(section_rule("Base URL", step=6, total=TOTAL_STEPS))
+    console.print(section_rule("Base URL", step=5, total=TOTAL_STEPS))
 
     info = PROVIDERS.get(provider_name, {})
     default_url = info.get("base_url") or ""
@@ -520,7 +442,7 @@ def run_setup_wizard(step: str | None = None) -> dict | None:
             title="setup",
         ))
 
-        wizard_steps = [setup_provider, setup_api_key, setup_model, setup_safety, setup_audit, setup_base_url]
+        wizard_steps = [setup_provider, setup_api_key, setup_model, setup_safety, setup_base_url]
         step_idx = 0
         going_back = False
         while step_idx < len(wizard_steps):
@@ -553,16 +475,13 @@ def run_setup_wizard(step: str | None = None) -> dict | None:
     elif step == "safety":
         config = setup_safety(config)
         save_config(config)
-    elif step == "audit":
-        config = setup_audit(config)
-        save_config(config)
     elif step == "base_url":
         config = setup_base_url(config)
         save_config(config)
         test_connection(config)
     else:
         console.print(f"  [red]Unknown setup step '{step}'.[/red]")
-        console.print(f"  [dim]Available: provider, key, model, safety, audit, base_url[/dim]")
+        console.print(f"  [dim]Available: provider, key, model, safety, base_url[/dim]")
         return config
 
     # --- Done summary ---
@@ -576,7 +495,7 @@ def run_setup_wizard(step: str | None = None) -> dict | None:
     if has_key:
         safety = config.get("command_safety", "risky")
         safety_labels = {"all": "Confirm all", "risky": "Confirm risky", "none": "No confirmation"}
-        audit = config.get("audit", False)
+        audit = config.get("audit", True)
         auto_approve = config.get("auditor_auto_approve", True)
         audit_label = ("On (auto-approve)" if auto_approve else "On (recommend only)") if audit else "Off"
         console.print(jarv_panel(
@@ -586,7 +505,7 @@ def run_setup_wizard(step: str | None = None) -> dict | None:
                 f"  [dim]Model   [/dim]  [bold]{model}[/bold]\n"
                 f"  [dim]Safety  [/dim]  [bold]{safety_labels.get(safety, safety)}[/bold]\n"
                 f"  [dim]Audit   [/dim]  [bold]{audit_label}[/bold]\n\n"
-                f"[dim]Type [bold]jarv[/bold] to start chatting, or [bold]jarv /config[/bold] to tweak settings.[/dim]"
+                f"[dim]Type [bold]jarv[/bold] to start chatting, or [bold]jarv /settings[/bold] to tweak settings.[/dim]"
             ),
             title="ready",
         ))

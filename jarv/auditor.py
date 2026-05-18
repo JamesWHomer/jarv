@@ -1,4 +1,4 @@
-"""Command auditor — uses a fast LLM to decide whether a flagged command is safe.
+"""Command auditor — uses an LLM to decide whether a flagged command is safe.
 
 When `audited` mode is enabled, flagged commands are sent to an LLM auditor
 instead of immediately prompting the user. The auditor sees the command, the
@@ -39,23 +39,11 @@ happen to match a broad pattern. Lean toward allowing unless genuinely risky.
 
 
 def _get_auditor_model(config: dict) -> str:
-    """Pick an appropriate fast model for the auditor based on provider."""
-    provider = config.get("provider", "openai")
+    """Return the configured auditor model, or the active model."""
     auditor_model = config.get("auditor_model", "")
     if auditor_model:
         return auditor_model
-
-    defaults = {
-        "openai": "gpt-4.1-mini",
-        "anthropic": "claude-haiku-4-5-20251001",
-        "groq": "llama-3.3-70b-versatile",
-        "deepseek": "deepseek-chat",
-        "openrouter": "openai/gpt-4.1-mini",
-        "gemini": "gemini-2.0-flash",
-        "together": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-        "fireworks": "accounts/fireworks/models/llama-v3p3-70b-instruct",
-    }
-    return defaults.get(provider, config.get("model", "gpt-4.1-mini"))
+    return config.get("model", "gpt-4.1-mini")
 
 
 def _build_context_summary(history: list, max_chars: int = 600) -> str:
