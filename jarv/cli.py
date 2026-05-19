@@ -7,6 +7,8 @@ from . import __version__
 from .config import load_config, validate_config
 from .display import console
 
+STDIN_LABEL = "Input from stdin"
+
 
 def _setup_nudge() -> None:
     """Print a one-line nudge if the env key is missing."""
@@ -138,6 +140,43 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _stdin_is_piped(stdin=None) -> bool:
+    stdin = stdin or sys.stdin
+    isatty = getattr(stdin, "isatty", None)
+    return callable(isatty) and not isatty()
+
+
+def _read_piped_stdin(max_chars: int, stdin=None) -> tuple[str, bool]:
+    stdin = stdin or sys.stdin
+    try:
+        limit = int(max_chars)
+        if limit <= 0:
+            limit = 200000
+    except (TypeError, ValueError):
+        limit = 200000
+
+    text = stdin.read(limit + 1)
+    if "\x00" in text:
+        raise ValueError("stdin appears to contain binary data; pass text input instead.")
+    if len(text) > limit:
+        return text[:limit], True
+    return text, False
+
+
+def _compose_query(query_parts: list[str], stdin_text: str = "", stdin_truncated: bool = False) -> str:
+    query = " ".join(query_parts).strip()
+    if not stdin_text:
+        return query
+
+    stdin_body = stdin_text.rstrip("\n")
+    if query:
+        suffix = "\n\n[stdin truncated because it exceeded max_stdin_chars]" if stdin_truncated else ""
+        return f"{query}\n\n{STDIN_LABEL}:\n```text\n{stdin_body}{suffix}\n```"
+
+    suffix = "\n\n[stdin truncated because it exceeded max_stdin_chars]" if stdin_truncated else ""
+    return f"{stdin_body}{suffix}".strip()
+
+
 def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -163,7 +202,7 @@ def main() -> None:
         return
 
     # Check if user typed a command name without the slash (e.g. "jarv set" instead of "jarv /set")
-    if query_parts and not query_parts[0].startswith("/"):
+    if query_parts and not query_parts[0].startswith("/") and not _stdin_is_piped():
         result = _maybe_command(query_parts[0], query_parts[1:])
         if result is not None:
             _, command, rest = result
@@ -202,7 +241,18 @@ def main() -> None:
 
     client = create_client(config)
 
-    if not query_parts:
+    stdin_text = ""
+    stdin_truncated = False
+    if _stdin_is_piped():
+        try:
+            stdin_text, stdin_truncated = _read_piped_stdin(config.get("max_stdin_chars", 200000))
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
+            sys.exit(1)
+
+    query = _compose_query(query_parts, stdin_text, stdin_truncated)
+
+    if not query:
         run_heads_up_mode(config, client)
         return
 
@@ -212,7 +262,6 @@ def main() -> None:
         threading.Thread(target=_check_update_background, daemon=True).start()
 
     from .agent import run_agent
-    query = " ".join(query_parts)
     try:
         run_agent(query, config, client, new_session=args.new, incognito=args.incognito)
     except KeyboardInterrupt:

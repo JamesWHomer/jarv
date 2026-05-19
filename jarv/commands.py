@@ -208,6 +208,7 @@ def print_help() -> None:
     key_table.add_row("model", "Model name (default: gpt-5.4-mini)")
     key_table.add_row("reasoning_effort", "Reasoning effort value (empty to disable)")
     key_table.add_row("max_history", "Number of messages to keep as context")
+    key_table.add_row("max_stdin_chars", "Maximum piped stdin characters attached to one-shot prompts")
     key_table.add_row("command_timeout", "Seconds before a shell command is killed")
     key_table.add_row("command_safety", "Command confirmation level (all, risky, none)")
     key_table.add_row("audit", "LLM auditor for flagged commands (true/false)")
@@ -250,6 +251,7 @@ jarv is a command-line AI assistant that supports multiple AI providers includin
 
 - `jarv` - Start heads-up mode so you can keep sending prompts without rerunning the command.
 - `jarv <question>` - Ask jarv anything. Your words after `jarv` are sent as the user message.
+- `command | jarv <instruction>` - Attach piped stdin as input for a one-shot prompt.
 - `jarv /help` - Show the short command overview. (`jarv help` also works as a permanent alias.)
 - `jarv /about` - Show this detailed overview.
 - `jarv /config` - Show raw config values. The API key is masked.
@@ -303,6 +305,7 @@ Keys:
 - `model` - Model name. Default: `{DEFAULT_CONFIG['model']}`.
 - `reasoning_effort` - Optional reasoning effort value. Empty disables this setting.
 - `max_history` - Number of history items kept as context. Default: `{DEFAULT_CONFIG['max_history']}`.
+- `max_stdin_chars` - Maximum piped stdin characters attached to a one-shot prompt. Default: `{DEFAULT_CONFIG['max_stdin_chars']}`.
 - `command_timeout` - Seconds before a shell command is killed. Default: `{DEFAULT_CONFIG['command_timeout']}`.
 - `command_safety` - Command confirmation level. `all` = confirm every command, `risky` = confirm only dangerous commands (destructive ops, privilege escalation, network exfil, etc.), `none` = no confirmation. Default: `risky`.
 - `audit` - When `true`, flagged commands are sent to a fast LLM auditor (uses extra tokens). The auditor's verdict appears inside the safety panel. Works with both `risky` and `all` safety levels. Default: `true`.
@@ -2189,6 +2192,13 @@ def _settings_rows(config: dict) -> list[dict]:
             "key": "max_history",
             "kind": "int",
             "desc": "messages kept as context",
+        },
+        {
+            "section": "runtime",
+            "label": "Stdin limit",
+            "key": "max_stdin_chars",
+            "kind": "int",
+            "desc": "piped stdin chars attached to one-shot prompts",
         },
         {
             "section": "subagents",

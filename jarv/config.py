@@ -23,6 +23,7 @@ DEFAULT_CONFIG = {
     "model": "gpt-5.4-mini",
     "reasoning_effort": "",
     "max_history": 40,
+    "max_stdin_chars": 200000,
     "command_timeout": 60,
     "command_safety": "risky",
     "audit": True,
@@ -116,7 +117,7 @@ def validate_config(config: dict) -> bool:
     if effort is None:
         config["reasoning_effort"] = ""
 
-    for key in ("max_history", "command_timeout"):
+    for key in ("max_history", "max_stdin_chars", "command_timeout"):
         try:
             value = int(config.get(key, DEFAULT_CONFIG[key]))
             if value <= 0:

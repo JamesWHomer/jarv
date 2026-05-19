@@ -37,6 +37,14 @@ jarv what process is using port 8080?
 jarv find all TODO comments in src/
 ```
 
+Jarv also accepts piped stdin as one-shot input. If you pass both stdin and prompt arguments, the arguments are treated as the instruction and stdin is attached as context.
+
+```bash
+git diff | jarv review this patch
+cat README.md | jarv summarize this
+rg TODO . | jarv group these by subsystem
+```
+
 ### Heads-up mode
 
 Run `jarv` with no arguments to enter an interactive prompt loop.
@@ -157,6 +165,7 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 | `model` | `"gpt-5.4-mini"` | Model name passed to the API. |
 | `reasoning_effort` | `""` | Reasoning effort level. Leave empty to disable. |
 | `max_history` | `40` | Number of recent messages kept as context. |
+| `max_stdin_chars` | `200000` | Maximum piped stdin characters attached to a one-shot prompt. |
 | `command_timeout` | `60` | Seconds before a shell command is killed. |
 | `command_safety` | `"risky"` | Command confirmation level: `all` (confirm every command), `risky` (confirm dangerous commands only), `none` (no confirmation). |
 | `audit` | `true` | LLM auditor for flagged commands. |
