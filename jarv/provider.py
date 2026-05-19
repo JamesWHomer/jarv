@@ -5,6 +5,7 @@ Supports two streaming backends:
 - Chat Completions API (for all other providers via OpenAI SDK or litellm)
 """
 
+import hashlib
 import os
 import uuid
 from dataclasses import dataclass
@@ -41,6 +42,16 @@ class StreamDone:
 
 class ProviderError(Exception):
     pass
+
+
+def responses_input_id(item_id: str, prefix: str) -> str:
+    """Return an id that is valid for Responses API input items."""
+    valid_prefix = f"{prefix}_"
+    if item_id.startswith(valid_prefix) and len(item_id) <= 64:
+        return item_id
+    digest_len = 64 - len(valid_prefix)
+    digest = hashlib.sha256(item_id.encode("utf-8")).hexdigest()[:digest_len]
+    return f"{valid_prefix}{digest}"
 
 
 # ---------------------------------------------------------------------------

@@ -33,6 +33,7 @@ from .provider import (
     StreamDone,
     TextDelta,
     ToolCallDone,
+    responses_input_id,
     stream_response,
 )
 from .orchestrator import (
@@ -47,7 +48,7 @@ from .orchestrator import (
     spawn_batch,
 )
 from .safety import check_command
-from .shell import display_command_result, execute_command
+from .shell import display_command_result, execute_command, truncate_model_output
 from .usage import estimate_context_breakdown, record_response_usage, usage_file_for
 
 # Responses API tool format (flat, no "function" wrapper key)
@@ -128,11 +129,11 @@ def to_response_input_item(item: dict) -> dict | None:
         if role == "assistant":
             return {"role": "assistant", "content": str(item.get("content") or "")}
         if typ == "reasoning" and "id" in item:
-            return {"type": "reasoning", "id": item["id"], "summary": item.get("summary", [])}
+            return {"type": "reasoning", "id": responses_input_id(str(item["id"]), "rs"), "summary": item.get("summary", [])}
         if typ == "function_call":
             return {
                 "type": "function_call",
-                "id": item["id"],
+                "id": responses_input_id(str(item["id"]), "fc"),
                 "call_id": item["call_id"],
                 "name": item["name"],
                 "arguments": item["arguments"],
@@ -555,6 +556,10 @@ def run_agent(
                             output = f"[unknown tool: {item.name}]"
                             console.print(f"[red]{output}[/red]")
 
+                    output = truncate_model_output(
+                        output,
+                        config.get("max_tool_output_chars", DEFAULT_CONFIG["max_tool_output_chars"]),
+                    )
                     fc = {
                         "type": "function_call",
                         "id": item.id,

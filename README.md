@@ -166,6 +166,7 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 | `reasoning_effort` | `""` | Reasoning effort level. Leave empty to disable. |
 | `max_history` | `40` | Number of recent messages kept as context. |
 | `max_stdin_chars` | `200000` | Maximum piped stdin characters attached to a one-shot prompt. |
+| `max_tool_output_chars` | `20000` | Maximum tool output characters returned to the model. Longer output is returned with the middle omitted. |
 | `command_timeout` | `60` | Seconds before a shell command is killed. |
 | `command_safety` | `"risky"` | Command confirmation level: `all` (confirm every command), `risky` (confirm dangerous commands only), `none` (no confirmation). |
 | `audit` | `true` | LLM auditor for flagged commands. |

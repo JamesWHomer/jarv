@@ -65,6 +65,6 @@ def display_output(output: str) -> None:
     if len(lines) > DISPLAY_LINE_LIMIT:
         console.print("\n".join(lines[:DISPLAY_LINE_LIMIT]), style="dim", markup=False)
         hidden = len(lines) - DISPLAY_LINE_LIMIT
-        console.print(f"[dim italic]... {hidden} more lines hidden (full output sent to model)[/dim italic]")
+        console.print(f"[dim italic]... {hidden} more lines hidden[/dim italic]")
     else:
         console.print(output, style="dim", markup=False)

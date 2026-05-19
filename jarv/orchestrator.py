@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable
 
 from .artifacts import ArtifactStore
+from .config import DEFAULT_CONFIG
 from .safety import check_command
 from .provider import (
     ProviderError,
@@ -20,9 +21,10 @@ from .provider import (
     TextDelta,
     ToolCallDone,
     ReasoningDone,
+    responses_input_id,
     stream_response,
 )
-from .shell import execute_command
+from .shell import execute_command, truncate_model_output
 from .usage import estimate_context_breakdown, record_response_usage
 
 
@@ -289,7 +291,7 @@ def run_subagent_loop(
 
         new_input: list[dict] = []
         for ri in reasoning_items:
-            new_input.append({"type": "reasoning", "id": ri.id, "summary": []})
+            new_input.append({"type": "reasoning", "id": responses_input_id(str(ri.id), "rs"), "summary": []})
 
         for item in tool_calls:
             try:
@@ -310,9 +312,14 @@ def run_subagent_loop(
                         spawn_observer=spawn_observer,
                     )
 
+            output = truncate_model_output(
+                output,
+                config.get("max_tool_output_chars", DEFAULT_CONFIG["max_tool_output_chars"]),
+            )
+
             new_input.append({
                 "type": "function_call",
-                "id": item.id,
+                "id": responses_input_id(str(item.id), "fc"),
                 "call_id": item.call_id,
                 "name": item.name,
                 "arguments": item.arguments,

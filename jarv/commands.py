@@ -210,6 +210,7 @@ def print_help() -> None:
     key_table.add_row("reasoning_effort", "Reasoning effort value (empty to disable)")
     key_table.add_row("max_history", "Number of messages to keep as context")
     key_table.add_row("max_stdin_chars", "Maximum piped stdin characters attached to one-shot prompts")
+    key_table.add_row("max_tool_output_chars", "Maximum tool output characters returned to the model")
     key_table.add_row("command_timeout", "Seconds before a shell command is killed")
     key_table.add_row("command_safety", "Command confirmation level (all, risky, none)")
     key_table.add_row("audit", "LLM auditor for flagged commands (true/false)")
@@ -280,7 +281,7 @@ Run `jarv` with no prompt to start an interactive session. Type a prompt and pre
 3. Loads recent conversation history from that session's history file.
 4. Sends your query, recent history, the configured system prompt, and system info to the configured provider's API.
 5. Streams the assistant response in the terminal.
-6. When the model issues tool calls, jarv runs the matching handler and feeds results back into the model (for `run_command`, that means showing the command, running it, printing stdout/stderr/exit status, and returning the full output).
+6. When the model issues tool calls, jarv runs the matching handler and feeds results back into the model (for `run_command`, that means showing the command, running it, printing stdout/stderr/exit status, and returning output up to `max_tool_output_chars`).
 7. Saves the final assistant response back to history, trimmed to `max_history` items.
 
 ## Tools and shell commands
@@ -290,7 +291,7 @@ Run `jarv` with no prompt to start an interactive session. Type a prompt and pre
 - Shell commands run only when the model calls `run_command`.
 - On Windows, `run_command` uses PowerShell.
 - On other platforms, `run_command` uses the system shell.
-- Command output shown in the terminal is shortened after 30 lines, but the full output is sent back to the model.
+- Command output shown in the terminal is shortened after 30 lines, and tool output returned to the model is capped by `max_tool_output_chars`.
 - Commands are killed after `command_timeout` seconds.
 - Interrupted commands/process trees are terminated when possible.
 
@@ -307,6 +308,7 @@ Keys:
 - `reasoning_effort` - Optional reasoning effort value. Empty disables this setting.
 - `max_history` - Number of history items kept as context. Default: `{DEFAULT_CONFIG['max_history']}`.
 - `max_stdin_chars` - Maximum piped stdin characters attached to a one-shot prompt. Default: `{DEFAULT_CONFIG['max_stdin_chars']}`.
+- `max_tool_output_chars` - Maximum tool output characters returned to the model. Default: `{DEFAULT_CONFIG['max_tool_output_chars']}`.
 - `command_timeout` - Seconds before a shell command is killed. Default: `{DEFAULT_CONFIG['command_timeout']}`.
 - `command_safety` - Command confirmation level. `all` = confirm every command, `risky` = confirm only dangerous commands (destructive ops, privilege escalation, network exfil, etc.), `none` = no confirmation. Default: `risky`.
 - `audit` - When `true`, flagged commands are sent to a fast LLM auditor (uses extra tokens). The auditor's verdict appears inside the safety panel. Works with both `risky` and `all` safety levels. Default: `true`.
@@ -2208,6 +2210,13 @@ def _settings_rows(config: dict) -> list[dict]:
             "key": "max_stdin_chars",
             "kind": "int",
             "desc": "piped stdin chars attached to one-shot prompts",
+        },
+        {
+            "section": "runtime",
+            "label": "Tool output limit",
+            "key": "max_tool_output_chars",
+            "kind": "int",
+            "desc": "tool output chars returned to the model",
         },
         {
             "section": "subagents",

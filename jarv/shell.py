@@ -16,7 +16,7 @@ class CommandResult:
     timed_out: bool = False
     timeout: int | float = 60
 
-    def to_model_output(self) -> str:
+    def to_model_output(self, max_chars: int | None = None) -> str:
         parts = []
         if self.stdout:
             parts.append(self.stdout.rstrip())
@@ -26,7 +26,29 @@ class CommandResult:
             parts.append(f"[timed out after {self.timeout:g} seconds]")
         elif self.exit_code not in (None, 0):
             parts.append(f"[exit code {self.exit_code}]")
-        return "\n".join(parts) if parts else "(no output)"
+        output = "\n".join(parts) if parts else "(no output)"
+        return truncate_model_output(output, max_chars, label="command output")
+
+
+def truncate_model_output(output: str, max_chars: int | None, label: str = "tool output") -> str:
+    try:
+        limit = int(max_chars) if max_chars is not None else 0
+    except (TypeError, ValueError):
+        limit = 0
+    if limit <= 0 or len(output) <= limit:
+        return output
+
+    notice = (
+        f"\n\n[{label} truncated to {limit} characters; "
+        f"{len(output) - limit} characters omitted from the middle]"
+    )
+    body_limit = limit - len(notice)
+    if body_limit <= 0:
+        return output[:limit] + notice
+
+    head = body_limit // 2
+    tail = body_limit - head
+    return output[:head].rstrip() + notice + "\n\n" + output[-tail:].lstrip()
 
 
 def _kill_process_tree(proc: subprocess.Popen) -> None:

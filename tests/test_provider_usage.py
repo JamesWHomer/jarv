@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
-from jarv.provider import StreamDone, TextDelta, _stream_chat_completions
+from jarv.provider import StreamDone, TextDelta, _stream_chat_completions, responses_input_id
 
 
 class FakeStream:
@@ -16,6 +16,25 @@ class FakeStream:
 
 
 class ProviderUsageTests(unittest.TestCase):
+    def test_responses_input_id_keeps_valid_id(self):
+        self.assertEqual(responses_input_id("fc_123", "fc"), "fc_123")
+
+    def test_responses_input_id_shortens_overlong_id(self):
+        item_id = "fc_" + ("x" * 100)
+
+        result = responses_input_id(item_id, "fc")
+
+        self.assertLessEqual(len(result), 64)
+        self.assertTrue(result.startswith("fc_"))
+        self.assertEqual(result, responses_input_id(item_id, "fc"))
+        self.assertNotEqual(result, item_id)
+
+    def test_responses_input_id_replaces_wrong_prefix(self):
+        result = responses_input_id("call_7119a55952524247b01522fc", "fc")
+
+        self.assertLessEqual(len(result), 64)
+        self.assertTrue(result.startswith("fc_"))
+
     def test_chat_stream_keeps_usage_when_final_chunk_has_choices(self):
         usage = SimpleNamespace(prompt_tokens=12, completion_tokens=3, total_tokens=15)
         chunks = [
