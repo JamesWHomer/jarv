@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+import textwrap
 import threading
 import time
 import urllib.request
@@ -2142,6 +2143,14 @@ def _settings_rows(config: dict) -> list[dict]:
             "desc": "optional custom endpoint",
         },
         {
+            "section": "behaviour",
+            "label": "System prompt",
+            "key": "system_prompt",
+            "kind": "text",
+            "multiline": True,
+            "desc": "instructions sent before each request",
+        },
+        {
             "section": "command review",
             "label": "Command safety",
             "key": "command_safety",
@@ -2327,6 +2336,10 @@ def _settings_default_model_for_provider(provider: str) -> str:
     return DEFAULT_CONFIG["model"]
 
 
+def _settings_provider_keys() -> list[str]:
+    return [key for key, _label, _model in _settings_provider_choices()]
+
+
 def _settings_resolve_provider(choice: str) -> str | None:
     raw = choice.strip()
     if not raw:
@@ -2433,6 +2446,135 @@ def _settings_choice_grid_lines(
     return lines
 
 
+def _settings_provider_display_label(label: str) -> str:
+    return label.split("(", 1)[0].strip()
+
+
+def _settings_provider_note(provider_key: str) -> str:
+    from .provider import LOCAL_PROVIDERS, PROVIDERS
+
+    notes = {
+        "openai": "OpenAI-hosted models through the Responses API",
+        "openrouter": "one API key for a marketplace of third-party models",
+        "anthropic": "Anthropic-hosted Claude models through LiteLLM",
+        "gemini": "Google AI Studio Gemini models through LiteLLM",
+        "groq": "Groq-hosted OpenAI-compatible chat endpoint",
+        "deepseek": "DeepSeek-hosted OpenAI-compatible chat endpoint",
+        "together": "Together-hosted catalog of open and partner models",
+        "fireworks": "Fireworks-hosted catalog of open and partner models",
+        "ollama": "local Ollama server running models on this machine",
+        "lm_studio": "local LM Studio server using an OpenAI-compatible API",
+        "vllm": "self-hosted vLLM server using an OpenAI-compatible API",
+    }
+    if provider_key in notes:
+        return notes[provider_key]
+    if provider_key in LOCAL_PROVIDERS:
+        base_url = PROVIDERS.get(provider_key, {}).get("base_url")
+        return base_url or "no API key"
+    return "hosted API provider"
+
+
+def _settings_provider_choice_lines(
+    config: dict,
+    inner_width: int,
+    *,
+    selected_provider: str | None = None,
+    max_lines: int | None = None,
+) -> list[Text]:
+    from .provider import LOCAL_PROVIDERS
+
+    if max_lines is not None and max_lines <= 0:
+        return []
+
+    providers = [
+        (idx, provider_key, label, default_model)
+        for idx, (provider_key, label, default_model) in enumerate(_settings_provider_choices(), 1)
+    ]
+    sections = [
+        ("Cloud providers", [item for item in providers if item[1] not in LOCAL_PROVIDERS]),
+        ("Local runtimes", [item for item in providers if item[1] in LOCAL_PROVIDERS]),
+    ]
+
+    number_width = 2
+    label_width = min(18, max(10, inner_width // 4))
+    key_width = min(14, max(8, inner_width // 5))
+    note_width = max(0, inner_width - 5 - number_width - label_width - key_width - 6)
+
+    entries: list[tuple[str, tuple[int, str, str, str] | None]] = []
+    for title, items in sections:
+        if not items:
+            continue
+        if entries:
+            entries.append(("blank", None))
+        entries.append(("section", (0, title, "", "")))
+        for idx, provider_key, label, default_model in items:
+            entries.append(
+                (
+                    "provider",
+                    (
+                        idx,
+                        provider_key,
+                        _settings_provider_display_label(label),
+                        _settings_provider_note(provider_key),
+                    ),
+                )
+            )
+
+    hidden = 0
+    if max_lines is not None and len(entries) > max_lines:
+        visible_count = max(0, max_lines - 1)
+        selected_idx = next(
+            (
+                idx
+                for idx, (kind, entry) in enumerate(entries)
+                if kind == "provider" and entry is not None and entry[1] == selected_provider
+            ),
+            0,
+        )
+        start_idx = min(max(0, selected_idx - visible_count // 2), max(0, len(entries) - visible_count))
+        visible_entries = entries[start_idx:start_idx + visible_count]
+        hidden = sum(1 for kind, _entry in entries[:start_idx] + entries[start_idx + visible_count:] if kind == "provider")
+        entries = visible_entries
+
+    lines: list[Text] = []
+    current_provider = config.get("provider", "openai")
+    selected_provider = selected_provider or current_provider
+    for kind, entry in entries:
+        if kind == "blank":
+            lines.append(Text(""))
+            continue
+        if kind == "section" and entry is not None:
+            _idx, title, _label, _note = entry
+            lines.append(Text(_clip_text(f"  {title}", inner_width), style="bold cyan"))
+            continue
+        if kind != "provider" or entry is None:
+            continue
+
+        idx, provider_key, label, note = entry
+        is_current = provider_key == current_provider
+        is_selected = provider_key == selected_provider
+        marker = ">" if is_selected else " "
+        selected_style = "bold bright_white"
+        current_style = "bold green"
+        label_style = selected_style if is_selected else current_style if is_current else "white"
+        detail_style = selected_style if is_selected else "dim"
+        line = Text(no_wrap=True, overflow="crop")
+        line.append(f" {marker} ", style="bold cyan" if is_selected else "dim")
+        line.append(f"{idx:>{number_width}}  ", style="bold cyan" if is_selected else "cyan")
+        line.append(f"{_clip_text(label, label_width):<{label_width}}", style=label_style)
+        line.append("  ", style="dim")
+        line.append(f"{_clip_text(provider_key, key_width):<{key_width}}", style=detail_style)
+        if note and note_width > 0:
+            line.append("  ", style="dim")
+            line.append(_clip_text(note, note_width), style=detail_style)
+        lines.append(line)
+
+    if hidden:
+        label = "provider" if hidden == 1 else "providers"
+        lines.append(Text(_clip_text(f"  ... {hidden} more {label}; use Up/Down", inner_width), style="dim"))
+    return lines
+
+
 def _settings_begin_edit(row: dict, config: dict) -> dict:
     key = row["key"]
     buffer = ""
@@ -2446,7 +2588,10 @@ def _settings_begin_edit(row: dict, config: dict) -> dict:
         readonly = provider in LOCAL_PROVIDERS
         return {"row": row, "buffer": "", "secret": True, "readonly": readonly, "error": ""}
 
-    return {"row": row, "buffer": buffer, "secret": False, "readonly": False, "error": ""}
+    edit = {"row": row, "buffer": buffer, "secret": False, "readonly": False, "error": ""}
+    if key == "provider":
+        edit["selected_provider"] = config.get("provider", "openai")
+    return edit
 
 
 def _settings_editor_lines(
@@ -2470,14 +2615,9 @@ def _settings_editor_lines(
     tail: list[Text] = []
 
     if key == "provider":
-        current = _settings_value_text(row, config).plain
-        intro.append(Text(_clip_text(f"  current: {current}", inner_width), style="dim"))
-        intro.append(Text(_clip_text("  choose by number or provider name", inner_width), style="dim"))
-        choice_items = [
-            (idx, label, provider_key)
-            for idx, (provider_key, label, _model) in enumerate(_settings_provider_choices(), 1)
-        ]
-        prompt = "Provider number/name"
+        intro.append(Text(_clip_text("  Up/Down choose   Enter save   Esc cancel", inner_width), style="dim"))
+        choice_items = []
+        prompt = ""
     elif key == "model":
         models = _settings_model_choices(config)
         if models:
@@ -2513,16 +2653,39 @@ def _settings_editor_lines(
     if edit.get("secret") and display.lower() != "clear":
         display = "*" * len(display)
 
-    line = Text(no_wrap=True, overflow="crop")
-    line.append(_clip_text(f"  {prompt}: ", inner_width), style="bold")
-    remaining = max(1, inner_width - len(line.plain) - 1)
-    line.append(_clip_text(display, remaining), style="green" if display else "dim")
-    line.append("_", style="bold cyan")
-    tail.append(line)
+    if key == "provider":
+        pass
+    elif row.get("multiline"):
+        body = f"  {prompt}: {display}_"
+        wrapped = textwrap.wrap(
+            body,
+            width=max(20, inner_width),
+            replace_whitespace=False,
+            drop_whitespace=False,
+            break_long_words=True,
+            break_on_hyphens=False,
+        ) or [f"  {prompt}: _"]
+        for idx, chunk in enumerate(wrapped):
+            line = Text(no_wrap=True, overflow="crop")
+            if idx == 0 and chunk.startswith(f"  {prompt}: "):
+                prefix = f"  {prompt}: "
+                line.append(prefix, style="bold")
+                line.append(chunk[len(prefix):], style="green" if display else "dim")
+            else:
+                line.append(chunk, style="green" if display else "dim")
+            tail.append(line)
+    else:
+        line = Text(no_wrap=True, overflow="crop")
+        line.append(_clip_text(f"  {prompt}: ", inner_width), style="bold")
+        remaining = max(1, inner_width - len(line.plain) - 1)
+        line.append(_clip_text(display, remaining), style="green" if display else "dim")
+        line.append("_", style="bold cyan")
+        tail.append(line)
 
     if edit.get("error"):
         tail.append(Text(_clip_text(f"  {edit['error']}", inner_width), style="red"))
-    tail.append(Text(_clip_text("  Enter save   Esc cancel   Backspace edit", inner_width), style="dim italic"))
+    if key != "provider":
+        tail.append(Text(_clip_text("  Enter save   Esc cancel   Backspace edit", inner_width), style="dim italic"))
 
     fixed_count = len(intro) + len(tail)
     if max_lines is not None and fixed_count > max_lines:
@@ -2531,12 +2694,11 @@ def _settings_editor_lines(
 
     choice_line_budget = None if max_lines is None else max(0, max_lines - fixed_count)
     if key == "provider":
-        choices = _settings_choice_grid_lines(
-            choice_items,
+        choices = _settings_provider_choice_lines(
+            config,
             inner_width,
+            selected_provider=edit.get("selected_provider"),
             max_lines=choice_line_budget,
-            max_columns=3,
-            more_hint="type a number/name",
         )
     elif key == "model" and choice_items:
         choices = _settings_choice_grid_lines(
@@ -2559,12 +2721,13 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
         return config, f"{row['label']} unchanged", "dim", True
 
     if key == "provider":
-        if not raw:
+        selected_provider = edit.get("selected_provider")
+        if not selected_provider:
             return config, f"{row['label']} unchanged", "dim", True
         old_provider = config.get("provider", "openai")
         old_model = str(config.get("model") or "")
         old_default = _settings_default_model_for_provider(old_provider)
-        provider = _settings_resolve_provider(raw)
+        provider = selected_provider
         if provider is None:
             edit["error"] = "Unknown provider. Enter a listed number or provider name."
             return config, edit["error"], "red", False
@@ -2872,6 +3035,21 @@ def _settings_interactive(config: dict) -> None:
                 if key == "ESC":
                     edit = None
                     flash = (f"{rows[selected]['label']} unchanged", "dim")
+                elif edit["row"]["key"] == "provider" and key in ("UP", "DOWN", "HOME", "END"):
+                    provider_keys = _settings_provider_keys()
+                    current_provider = edit.get("selected_provider", config.get("provider", "openai"))
+                    current_idx = provider_keys.index(current_provider) if current_provider in provider_keys else 0
+                    if key == "UP":
+                        current_idx = max(0, current_idx - 1)
+                    elif key == "DOWN":
+                        current_idx = min(len(provider_keys) - 1, current_idx + 1)
+                    elif key == "HOME":
+                        current_idx = 0
+                    elif key == "END":
+                        current_idx = len(provider_keys) - 1
+                    edit["selected_provider"] = provider_keys[current_idx]
+                    edit["buffer"] = ""
+                    edit["error"] = ""
                 elif key == "ENTER":
                     config, message, style, done = _settings_commit_edit(edit, config)
                     if done:
@@ -2880,6 +3058,8 @@ def _settings_interactive(config: dict) -> None:
                         flash = (message, style)
                     else:
                         flash = None
+                elif edit["row"]["key"] == "provider":
+                    edit["error"] = ""
                 elif key == "BACKSPACE":
                     if edit["buffer"]:
                         edit["buffer"] = edit["buffer"][:-1]
