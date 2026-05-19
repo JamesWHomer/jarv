@@ -90,6 +90,22 @@ def short_hash(value: str, length: int = 12) -> str:
     return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()[:length]
 
 
+def get_windows_console_id() -> tuple[str, str] | None:
+    """Return a stable id for a classic Windows console window when available."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+    except Exception:
+        return None
+    if not hwnd:
+        return None
+    terminal_id = f"windows-console-{short_hash(str(hwnd))}"
+    return terminal_id, f"Windows console {terminal_id[-6:]}"
+
+
 def detect_terminal() -> tuple[str, str]:
     """Return (terminal_id, label) for the current terminal."""
     candidates = [
@@ -103,6 +119,10 @@ def detect_terminal() -> tuple[str, str]:
             terminal_id = f"{source}-{short_hash(value)}"
             return terminal_id, f"{source} {terminal_id[-6:]}"
 
+    windows_console = get_windows_console_id()
+    if windows_console is not None:
+        return windows_console
+
     user = os.environ.get("USERNAME") or os.environ.get("USER") or "unknown-user"
     raw = "|".join([str(os.getppid()), os.getcwd(), user, get_shell_name()])
     terminal_id = f"parent-{short_hash(raw)}"
@@ -112,6 +132,25 @@ def detect_terminal() -> tuple[str, str]:
 def history_file_for_session(session_id: str) -> Path:
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     return SESSIONS_DIR / f"history-{short_hash(session_id)}.json"
+
+
+def most_recent_legacy_parent_session(sessions: dict) -> str | None:
+    candidates = []
+    for session_id, meta in sessions.items():
+        if not session_id.startswith("parent-") or meta.get("archived"):
+            continue
+        history_path_str = meta.get("history_file")
+        if not history_path_str:
+            continue
+        history_path = Path(history_path_str)
+        if not history_path.exists() or not load_history(history_path):
+            continue
+        timestamp = meta.get("last_message_at") or meta.get("last_used_at") or ""
+        candidates.append((timestamp, session_id))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return candidates[0][1]
 
 
 def migrate_flat_session_files() -> None:
@@ -158,7 +197,12 @@ def prepare_session_context(mark_message: bool = False) -> SessionContext:
     terminals = sessions_data["terminals"]
     sessions = sessions_data["sessions"]
 
-    session_id = terminals.get(terminal_id) or terminal_id
+    session_id = terminals.get(terminal_id)
+    if session_id is None:
+        if terminal_id.startswith("windows-console-") and terminal_id not in sessions:
+            session_id = most_recent_legacy_parent_session(sessions) or terminal_id
+        else:
+            session_id = terminal_id
     terminals[terminal_id] = session_id
 
     history_path = history_file_for_session(session_id)
