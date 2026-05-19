@@ -8,6 +8,7 @@ it recommends caution).
 """
 
 import json
+import re
 
 from .display import console
 from .provider import resolve_api_key, PROVIDERS, LOCAL_PROVIDERS
@@ -182,17 +183,67 @@ def _call_litellm(
 
 
 def _parse_response(text: str) -> tuple[bool, str]:
-    """Parse the auditor's JSON response."""
+    """Parse the auditor's response.
+
+    JSON is preferred, but some models return a short prose verdict despite
+    being prompted for JSON. Accept clear allow/deny responses so the auditor
+    can still make a useful decision.
+    """
     text = text.strip()
     # Strip markdown code fences if present
     if text.startswith("```"):
         lines = text.splitlines()
         text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
 
+    json_text = _extract_json_object(text)
     try:
-        data = json.loads(text)
+        data = json.loads(json_text)
         allow = bool(data.get("allow", False))
         reason = str(data.get("reason", "no reason given"))
         return allow, reason
     except (json.JSONDecodeError, TypeError):
-        return False, "could not parse auditor response"
+        pass
+
+    parsed = _parse_loose_verdict(text)
+    if parsed:
+        return parsed
+
+    return False, "could not parse auditor response"
+
+
+def _extract_json_object(text: str) -> str:
+    """Return the first JSON-looking object, or the original text."""
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end > start:
+        return text[start:end + 1]
+    return text
+
+
+def _parse_loose_verdict(text: str) -> tuple[bool, str] | None:
+    """Accept common non-JSON verdicts returned by weaker JSON followers."""
+    normalized = text.strip()
+    if not normalized:
+        return None
+
+    lowered = normalized.lower()
+
+    allow_match = re.search(r"\ballow(?:ed)?\b\s*[:=-]?\s*(true|yes|y)\b", lowered)
+    deny_match = re.search(r"\b(?:allow(?:ed)?\b\s*[:=-]?\s*(false|no|n)|deny|denied)\b", lowered)
+    leading_allow = re.match(r"^\s*(?:verdict\s*[:=-]\s*)?(allow|approved|safe)\b", lowered)
+    leading_deny = re.match(r"^\s*(?:verdict\s*[:=-]\s*)?(deny|denied|reject|rejected|unsafe)\b", lowered)
+
+    if allow_match or leading_allow:
+        return True, _loose_reason(normalized, "auditor allowed command")
+    if deny_match or leading_deny:
+        return False, _loose_reason(normalized, "auditor denied command")
+    return None
+
+
+def _loose_reason(text: str, fallback: str) -> str:
+    """Extract a concise reason from non-JSON auditor text."""
+    reason_match = re.search(r"\breason\s*[:=-]\s*(.+)", text, re.IGNORECASE | re.DOTALL)
+    reason = reason_match.group(1).strip() if reason_match else text
+    reason = re.sub(r"^\s*(?:verdict\s*[:=-]\s*)?(?:allow(?:ed)?|approved|safe|deny|denied|reject(?:ed)?|unsafe)\b\s*[:=-]?\s*", "", reason, flags=re.IGNORECASE)
+    reason = " ".join(reason.split())
+    return reason[:120] if reason else fallback
