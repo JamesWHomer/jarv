@@ -365,9 +365,9 @@ def _stream_chat_completions(
     stream = client.chat.completions.create(**kwargs)
     try:
         for chunk in stream:
+            if getattr(chunk, "usage", None):
+                final_chunk = chunk
             if not chunk.choices:
-                if getattr(chunk, "usage", None):
-                    final_chunk = chunk
                 continue
 
             delta = chunk.choices[0].delta
@@ -420,9 +420,9 @@ def _stream_litellm(
     final_chunk = None
 
     for chunk in litellm.completion(**kwargs):
+        if getattr(chunk, "usage", None):
+            final_chunk = chunk
         if not chunk.choices:
-            if getattr(chunk, "usage", None):
-                final_chunk = chunk
             continue
 
         delta = chunk.choices[0].delta

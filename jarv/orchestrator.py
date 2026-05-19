@@ -23,7 +23,7 @@ from .provider import (
     stream_response,
 )
 from .shell import execute_command
-from .usage import record_response_usage
+from .usage import estimate_context_breakdown, record_response_usage
 
 
 RUN_COMMAND_TOOL = {
@@ -250,6 +250,12 @@ def run_subagent_loop(
     while True:
         tool_calls: list = []
         reasoning_items: list = []
+        context_breakdown = estimate_context_breakdown(
+            config["model"],
+            kwargs["instructions"],
+            kwargs["tools"],
+            kwargs["input"],
+        )
         try:
             final_response = None
             for event in stream_response(
@@ -270,6 +276,8 @@ def run_subagent_loop(
                 config["model"],
                 final_response,
                 "subagent",
+                context_breakdown=context_breakdown,
+                output_text="\n".join(f"{item.name} {item.arguments}" for item in tool_calls),
             )
         except ProviderError as e:
             return None, f"provider error: {e}"

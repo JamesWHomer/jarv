@@ -505,6 +505,9 @@ def run_agent(
                     final_response,
                     "root",
                     context_breakdown=_ctx_breakdown,
+                    output_text=reply_text or "\n".join(
+                        f"{item.name} {item.arguments}" for item in tool_calls
+                    ),
                 )
             finally:
                 if spinner_live is not None:

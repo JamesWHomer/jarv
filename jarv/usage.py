@@ -236,6 +236,31 @@ def usage_from_response(response: Any) -> dict | None:
     }
 
 
+def estimated_usage_from_context(
+    model: str,
+    context_breakdown: dict | None = None,
+    output_text: str | None = None,
+) -> dict | None:
+    """Build a best-effort usage record when a provider omits token usage."""
+    input_tokens = 0
+    if isinstance(context_breakdown, dict):
+        input_tokens = sum(int(context_breakdown.get(k) or 0) for k in _BREAKDOWN_KEYS)
+    output_tokens = _litellm_token_count(model, output_text or "")
+
+    if input_tokens <= 0 and output_tokens <= 0:
+        return None
+
+    return {
+        "input_tokens": input_tokens,
+        "cached_input_tokens": 0,
+        "uncached_input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "reasoning_output_tokens": 0,
+        "total_tokens": input_tokens + output_tokens,
+        "estimated": True,
+    }
+
+
 def _add_tokens(bucket: dict, record: dict) -> None:
     for key in (
         "input_tokens",
@@ -419,11 +444,14 @@ def record_response_usage(
     response: Any,
     source: str,
     context_breakdown: dict | None = None,
+    output_text: str | None = None,
 ) -> None:
     try:
         if usage_path is None:
             return
         token_usage = usage_from_response(response)
+        if token_usage is None:
+            token_usage = estimated_usage_from_context(model, context_breakdown, output_text)
         if token_usage is None:
             return
 
