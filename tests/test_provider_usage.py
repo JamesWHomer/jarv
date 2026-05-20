@@ -71,6 +71,35 @@ class ProviderUsageTests(unittest.TestCase):
         self.assertIsInstance(events[-1], StreamDone)
         self.assertIs(events[-1].response, chunks[-1])
 
+    def test_chat_stream_sanitizes_lone_surrogates_before_api_call(self):
+        captured = {}
+        stream = FakeStream([])
+
+        def create(**kwargs):
+            captured["kwargs"] = kwargs
+            return stream
+
+        client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=create
+                )
+            )
+        )
+
+        list(_stream_chat_completions(
+            client,
+            "model",
+            "system\udc8f",
+            [],
+            [{"role": "user", "content": "abc\udc8fdef"}],
+        ))
+
+        messages = captured["kwargs"]["messages"]
+        self.assertEqual(messages[0]["content"], "system?")
+        self.assertEqual(messages[1]["content"], "abc?def")
+        str(captured["kwargs"]).encode("utf-8")
+
 
 if __name__ == "__main__":
     unittest.main()

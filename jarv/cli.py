@@ -6,6 +6,7 @@ import threading
 from . import __version__
 from .config import load_config, validate_config
 from .display import console
+from .unicode_safety import sanitize_text
 
 STDIN_LABEL = "Input from stdin"
 
@@ -155,7 +156,7 @@ def _read_piped_stdin(max_chars: int, stdin=None) -> tuple[str, bool]:
     except (TypeError, ValueError):
         limit = 200000
 
-    text = stdin.read(limit + 1)
+    text = sanitize_text(stdin.read(limit + 1))
     if "\x00" in text:
         raise ValueError("stdin appears to contain binary data; pass text input instead.")
     if len(text) > limit:

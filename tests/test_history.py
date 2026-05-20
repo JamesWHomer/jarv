@@ -109,6 +109,16 @@ class TerminalDetectionTests(unittest.TestCase):
             self.assertTrue(mapped_session.startswith("windows-console-old-"))
             self.assertNotEqual(mapped_session, "windows-console-old")
 
+    def test_history_replaces_lone_surrogates(self):
+        with TemporaryDirectory() as tmp:
+            history_file = Path(tmp) / "history.json"
+
+            history.save_history([{"role": "user", "content": "abc\udc8fdef"}], history_file)
+            loaded = history.load_history(history_file)
+
+            self.assertEqual(loaded[0]["content"], "abc?def")
+            history_file.read_text(encoding="utf-8").encode("utf-8")
+
 
 if __name__ == "__main__":
     unittest.main()

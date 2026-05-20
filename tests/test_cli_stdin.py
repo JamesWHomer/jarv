@@ -39,6 +39,13 @@ class CliStdinTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             cli._read_piped_stdin(100, PipedStringIO("abc\x00def"))
 
+    def test_read_piped_stdin_replaces_lone_surrogates(self):
+        text, truncated = cli._read_piped_stdin(100, PipedStringIO("abc\udc8fdef"))
+
+        self.assertEqual(text, "abc?def")
+        self.assertFalse(truncated)
+        text.encode("utf-8")
+
     def test_main_combines_prompt_and_piped_stdin_for_agent(self):
         config = {
             "provider": "openai",

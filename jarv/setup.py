@@ -7,80 +7,12 @@ from rich.text import Text
 
 from .display import console, jarv_panel, section_rule
 from .provider import PROVIDERS, LOCAL_PROVIDERS, KEY_PATTERNS
+from .provider_catalog import PROVIDER_CHOICES, PROVIDER_MODELS
 
 
 class GoBack(Exception):
     pass
 
-
-PROVIDER_CHOICES = [
-    ("openai", "OpenAI", "gpt-5.4-mini"),
-    ("openrouter", "OpenRouter (200+ models)", "tencent/hy3-preview"),
-    ("anthropic", "Anthropic", "claude-sonnet-4-6"),
-    ("gemini", "Google Gemini", "gemini-3-flash-preview"),
-    ("groq", "Groq", "openai/gpt-oss-120b"),
-    ("deepseek", "DeepSeek", "deepseek-v4-flash"),
-    ("together", "Together AI", "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"),
-    ("fireworks", "Fireworks AI", "accounts/fireworks/models/kimi-k2p6"),
-    ("ollama", "Ollama", "llama3.3"),
-    ("lm_studio", "LM Studio", "local-model"),
-    ("vllm", "vLLM", "local-model"),
-]
-
-PROVIDER_MODELS = {
-    "openai": [
-        ("gpt-5.5", "Flagship — largest, smartest"),
-        ("gpt-5.4-mini", "Balanced — faster, cheaper"),
-        ("gpt-5.4-nano", "Budget — smallest, fastest"),
-    ],
-    "anthropic": [
-        ("claude-opus-4-7", "Flagship — most capable"),
-        ("claude-sonnet-4-6", "Balanced — fast and capable"),
-        ("claude-haiku-4-5", "Budget — fastest, cheapest"),
-    ],
-    "openrouter": [
-        # Top 15 by weekly token usage (openrouter.ai/models?order=top-weekly)
-        ("tencent/hy3-preview", "Tencent — Hunyuan H3 (Hy3) Preview"),
-        ("deepseek/deepseek-v4-flash", "DeepSeek — V4 Flash"),
-        ("anthropic/claude-opus-4.7", "Anthropic — Claude Opus 4.7"),
-        ("anthropic/claude-sonnet-4.6", "Anthropic — Claude Sonnet 4.6"),
-        ("moonshotai/kimi-k2.6", "MoonshotAI — Kimi K2.6"),
-        ("google/gemini-3-flash-preview", "Google — Gemini 3 Flash Preview"),
-        ("deepseek/deepseek-v3.2", "DeepSeek — V3.2"),
-        ("deepseek/deepseek-v4-pro", "DeepSeek — V4 Pro"),
-        ("minimax/minimax-m2.7", "MiniMax — M2.7"),
-        ("openrouter/owl-alpha", "OpenRouter — Owl Alpha"),
-        ("stepfun/step-3.5-flash", "StepFun — Step 3.5 Flash"),
-        ("nvidia/nemotron-3-super-120b-a12b:free", "NVIDIA — Nemotron 3 Super"),
-        ("anthropic/claude-opus-4.6", "Anthropic — Claude Opus 4.6"),
-        ("google/gemini-2.5-flash-lite", "Google — Gemini 2.5 Flash Lite"),
-        ("google/gemini-2.5-flash", "Google — Gemini 2.5 Flash"),
-    ],
-    "gemini": [
-        ("gemini-3.1-pro-preview", "Flagship — Gemini 3.1 Pro, 2M context"),
-        ("gemini-3-flash-preview", "Balanced — Gemini 3 Flash"),
-        ("gemini-3.1-flash-lite", "Budget — fastest, cheapest"),
-    ],
-    "groq": [
-        ("openai/gpt-oss-120b", "Flagship — GPT OSS 120B"),
-        ("llama-3.3-70b-versatile", "Balanced — Llama 3.3 70B"),
-        ("llama-3.1-8b-instant", "Budget — fastest inference"),
-    ],
-    "deepseek": [
-        ("deepseek-v4-pro", "Flagship — DeepSeek V4 Pro, 1M context"),
-        ("deepseek-v4-flash", "Budget — faster, cheaper"),
-    ],
-    "together": [
-        ("deepseek-ai/DeepSeek-V4-Pro", "Flagship — DeepSeek V4 Pro"),
-        ("meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8", "Balanced — Llama 4 Maverick, 1M context"),
-        ("Qwen/Qwen3.5-9B", "Budget — Qwen 3.5 9B"),
-    ],
-    "fireworks": [
-        ("accounts/fireworks/models/kimi-k2p6", "Flagship — Kimi K2.6"),
-        ("accounts/fireworks/models/minimax-m2p7", "Balanced — MiniMax M2.7"),
-        ("accounts/fireworks/models/qwen3-8b", "Budget — Qwen3 8B"),
-    ],
-}
 
 SETUP_STEPS = {"provider", "key", "model", "safety", "base_url"}
 TOTAL_STEPS = 5

@@ -11,6 +11,9 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Iterator
 
+from .provider_catalog import KEY_PATTERNS, LOCAL_PROVIDERS, PROVIDERS
+from .unicode_safety import sanitize_json_value
+
 
 # ---------------------------------------------------------------------------
 # Normalized stream events
@@ -52,102 +55,6 @@ def responses_input_id(item_id: str, prefix: str) -> str:
     digest_len = 64 - len(valid_prefix)
     digest = hashlib.sha256(item_id.encode("utf-8")).hexdigest()[:digest_len]
     return f"{valid_prefix}{digest}"
-
-
-# ---------------------------------------------------------------------------
-# Provider registry
-# ---------------------------------------------------------------------------
-
-PROVIDERS = {
-    "openai": {
-        "backend": "responses",
-        "base_url": None,
-        "env_key": "OPENAI_API_KEY",
-        "key_url": "https://platform.openai.com/api-keys",
-        "label": "OpenAI",
-    },
-    "openrouter": {
-        "backend": "openai_compat",
-        "base_url": "https://openrouter.ai/api/v1",
-        "env_key": "OPENROUTER_API_KEY",
-        "key_url": "https://openrouter.ai/keys",
-        "label": "OpenRouter",
-    },
-    "groq": {
-        "backend": "openai_compat",
-        "base_url": "https://api.groq.com/openai/v1",
-        "env_key": "GROQ_API_KEY",
-        "key_url": "https://console.groq.com/keys",
-        "label": "Groq",
-    },
-    "deepseek": {
-        "backend": "openai_compat",
-        "base_url": "https://api.deepseek.com",
-        "env_key": "DEEPSEEK_API_KEY",
-        "key_url": "https://platform.deepseek.com/api_keys",
-        "label": "DeepSeek",
-    },
-    "together": {
-        "backend": "openai_compat",
-        "base_url": "https://api.together.ai/v1",
-        "env_key": "TOGETHER_API_KEY",
-        "key_url": "https://api.together.ai/settings/api-keys",
-        "label": "Together AI",
-    },
-    "fireworks": {
-        "backend": "openai_compat",
-        "base_url": "https://api.fireworks.ai/inference/v1",
-        "env_key": "FIREWORKS_API_KEY",
-        "key_url": "https://fireworks.ai/account/api-keys",
-        "label": "Fireworks AI",
-    },
-    "anthropic": {
-        "backend": "litellm",
-        "base_url": None,
-        "env_key": "ANTHROPIC_API_KEY",
-        "key_url": "https://console.anthropic.com/settings/keys",
-        "label": "Anthropic",
-        "litellm_prefix": "anthropic",
-    },
-    "gemini": {
-        "backend": "litellm",
-        "base_url": None,
-        "env_key": "GEMINI_API_KEY",
-        "key_url": "https://aistudio.google.com/apikey",
-        "label": "Google Gemini",
-        "litellm_prefix": "gemini",
-    },
-    "ollama": {
-        "backend": "litellm",
-        "base_url": None,
-        "env_key": None,
-        "key_url": None,
-        "label": "Ollama",
-        "litellm_prefix": "ollama",
-    },
-    "lm_studio": {
-        "backend": "openai_compat",
-        "base_url": "http://localhost:1234/v1",
-        "env_key": None,
-        "key_url": None,
-        "label": "LM Studio",
-    },
-    "vllm": {
-        "backend": "openai_compat",
-        "base_url": "http://localhost:8000/v1",
-        "env_key": None,
-        "key_url": None,
-        "label": "vLLM",
-    },
-}
-
-LOCAL_PROVIDERS = {"ollama", "lm_studio", "vllm"}
-
-KEY_PATTERNS: dict[str, str] = {
-    "openai": r"^sk-.{20,}",
-    "anthropic": r"^sk-ant-.{20,}",
-    "openrouter": r"^sk-or-.{20,}",
-}
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +232,7 @@ def _stream_responses_api(
     )
     if reasoning:
         kwargs["reasoning"] = reasoning
+    kwargs = sanitize_json_value(kwargs)
 
     with client.responses.stream(**kwargs) as stream:
         for event in stream:
@@ -357,7 +265,7 @@ def _stream_responses_api(
 def _stream_chat_completions(
     client, model, instructions, tools, input_items, reasoning=None,
 ) -> Iterator:
-    messages = _to_chat_messages(instructions, input_items)
+    messages = sanitize_json_value(_to_chat_messages(instructions, input_items))
 
     kwargs: dict[str, Any] = dict(
         model=model,
@@ -366,14 +274,14 @@ def _stream_chat_completions(
         stream_options={"include_usage": True},
     )
     if tools:
-        kwargs["tools"] = _to_chat_tools(tools)
+        kwargs["tools"] = sanitize_json_value(_to_chat_tools(tools))
     if reasoning and reasoning.get("effort"):
         kwargs["reasoning_effort"] = reasoning["effort"]
 
     accumulators: dict[int, dict] = {}
     final_chunk = None
 
-    stream = client.chat.completions.create(**kwargs)
+    stream = client.chat.completions.create(**sanitize_json_value(kwargs))
     try:
         for chunk in stream:
             if getattr(chunk, "usage", None):
@@ -408,7 +316,7 @@ def _stream_litellm(
 
     litellm = import_litellm()
 
-    messages = _to_chat_messages(instructions, input_items)
+    messages = sanitize_json_value(_to_chat_messages(instructions, input_items))
     provider_name = config.get("provider", "")
 
     litellm_model = model
@@ -423,7 +331,7 @@ def _stream_litellm(
         stream_options={"include_usage": True},
     )
     if tools:
-        kwargs["tools"] = _to_chat_tools(tools)
+        kwargs["tools"] = sanitize_json_value(_to_chat_tools(tools))
 
     api_key = resolve_api_key(config)
     if api_key and api_key != "not-needed":
@@ -432,7 +340,7 @@ def _stream_litellm(
     accumulators: dict[int, dict] = {}
     final_chunk = None
 
-    for chunk in litellm.completion(**kwargs):
+    for chunk in litellm.completion(**sanitize_json_value(kwargs)):
         if getattr(chunk, "usage", None):
             final_chunk = chunk
         if not chunk.choices:

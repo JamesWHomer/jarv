@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .config import CONFIG_DIR
 from .display import console
+from .unicode_safety import sanitize_json_value
 
 SESSIONS_FILE = CONFIG_DIR / "sessions.json"
 SESSIONS_DIR = CONFIG_DIR / "sessions"
@@ -18,7 +19,7 @@ def load_history(path: Path) -> list:
     try:
         history = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(history, list):
-            return history
+            return sanitize_json_value(history)
         console.print(f"[yellow]Ignoring invalid history format:[/yellow] {path}")
     except json.JSONDecodeError as e:
         console.print(f"[yellow]Ignoring malformed history:[/yellow] {e}")
@@ -30,7 +31,7 @@ def load_history(path: Path) -> list:
 def save_history(history: list, path: Path) -> None:
     CONFIG_DIR.mkdir(exist_ok=True)
     try:
-        path.write_text(json.dumps(history, indent=2), encoding="utf-8")
+        path.write_text(json.dumps(sanitize_json_value(history), indent=2), encoding="utf-8")
     except OSError as e:
         console.print(f"[yellow]Could not save history:[/yellow] {e}")
 
@@ -41,6 +42,7 @@ def load_sessions() -> dict:
     try:
         data = json.loads(SESSIONS_FILE.read_text(encoding="utf-8"))
         if isinstance(data, dict):
+            data = sanitize_json_value(data)
             data.setdefault("terminals", {})
             data.setdefault("sessions", {})
             if isinstance(data["terminals"], dict) and isinstance(data["sessions"], dict):
@@ -55,7 +57,7 @@ def load_sessions() -> dict:
 def save_sessions(data: dict) -> None:
     CONFIG_DIR.mkdir(exist_ok=True)
     try:
-        SESSIONS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        SESSIONS_FILE.write_text(json.dumps(sanitize_json_value(data), indent=2), encoding="utf-8")
     except OSError as e:
         console.print(f"[yellow]Could not save sessions metadata:[/yellow] {e}")
 
