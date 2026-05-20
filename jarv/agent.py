@@ -19,6 +19,7 @@ from .config import DEFAULT_CONFIG
 from .display import console, flatten_headings
 from .history import (
     artifact_file_for,
+    forget_current_session,
     get_shell_name,
     history_metadata,
     load_history,
@@ -385,6 +386,8 @@ def run_agent(
     incognito: bool = False,
 ) -> None:
     interactive = sys.stdout.isatty()
+    if new_session:
+        forget_current_session()
     session_context = prepare_session_context(mark_message=True)
     history = [] if (new_session or incognito) else load_history(session_context.history_file)
     max_history = config.get("max_history", DEFAULT_CONFIG["max_history"])

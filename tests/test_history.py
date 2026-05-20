@@ -1,3 +1,4 @@
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -33,32 +34,80 @@ class TerminalDetectionTests(unittest.TestCase):
 
         self.assertTrue(terminal_id.startswith("windows-terminal-"))
 
-    def test_most_recent_legacy_parent_session_ignores_empty_sessions(self):
+    def test_new_windows_console_uses_own_session_not_legacy_parent(self):
         with TemporaryDirectory() as tmp:
-            old_history = Path(tmp) / "old.json"
-            new_history = Path(tmp) / "new.json"
-            old_history.write_text('[{"role": "user", "content": "old"}]', encoding="utf-8")
-            new_history.write_text('[{"role": "user", "content": "new"}]', encoding="utf-8")
+            sessions_file = Path(tmp) / "sessions.json"
+            sessions_dir = Path(tmp) / "sessions"
+            legacy_history = sessions_dir / "history-legacy.json"
+            sessions_dir.mkdir()
+            legacy_history.write_text('[{"role": "user", "content": "legacy"}]', encoding="utf-8")
 
-            sessions = {
-                "parent-old": {
-                    "history_file": str(old_history),
-                    "last_message_at": "2026-05-19T01:00:00Z",
-                },
-                "parent-empty": {
-                    "history_file": str(Path(tmp) / "missing.json"),
-                    "last_message_at": "2026-05-19T03:00:00Z",
-                },
-                "parent-new": {
-                    "history_file": str(new_history),
-                    "last_message_at": "2026-05-19T02:00:00Z",
-                },
-            }
-
-            self.assertEqual(
-                history.most_recent_legacy_parent_session(sessions),
-                "parent-new",
+            sessions_file.write_text(
+                json.dumps(
+                    {
+                        "terminals": {},
+                        "sessions": {
+                            "parent-legacy": {
+                                "history_file": str(legacy_history),
+                                "last_message_at": "2026-05-19T02:00:00Z",
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
             )
+
+            with (
+                patch.object(history, "SESSIONS_FILE", sessions_file),
+                patch.object(history, "SESSIONS_DIR", sessions_dir),
+                patch.object(
+                    history,
+                    "detect_terminal",
+                    return_value=("windows-console-new", "Windows console new"),
+                ),
+            ):
+                context = history.prepare_session_context(mark_message=True)
+
+            data = json.loads(sessions_file.read_text(encoding="utf-8"))
+
+            self.assertEqual(context.session_id, "windows-console-new")
+            self.assertEqual(data["terminals"]["windows-console-new"], "windows-console-new")
+            self.assertIn("windows-console-new", data["sessions"])
+            self.assertIn("parent-legacy", data["sessions"])
+
+    def test_forget_current_session_maps_terminal_to_new_session(self):
+        with TemporaryDirectory() as tmp:
+            sessions_file = Path(tmp) / "sessions.json"
+            sessions_file.write_text(
+                json.dumps(
+                    {
+                        "terminals": {"windows-console-old": "windows-console-old"},
+                        "sessions": {
+                            "windows-console-old": {
+                                "history_file": str(Path(tmp) / "old.json"),
+                                "last_message_at": "2026-05-19T02:00:00Z",
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                patch.object(history, "SESSIONS_FILE", sessions_file),
+                patch.object(
+                    history,
+                    "detect_terminal",
+                    return_value=("windows-console-old", "Windows console old"),
+                ),
+            ):
+                history.forget_current_session()
+
+            data = json.loads(sessions_file.read_text(encoding="utf-8"))
+            mapped_session = data["terminals"]["windows-console-old"]
+
+            self.assertTrue(mapped_session.startswith("windows-console-old-"))
+            self.assertNotEqual(mapped_session, "windows-console-old")
 
 
 if __name__ == "__main__":

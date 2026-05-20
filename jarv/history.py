@@ -134,25 +134,6 @@ def history_file_for_session(session_id: str) -> Path:
     return SESSIONS_DIR / f"history-{short_hash(session_id)}.json"
 
 
-def most_recent_legacy_parent_session(sessions: dict) -> str | None:
-    candidates = []
-    for session_id, meta in sessions.items():
-        if not session_id.startswith("parent-") or meta.get("archived"):
-            continue
-        history_path_str = meta.get("history_file")
-        if not history_path_str:
-            continue
-        history_path = Path(history_path_str)
-        if not history_path.exists() or not load_history(history_path):
-            continue
-        timestamp = meta.get("last_message_at") or meta.get("last_used_at") or ""
-        candidates.append((timestamp, session_id))
-    if not candidates:
-        return None
-    candidates.sort(reverse=True)
-    return candidates[0][1]
-
-
 def migrate_flat_session_files() -> None:
     """Move history-*.json and artifacts-*.json from ~/.jarv/ into ~/.jarv/sessions/."""
     flat_history = list(CONFIG_DIR.glob("history-*.json"))
@@ -199,10 +180,7 @@ def prepare_session_context(mark_message: bool = False) -> SessionContext:
 
     session_id = terminals.get(terminal_id)
     if session_id is None:
-        if terminal_id.startswith("windows-console-") and terminal_id not in sessions:
-            session_id = most_recent_legacy_parent_session(sessions) or terminal_id
-        else:
-            session_id = terminal_id
+        session_id = terminal_id
     terminals[terminal_id] = session_id
 
     history_path = history_file_for_session(session_id)
