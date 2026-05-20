@@ -158,7 +158,9 @@ def _uses_max_completion_tokens(config: dict, model: str, info: dict) -> bool:
 def _call_litellm(
     config: dict, model: str, user_message: str
 ) -> tuple[bool, str]:
-    import litellm
+    from .litellm_compat import import_litellm
+
+    litellm = import_litellm()
 
     provider_name = config.get("provider", "")
     prefix = PROVIDERS.get(provider_name, {}).get("litellm_prefix", "")

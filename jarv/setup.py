@@ -391,7 +391,9 @@ def test_connection(config: dict) -> bool:
                 client.models.list()
 
             elif backend == "litellm":
-                import litellm
+                from .litellm_compat import import_litellm
+
+                litellm = import_litellm()
                 api_key = resolve_api_key(config)
                 model = config.get("model", "")
                 prefix = PROVIDERS.get(provider_name, {}).get("litellm_prefix")
@@ -576,6 +578,9 @@ def _is_known_litellm_model(model_name: str) -> bool:
     try:
         import json
         from importlib.resources import files
+        from .litellm_compat import import_litellm
+
+        import_litellm()
         data = json.loads(
             files("litellm")
             .joinpath("model_prices_and_context_window_backup.json")

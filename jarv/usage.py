@@ -20,7 +20,9 @@ def _litellm_token_count(model: str, text: str) -> int:
     if not text:
         return 0
     try:
-        from litellm import token_counter
+        from .litellm_compat import import_litellm
+
+        token_counter = import_litellm().token_counter
         return max(0, int(token_counter(model=model, text=text)))
     except Exception:
         return _estimated_token_count(text)

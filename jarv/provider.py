@@ -404,7 +404,9 @@ def _stream_chat_completions(
 def _stream_litellm(
     config, model, instructions, tools, input_items, reasoning=None,
 ) -> Iterator:
-    import litellm
+    from .litellm_compat import import_litellm
+
+    litellm = import_litellm()
 
     messages = _to_chat_messages(instructions, input_items)
     provider_name = config.get("provider", "")
