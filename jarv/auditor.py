@@ -192,19 +192,9 @@ def _parse_response(text: str) -> tuple[bool, str]:
     can still make a useful decision.
     """
     text = text.strip()
-    # Strip markdown code fences if present
-    if text.startswith("```"):
-        lines = text.splitlines()
-        text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-
-    json_text = _extract_json_object(text)
-    try:
-        data = json.loads(json_text)
-        allow = bool(data.get("allow", False))
-        reason = str(data.get("reason", "no reason given"))
-        return allow, reason
-    except (json.JSONDecodeError, TypeError):
-        pass
+    parsed_json = _parse_json_verdict(text)
+    if parsed_json:
+        return parsed_json
 
     parsed = _parse_loose_verdict(text)
     if parsed:
@@ -213,13 +203,46 @@ def _parse_response(text: str) -> tuple[bool, str]:
     return False, "could not parse auditor response"
 
 
-def _extract_json_object(text: str) -> str:
-    """Return the first JSON-looking object, or the original text."""
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end > start:
-        return text[start:end + 1]
-    return text
+def _parse_json_verdict(text: str) -> tuple[bool, str] | None:
+    """Return the first valid JSON verdict object found in arbitrary text."""
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"{", text):
+        try:
+            data, _ = decoder.raw_decode(text[match.start():])
+        except json.JSONDecodeError:
+            continue
+
+        parsed = _coerce_json_verdict(data)
+        if parsed:
+            return parsed
+    return None
+
+
+def _coerce_json_verdict(data) -> tuple[bool, str] | None:
+    """Validate and normalize an auditor JSON object."""
+    if not isinstance(data, dict) or "allow" not in data:
+        return None
+
+    allow = _coerce_json_bool(data["allow"])
+    if allow is None:
+        return None
+
+    raw_reason = data.get("reason")
+    reason = str(raw_reason).strip() if raw_reason is not None else ""
+    return allow, reason or "no reason given"
+
+
+def _coerce_json_bool(value) -> bool | None:
+    """Accept booleans and clear boolean-like strings only."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("true", "yes", "y"):
+            return True
+        if normalized in ("false", "no", "n"):
+            return False
+    return None
 
 
 def _parse_loose_verdict(text: str) -> tuple[bool, str] | None:
