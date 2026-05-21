@@ -31,6 +31,7 @@ from .artifacts import ArtifactStore, load_artifact_store, save_artifact_store
 from .provider import (
     ProviderError,
     ReasoningDone,
+    ReasoningStarted,
     StreamDone,
     TextDelta,
     ToolCallDone,
@@ -59,17 +60,23 @@ TOOLS = [RUN_COMMAND_TOOL, SPAWN_TOOL, READ_ARTIFACT_TOOL, ASK_USER_TOOL]
 _THINKING_FRAMES = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"]
 
 
-class ThinkingIndicator:
-    """Animated thinking bubble with live elapsed timer; re-renders on each Live refresh."""
+def response_wait_label(has_reasoning: bool) -> str:
+    """Return the live wait label for the response stream."""
+    return "Thinking" if has_reasoning else "Waiting"
+
+
+class ResponseWaitIndicator:
+    """Animated response wait line with live elapsed timer."""
 
     def __init__(self, start_time: float):
         self._start = start_time
+        self.has_reasoning = False
 
     def __rich_console__(self, console, options):
         now = time.perf_counter()
         elapsed = now - self._start
         frame = _THINKING_FRAMES[int(now * 10) % len(_THINKING_FRAMES)]
-        yield Text(f"{frame}  Thinking\u2026  {int(elapsed)}s")
+        yield Text(f"{frame}  {response_wait_label(self.has_reasoning)}\u2026  {int(elapsed)}s")
 
 
 class TailMarkdown:
@@ -118,6 +125,14 @@ def format_thought_duration(seconds: float) -> str:
     rounded = round(max(0.0, seconds), 1)
     unit = "second" if rounded == 1 else "seconds"
     return f"{rounded:.1f} {unit}"
+
+
+def response_start_status(seconds: float, has_reasoning: bool) -> str:
+    """Return the completed wait-status text for the first visible response."""
+    duration = format_thought_duration(seconds)
+    if has_reasoning:
+        return f"Thought for {duration}."
+    return f"Started responding in {duration}."
 
 
 def to_response_input_item(item: dict) -> dict | None:
@@ -433,6 +448,7 @@ def run_agent(
             reply_text = ""
             tool_calls = []
             reasoning_items = []
+            saw_reasoning = False
             got_text = False
 
             _ctx_breakdown = estimate_context_breakdown(
@@ -443,14 +459,16 @@ def run_agent(
             )
 
             thought_started = time.perf_counter()
+            wait_indicator: ResponseWaitIndicator | None = None
             spinner_live: Live | None = None
             stream_live: Live | None = None
             if interactive:
                 # Spinner runs at a low refresh rate to reduce Windows focus
                 # annoyances; once text starts streaming we swap to a faster
                 # Live that progressively renders the Markdown reply.
+                wait_indicator = ResponseWaitIndicator(thought_started)
                 spinner_live = Live(
-                    ThinkingIndicator(thought_started),
+                    wait_indicator,
                     refresh_per_second=4,
                     console=console,
                     auto_refresh=True,
@@ -475,7 +493,10 @@ def run_agent(
                                 thought_elapsed = time.perf_counter() - thought_started
                                 console.print(
                                     thought_complete_indicator(
-                                        f"Thought for {format_thought_duration(thought_elapsed)}."
+                                        response_start_status(
+                                            thought_elapsed,
+                                            has_reasoning=saw_reasoning,
+                                        )
                                     )
                                 )
                                 stream_max_lines = console.size.height - 2
@@ -498,8 +519,15 @@ def run_agent(
                             )
                     elif isinstance(event, ToolCallDone):
                         tool_calls.append(event)
+                    elif isinstance(event, ReasoningStarted):
+                        saw_reasoning = True
+                        if wait_indicator is not None:
+                            wait_indicator.has_reasoning = True
                     elif isinstance(event, ReasoningDone):
+                        saw_reasoning = True
                         reasoning_items.append(event)
+                        if wait_indicator is not None:
+                            wait_indicator.has_reasoning = True
                     elif isinstance(event, StreamDone):
                         final_response = event.response
                 record_response_usage(
@@ -527,7 +555,10 @@ def run_agent(
                 thought_elapsed = time.perf_counter() - thought_started
                 console.print(
                     thought_complete_indicator(
-                        f"Thought for {format_thought_duration(thought_elapsed)}."
+                        response_start_status(
+                            thought_elapsed,
+                            has_reasoning=saw_reasoning,
+                        )
                     )
                 )
 

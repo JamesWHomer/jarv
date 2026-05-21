@@ -1,7 +1,17 @@
 import unittest
+from unittest.mock import patch
 from types import SimpleNamespace
 
-from jarv.provider import StreamDone, TextDelta, _stream_chat_completions, responses_input_id
+from jarv.provider import (
+    ReasoningDone,
+    ReasoningStarted,
+    StreamDone,
+    TextDelta,
+    _stream_chat_completions,
+    _stream_litellm,
+    _stream_responses_api,
+    responses_input_id,
+)
 
 
 class FakeStream:
@@ -13,6 +23,17 @@ class FakeStream:
 
     def close(self):
         pass
+
+
+class FakeResponseStream(FakeStream):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        pass
+
+    def get_final_response(self):
+        return SimpleNamespace(usage=None)
 
 
 class ProviderUsageTests(unittest.TestCase):
@@ -71,6 +92,99 @@ class ProviderUsageTests(unittest.TestCase):
         self.assertIsInstance(events[-1], StreamDone)
         self.assertIs(events[-1].response, chunks[-1])
 
+    def test_chat_stream_emits_reasoning_started_from_reasoning_content(self):
+        chunks = [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(reasoning_content="thinking", content=None, tool_calls=None),
+                        finish_reason=None,
+                    )
+                ],
+                usage=None,
+            ),
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(content="hi", tool_calls=None),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=None,
+            ),
+        ]
+        client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(create=lambda **_kwargs: FakeStream(chunks))
+            )
+        )
+
+        events = list(_stream_chat_completions(client, "model", "system", [], []))
+
+        self.assertIsInstance(events[0], ReasoningStarted)
+        self.assertIsInstance(events[1], TextDelta)
+
+    def test_chat_stream_emits_reasoning_started_from_extra_reasoning(self):
+        chunks = [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            additional_kwargs={"reasoning": "thinking"},
+                            content=None,
+                            tool_calls=None,
+                        ),
+                        finish_reason=None,
+                    )
+                ],
+                usage=None,
+            ),
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(content="hi", tool_calls=None),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=None,
+            ),
+        ]
+        client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(create=lambda **_kwargs: FakeStream(chunks))
+            )
+        )
+
+        events = list(_stream_chat_completions(client, "model", "system", [], []))
+
+        self.assertIsInstance(events[0], ReasoningStarted)
+        self.assertIsInstance(events[1], TextDelta)
+
+    def test_chat_stream_emits_reasoning_started_from_content_block(self):
+        chunks = [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content=[{"type": "thinking", "thinking": "thinking"}],
+                            tool_calls=None,
+                        ),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=None,
+            ),
+        ]
+        client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(create=lambda **_kwargs: FakeStream(chunks))
+            )
+        )
+
+        events = list(_stream_chat_completions(client, "model", "system", [], []))
+
+        self.assertIsInstance(events[0], ReasoningStarted)
+
     def test_chat_stream_sanitizes_lone_surrogates_before_api_call(self):
         captured = {}
         stream = FakeStream([])
@@ -99,6 +213,73 @@ class ProviderUsageTests(unittest.TestCase):
         self.assertEqual(messages[0]["content"], "system?")
         self.assertEqual(messages[1]["content"], "abc?def")
         str(captured["kwargs"]).encode("utf-8")
+
+    def test_responses_stream_emits_reasoning_started_before_text(self):
+        stream = FakeResponseStream([
+            SimpleNamespace(
+                type="response.output_item.added",
+                item=SimpleNamespace(type="reasoning", id="rs_123"),
+            ),
+            SimpleNamespace(type="response.output_text.delta", delta="hi"),
+            SimpleNamespace(
+                type="response.output_item.done",
+                item=SimpleNamespace(type="reasoning", id="rs_123", summary=[]),
+            ),
+        ])
+        client = SimpleNamespace(
+            responses=SimpleNamespace(stream=lambda **_kwargs: stream)
+        )
+
+        events = list(_stream_responses_api(client, "model", "system", [], []))
+
+        self.assertIsInstance(events[0], ReasoningStarted)
+        self.assertEqual(events[0].id, "rs_123")
+        self.assertIsInstance(events[1], TextDelta)
+        self.assertIsInstance(events[2], ReasoningDone)
+        self.assertIsInstance(events[-1], StreamDone)
+
+    def test_responses_stream_emits_reasoning_started_from_reasoning_text_delta(self):
+        stream = FakeResponseStream([
+            SimpleNamespace(type="response.reasoning_text.delta", delta="thinking"),
+            SimpleNamespace(type="response.output_text.delta", delta="hi"),
+        ])
+        client = SimpleNamespace(
+            responses=SimpleNamespace(stream=lambda **_kwargs: stream)
+        )
+
+        events = list(_stream_responses_api(client, "model", "system", [], []))
+
+        self.assertIsInstance(events[0], ReasoningStarted)
+        self.assertIsInstance(events[1], TextDelta)
+
+    def test_litellm_stream_emits_reasoning_started_from_thinking_blocks(self):
+        chunks = [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(thinking_blocks=[{"type": "thinking"}], content=None, tool_calls=None),
+                        finish_reason=None,
+                    )
+                ],
+                usage=None,
+            ),
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(content="hi", tool_calls=None),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=None,
+            ),
+        ]
+        fake_litellm = SimpleNamespace(completion=lambda **_kwargs: FakeStream(chunks))
+
+        with patch("jarv.litellm_compat.import_litellm", return_value=fake_litellm):
+            events = list(_stream_litellm({"provider": "anthropic"}, "model", "system", [], []))
+
+        self.assertIsInstance(events[0], ReasoningStarted)
+        self.assertIsInstance(events[1], TextDelta)
 
 
 if __name__ == "__main__":

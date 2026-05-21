@@ -39,6 +39,11 @@ class ReasoningDone:
 
 
 @dataclass
+class ReasoningStarted:
+    id: str
+
+
+@dataclass
 class StreamDone:
     response: Any
 
@@ -55,6 +60,81 @@ def responses_input_id(item_id: str, prefix: str) -> str:
     digest_len = 64 - len(valid_prefix)
     digest = hashlib.sha256(item_id.encode("utf-8")).hexdigest()[:digest_len]
     return f"{valid_prefix}{digest}"
+
+
+def _value(obj: Any, key: str) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(key)
+    return getattr(obj, key, None)
+
+
+def _truthy_reasoning_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, set, dict)):
+        return bool(value)
+    return True
+
+
+def _has_reasoning_block(value: Any) -> bool:
+    if isinstance(value, dict):
+        typ = value.get("type")
+        if typ in ("thinking", "redacted_thinking", "reasoning", "reasoning_text"):
+            return True
+        return any(_has_reasoning_block(v) for v in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_has_reasoning_block(v) for v in value)
+    return False
+
+
+def _text_from_content(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        if value.get("type") in ("text", "output_text"):
+            return str(value.get("text") or "")
+        return ""
+    if isinstance(value, list):
+        return "".join(_text_from_content(item) for item in value)
+    return ""
+
+
+def _has_reasoning_signal(obj: Any) -> bool:
+    """Return True when a provider stream object exposes reasoning/thinking data."""
+    if obj is None:
+        return False
+    for key in ("reasoning_content", "reasoning", "reasoning_details", "thinking", "thinking_blocks", "reasoning_items"):
+        value = _value(obj, key)
+        if _truthy_reasoning_value(value) or _has_reasoning_block(value):
+            return True
+    if _has_reasoning_block(_value(obj, "content")):
+        return True
+    extra = _value(obj, "additional_kwargs") or _value(obj, "model_extra")
+    if isinstance(extra, dict):
+        for key in ("reasoning_content", "reasoning", "reasoning_details", "thinking", "thinking_blocks", "reasoning_items"):
+            value = extra.get(key)
+            if _truthy_reasoning_value(value) or _has_reasoning_block(value):
+                return True
+        if _has_reasoning_block(extra.get("content")):
+            return True
+    return False
+
+
+def _response_event_has_reasoning_started(event: Any) -> bool:
+    typ = str(_value(event, "type") or "")
+    if typ in (
+        "response.reasoning_text.delta",
+        "response.reasoning_summary_text.delta",
+        "response.reasoning_summary_part.added",
+    ):
+        return True
+    if typ == "response.output_item.added":
+        return _value(_value(event, "item"), "type") == "reasoning"
+    if typ == "response.content_part.added":
+        return _value(_value(event, "part"), "type") == "reasoning_text"
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -234,8 +314,13 @@ def _stream_responses_api(
         kwargs["reasoning"] = reasoning
     kwargs = sanitize_json_value(kwargs)
 
+    reasoning_started = False
     with client.responses.stream(**kwargs) as stream:
         for event in stream:
+            if not reasoning_started and _response_event_has_reasoning_started(event):
+                reasoning_started = True
+                item = _value(event, "item")
+                yield ReasoningStarted(id=str(_value(item, "id") or ""))
             if event.type == "response.output_text.delta":
                 yield TextDelta(event.delta)
             elif event.type == "response.output_item.done":
@@ -280,6 +365,7 @@ def _stream_chat_completions(
 
     accumulators: dict[int, dict] = {}
     final_chunk = None
+    reasoning_started = False
 
     stream = client.chat.completions.create(**sanitize_json_value(kwargs))
     try:
@@ -290,8 +376,12 @@ def _stream_chat_completions(
                 continue
 
             delta = chunk.choices[0].delta
-            if delta and getattr(delta, "content", None):
-                yield TextDelta(delta.content)
+            if not reasoning_started and (_has_reasoning_signal(delta) or _has_reasoning_signal(chunk.choices[0])):
+                reasoning_started = True
+                yield ReasoningStarted(id="")
+            text_delta = _text_from_content(_value(delta, "content")) if delta else ""
+            if text_delta:
+                yield TextDelta(text_delta)
             if delta and getattr(delta, "tool_calls", None):
                 for tc_delta in delta.tool_calls:
                     _accumulate_tool_delta(accumulators, tc_delta)
@@ -339,6 +429,7 @@ def _stream_litellm(
 
     accumulators: dict[int, dict] = {}
     final_chunk = None
+    reasoning_started = False
 
     for chunk in litellm.completion(**sanitize_json_value(kwargs)):
         if getattr(chunk, "usage", None):
@@ -347,8 +438,12 @@ def _stream_litellm(
             continue
 
         delta = chunk.choices[0].delta
-        if getattr(delta, "content", None):
-            yield TextDelta(delta.content)
+        if not reasoning_started and (_has_reasoning_signal(delta) or _has_reasoning_signal(chunk.choices[0])):
+            reasoning_started = True
+            yield ReasoningStarted(id="")
+        text_delta = _text_from_content(_value(delta, "content"))
+        if text_delta:
+            yield TextDelta(text_delta)
         if getattr(delta, "tool_calls", None):
             for tc_delta in delta.tool_calls:
                 _accumulate_tool_delta(accumulators, tc_delta)
@@ -374,7 +469,7 @@ def stream_response(
 ) -> Iterator:
     """Stream a response using the configured provider.
 
-    Yields TextDelta, ToolCallDone, ReasoningDone, and StreamDone events.
+    Yields TextDelta, ToolCallDone, ReasoningStarted, ReasoningDone, and StreamDone events.
     """
     backend = get_backend(config)
     try:
