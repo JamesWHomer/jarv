@@ -123,7 +123,7 @@ def print_help() -> None:
     key_table.add_row("base_url", "Custom API base URL (overrides provider default)")
     key_table.add_row("model", "Model name (default: gpt-5.4-mini)")
     key_table.add_row("reasoning_effort", "Reasoning effort value (empty to disable)")
-    key_table.add_row("max_history", "Number of messages to keep as context")
+    key_table.add_row("max_history", "Recent history items included as model context")
     key_table.add_row("max_stdin_chars", "Maximum piped stdin characters attached to one-shot prompts")
     key_table.add_row("max_tool_output_chars", "Maximum tool output characters returned to the model")
     key_table.add_row("command_timeout", "Seconds before a shell command is killed")
@@ -197,12 +197,13 @@ Run `jarv` with no prompt to start an interactive session. Type a prompt and pre
 4. Sends your query, recent history, the configured system prompt, and system info to the configured provider's API.
 5. Streams the assistant response in the terminal.
 6. When the model issues tool calls, jarv runs the matching handler and feeds results back into the model (for `run_command`, that means showing the command, running it, printing stdout/stderr/exit status, and returning output up to `max_tool_output_chars`).
-7. Saves the final assistant response back to history, trimmed to `max_history` items.
+7. Saves the full session history. On future prompts, `max_history` limits only the recent history items sent back as model context.
 
 ## Tools and shell commands
 
 - The root model sees three tools: `run_command`, `spawn`, and `read_artifact`.
 - Spawned subagents also get a mandatory `finish` tool (to return output) and may get `spawn` when the parent sets `sterile: false`.
+- Subagent internal transcripts are discarded. Root history stores the parent `spawn`/`read_artifact` tool calls and their returned outputs.
 - Shell commands run only when the model calls `run_command`.
 - On Windows, `run_command` uses PowerShell.
 - On other platforms, `run_command` uses the system shell.
@@ -221,7 +222,7 @@ Keys:
 - `base_url` - Custom API base URL. Overrides the provider's default endpoint.
 - `model` - Model name. Default: `{DEFAULT_CONFIG['model']}`.
 - `reasoning_effort` - Optional reasoning effort value. Empty disables this setting.
-- `max_history` - Number of history items kept as context. Default: `{DEFAULT_CONFIG['max_history']}`.
+- `max_history` - Number of recent stored history items included as model context. It does not delete saved history. Stored items include user messages, assistant messages, reasoning items, function calls, and function call outputs. Default: `{DEFAULT_CONFIG['max_history']}`.
 - `max_stdin_chars` - Maximum piped stdin characters attached to a one-shot prompt. Default: `{DEFAULT_CONFIG['max_stdin_chars']}`.
 - `max_tool_output_chars` - Maximum tool output characters returned to the model. Default: `{DEFAULT_CONFIG['max_tool_output_chars']}`.
 - `command_timeout` - Seconds before a shell command is killed. Default: `{DEFAULT_CONFIG['command_timeout']}`.

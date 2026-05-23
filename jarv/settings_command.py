@@ -153,7 +153,7 @@ def _settings_rows(config: dict) -> list[dict]:
             "label": "History limit",
             "key": "max_history",
             "kind": "int",
-            "desc": "messages kept as context",
+            "desc": "recent stored items sent as context",
         },
         {
             "section": "runtime",

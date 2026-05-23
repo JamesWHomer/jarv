@@ -119,6 +119,7 @@ When the model calls `spawn`, Jarv runs N child agents in parallel. Each child o
 - **Parallel by default** — all children in a `spawn` call run concurrently in a thread pool.
 - **Artifacts** — each child's output is stored as a named artifact. The parent (or siblings that declare a dependency) can fetch the full content.
 - **Recursive** — children can themselves spawn further children, up to `max_subagent_depth` levels deep (default 4). Children are sterile by default; the parent must explicitly allow further spawning.
+- **Transcript scope** — child-agent transcripts are discarded. Root history stores the parent `spawn`/`read_artifact` tool calls and returned outputs.
 - **Scoped per query** — the artifact store resets with each new top-level prompt.
 
 The terminal shows a live progress panel as children run, with a green checkmark or red cross as each finishes.
@@ -164,7 +165,7 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 | `api_key` | `""` | OpenAI API key. Falls back to `OPENAI_API_KEY` env var if empty. |
 | `model` | `"gpt-5.4-mini"` | Model name passed to the API. |
 | `reasoning_effort` | `""` | Reasoning effort level. Leave empty to disable. |
-| `max_history` | `40` | Number of recent messages kept as context. |
+| `max_history` | `40` | Number of recent stored history items included as model context. Does not delete saved history. |
 | `max_stdin_chars` | `200000` | Maximum piped stdin characters attached to a one-shot prompt. |
 | `max_tool_output_chars` | `20000` | Maximum tool output characters returned to the model. Longer output is returned with the middle omitted. |
 | `command_timeout` | `60` | Seconds before a shell command is killed. |
@@ -192,6 +193,8 @@ All state is stored in `~/.jarv/` (on Windows, `%USERPROFILE%\.jarv\`):
 │   └── redo-<hash>.json             # undo/redo stack
 └── archive/                         # archived sessions
 ```
+
+`max_history` counts stored items, not exchanges or tokens. User messages, assistant messages, reasoning items, function calls, and function call outputs each count as one item.
 
 ## Dependencies
 
