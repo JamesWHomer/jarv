@@ -68,6 +68,32 @@ def _value(obj: Any, key: str) -> Any:
     return getattr(obj, key, None)
 
 
+_REASONING_SIGNAL_KEYS = (
+    "reasoning_content",
+    "reasoningContent",
+    "reasoning",
+    "reasoning_details",
+    "thinking",
+    "thinking_blocks",
+    "reasoning_items",
+)
+
+_REASONING_CONTAINER_KEYS = (
+    "additional_kwargs",
+    "model_extra",
+    "provider_specific_fields",
+)
+
+_REASONING_BLOCK_TYPES = (
+    "thinking",
+    "thinking_delta",
+    "redacted_thinking",
+    "redacted_thinking_delta",
+    "reasoning",
+    "reasoning_text",
+)
+
+
 def _truthy_reasoning_value(value: Any) -> bool:
     if value is None:
         return False
@@ -81,8 +107,13 @@ def _truthy_reasoning_value(value: Any) -> bool:
 def _has_reasoning_block(value: Any) -> bool:
     if isinstance(value, dict):
         typ = value.get("type")
-        if typ in ("thinking", "redacted_thinking", "reasoning", "reasoning_text"):
+        if typ in _REASONING_BLOCK_TYPES:
             return True
+        for key in _REASONING_SIGNAL_KEYS:
+            if key in value and (
+                _truthy_reasoning_value(value[key]) or _has_reasoning_block(value[key])
+            ):
+                return True
         return any(_has_reasoning_block(v) for v in value.values())
     if isinstance(value, (list, tuple)):
         return any(_has_reasoning_block(v) for v in value)
@@ -105,15 +136,19 @@ def _has_reasoning_signal(obj: Any) -> bool:
     """Return True when a provider stream object exposes reasoning/thinking data."""
     if obj is None:
         return False
-    for key in ("reasoning_content", "reasoning", "reasoning_details", "thinking", "thinking_blocks", "reasoning_items"):
+    for key in _REASONING_SIGNAL_KEYS:
         value = _value(obj, key)
         if _truthy_reasoning_value(value) or _has_reasoning_block(value):
             return True
     if _has_reasoning_block(_value(obj, "content")):
         return True
-    extra = _value(obj, "additional_kwargs") or _value(obj, "model_extra")
-    if isinstance(extra, dict):
-        for key in ("reasoning_content", "reasoning", "reasoning_details", "thinking", "thinking_blocks", "reasoning_items"):
+    for container_key in _REASONING_CONTAINER_KEYS:
+        extra = _value(obj, container_key)
+        if not isinstance(extra, dict):
+            continue
+        if _has_reasoning_block(extra):
+            return True
+        for key in _REASONING_SIGNAL_KEYS:
             value = extra.get(key)
             if _truthy_reasoning_value(value) or _has_reasoning_block(value):
                 return True
@@ -422,6 +457,8 @@ def _stream_litellm(
     )
     if tools:
         kwargs["tools"] = sanitize_json_value(_to_chat_tools(tools))
+    if reasoning and reasoning.get("effort"):
+        kwargs["reasoning_effort"] = reasoning["effort"]
 
     api_key = resolve_api_key(config)
     if api_key and api_key != "not-needed":

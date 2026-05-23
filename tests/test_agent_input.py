@@ -1,6 +1,20 @@
+import io
 import unittest
+from datetime import datetime, timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
-from jarv.agent import response_start_status, response_wait_label, to_response_input_item
+from jarv.agent import (
+    build_input,
+    response_start_status,
+    response_wait_label,
+    run_agent,
+    to_response_input_item,
+)
+from jarv.config import DEFAULT_CONFIG
+from jarv.history import SessionContext, load_history, save_history
+from jarv.provider import StreamDone, TextDelta
 
 
 class AgentInputTests(unittest.TestCase):
@@ -63,6 +77,86 @@ class AgentInputTests(unittest.TestCase):
 
         self.assertLessEqual(len(api_item["id"]), 64)
         self.assertTrue(api_item["id"].startswith("rs_"))
+
+    def test_build_input_limits_context_without_mutating_history(self):
+        history = [
+            {"role": "user", "content": "old"},
+            {"role": "assistant", "content": "older answer"},
+            {"role": "user", "content": "new"},
+            {"role": "assistant", "content": "newer answer"},
+        ]
+        original = [dict(item) for item in history]
+
+        api_items = build_input(history, max_history=2)
+
+        self.assertEqual(
+            api_items,
+            [
+                {"role": "user", "content": "new"},
+                {"role": "assistant", "content": "newer answer"},
+            ],
+        )
+        self.assertEqual(history, original)
+
+    def test_build_input_counts_tool_call_and_output_as_history_items(self):
+        history = [
+            {"role": "user", "content": "run a command"},
+            {
+                "type": "function_call",
+                "id": "call_1",
+                "call_id": "call_1",
+                "name": "run_command",
+                "arguments": '{"command": "pwd"}',
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "C:\\work",
+            },
+            {"role": "assistant", "content": "done"},
+        ]
+
+        self.assertEqual(len(build_input(history, max_history=4)), 4)
+        self.assertEqual(build_input(history, max_history=3), [])
+
+    def test_run_agent_persists_full_history_even_when_context_limit_is_lower(self):
+        with TemporaryDirectory() as tmp:
+            history_file = Path(tmp) / "history.json"
+            existing = [
+                {"role": "user", "content": "one"},
+                {"role": "assistant", "content": "two"},
+                {"role": "user", "content": "three"},
+            ]
+            save_history(existing, history_file)
+            context = SessionContext(
+                session_id="session-id",
+                session_label="test session",
+                history_file=history_file,
+                now=datetime(2026, 5, 21, tzinfo=timezone.utc),
+            )
+            config = {**DEFAULT_CONFIG, "max_history": 2}
+
+            def fake_stream_response(*_args, **_kwargs):
+                yield TextDelta("four")
+                yield StreamDone(response=None)
+
+            with (
+                patch("jarv.agent.prepare_session_context", return_value=context),
+                patch("jarv.agent.stream_response", side_effect=fake_stream_response),
+                patch("jarv.agent.sys.stdout", new=io.StringIO()),
+            ):
+                run_agent("new prompt", config, client=None)
+
+            saved = load_history(history_file)
+
+        self.assertEqual(len(saved), len(existing) + 2)
+        self.assertEqual([item["content"] for item in saved if "content" in item], [
+            "one",
+            "two",
+            "three",
+            "new prompt",
+            "four",
+        ])
 
 
 if __name__ == "__main__":

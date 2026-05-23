@@ -281,6 +281,73 @@ class ProviderUsageTests(unittest.TestCase):
         self.assertIsInstance(events[0], ReasoningStarted)
         self.assertIsInstance(events[1], TextDelta)
 
+    def test_litellm_stream_emits_reasoning_started_from_provider_specific_reasoning(self):
+        chunks = [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content=None,
+                            tool_calls=None,
+                            provider_specific_fields={
+                                "reasoningContent": {"type": "thinking_delta", "text": "thinking"}
+                            },
+                        ),
+                        finish_reason=None,
+                    )
+                ],
+                usage=None,
+            ),
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(content="hi", tool_calls=None),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=None,
+            ),
+        ]
+        fake_litellm = SimpleNamespace(completion=lambda **_kwargs: FakeStream(chunks))
+
+        with patch("jarv.litellm_compat.import_litellm", return_value=fake_litellm):
+            events = list(_stream_litellm({"provider": "anthropic"}, "model", "system", [], []))
+
+        self.assertIsInstance(events[0], ReasoningStarted)
+        self.assertIsInstance(events[1], TextDelta)
+
+    def test_litellm_stream_forwards_reasoning_effort(self):
+        captured = {}
+        chunks = [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(content="hi", tool_calls=None),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=None,
+            ),
+        ]
+
+        def completion(**kwargs):
+            captured["kwargs"] = kwargs
+            return FakeStream(chunks)
+
+        fake_litellm = SimpleNamespace(completion=completion)
+
+        with patch("jarv.litellm_compat.import_litellm", return_value=fake_litellm):
+            list(_stream_litellm(
+                {"provider": "anthropic"},
+                "model",
+                "system",
+                [],
+                [],
+                reasoning={"effort": "high"},
+            ))
+
+        self.assertEqual(captured["kwargs"]["reasoning_effort"], "high")
+
 
 if __name__ == "__main__":
     unittest.main()
