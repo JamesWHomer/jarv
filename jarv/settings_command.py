@@ -13,7 +13,7 @@ from rich import box
 
 from .command_input import _read_key
 from .config import CONFIG_FILE, DEFAULT_CONFIG, load_config, save_config, validate_config
-from .display import console, jarv_panel, section_rule
+from .display import console, jarv_panel, refresh_on_resize, section_rule
 
 
 _SETTINGS_SAFETY_CHOICES = (
@@ -983,7 +983,7 @@ def _settings_interactive(config: dict) -> None:
         auto_refresh=False,
         transient=False,
         vertical_overflow="crop",
-    ) as live:
+    ) as live, refresh_on_resize(live):
         while True:
             live.refresh()
             try:

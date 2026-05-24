@@ -15,7 +15,7 @@ from rich import box
 
 from .command_input import _read_key
 from .config import CONFIG_DIR
-from .display import console, flatten_headings, jarv_panel, section_rule
+from .display import console, flatten_headings, jarv_panel, refresh_on_resize, section_rule
 from .history import (
     SESSIONS_DIR,
     artifact_file_for,
@@ -952,7 +952,7 @@ def cmd_sessions(args: list | None = None) -> None:
         auto_refresh=False,
         transient=False,
         vertical_overflow="crop",
-    ) as live:
+    ) as live, refresh_on_resize(live):
         while True:
             live.refresh()
             try:
@@ -1339,7 +1339,7 @@ def cmd_history() -> None:
         auto_refresh=False,
         transient=False,
         vertical_overflow="crop",
-    ) as live:
+    ) as live, refresh_on_resize(live):
         while True:
             live.refresh()
             try:

@@ -1,4 +1,6 @@
 import re
+import threading
+from contextlib import contextmanager
 
 from rich import box
 from rich.console import Console, RenderableType
@@ -10,6 +12,8 @@ console = Console()
 PANEL_BORDER_STYLE = "cyan"
 ACCENT_STYLE = "bold cyan"
 TITLE_STYLE = "bold bright_white"
+
+RESIZE_REFRESH_INTERVAL = 0.1
 
 STEP_DOT_DONE = "\u25cf"
 STEP_DOT_ACTIVE = "\u25cf"
@@ -52,6 +56,30 @@ def status_line(prefix: str, message: str, prefix_style: str = "bold cyan", mess
     if message_style:
         return f"[{prefix_style}]{prefix}[/{prefix_style}] [{message_style}]{message}[/{message_style}]"
     return f"[{prefix_style}]{prefix}[/{prefix_style}] {message}"
+
+
+@contextmanager
+def refresh_on_resize(live, *, console: Console = console, interval: float = RESIZE_REFRESH_INTERVAL):
+    """Refresh a Rich Live display when the terminal dimensions change."""
+    stop = threading.Event()
+    last_size = (console.size.width, console.size.height)
+
+    def _watch() -> None:
+        nonlocal last_size
+        while not stop.wait(interval):
+            current_size = (console.size.width, console.size.height)
+            if current_size == last_size:
+                continue
+            last_size = current_size
+            live.refresh()
+
+    thread = threading.Thread(target=_watch, name="jarv-resize-refresh", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=max(0.1, interval * 2))
 
 DISPLAY_LINE_LIMIT = 30
 
