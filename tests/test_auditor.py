@@ -1,4 +1,8 @@
+import sys
+from types import SimpleNamespace
+
 from jarv.auditor import _parse_response
+from jarv.auditor import _call_openai_compat
 
 
 def test_parse_response_accepts_strict_json():
@@ -72,6 +76,20 @@ def test_parse_response_ignores_json_without_allow_key():
     )
 
 
+def test_parse_response_accepts_json_verdict_alias():
+    assert _parse_response('{"verdict": "deny", "reason": "removes user files"}') == (
+        False,
+        "removes user files",
+    )
+
+
+def test_parse_response_accepts_json_decision_alias():
+    assert _parse_response('{"decision": "approve", "reason": "version probe only"}') == (
+        True,
+        "version probe only",
+    )
+
+
 def test_parse_response_rejects_unclear_json_allow_value():
     assert _parse_response('{"allow": "maybe", "reason": "ambiguous"}') == (
         False,
@@ -102,3 +120,103 @@ def test_parse_response_still_rejects_unclear_text():
         False,
         "could not parse auditor response",
     )
+
+
+def _install_fake_openai(monkeypatch, contents):
+    calls = []
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            content = contents[len(calls) - 1]
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **_kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAI))
+    return calls
+
+
+def test_openai_direct_request_avoids_fragile_response_options(monkeypatch):
+    calls = _install_fake_openai(
+        monkeypatch,
+        ['{"allow": true, "reason": "routine cleanup"}'],
+    )
+
+    result = _call_openai_compat(
+        {"provider": "openai"},
+        "gpt-4.1-mini",
+        "Command: Remove-Item .cache",
+        {"base_url": None},
+    )
+
+    assert result == (True, "routine cleanup")
+    assert "response_format" not in calls[0]
+    assert "reasoning_effort" not in calls[0]
+
+
+def test_openai_reasoning_model_uses_larger_budget_without_extra_options(monkeypatch):
+    calls = _install_fake_openai(
+        monkeypatch,
+        ['{"allow": true, "reason": "safe status check"}'],
+    )
+
+    result = _call_openai_compat(
+        {"provider": "openai"},
+        "gpt-5.4-mini",
+        "Command: git status",
+        {"base_url": None},
+    )
+
+    assert result == (True, "safe status check")
+    assert calls[0]["max_completion_tokens"] == 300
+    assert "max_tokens" not in calls[0]
+    assert "response_format" not in calls[0]
+    assert "reasoning_effort" not in calls[0]
+
+
+def test_openai_unparsable_response_retries_once(monkeypatch):
+    calls = _install_fake_openai(
+        monkeypatch,
+        [
+            "I cannot determine this from context.",
+            '{"allow": true, "reason": "safe version probe"}',
+        ],
+    )
+
+    result = _call_openai_compat(
+        {"provider": "openai"},
+        "gpt-4.1-mini",
+        "Command: python --version",
+        {"base_url": None},
+    )
+
+    assert result == (True, "safe version probe")
+    assert len(calls) == 2
+    assert "previous response could not be parsed" in calls[1]["messages"][1][
+        "content"
+    ]
+
+
+def test_openai_retry_failure_fails_closed(monkeypatch):
+    calls = _install_fake_openai(
+        monkeypatch,
+        [
+            "I cannot determine this from context.",
+            "Still unclear.",
+        ],
+    )
+
+    result = _call_openai_compat(
+        {"provider": "openai"},
+        "gpt-4.1-mini",
+        "Command: Remove-Item important",
+        {"base_url": None},
+    )
+
+    assert result == (False, "could not parse auditor response")
+    assert len(calls) == 2

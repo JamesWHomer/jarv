@@ -38,6 +38,13 @@ happen to match a broad pattern. Lean toward allowing unless genuinely risky.
 - Keep your reason under 15 words.\
 """
 
+AUDITOR_RETRY_INSTRUCTION = """\
+Your previous response could not be parsed.
+Return only valid JSON matching this schema:
+{"allow": true/false, "reason": "short one-sentence explanation"}
+Do not include markdown, code fences, or extra text.\
+"""
+
 
 def _get_auditor_model(config: dict) -> str:
     """Return the configured auditor model, or the active model."""
@@ -127,32 +134,69 @@ def _call_openai_compat(
 
     client = OpenAI(**kwargs)
 
+    kwargs = _openai_compat_kwargs(
+        config,
+        model,
+        info,
+        _auditor_messages(user_message),
+    )
+    response = client.chat.completions.create(**kwargs)
+    parsed = _parse_response(response.choices[0].message.content or "")
+    if not _is_parse_failure(parsed):
+        return parsed
+
+    retry_kwargs = _openai_compat_kwargs(
+        config,
+        model,
+        info,
+        _auditor_messages(user_message, retry=True),
+    )
+    retry_response = client.chat.completions.create(**retry_kwargs)
+    return _parse_response(retry_response.choices[0].message.content or "")
+
+
+def _auditor_messages(user_message: str, *, retry: bool = False) -> list[dict[str, str]]:
+    """Build the auditor prompt, optionally with a strict retry instruction."""
+    content = user_message
+    if retry:
+        content = f"{user_message}\n\n{AUDITOR_RETRY_INSTRUCTION}"
+    return [
+        {"role": "system", "content": AUDITOR_SYSTEM_PROMPT},
+        {"role": "user", "content": content},
+    ]
+
+
+def _openai_compat_kwargs(
+    config: dict,
+    model: str,
+    info: dict,
+    messages: list[dict[str, str]],
+) -> dict:
     kwargs = {
         "model": model,
-        "messages": [
-            {"role": "system", "content": AUDITOR_SYSTEM_PROMPT},
-            {"role": "user", "content": user_message},
-        ],
+        "messages": messages,
     }
     if _uses_max_completion_tokens(config, model, info):
-        kwargs["max_completion_tokens"] = 100
+        kwargs["max_completion_tokens"] = 300
     else:
         kwargs["temperature"] = 0
         kwargs["max_tokens"] = 100
 
-    response = client.chat.completions.create(**kwargs)
-
-    return _parse_response(response.choices[0].message.content or "")
+    return kwargs
 
 
 def _uses_max_completion_tokens(config: dict, model: str, info: dict) -> bool:
     """Return True for OpenAI Chat models that reject max_tokens."""
-    provider = config.get("provider", "openai")
-    is_openai = provider == "openai" and not (config.get("base_url") or info.get("base_url"))
-    if not is_openai:
+    if not _is_direct_openai(config, info):
         return False
     model = model.lower()
     return model.startswith(("gpt-5", "o1", "o3", "o4"))
+
+
+def _is_direct_openai(config: dict, info: dict) -> bool:
+    """Return True when the OpenAI SDK is talking to OpenAI directly."""
+    provider = config.get("provider", "openai")
+    return provider == "openai" and not (config.get("base_url") or info.get("base_url"))
 
 
 def _call_litellm(
@@ -166,22 +210,35 @@ def _call_litellm(
     prefix = PROVIDERS.get(provider_name, {}).get("litellm_prefix", "")
     litellm_model = f"{prefix}/{model}" if prefix and "/" not in model else model
 
-    kwargs = {
-        "model": litellm_model,
-        "messages": [
-            {"role": "system", "content": AUDITOR_SYSTEM_PROMPT},
-            {"role": "user", "content": user_message},
-        ],
-        "temperature": 0,
-        "max_tokens": 100,
-    }
+    kwargs = _litellm_kwargs(litellm_model, _auditor_messages(user_message))
 
     api_key = resolve_api_key(config)
     if api_key and api_key != "not-needed":
         kwargs["api_key"] = api_key
 
     response = litellm.completion(**kwargs)
-    return _parse_response(response.choices[0].message.content or "")
+    parsed = _parse_response(response.choices[0].message.content or "")
+    if not _is_parse_failure(parsed):
+        return parsed
+
+    retry_kwargs = _litellm_kwargs(litellm_model, _auditor_messages(user_message, retry=True))
+    if api_key and api_key != "not-needed":
+        retry_kwargs["api_key"] = api_key
+    retry_response = litellm.completion(**retry_kwargs)
+    return _parse_response(retry_response.choices[0].message.content or "")
+
+
+def _litellm_kwargs(litellm_model: str, messages: list[dict[str, str]]) -> dict:
+    return {
+        "model": litellm_model,
+        "messages": messages,
+        "temperature": 0,
+        "max_tokens": 100,
+    }
+
+
+def _is_parse_failure(parsed: tuple[bool, str]) -> bool:
+    return parsed == (False, "could not parse auditor response")
 
 
 def _parse_response(text: str) -> tuple[bool, str]:
@@ -220,10 +277,10 @@ def _parse_json_verdict(text: str) -> tuple[bool, str] | None:
 
 def _coerce_json_verdict(data) -> tuple[bool, str] | None:
     """Validate and normalize an auditor JSON object."""
-    if not isinstance(data, dict) or "allow" not in data:
+    if not isinstance(data, dict):
         return None
 
-    allow = _coerce_json_bool(data["allow"])
+    allow = _coerce_json_bool(data["allow"]) if "allow" in data else _coerce_json_alias(data)
     if allow is None:
         return None
 
@@ -241,6 +298,23 @@ def _coerce_json_bool(value) -> bool | None:
         if normalized in ("true", "yes", "y"):
             return True
         if normalized in ("false", "no", "n"):
+            return False
+    return None
+
+
+def _coerce_json_alias(data: dict) -> bool | None:
+    """Accept clear schema-ish verdict aliases from non-strict providers."""
+    for key, allow_values, deny_values in (
+        ("verdict", ("allow", "allowed"), ("deny", "denied")),
+        ("decision", ("approve", "approved", "allow", "allowed"), ("reject", "rejected", "deny", "denied")),
+    ):
+        value = data.get(key)
+        if not isinstance(value, str):
+            continue
+        normalized = value.strip().lower()
+        if normalized in allow_values:
+            return True
+        if normalized in deny_values:
             return False
     return None
 
