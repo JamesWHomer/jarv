@@ -13,9 +13,9 @@ from rich.table import Table
 from rich.text import Text
 from rich import box
 
-from .command_input import _read_key
+from .command_input import _read_key, mouse_capture
 from .config import CONFIG_DIR
-from .display import console, flatten_headings, jarv_panel, refresh_on_resize, section_rule
+from .display import console, flatten_headings, jarv_panel, refresh_on_resize, section_rule, terminal_size
 from .history import (
     SESSIONS_DIR,
     artifact_file_for,
@@ -408,7 +408,7 @@ def cmd_sessions(args: list | None = None) -> None:
         return max(1, content)
 
     def _max_vis(has_status: bool = False) -> int:
-        term_h = console.size.height
+        _, term_h = terminal_size(console=console)
         has_search = bool(search_active or search_query)
         return _content_rows(term_h, has_status, show_footer=term_h >= 6, has_search=has_search)
 
@@ -561,8 +561,7 @@ def cmd_sessions(args: list | None = None) -> None:
 
     def _render_preview() -> Panel:
         nonlocal preview_offset
-        term_h = console.size.height
-        term_w = console.size.width
+        term_w, term_h = terminal_size(console=console)
         panel_width = max(1, term_w)
         inner_width = max(1, panel_width - 4)
         show_footer = term_h >= 6
@@ -631,8 +630,7 @@ def cmd_sessions(args: list | None = None) -> None:
         if preview_sid is not None:
             return _render_preview()
         nonlocal offset
-        term_w = console.size.width
-        term_h = console.size.height
+        term_w, term_h = terminal_size(console=console)
         panel_width = max(1, term_w)
         inner_width = max(1, panel_width - 4)
         show_footer = term_h >= 6
@@ -952,7 +950,7 @@ def cmd_sessions(args: list | None = None) -> None:
         auto_refresh=False,
         transient=False,
         vertical_overflow="crop",
-    ) as live, refresh_on_resize(live):
+    ) as live, refresh_on_resize(live), mouse_capture():
         while True:
             live.refresh()
             try:
@@ -1017,7 +1015,8 @@ def cmd_sessions(args: list | None = None) -> None:
                 elif key == "HOME":
                     preview_offset = 0
                 elif key == "END":
-                    preview_offset = max(0, len(_preview_lines(preview_sid, max(1, console.size.width - 4))) - 1)
+                    term_w, _ = terminal_size(console=console)
+                    preview_offset = max(0, len(_preview_lines(preview_sid, max(1, term_w - 4))) - 1)
                 elif key == "ENTER":
                     row = next((r for r in rows if r["sid"] == preview_sid), None)
                     if row is not None:
@@ -1262,7 +1261,7 @@ def cmd_history() -> None:
         return anchors
 
     def _body_rows() -> int:
-        term_h = console.size.height
+        _, term_h = terminal_size(console=console)
         show_footer = term_h >= 6
         return max(1, term_h - 2 - (2 if show_footer else 0))  # panel border + footer
 
@@ -1271,7 +1270,8 @@ def cmd_history() -> None:
 
     def _jump_to_message(delta: int) -> None:
         nonlocal offset
-        width = max(1, console.size.width - 4)
+        term_w, _ = terminal_size(console=console)
+        width = max(1, term_w - 4)
         anchors = _anchors(width)
         if not anchors:
             return
@@ -1285,8 +1285,7 @@ def cmd_history() -> None:
 
     def _render() -> Panel:
         nonlocal offset
-        term_w = console.size.width
-        term_h = console.size.height
+        term_w, term_h = terminal_size(console=console)
         panel_width = max(1, term_w)
         show_footer = term_h >= 6
         body = _body_rows()
@@ -1339,14 +1338,15 @@ def cmd_history() -> None:
         auto_refresh=False,
         transient=False,
         vertical_overflow="crop",
-    ) as live, refresh_on_resize(live):
+    ) as live, refresh_on_resize(live), mouse_capture():
         while True:
             live.refresh()
             try:
                 key = _read_key()
             except KeyboardInterrupt:
                 break
-            width = max(1, console.size.width - 4)
+            term_w, _ = terminal_size(console=console)
+            width = max(1, term_w - 4)
             total = len(_lines(width))
             page = max(1, _body_rows() - 1)
             max_off = max(0, total - _body_rows())

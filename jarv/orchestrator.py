@@ -265,6 +265,7 @@ def run_subagent_loop(
                 kwargs["model"], kwargs["instructions"],
                 kwargs["tools"], kwargs["input"],
                 reasoning=kwargs.get("reasoning"),
+                prompt_cache_key=f"jarv:{node.session_id}" if node.session_id else None,
             ):
                 if isinstance(event, ToolCallDone):
                     tool_calls.append(event)

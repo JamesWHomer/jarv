@@ -664,7 +664,7 @@ wheels = [
 
 [[package]]
 name = "jarv"
-version = "0.10.3"
+version = "0.10.6"
 source = { editable = "." }
 dependencies = [
     { name = "litellm" },

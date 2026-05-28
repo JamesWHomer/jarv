@@ -158,6 +158,61 @@ class AgentInputTests(unittest.TestCase):
             "four",
         ])
 
+    def test_run_agent_passes_session_prompt_cache_key(self):
+        with TemporaryDirectory() as tmp:
+            history_file = Path(tmp) / "history.json"
+            context = SessionContext(
+                session_id="session-id",
+                session_label="test session",
+                history_file=history_file,
+                now=datetime(2026, 5, 21, tzinfo=timezone.utc),
+            )
+            captured = {}
+
+            def fake_stream_response(*_args, **kwargs):
+                captured["kwargs"] = kwargs
+                yield TextDelta("hello")
+                yield StreamDone(response=None)
+
+            with (
+                patch("jarv.agent.prepare_session_context", return_value=context),
+                patch("jarv.agent.stream_response", side_effect=fake_stream_response),
+                patch("jarv.agent.sys.stdout", new=io.StringIO()),
+            ):
+                run_agent("hello!", DEFAULT_CONFIG, client=None)
+
+        self.assertEqual(captured["kwargs"]["prompt_cache_key"], "jarv:session-id")
+
+    def test_run_agent_persists_text_recovered_from_final_response(self):
+        with TemporaryDirectory() as tmp:
+            history_file = Path(tmp) / "history.json"
+            context = SessionContext(
+                session_id="session-id",
+                session_label="test session",
+                history_file=history_file,
+                now=datetime(2026, 5, 21, tzinfo=timezone.utc),
+            )
+            recovered_response = type(
+                "Response",
+                (),
+                {"output_text": "recovered answer", "status": "completed"},
+            )()
+
+            def fake_stream_response(*_args, **_kwargs):
+                yield StreamDone(response=recovered_response)
+
+            with (
+                patch("jarv.agent.prepare_session_context", return_value=context),
+                patch("jarv.agent.stream_response", side_effect=fake_stream_response),
+                patch("jarv.agent.sys.stdout", new=io.StringIO()),
+            ):
+                run_agent("hello!", DEFAULT_CONFIG, client=None)
+
+            saved = load_history(history_file)
+
+        self.assertEqual(saved[-1]["role"], "assistant")
+        self.assertEqual(saved[-1]["content"], "recovered answer")
+
 
 if __name__ == "__main__":
     unittest.main()

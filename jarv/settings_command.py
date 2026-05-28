@@ -11,9 +11,9 @@ from rich.table import Table
 from rich.text import Text
 from rich import box
 
-from .command_input import _read_key
+from .command_input import _read_key, mouse_capture
 from .config import CONFIG_FILE, DEFAULT_CONFIG, load_config, save_config, validate_config
-from .display import console, jarv_panel, refresh_on_resize, section_rule
+from .display import console, jarv_panel, refresh_on_resize, section_rule, terminal_size
 
 
 _SETTINGS_SAFETY_CHOICES = (
@@ -846,7 +846,7 @@ def _settings_interactive(config: dict) -> None:
 
     def _render_settings_panel(height: int) -> Panel:
         nonlocal selected
-        term_w = console.size.width
+        term_w, _ = terminal_size(console=console)
         panel_width = max(1, term_w)
         inner_width = max(1, panel_width - 4)
         height = max(3, height)
@@ -925,7 +925,7 @@ def _settings_interactive(config: dict) -> None:
         )
 
     def _render_editor_panel(height: int) -> Panel:
-        term_w = console.size.width
+        term_w, _ = terminal_size(console=console)
         panel_width = max(1, term_w)
         inner_width = max(1, panel_width - 4)
         height = max(3, height)
@@ -948,11 +948,11 @@ def _settings_interactive(config: dict) -> None:
         )
 
     def _render():
-        term_h = max(3, console.size.height)
+        term_w, term_h = terminal_size(console=console)
+        term_h = max(3, term_h)
         if edit is None:
             return _render_settings_panel(term_h)
 
-        term_w = console.size.width
         inner_width = max(1, max(1, term_w) - 4)
         desired_editor_height = len(_settings_editor_lines(edit, config, inner_width)) + 2
         desired_editor_height = max(7, min(desired_editor_height, term_h))
@@ -983,7 +983,7 @@ def _settings_interactive(config: dict) -> None:
         auto_refresh=False,
         transient=False,
         vertical_overflow="crop",
-    ) as live, refresh_on_resize(live):
+    ) as live, refresh_on_resize(live), mouse_capture():
         while True:
             live.refresh()
             try:

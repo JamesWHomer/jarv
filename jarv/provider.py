@@ -7,6 +7,7 @@ Supports two streaming backends:
 
 import hashlib
 import os
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Iterator
@@ -129,7 +130,24 @@ def _text_from_content(value: Any) -> str:
         return ""
     if isinstance(value, list):
         return "".join(_text_from_content(item) for item in value)
+    typ = _value(value, "type")
+    if typ in ("text", "output_text"):
+        return str(_value(value, "text") or "")
     return ""
+
+
+def response_output_text(response: Any) -> str:
+    """Extract assistant-visible text from a Responses API response object."""
+    direct = _value(response, "output_text")
+    if isinstance(direct, str):
+        return direct
+    chunks: list[str] = []
+    output = _value(response, "output")
+    if isinstance(output, list):
+        for item in output:
+            if _value(item, "type") == "message":
+                chunks.append(_text_from_content(_value(item, "content")))
+    return "".join(chunks)
 
 
 def _has_reasoning_signal(obj: Any) -> bool:
@@ -170,6 +188,61 @@ def _response_event_has_reasoning_started(event: Any) -> bool:
     if typ == "response.content_part.added":
         return _value(_value(event, "part"), "type") == "reasoning_text"
     return False
+
+
+def _response_output_items(response: Any) -> list:
+    output = _value(response, "output")
+    return output if isinstance(output, list) else []
+
+
+def _is_response_complete(response: Any) -> bool:
+    status = _value(response, "status")
+    if status in (None, "completed"):
+        return bool(response_output_text(response) or _response_output_items(response))
+    return False
+
+
+def _retrieve_completed_response(client: Any, response_id: str, attempts: int = 4) -> Any | None:
+    for attempt in range(attempts):
+        try:
+            response = client.responses.retrieve(response_id)
+        except Exception:
+            response = None
+        if response is not None and _is_response_complete(response):
+            return response
+        if attempt < attempts - 1:
+            time.sleep(0.25 * (attempt + 1))
+    return None
+
+
+def _events_from_recovered_response(
+    response: Any,
+    yielded_tool_call_ids: set[str],
+    yielded_reasoning_ids: set[str],
+) -> Iterator:
+    for item in _response_output_items(response):
+        typ = _value(item, "type")
+        if typ == "function_call":
+            call_id = str(_value(item, "call_id") or "")
+            item_id = str(_value(item, "id") or call_id)
+            if item_id in yielded_tool_call_ids or call_id in yielded_tool_call_ids:
+                continue
+            yielded_tool_call_ids.update({item_id, call_id})
+            yield ToolCallDone(
+                id=item_id,
+                call_id=call_id,
+                name=str(_value(item, "name") or ""),
+                arguments=str(_value(item, "arguments") or ""),
+            )
+        elif typ == "reasoning":
+            item_id = str(_value(item, "id") or "")
+            if item_id in yielded_reasoning_ids:
+                continue
+            yielded_reasoning_ids.add(item_id)
+            yield ReasoningDone(
+                id=item_id,
+                summary=_value(item, "summary") or [],
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -337,7 +410,7 @@ def _accumulate_tool_delta(accumulators: dict[int, dict], tc_delta) -> None:
 # ---------------------------------------------------------------------------
 
 def _stream_responses_api(
-    client, model, instructions, tools, input_items, reasoning=None,
+    client, model, instructions, tools, input_items, reasoning=None, prompt_cache_key=None,
 ) -> Iterator:
     kwargs: dict[str, Any] = dict(
         model=model,
@@ -347,35 +420,67 @@ def _stream_responses_api(
     )
     if reasoning:
         kwargs["reasoning"] = reasoning
+    if prompt_cache_key:
+        kwargs["prompt_cache_key"] = prompt_cache_key
     kwargs = sanitize_json_value(kwargs)
 
     reasoning_started = False
-    with client.responses.stream(**kwargs) as stream:
-        for event in stream:
-            if not reasoning_started and _response_event_has_reasoning_started(event):
-                reasoning_started = True
-                item = _value(event, "item")
-                yield ReasoningStarted(id=str(_value(item, "id") or ""))
-            if event.type == "response.output_text.delta":
-                yield TextDelta(event.delta)
-            elif event.type == "response.output_item.done":
-                if event.item.type == "function_call":
-                    yield ToolCallDone(
-                        id=event.item.id,
-                        call_id=event.item.call_id,
-                        name=event.item.name,
-                        arguments=event.item.arguments,
-                    )
-                elif event.item.type == "reasoning":
-                    yield ReasoningDone(
-                        id=event.item.id,
-                        summary=getattr(event.item, "summary", []),
-                    )
-        try:
-            final_response = stream.get_final_response()
-        except Exception:
-            final_response = None
-        yield StreamDone(response=final_response)
+    response_id: str | None = None
+    yielded_tool_call_ids: set[str] = set()
+    yielded_reasoning_ids: set[str] = set()
+    try:
+        with client.responses.stream(**kwargs) as stream:
+            for event in stream:
+                if event.type == "response.created":
+                    response = _value(event, "response")
+                    response_id = str(_value(response, "id") or response_id or "")
+                    continue
+                response = _value(event, "response")
+                if response is not None and _value(response, "id"):
+                    response_id = str(_value(response, "id"))
+                if not reasoning_started and _response_event_has_reasoning_started(event):
+                    reasoning_started = True
+                    item = _value(event, "item")
+                    yield ReasoningStarted(id=str(_value(item, "id") or ""))
+                if event.type == "response.output_text.delta":
+                    yield TextDelta(event.delta)
+                elif event.type == "response.output_item.done":
+                    if event.item.type == "function_call":
+                        yielded_tool_call_ids.update(
+                            {str(event.item.id or ""), str(event.item.call_id or "")}
+                        )
+                        yield ToolCallDone(
+                            id=event.item.id,
+                            call_id=event.item.call_id,
+                            name=event.item.name,
+                            arguments=event.item.arguments,
+                        )
+                    elif event.item.type == "reasoning":
+                        yielded_reasoning_ids.add(str(event.item.id or ""))
+                        yield ReasoningDone(
+                            id=event.item.id,
+                            summary=getattr(event.item, "summary", []),
+                        )
+            try:
+                final_response = stream.get_final_response()
+            except Exception:
+                final_response = (
+                    _retrieve_completed_response(client, response_id)
+                    if response_id else None
+                )
+            yield StreamDone(response=final_response)
+    except Exception:
+        if response_id:
+            recovered_response = _retrieve_completed_response(client, response_id)
+            if recovered_response is not None:
+                yield from _events_from_recovered_response(
+                    recovered_response,
+                    yielded_tool_call_ids,
+                    yielded_reasoning_ids,
+                )
+                yield StreamDone(response=recovered_response)
+                return
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -503,6 +608,7 @@ def stream_response(
     tools: list,
     input_items: list,
     reasoning: dict | None = None,
+    prompt_cache_key: str | None = None,
 ) -> Iterator:
     """Stream a response using the configured provider.
 
@@ -512,7 +618,7 @@ def stream_response(
     try:
         if backend == "responses":
             yield from _stream_responses_api(
-                client, model, instructions, tools, input_items, reasoning,
+                client, model, instructions, tools, input_items, reasoning, prompt_cache_key,
             )
         elif backend == "openai_compat":
             yield from _stream_chat_completions(

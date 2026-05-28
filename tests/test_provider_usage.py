@@ -10,6 +10,7 @@ from jarv.provider import (
     _stream_chat_completions,
     _stream_litellm,
     _stream_responses_api,
+    response_output_text,
     responses_input_id,
 )
 
@@ -34,6 +35,16 @@ class FakeResponseStream(FakeStream):
 
     def get_final_response(self):
         return SimpleNamespace(usage=None)
+
+
+class BrokenResponseStream(FakeResponseStream):
+    def __iter__(self):
+        yield SimpleNamespace(
+            type="response.created",
+            response=SimpleNamespace(id="resp_123"),
+        )
+        yield SimpleNamespace(type="response.output_text.delta", delta="partial")
+        raise RuntimeError("incomplete chunked read")
 
 
 class ProviderUsageTests(unittest.TestCase):
@@ -251,6 +262,50 @@ class ProviderUsageTests(unittest.TestCase):
 
         self.assertIsInstance(events[0], ReasoningStarted)
         self.assertIsInstance(events[1], TextDelta)
+
+    def test_responses_stream_forwards_prompt_cache_key(self):
+        captured = {}
+        stream = FakeResponseStream([])
+
+        def response_stream(**kwargs):
+            captured["kwargs"] = kwargs
+            return stream
+
+        client = SimpleNamespace(
+            responses=SimpleNamespace(stream=response_stream)
+        )
+
+        list(_stream_responses_api(
+            client,
+            "model",
+            "system",
+            [],
+            [],
+            prompt_cache_key="jarv:session-id",
+        ))
+
+        self.assertEqual(captured["kwargs"]["prompt_cache_key"], "jarv:session-id")
+
+    def test_responses_stream_recovers_completed_response_after_disconnect(self):
+        recovered = SimpleNamespace(
+            id="resp_123",
+            status="completed",
+            output_text="partial and recovered",
+            output=[],
+        )
+        client = SimpleNamespace(
+            responses=SimpleNamespace(
+                stream=lambda **_kwargs: BrokenResponseStream([]),
+                retrieve=lambda response_id: recovered if response_id == "resp_123" else None,
+            )
+        )
+
+        events = list(_stream_responses_api(client, "model", "system", [], []))
+
+        self.assertIsInstance(events[0], TextDelta)
+        self.assertIsInstance(events[-1], StreamDone)
+        self.assertIs(events[-1].response, recovered)
+        self.assertEqual(response_output_text(events[-1].response), "partial and recovered")
 
     def test_litellm_stream_emits_reasoning_started_from_thinking_blocks(self):
         chunks = [

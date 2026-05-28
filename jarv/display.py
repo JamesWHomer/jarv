@@ -1,4 +1,6 @@
+import os
 import re
+import signal
 import threading
 from contextlib import contextmanager
 
@@ -18,6 +20,19 @@ RESIZE_REFRESH_INTERVAL = 0.1
 STEP_DOT_DONE = "\u25cf"
 STEP_DOT_ACTIVE = "\u25cf"
 STEP_DOT_PENDING = "\u25cb"
+
+
+def terminal_size(*, console: Console = console) -> tuple[int, int]:
+    """Return current terminal dimensions as (width, height)."""
+    for stream in (0, 1, 2):
+        try:
+            size = os.get_terminal_size(stream)
+        except OSError:
+            continue
+        return max(1, size.columns), max(1, size.lines)
+
+    size = console.size
+    return max(1, size.width), max(1, size.height)
 
 
 def jarv_panel(body: RenderableType, title: str, subtitle: str | None = None, padding: tuple = (1, 2)) -> Panel:
@@ -62,16 +77,37 @@ def status_line(prefix: str, message: str, prefix_style: str = "bold cyan", mess
 def refresh_on_resize(live, *, console: Console = console, interval: float = RESIZE_REFRESH_INTERVAL):
     """Refresh a Rich Live display when the terminal dimensions change."""
     stop = threading.Event()
-    last_size = (console.size.width, console.size.height)
+    changed = threading.Event()
+    last_size = terminal_size(console=console)
+    previous_sigwinch = None
+    restore_sigwinch = False
 
     def _watch() -> None:
         nonlocal last_size
-        while not stop.wait(interval):
-            current_size = (console.size.width, console.size.height)
+        while not stop.is_set():
+            changed.wait(interval)
+            changed.clear()
+            if stop.is_set():
+                break
+            current_size = terminal_size(console=console)
             if current_size == last_size:
                 continue
             last_size = current_size
             live.refresh()
+
+    if hasattr(signal, "SIGWINCH"):
+        try:
+            previous_sigwinch = signal.getsignal(signal.SIGWINCH)
+
+            def _handle_sigwinch(signum, frame):
+                changed.set()
+                if callable(previous_sigwinch):
+                    previous_sigwinch(signum, frame)
+
+            signal.signal(signal.SIGWINCH, _handle_sigwinch)
+            restore_sigwinch = True
+        except (ValueError, OSError):
+            restore_sigwinch = False
 
     thread = threading.Thread(target=_watch, name="jarv-resize-refresh", daemon=True)
     thread.start()
@@ -79,7 +115,13 @@ def refresh_on_resize(live, *, console: Console = console, interval: float = RES
         yield
     finally:
         stop.set()
+        changed.set()
         thread.join(timeout=max(0.1, interval * 2))
+        if restore_sigwinch:
+            try:
+                signal.signal(signal.SIGWINCH, previous_sigwinch)
+            except (ValueError, OSError):
+                pass
 
 DISPLAY_LINE_LIMIT = 30
 

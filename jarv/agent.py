@@ -16,7 +16,7 @@ from rich.segment import Segment
 from rich.text import Text
 
 from .config import DEFAULT_CONFIG
-from .display import console, flatten_headings
+from .display import console, flatten_headings, terminal_size
 from .history import (
     artifact_file_for,
     forget_current_session,
@@ -35,6 +35,7 @@ from .provider import (
     StreamDone,
     TextDelta,
     ToolCallDone,
+    response_output_text,
     responses_input_id,
     stream_response,
 )
@@ -443,6 +444,8 @@ def run_agent(
     if effort:
         kwargs["reasoning"] = {"effort": effort}
 
+    reply_text = ""
+    tool_calls = []
     try:
         while True:
             reply_text = ""
@@ -482,6 +485,7 @@ def run_agent(
                     kwargs["model"], kwargs["instructions"],
                     kwargs["tools"], kwargs["input"],
                     reasoning=kwargs.get("reasoning"),
+                    prompt_cache_key=f"jarv:{session_context.session_id}",
                 ):
                     if isinstance(event, TextDelta):
                         if not got_text:
@@ -499,7 +503,8 @@ def run_agent(
                                         )
                                     )
                                 )
-                                stream_max_lines = console.size.height - 2
+                                _, term_h = terminal_size(console=console)
+                                stream_max_lines = term_h - 2
                                 stream_live = Live(
                                     TailMarkdown("", stream_max_lines),
                                     refresh_per_second=12,
@@ -530,6 +535,10 @@ def run_agent(
                             wait_indicator.has_reasoning = True
                     elif isinstance(event, StreamDone):
                         final_response = event.response
+                final_text = response_output_text(final_response)
+                if final_text and len(final_text) >= len(reply_text):
+                    reply_text = final_text
+                    got_text = True
                 record_response_usage(
                     usage_path,
                     session_context.session_id,
@@ -629,6 +638,8 @@ def run_agent(
             raise
     except ProviderError as e:
         console.print(f"[red]API error:[/red] {escape(str(e))}")
+        if reply_text and not tool_calls:
+            history.append({"role": "assistant", "content": reply_text, **metadata})
         if not incognito:
             save_history(history, session_context.history_file)
         save_artifact_store(artifact_store, artifact_file)
