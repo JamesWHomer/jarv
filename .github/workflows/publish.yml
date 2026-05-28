@@ -45,13 +45,28 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v4
         with:
           name: dist
           path: dist/
 
+      - name: Extract release notes from annotated tag
+        shell: bash
+        run: |
+          git for-each-ref "refs/tags/${GITHUB_REF_NAME}" --format='%(contents:body)' > release-notes.md
+
+          # Fallback in case the tag has no separate body
+          if [ ! -s release-notes.md ]; then
+            git for-each-ref "refs/tags/${GITHUB_REF_NAME}" --format='%(contents)' > release-notes.md
+          fi
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          body_path: release-notes.md
           generate_release_notes: true
