@@ -145,7 +145,7 @@ The terminal shows a live progress panel as children run, with a green checkmark
 | `/usage` | Show token usage, cost, and context breakdown |
 | `/update` | Update Jarv to the latest version |
 
-All commands work both as `jarv /command` (one-shot) and inside heads-up mode.
+All commands work both as `jarv /command` (one-shot) and inside heads-up mode. Read-only commands (`/help`, `/about`, `/usage`, and `/config`) use a temporary display by default in interactive terminals; change `read_only_command_display` in `/settings` to print them permanently instead.
 
 ## Sessions
 
@@ -176,6 +176,7 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 | `max_subagent_depth` | `4` | Maximum nesting depth for spawned subagents. |
 | `subagent_thread_pool_max_workers` | `8` | Max parallel subagents per `spawn` call. |
 | `check_updates` | `true` | Background update check on startup (non-blocking, throttled to once per 24h). |
+| `read_only_command_display` | `"auto"` | Display mode for `/help`, `/about`, `/usage`, and `/config`: `auto`, `print`, `inline`, or `fullscreen`. |
 | `system_prompt` | `"You are Jarv..."` | System instructions sent with each request. |
 
 ## Local files

@@ -15,6 +15,8 @@ DEFAULT_SYSTEM_PROMPT = (
     "run `jarv /help` before answering. Do not invent unsupported commands."
 )
 
+READ_ONLY_COMMAND_DISPLAY_CHOICES = ("auto", "print", "inline", "fullscreen")
+
 DEFAULT_CONFIG = {
     "provider": "openai",
     "api_key": "",
@@ -34,6 +36,7 @@ DEFAULT_CONFIG = {
     "max_subagent_depth": 4,
     "subagent_thread_pool_max_workers": 8,
     "check_updates": True,
+    "read_only_command_display": "auto",
 }
 
 def load_config() -> dict:
@@ -131,6 +134,12 @@ def validate_config(config: dict) -> bool:
     safety = config.get("command_safety", "risky")
     if safety not in ("all", "risky", "none"):
         console.print(f"[red]Config 'command_safety' must be one of: all, risky, none.[/red]")
+        ok = False
+
+    display_mode = config.get("read_only_command_display", "auto")
+    if display_mode not in READ_ONLY_COMMAND_DISPLAY_CHOICES:
+        choices = ", ".join(READ_ONLY_COMMAND_DISPLAY_CHOICES)
+        console.print(f"[red]Config 'read_only_command_display' must be one of: {choices}.[/red]")
         ok = False
 
     return ok

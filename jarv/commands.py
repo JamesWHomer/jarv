@@ -13,7 +13,7 @@ from rich.text import Text
 
 from . import __version__
 from .config import CONFIG_DIR, CONFIG_FILE, DEFAULT_CONFIG, load_config, save_config
-from .display import console, flatten_headings, jarv_panel, section_rule, status_line
+from .display import console, flatten_headings, section_rule, status_line
 from .history import (
     SESSIONS_DIR,
     SESSIONS_FILE,
@@ -21,6 +21,7 @@ from .history import (
     load_history,
     prepare_session_context,
 )
+from .read_only_display import show_read_only_command
 from .command_input import _read_key
 from .session_commands import (
     archive_session_files,
@@ -92,7 +93,7 @@ def cmd_unset(args: list) -> None:
         console.print(f"[bold cyan]✓[/bold cyan] [bold cyan]{key}[/bold cyan] [dim]removed.[/dim]")
 
 
-def print_help() -> None:
+def _help_body() -> Group:
     cmd_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
     cmd_table.add_column(style="bold cyan", no_wrap=True)
     cmd_table.add_column(style="white")
@@ -135,6 +136,7 @@ def print_help() -> None:
     key_table.add_row("max_subagent_depth", "Max spawn depth for nested subagents")
     key_table.add_row("subagent_thread_pool_max_workers", "Parallel subagents per spawn call")
     key_table.add_row("check_updates", "Non-blocking background update check on one-shot runs (true/false)")
+    key_table.add_row("read_only_command_display", "How read-only commands display (auto, print, inline, fullscreen)")
 
     paths_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
     paths_table.add_column(style="dim", no_wrap=True)
@@ -143,7 +145,7 @@ def print_help() -> None:
     paths_table.add_row("Sessions index", str(SESSIONS_FILE))
     paths_table.add_row("Session data", str(SESSIONS_DIR))
 
-    body = Group(
+    return Group(
         section_rule("commands"),
         Text(""),
         cmd_table,
@@ -156,10 +158,18 @@ def print_help() -> None:
         Text(""),
         paths_table,
     )
-    console.print(jarv_panel(body, title="help"))
 
 
-def print_about() -> None:
+def print_help(*, mode: str | None = None, include_setup_nudge: bool = True) -> None:
+    show_read_only_command(
+        _help_body(),
+        title="help",
+        mode=mode,
+        include_setup_nudge=include_setup_nudge,
+    )
+
+
+def _about_body() -> Markdown:
     about = f"""# jarv
 
 jarv is a command-line AI assistant that supports multiple AI providers including OpenAI, Anthropic, Google Gemini, OpenRouter, Groq, DeepSeek, and more.
@@ -179,6 +189,7 @@ jarv is a command-line AI assistant that supports multiple AI providers includin
 - `jarv /undo [n]` - Unsend the last n exchanges (default 1). The removed exchange is pushed onto a redo stack.
 - `jarv /redo [n]` - Restore the last n undone exchanges (default 1). Sending a new message clears the redo stack.
 - `jarv /settings` - Open an interactive settings menu for provider/model, command review, audit, runtime, and updates.
+- `jarv /settings` also controls how read-only commands display: `auto`, `print`, `inline`, or `fullscreen`.
 - `jarv /new` - Start a fresh session on the next message.
 - `jarv /archive` - Archive this terminal's session history and start a fresh one on the next message.
 - `jarv /sessions` / `jarv /session` - List sessions by recency. In an interactive terminal you can scroll through all of them; when stdout is not a TTY (e.g. piped), only the 5 most recent are listed.
@@ -234,6 +245,7 @@ Keys:
 - `max_subagent_depth` - Maximum recursion depth for `spawn` (root is 0). Default: `{DEFAULT_CONFIG['max_subagent_depth']}`.
 - `subagent_thread_pool_max_workers` - Max parallel children in one `spawn` batch. Default: `{DEFAULT_CONFIG['subagent_thread_pool_max_workers']}`.
 - `check_updates` - When `true`, a one-shot `jarv <question>` run fires a non-blocking background check against GitHub. If a new version is found it is flagged locally and shown at the start of the next run. Default: `true`. Set to `false` to disable entirely. Heads-up mode (`jarv` with no args) and slash commands do not run this check.
+- `read_only_command_display` - How `/help`, `/about`, `/usage`, and `/config` are displayed in an interactive terminal. `auto` chooses inline for short output and fullscreen for longer output. `print` preserves permanent terminal output. `inline` and `fullscreen` force those temporary views. Default: `auto`.
 - `/usage` model metadata comes from LiteLLM.
 
 If the config file does not exist, jarv creates it and exits so you can add an API key.
@@ -269,7 +281,17 @@ Each terminal is bound to exactly one session at a time. By default a fresh term
 
 jarv {__version__}
 """
-    console.print(jarv_panel(Markdown(flatten_headings(about)), title="about", subtitle=f"v{__version__}"))
+    return Markdown(flatten_headings(about))
+
+
+def print_about(*, mode: str | None = None, include_setup_nudge: bool = True) -> None:
+    show_read_only_command(
+        _about_body(),
+        title="about",
+        subtitle=f"v{__version__}",
+        mode=mode,
+        include_setup_nudge=include_setup_nudge,
+    )
 
 
 def _fetch_latest_pypi_version() -> str | None:
@@ -425,6 +447,6 @@ def cmd_config() -> None:
         Text(""),
         table,
     )
-    console.print(jarv_panel(body, title="config", subtitle=str(CONFIG_FILE)))
+    show_read_only_command(body, title="config", subtitle=str(CONFIG_FILE), config=config)
 
 

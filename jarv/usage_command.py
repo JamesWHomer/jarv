@@ -4,8 +4,9 @@ from rich.console import Group
 from rich.table import Table
 from rich.text import Text
 
-from .display import console, jarv_panel, section_rule
+from .display import section_rule
 from .history import load_history, prepare_session_context
+from .read_only_display import show_read_only_command
 from .usage import (
     estimate_token_cost_usd,
     format_cost,
@@ -168,7 +169,11 @@ def cmd_usage() -> None:
     totals = usage.get("totals") if isinstance(usage.get("totals"), dict) else {}
     request_count = int(totals.get("request_count") or 0)
     if request_count <= 0:
-        console.print("[dim]No token usage recorded for this session yet.[/dim]")
+        show_read_only_command(
+            Text("No token usage recorded for this session yet.", style="dim"),
+            title="usage",
+            subtitle=str(usage_path),
+        )
         return
 
     history = load_history(ctx.history_file)
@@ -233,6 +238,6 @@ def cmd_usage() -> None:
         token_table,
     ]
 
-    console.print(jarv_panel(Group(*panel_parts), title="usage", subtitle=str(usage_path)))
+    show_read_only_command(Group(*panel_parts), title="usage", subtitle=str(usage_path))
 
 

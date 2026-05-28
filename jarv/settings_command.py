@@ -12,7 +12,13 @@ from rich.text import Text
 from rich import box
 
 from .command_input import _read_key, mouse_capture
-from .config import CONFIG_FILE, DEFAULT_CONFIG, load_config, save_config, validate_config
+from .config import (
+    CONFIG_FILE,
+    DEFAULT_CONFIG,
+    READ_ONLY_COMMAND_DISPLAY_CHOICES,
+    load_config,
+    save_config,
+)
 from .display import console, jarv_panel, refresh_on_resize, section_rule, terminal_size
 
 
@@ -29,6 +35,11 @@ _SETTINGS_REASONING_CHOICES = (
     ("medium", "medium"),
     ("high", "high"),
     ("xhigh", "xhigh"),
+)
+
+_SETTINGS_READ_ONLY_DISPLAY_CHOICES = tuple(
+    (value, "inline popup" if value == "inline" else "fullscreen view" if value == "fullscreen" else value)
+    for value in READ_ONLY_COMMAND_DISPLAY_CHOICES
 )
 
 
@@ -102,6 +113,14 @@ def _settings_rows(config: dict) -> list[dict]:
             "kind": "text",
             "multiline": True,
             "desc": "instructions sent before each request",
+        },
+        {
+            "section": "display",
+            "label": "Read-only commands",
+            "key": "read_only_command_display",
+            "kind": "choice",
+            "choices": _SETTINGS_READ_ONLY_DISPLAY_CHOICES,
+            "desc": "auto, print, inline popup, or fullscreen view",
         },
         {
             "section": "command review",

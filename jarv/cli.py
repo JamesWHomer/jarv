@@ -37,18 +37,18 @@ def _lazy_commands():
     )
     return {
         "/setup":    (cmd_setup, False, True),
-        "/help":     (print_help, True, False),
-        "/about":    (print_about, True, False),
+        "/help":     (print_help, False, False),
+        "/about":    (print_about, False, False),
         "/update":   (cmd_update, True, False),
         "/new":      (cmd_new, True, False),
         "/archive":  (cmd_archive, True, False),
         "/session":  (cmd_sessions, True, True),
         "/sessions": (cmd_sessions, True, True),
         "/history":  (cmd_history, True, False),
-        "/usage":    (cmd_usage, True, False),
+        "/usage":    (cmd_usage, False, False),
         "/set":      (cmd_set, True, True),
         "/unset":    (cmd_unset, True, True),
-        "/config":   (cmd_config, True, False),
+        "/config":   (cmd_config, False, False),
         "/settings": (cmd_settings, True, False),
         "/undo":     (cmd_undo, True, True),
         "/redo":     (cmd_redo, True, True),
@@ -191,7 +191,7 @@ def main() -> None:
     # "jarv help" permanent alias
     if query_parts and query_parts[0].lower() == "help":
         from .commands import print_help
-        print_help()
+        print_help(mode="print", include_setup_nudge=False)
         return
 
     # Slash commands — flags are silently ignored for these
