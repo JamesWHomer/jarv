@@ -74,13 +74,29 @@ def status_line(prefix: str, message: str, prefix_style: str = "bold cyan", mess
 
 
 @contextmanager
-def refresh_on_resize(live, *, console: Console = console, interval: float = RESIZE_REFRESH_INTERVAL):
-    """Refresh a Rich Live display when the terminal dimensions change."""
+def refresh_on_resize(
+    live,
+    *,
+    console: Console = console,
+    interval: float = RESIZE_REFRESH_INTERVAL,
+    on_change=None,
+):
+    """Refresh a Rich Live display when the terminal dimensions change.
+
+    ``on_change`` lets callers substitute a custom repaint (e.g. a full-screen
+    hard repaint for inline views) for the default ``live.refresh()``.
+    """
     stop = threading.Event()
     changed = threading.Event()
     last_size = terminal_size(console=console)
     previous_sigwinch = None
     restore_sigwinch = False
+
+    def _repaint() -> None:
+        if on_change is not None:
+            on_change()
+        else:
+            live.refresh()
 
     def _watch() -> None:
         nonlocal last_size
@@ -93,7 +109,7 @@ def refresh_on_resize(live, *, console: Console = console, interval: float = RES
             if current_size == last_size:
                 continue
             last_size = current_size
-            live.refresh()
+            _repaint()
 
     if hasattr(signal, "SIGWINCH"):
         try:

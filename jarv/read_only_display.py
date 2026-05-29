@@ -82,10 +82,6 @@ def _with_optional_setup_nudge(body: RenderableType, *, include_setup_nudge: boo
     return Group(nudge, Text(""), body)
 
 
-def _transient_body(body: RenderableType) -> RenderableType:
-    return Group(body, Text(""), Text("q/Esc/Enter close", style="dim italic", no_wrap=True, overflow="crop"))
-
-
 def _rendered_text_lines(renderable: RenderableType, width: int) -> list[Text]:
     options = console.options.update(width=max(1, width))
     rendered = console.render_lines(renderable, options, pad=False)
@@ -99,51 +95,36 @@ def _rendered_text_lines(renderable: RenderableType, width: int) -> list[Text]:
     return lines
 
 
-def _rendered_line_count(renderable: RenderableType, width: int) -> int:
-    return len(_rendered_text_lines(renderable, width))
-
-
-def _auto_mode(body: RenderableType, *, title: str, subtitle: str | None) -> str:
-    term_w, term_h = terminal_size(console=console)
-    width = max(1, term_w)
-    panel = _command_panel(_transient_body(body), title=title, subtitle=subtitle, width=width, padding=(0, 1))
-    return "inline" if _rendered_line_count(panel, width) <= max(3, term_h) else "fullscreen"
-
-
 def _is_close_key(key: str) -> bool:
     return key in ("ESC", "ENTER", "q", "Q")
 
 
-def _show_inline(body: RenderableType, *, title: str, subtitle: str | None) -> None:
-    def _render() -> Panel:
-        term_w, _ = terminal_size(console=console)
-        return _command_panel(
-            _transient_body(body),
-            title=title,
-            subtitle=subtitle,
-            width=max(1, term_w),
-            padding=(0, 1),
-        )
-
-    with Live(
-        get_renderable=_render,
-        console=console,
-        screen=False,
-        auto_refresh=False,
-        transient=True,
-        vertical_overflow="crop",
-    ) as live, refresh_on_resize(live):
-        while True:
-            live.refresh()
-            try:
-                key, _repeat_count = _read_key_with_repeats()
-            except KeyboardInterrupt:
-                break
-            if _is_close_key(key):
-                break
+# Number of non-content rows a compact overlay panel reserves: 2 panel borders
+# plus a blank spacer and the "q/Esc/Enter close" hint line.
+_COMPACT_CHROME_ROWS = 4
 
 
-def _show_fullscreen(body: RenderableType, *, title: str, subtitle: str | None) -> None:
+def _show_overlay(
+    body: RenderableType,
+    *,
+    title: str,
+    subtitle: str | None,
+    prefer_compact: bool,
+) -> None:
+    """Render a read-only command view in the alternate screen buffer.
+
+    The alternate screen is the only reliable surface for an interactive,
+    resizable panel: Rich repaints it from ``home`` every frame (see
+    ``Live.process_renderables`` -> ``Control.home()`` when ``_alt_screen`` is
+    set), so terminal resize/zoom can never leave stacked or torn frames the way
+    inline rendering in the normal buffer does (relative cursor moves desync
+    after the emulator reflows scrollback, and ghosts that scroll out of the
+    viewport can't be erased at all).
+
+    When ``prefer_compact`` is set and the content fits, the panel is sized to
+    its content (the lightweight "inline" look). Otherwise it fills the screen
+    and becomes scrollable.
+    """
     offset = 0
     visual_cache: dict[int, list[Text]] = {}
 
@@ -155,28 +136,45 @@ def _show_fullscreen(body: RenderableType, *, title: str, subtitle: str | None) 
             visual_cache[width] = cached
         return cached
 
-    def _body_rows() -> int:
-        _, term_h = terminal_size(console=console)
+    def _body_rows(term_h: int) -> int:
         show_footer = term_h >= 6
         return max(1, term_h - 2 - (2 if show_footer else 0))
+
+    def _is_compact(term_w: int, term_h: int) -> bool:
+        if not prefer_compact:
+            return False
+        inner_width = max(1, term_w - 4)
+        return len(_lines(inner_width)) + _COMPACT_CHROME_ROWS <= term_h
 
     def _render() -> Panel:
         nonlocal offset
         term_w, term_h = terminal_size(console=console)
         panel_width = max(1, term_w)
-        show_footer = term_h >= 6
-        body_rows = _body_rows()
         inner_width = max(1, panel_width - 4)
         lines = _lines(inner_width)
         total = len(lines)
+
+        if _is_compact(term_w, term_h):
+            offset = 0
+            parts: list[Text] = list(lines)
+            parts.append(Text(""))
+            parts.append(Text("q/Esc/Enter close", style="dim italic", no_wrap=True, overflow="crop"))
+            return _command_panel(
+                Group(*parts),
+                title=title,
+                subtitle=subtitle,
+                width=panel_width,
+                padding=(0, 1),
+            )
+
+        show_footer = term_h >= 6
+        body_rows = _body_rows(term_h)
         max_off = max(0, total - body_rows)
         offset = max(0, min(offset, max_off))
         start = offset
         end = min(total, start + body_rows)
 
-        parts: list[Text] = []
-        parts.extend(lines[start:end])
-
+        parts = list(lines[start:end])
         if show_footer:
             target_rows_before_footer = max(0, term_h - 2 - 2)
             while len(parts) < target_rows_before_footer:
@@ -201,24 +199,37 @@ def _show_fullscreen(body: RenderableType, *, title: str, subtitle: str | None) 
             padding=(0, 1),
         )
 
-    with Live(
+    live = Live(
         get_renderable=_render,
         console=console,
         screen=True,
         auto_refresh=False,
         transient=False,
         vertical_overflow="crop",
-    ) as live, refresh_on_resize(live), mouse_capture():
+    )
+
+    def _on_resize() -> None:
+        # Clear the alternate screen before repainting so a mode switch
+        # (compact <-> scrollable) on resize can never leave residual rows.
+        with live._lock:
+            try:
+                console.clear()
+            except Exception:
+                pass
+            live.refresh()
+
+    with live, refresh_on_resize(live, on_change=_on_resize), mouse_capture():
         while True:
             live.refresh()
             try:
                 key, repeat_count = _read_key_with_repeats()
             except KeyboardInterrupt:
                 break
-            term_w, _ = terminal_size(console=console)
+            term_w, term_h = terminal_size(console=console)
             total = len(_lines(max(1, term_w - 4)))
-            page = max(1, _body_rows() - 1)
-            max_off = max(0, total - _body_rows())
+            body_rows = _body_rows(term_h)
+            page = max(1, body_rows - 1)
+            max_off = max(0, total - body_rows)
             if _is_close_key(key):
                 break
             if key == "UP":
@@ -252,10 +263,12 @@ def show_read_only_command(
         console.print(_command_panel(body, title=title, subtitle=subtitle))
         return
 
-    if selected_mode == "auto":
-        selected_mode = _auto_mode(body, title=title, subtitle=subtitle)
-
-    if selected_mode == "fullscreen":
-        _show_fullscreen(body, title=title, subtitle=subtitle)
-    else:
-        _show_inline(body, title=title, subtitle=subtitle)
+    # Interactive views always render in the alternate screen buffer. "inline"
+    # and "auto" use the compact (content-sized) overlay when it fits; full-
+    # screen forces the scrollable full-height panel.
+    _show_overlay(
+        body,
+        title=title,
+        subtitle=subtitle,
+        prefer_compact=selected_mode != "fullscreen",
+    )

@@ -73,7 +73,7 @@ def _install_display_harness(monkeypatch, *, width=80, height=24, key="ENTER", f
     return output
 
 
-def test_auto_uses_inline_for_short_output(monkeypatch):
+def test_auto_uses_overlay_for_short_output(monkeypatch):
     _install_display_harness(monkeypatch, height=20)
 
     read_only_display.show_read_only_command(
@@ -83,7 +83,8 @@ def test_auto_uses_inline_for_short_output(monkeypatch):
         include_setup_nudge=False,
     )
 
-    assert FakeLive.instances[-1].kwargs["screen"] is False
+    # Interactive views always render in the alternate screen buffer.
+    assert FakeLive.instances[-1].kwargs["screen"] is True
 
 
 def test_auto_uses_fullscreen_for_long_output(monkeypatch):
@@ -140,7 +141,7 @@ def test_inline_view_closes_on_expected_keys(monkeypatch, key):
         include_setup_nudge=False,
     )
 
-    assert FakeLive.instances[-1].kwargs["screen"] is False
+    assert FakeLive.instances[-1].kwargs["screen"] is True
     assert FakeLive.instances[-1].refresh_count == 1
 
 
