@@ -1,3 +1,4 @@
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -59,3 +60,47 @@ def test_usage_empty_state_uses_shared_renderer(monkeypatch):
     assert len(calls) == 1
     assert calls[0]["title"] == "usage"
     assert calls[0]["subtitle"] == "usage.json"
+
+
+def test_usage_all_since_uses_global_renderer(monkeypatch):
+    calls = []
+    captured = {}
+    monkeypatch.setattr(usage_command, "show_read_only_command", lambda body, **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(usage_command, "global_usage_file", lambda: Path("global-usage.json"))
+
+    def load_records(*, since=None, warn=True):
+        captured["since"] = since
+        captured["warn"] = warn
+        return [
+            {
+                "created_at": "2026-05-29T01:00:00Z",
+                "session_id": "session-id",
+                "model": "test-model",
+                "source": "root",
+                "input_tokens": 10,
+                "cached_input_tokens": 0,
+                "uncached_input_tokens": 10,
+                "output_tokens": 5,
+                "reasoning_output_tokens": 0,
+                "total_tokens": 15,
+            }
+        ]
+
+    monkeypatch.setattr(usage_command, "load_global_usage_records", load_records)
+
+    usage_command.cmd_usage(["--all", "--since", "24h"])
+
+    assert captured["since"] == timedelta(hours=24)
+    assert captured["warn"] is True
+    assert calls[0]["title"] == "usage"
+    assert calls[0]["subtitle"] == "global-usage.json - last 24h"
+
+
+def test_usage_day_alias_uses_24_hour_global_window(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(usage_command, "_cmd_global_usage", lambda since, label: captured.update({"since": since, "label": label}))
+
+    usage_command.cmd_usage(["day"])
+
+    assert captured["since"] == timedelta(hours=24)
+    assert captured["label"] == "last 24h"

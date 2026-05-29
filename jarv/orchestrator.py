@@ -185,7 +185,12 @@ def dispatch_tool(
         safety_level = config.get("command_safety", "risky")
         audit = config.get("audit", True)
         allowed, denial = check_command(
-            cmd, safety_level, audit=audit, config=config
+            cmd,
+            safety_level,
+            audit=audit,
+            config=config,
+            usage_path=node.usage_path,
+            session_id=node.session_id,
         )
         if not allowed:
             return denial

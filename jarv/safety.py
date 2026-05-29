@@ -2,6 +2,7 @@ import re
 import sys
 import threading
 import time
+from pathlib import Path
 
 from rich.console import Group
 from rich.markup import escape
@@ -232,6 +233,8 @@ def check_command(
     audit: bool = False,
     config: dict | None = None,
     history: list | None = None,
+    usage_path: Path | None = None,
+    session_id: str | None = None,
 ) -> tuple[bool, str]:
     """Gate a command according to the configured safety level.
 
@@ -249,7 +252,7 @@ def check_command(
     if safety_level == "all":
         reason = "all commands require approval"
         if audit:
-            return _audit_gate(command, reason, config, history)
+            return _audit_gate(command, reason, config, history, usage_path, session_id)
         if not prompt_confirmation(command, reason):
             return False, "[command denied by user — safety level is set to 'all']"
         return True, ""
@@ -258,7 +261,7 @@ def check_command(
     is_risky, reason = classify_command(command)
     if is_risky:
         if audit:
-            return _audit_gate(command, reason, config, history)
+            return _audit_gate(command, reason, config, history, usage_path, session_id)
         if not prompt_confirmation(command, reason):
             return False, f"[command denied by user — detected as risky: {reason}]"
     return True, ""
@@ -322,6 +325,8 @@ def _audit_gate(
     reason: str,
     config: dict | None,
     history: list | None,
+    usage_path: Path | None,
+    session_id: str | None,
 ) -> tuple[bool, str]:
     """Show the safety panel with an integrated auditor spinner.
 
@@ -337,7 +342,14 @@ def _audit_gate(
     if not sys.stdout.isatty():
         console.print()
         console.print(jarv_panel(body, title="safety", subtitle="confirm to run", padding=(1, 2)))
-        allow, auditor_reason = audit_command(command, reason, config or {}, history)
+        allow, auditor_reason = audit_command(
+            command,
+            reason,
+            config or {},
+            history,
+            usage_path=usage_path,
+            session_id=session_id,
+        )
         if allow:
             console.print(f"[green]  ✓ auditor:[/green] [dim]{auditor_reason}[/dim]")
             return True, ""
@@ -347,7 +359,14 @@ def _audit_gate(
 
     def _run_auditor():
         try:
-            a, r = audit_command(command, reason, config or {}, history)
+            a, r = audit_command(
+                command,
+                reason,
+                config or {},
+                history,
+                usage_path=usage_path,
+                session_id=session_id,
+            )
             audit_state["allow"] = a
             audit_state["reason"] = r
         except Exception as e:

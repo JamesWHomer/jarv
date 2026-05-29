@@ -142,7 +142,9 @@ The terminal shows a live progress panel as children run, with a green checkmark
 | `/history` | Show recent conversation history |
 | `/undo [n]` | Remove last *n* exchanges (default 1) |
 | `/redo [n]` | Restore last *n* undone exchanges (default 1) |
-| `/usage` | Show token usage, cost, and context breakdown |
+| `/usage` | Show token usage, cost, and context breakdown for the current session |
+| `/usage day` / `/usage week` / `/usage month` | Show system-wide usage for the last 24h, 7d, or 30d |
+| `/usage --all [--since 24h]` | Show system-wide usage across Jarv sessions |
 | `/update` | Update Jarv to the latest version |
 
 All commands work both as `jarv /command` (one-shot) and inside heads-up mode. Read-only commands (`/help`, `/about`, `/usage`, and `/config`) use a temporary display by default in interactive terminals; change `read_only_command_display` in `/settings` to print them permanently instead.
@@ -190,12 +192,15 @@ All state is stored in `~/.jarv/` (on Windows, `%USERPROFILE%\.jarv\`):
 ├── sessions/
 │   ├── history-<hash>.json          # conversation history
 │   ├── artifacts-<hash>.json        # subagent artifacts
-│   ├── usage-<hash>.json            # token usage totals
+│   ├── usage-<hash>.json            # session token usage totals
 │   └── redo-<hash>.json             # undo/redo stack
+├── usage.json                       # future system-wide token usage ledger
 └── archive/                         # archived sessions
 ```
 
 `max_history` counts stored items, not exchanges or tokens. User messages, assistant messages, reasoning items, function calls, and function call outputs each count as one item.
+
+System-wide usage tracking starts from the version that records `~/.jarv/usage.json`; older session totals are not backfilled into time-window reports.
 
 ## Dependencies
 

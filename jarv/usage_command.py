@@ -1,5 +1,7 @@
 """Token usage command rendering."""
 
+from datetime import timedelta
+
 from rich.console import Group
 from rich.table import Table
 from rich.text import Text
@@ -8,10 +10,13 @@ from .display import section_rule
 from .history import load_history, prepare_session_context
 from .read_only_display import show_read_only_command
 from .usage import (
+    aggregate_usage_records,
     estimate_token_cost_usd,
     format_cost,
     format_int,
+    global_usage_file,
     known_context_window,
+    load_global_usage_records,
     load_usage,
     usage_file_for,
 )
@@ -162,7 +167,167 @@ def _estimated_total_cost(usage: dict) -> float | None:
     return None
 
 
-def cmd_usage() -> None:
+def _parse_since_value(value: str) -> timedelta | None:
+    raw = value.strip().lower()
+    if len(raw) < 2:
+        return None
+    unit = raw[-1]
+    try:
+        amount = int(raw[:-1])
+    except ValueError:
+        return None
+    if amount <= 0:
+        return None
+    if unit == "h":
+        return timedelta(hours=amount)
+    if unit == "d":
+        return timedelta(days=amount)
+    return None
+
+
+def _parse_global_usage_args(args: list[str] | None) -> tuple[bool, timedelta | None, str, str | None]:
+    args = list(args or [])
+    aliases = {
+        "day": ("last 24h", timedelta(hours=24)),
+        "week": ("last 7d", timedelta(days=7)),
+        "month": ("last 30d", timedelta(days=30)),
+    }
+    if not args:
+        return False, None, "", None
+    if len(args) == 1 and args[0].lower() in aliases:
+        label, since = aliases[args[0].lower()]
+        return True, since, label, None
+    if args[0] != "--all":
+        return False, None, "", "Usage: jarv /usage [--all [--since 24h|7d|30d] | day|week|month]"
+    if len(args) == 1:
+        return True, None, "all time", None
+    if len(args) == 3 and args[1] == "--since":
+        since = _parse_since_value(args[2])
+        if since is None:
+            return False, None, "", "Usage: jarv /usage --all --since 24h|7d|30d"
+        return True, since, f"last {args[2].lower()}", None
+    if len(args) == 2 and args[1].startswith("--since="):
+        raw = args[1].split("=", 1)[1]
+        since = _parse_since_value(raw)
+        if since is None:
+            return False, None, "", "Usage: jarv /usage --all --since 24h|7d|30d"
+        return True, since, f"last {raw.lower()}", None
+    return False, None, "", "Usage: jarv /usage [--all [--since 24h|7d|30d] | day|week|month]"
+
+
+def _token_totals_table(usage: dict, *, model: str | None = None, exchanges: int | None = None) -> Table:
+    totals = usage.get("totals") if isinstance(usage.get("totals"), dict) else {}
+    request_count = int(totals.get("request_count") or 0)
+    reasoning_tokens = int(totals.get("reasoning_output_tokens") or 0)
+    estimated_cost = _estimated_total_cost(usage)
+
+    token_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
+    token_table.add_column("Field", style="dim", no_wrap=True)
+    token_table.add_column("Value", no_wrap=False)
+    if model is not None:
+        token_table.add_row("Last model", Text(model, style="bold magenta"))
+    if exchanges is not None:
+        token_table.add_row("Messages", Text(_plural(exchanges, "exchange")))
+    token_table.add_row("Requests", Text(_plural(request_count, "request")))
+    token_table.add_row("Input tokens", Text(format_int(totals.get("input_tokens"))))
+    token_table.add_row("Cached input", Text(format_int(totals.get("cached_input_tokens")), style="cyan"))
+    token_table.add_row("New input", Text(format_int(totals.get("uncached_input_tokens"))))
+    token_table.add_row("Output tokens", Text(format_int(totals.get("output_tokens"))))
+    if reasoning_tokens:
+        token_table.add_row("Reasoning output", Text(format_int(reasoning_tokens), style="green"))
+    token_table.add_row("Total tokens", Text(format_int(totals.get("total_tokens")), style="bold"))
+    token_table.add_row("Estimated cost", Text(format_cost(estimated_cost), style="bold green"))
+    return token_table
+
+
+def _breakdown_table(buckets: dict, *, kind: str) -> Table:
+    table = Table(box=None, show_header=True, padding=(0, 2), pad_edge=False, header_style="dim")
+    table.add_column(kind, no_wrap=True)
+    table.add_column("Requests", justify="right", no_wrap=True)
+    table.add_column("Tokens", justify="right", no_wrap=True)
+    if kind == "Model":
+        table.add_column("Est. cost", justify="right", no_wrap=True)
+
+    rows = sorted(
+        ((name, bucket) for name, bucket in buckets.items() if isinstance(bucket, dict)),
+        key=lambda item: int(item[1].get("total_tokens") or 0),
+        reverse=True,
+    )
+    for name, bucket in rows:
+        cells = [
+            Text(str(name), style="bold magenta" if kind == "Model" else "bold cyan"),
+            Text(format_int(bucket.get("request_count"))),
+            Text(format_int(bucket.get("total_tokens")), style="bold"),
+        ]
+        if kind == "Model":
+            cells.append(Text(format_cost(estimate_token_cost_usd(bucket, str(name)))))
+        table.add_row(*cells)
+    return table
+
+
+def _cmd_global_usage(since: timedelta | None, window_label: str) -> None:
+    usage_path = global_usage_file()
+    records = load_global_usage_records(since=since, warn=True)
+    usage = aggregate_usage_records(records)
+    totals = usage.get("totals") if isinstance(usage.get("totals"), dict) else {}
+    request_count = int(totals.get("request_count") or 0)
+    subtitle = f"{usage_path} - {window_label}"
+    if request_count <= 0:
+        show_read_only_command(
+            Text(f"No system-wide token usage recorded for {window_label}.", style="dim"),
+            title="usage",
+            subtitle=subtitle,
+        )
+        return
+
+    last_request = usage.get("last_request") if isinstance(usage.get("last_request"), dict) else None
+    overview = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
+    overview.add_column("Field", style="dim", no_wrap=True)
+    overview.add_column("Value", no_wrap=False)
+    overview.add_row("Scope", Text("System-wide", style="bold cyan"))
+    overview.add_row("Window", Text(window_label))
+    if last_request:
+        last_model = str(last_request.get("model") or "unknown")
+        overview.add_row("Last model", Text(last_model, style="bold magenta"))
+
+    panel_parts: list = [
+        section_rule("system-wide overview"),
+        Text(""),
+        overview,
+        Text(""),
+        section_rule("token totals"),
+        Text(""),
+        _token_totals_table(usage),
+    ]
+    sources = usage.get("sources") if isinstance(usage.get("sources"), dict) else {}
+    if sources:
+        panel_parts += [
+            Text(""),
+            section_rule("by source"),
+            Text(""),
+            _breakdown_table(sources, kind="Source"),
+        ]
+    models = usage.get("models") if isinstance(usage.get("models"), dict) else {}
+    if models:
+        panel_parts += [
+            Text(""),
+            section_rule("by model"),
+            Text(""),
+            _breakdown_table(models, kind="Model"),
+        ]
+
+    show_read_only_command(Group(*panel_parts), title="usage", subtitle=subtitle)
+
+
+def cmd_usage(args: list[str] | None = None) -> None:
+    is_global, since, window_label, error = _parse_global_usage_args(args)
+    if error is not None:
+        show_read_only_command(Text(error, style="yellow"), title="usage")
+        return
+    if is_global:
+        _cmd_global_usage(since, window_label)
+        return
+
     ctx = prepare_session_context()
     usage_path = usage_file_for(ctx.history_file)
     usage = load_usage(usage_path, ctx.session_id)
@@ -181,7 +346,6 @@ def cmd_usage() -> None:
     last_request = usage.get("last_request") if isinstance(usage.get("last_request"), dict) else None
     last_root = usage.get("last_root_request") if isinstance(usage.get("last_root_request"), dict) else None
     model = str((last_request or {}).get("model") or "unknown")
-    estimated_cost = _estimated_total_cost(usage)
 
     root_model = str((last_root or {}).get("model") or "unknown")
 
@@ -191,21 +355,7 @@ def cmd_usage() -> None:
     context_table.add_row("Latest root model", Text(root_model, style="bold magenta"))
     context_table.add_row("Context usage", _context_usage_renderable(last_root))
 
-    reasoning_tokens = int(totals.get("reasoning_output_tokens") or 0)
-    token_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
-    token_table.add_column("Field", style="dim", no_wrap=True)
-    token_table.add_column("Value", no_wrap=False)
-    token_table.add_row("Last model", Text(model, style="bold magenta"))
-    token_table.add_row("Messages", Text(_plural(exchanges, "exchange")))
-    token_table.add_row("Requests", Text(_plural(request_count, "request")))
-    token_table.add_row("Input tokens", Text(format_int(totals.get("input_tokens"))))
-    token_table.add_row("Cached input", Text(format_int(totals.get("cached_input_tokens")), style="cyan"))
-    token_table.add_row("New input", Text(format_int(totals.get("uncached_input_tokens"))))
-    token_table.add_row("Output tokens", Text(format_int(totals.get("output_tokens"))))
-    if reasoning_tokens:
-        token_table.add_row("Reasoning output", Text(format_int(reasoning_tokens), style="green"))
-    token_table.add_row("Total tokens", Text(format_int(totals.get("total_tokens")), style="bold"))
-    token_table.add_row("Estimated cost", Text(format_cost(estimated_cost), style="bold green"))
+    token_table = _token_totals_table(usage, model=model, exchanges=exchanges)
     if last_request is not None:
         last_line = Text()
         last_line.append(format_int(last_request.get("input_tokens")), style="bold")

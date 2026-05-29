@@ -9,9 +9,12 @@ it recommends caution).
 
 import json
 import re
+from pathlib import Path
+from typing import Any
 
 from .display import console
 from .provider import resolve_api_key, PROVIDERS, LOCAL_PROVIDERS
+from .usage import estimate_context_breakdown, record_response_usage
 
 
 AUDITOR_SYSTEM_PROMPT = """\
@@ -88,6 +91,10 @@ def audit_command(
     reason: str,
     config: dict,
     history: list | None = None,
+    *,
+    usage_path: Path | None = None,
+    session_id: str | None = None,
+    global_usage_path: Path | None = None,
 ) -> tuple[bool, str]:
     """Run the auditor on a flagged command.
 
@@ -110,16 +117,38 @@ def audit_command(
 
     try:
         if backend == "litellm":
-            return _call_litellm(config, model, user_message)
+            return _call_litellm(
+                config,
+                model,
+                user_message,
+                usage_path=usage_path,
+                session_id=session_id,
+                global_usage_path=global_usage_path,
+            )
         else:
-            return _call_openai_compat(config, model, user_message, info)
+            return _call_openai_compat(
+                config,
+                model,
+                user_message,
+                info,
+                usage_path=usage_path,
+                session_id=session_id,
+                global_usage_path=global_usage_path,
+            )
     except Exception as e:
         # If auditor fails, fall back to user prompt
         return False, f"auditor unavailable ({type(e).__name__})"
 
 
 def _call_openai_compat(
-    config: dict, model: str, user_message: str, info: dict
+    config: dict,
+    model: str,
+    user_message: str,
+    info: dict,
+    *,
+    usage_path: Path | None = None,
+    session_id: str | None = None,
+    global_usage_path: Path | None = None,
 ) -> tuple[bool, str]:
     from openai import OpenAI
 
@@ -134,25 +163,47 @@ def _call_openai_compat(
 
     client = OpenAI(**kwargs)
 
+    messages = _auditor_messages(user_message)
     kwargs = _openai_compat_kwargs(
         config,
         model,
         info,
-        _auditor_messages(user_message),
+        messages,
     )
     response = client.chat.completions.create(**kwargs)
-    parsed = _parse_response(response.choices[0].message.content or "")
+    content = _response_text(response)
+    _record_auditor_response(
+        usage_path,
+        session_id,
+        model,
+        response,
+        messages,
+        content,
+        global_usage_path=global_usage_path,
+    )
+    parsed = _parse_response(content)
     if not _is_parse_failure(parsed):
         return parsed
 
+    retry_messages = _auditor_messages(user_message, retry=True)
     retry_kwargs = _openai_compat_kwargs(
         config,
         model,
         info,
-        _auditor_messages(user_message, retry=True),
+        retry_messages,
     )
     retry_response = client.chat.completions.create(**retry_kwargs)
-    return _parse_response(retry_response.choices[0].message.content or "")
+    retry_content = _response_text(retry_response)
+    _record_auditor_response(
+        usage_path,
+        session_id,
+        model,
+        retry_response,
+        retry_messages,
+        retry_content,
+        global_usage_path=global_usage_path,
+    )
+    return _parse_response(retry_content)
 
 
 def _auditor_messages(user_message: str, *, retry: bool = False) -> list[dict[str, str]]:
@@ -164,6 +215,48 @@ def _auditor_messages(user_message: str, *, retry: bool = False) -> list[dict[st
         {"role": "system", "content": AUDITOR_SYSTEM_PROMPT},
         {"role": "user", "content": content},
     ]
+
+
+def _response_text(response: Any) -> str:
+    try:
+        return str(response.choices[0].message.content or "")
+    except Exception:
+        return ""
+
+
+def _record_auditor_response(
+    usage_path: Path | None,
+    session_id: str | None,
+    model: str,
+    response: Any,
+    messages: list[dict[str, str]],
+    output_text: str,
+    *,
+    global_usage_path: Path | None = None,
+) -> None:
+    if usage_path is None and global_usage_path is None:
+        return
+    instructions = ""
+    input_items: list[dict[str, str]] = []
+    for message in messages:
+        if message.get("role") == "system" and not instructions:
+            instructions = str(message.get("content") or "")
+        else:
+            input_items.append({
+                "role": str(message.get("role") or "user"),
+                "content": str(message.get("content") or ""),
+            })
+    context_breakdown = estimate_context_breakdown(model, instructions, [], input_items)
+    record_response_usage(
+        usage_path,
+        session_id,
+        model,
+        response,
+        "auditor",
+        context_breakdown=context_breakdown,
+        output_text=output_text,
+        global_usage_path=global_usage_path,
+    )
 
 
 def _openai_compat_kwargs(
@@ -200,7 +293,13 @@ def _is_direct_openai(config: dict, info: dict) -> bool:
 
 
 def _call_litellm(
-    config: dict, model: str, user_message: str
+    config: dict,
+    model: str,
+    user_message: str,
+    *,
+    usage_path: Path | None = None,
+    session_id: str | None = None,
+    global_usage_path: Path | None = None,
 ) -> tuple[bool, str]:
     from .litellm_compat import import_litellm
 
@@ -210,22 +309,44 @@ def _call_litellm(
     prefix = PROVIDERS.get(provider_name, {}).get("litellm_prefix", "")
     litellm_model = f"{prefix}/{model}" if prefix and "/" not in model else model
 
-    kwargs = _litellm_kwargs(litellm_model, _auditor_messages(user_message))
+    messages = _auditor_messages(user_message)
+    kwargs = _litellm_kwargs(litellm_model, messages)
 
     api_key = resolve_api_key(config)
     if api_key and api_key != "not-needed":
         kwargs["api_key"] = api_key
 
     response = litellm.completion(**kwargs)
-    parsed = _parse_response(response.choices[0].message.content or "")
+    content = _response_text(response)
+    _record_auditor_response(
+        usage_path,
+        session_id,
+        model,
+        response,
+        messages,
+        content,
+        global_usage_path=global_usage_path,
+    )
+    parsed = _parse_response(content)
     if not _is_parse_failure(parsed):
         return parsed
 
-    retry_kwargs = _litellm_kwargs(litellm_model, _auditor_messages(user_message, retry=True))
+    retry_messages = _auditor_messages(user_message, retry=True)
+    retry_kwargs = _litellm_kwargs(litellm_model, retry_messages)
     if api_key and api_key != "not-needed":
         retry_kwargs["api_key"] = api_key
     retry_response = litellm.completion(**retry_kwargs)
-    return _parse_response(retry_response.choices[0].message.content or "")
+    retry_content = _response_text(retry_response)
+    _record_auditor_response(
+        usage_path,
+        session_id,
+        model,
+        retry_response,
+        retry_messages,
+        retry_content,
+        global_usage_path=global_usage_path,
+    )
+    return _parse_response(retry_content)
 
 
 def _litellm_kwargs(litellm_model: str, messages: list[dict[str, str]]) -> dict:

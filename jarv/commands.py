@@ -106,7 +106,7 @@ def _help_body() -> Group:
     cmd_table.add_row("jarv /sessions, /session", "List sessions (all in a TTY; 5 most recent when piped/non-TTY)")
     cmd_table.add_row("jarv /sessions <id>", "Load a specific session into this terminal by id prefix")
     cmd_table.add_row("jarv /history", "Show recent conversation history")
-    cmd_table.add_row("jarv /usage", "Show token usage for this session")
+    cmd_table.add_row("jarv /usage [day|week|month|--all]", "Show session or system-wide token usage")
     cmd_table.add_row("jarv /undo [n]", "Unsend the last n exchanges (default 1)")
     cmd_table.add_row("jarv /redo [n]", "Restore the last n undone exchanges (default 1)")
     cmd_table.add_row("jarv /settings", "Open the interactive settings menu")
@@ -186,6 +186,8 @@ jarv is a command-line AI assistant that supports multiple AI providers includin
 - `jarv /unset <key>` - Reset a default config key, or remove a custom key.
 - `jarv /history` - Show recent user and assistant messages.
 - `jarv /usage` - Show token usage for the current session.
+- `jarv /usage day|week|month` - Show system-wide usage for the last 24h, 7d, or 30d.
+- `jarv /usage --all [--since 24h]` - Show system-wide usage across Jarv sessions.
 - `jarv /undo [n]` - Unsend the last n exchanges (default 1). The removed exchange is pushed onto a redo stack.
 - `jarv /redo [n]` - Restore the last n undone exchanges (default 1). Sending a new message clears the redo stack.
 - `jarv /settings` - Open an interactive settings menu for provider/model, command review, audit, runtime, and updates.
@@ -246,7 +248,7 @@ Keys:
 - `subagent_thread_pool_max_workers` - Max parallel children in one `spawn` batch. Default: `{DEFAULT_CONFIG['subagent_thread_pool_max_workers']}`.
 - `check_updates` - When `true`, a one-shot `jarv <question>` run fires a non-blocking background check against GitHub. If a new version is found it is flagged locally and shown at the start of the next run. Default: `true`. Set to `false` to disable entirely. Heads-up mode (`jarv` with no args) and slash commands do not run this check.
 - `read_only_command_display` - How `/help`, `/about`, `/usage`, and `/config` are displayed in an interactive terminal. `auto` chooses inline for short output and fullscreen for longer output. `print` preserves permanent terminal output. `inline` and `fullscreen` force those temporary views. Default: `auto`.
-- `/usage` model metadata comes from LiteLLM.
+- `/usage` model metadata and cost estimates come from LiteLLM. System-wide views read future usage from `{CONFIG_DIR / "usage.json"}`.
 
 If the config file does not exist, jarv creates it and exits so you can add an API key.
 If the config file is invalid JSON, jarv backs it up and creates a fresh default config.

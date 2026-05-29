@@ -45,7 +45,7 @@ def _lazy_commands():
         "/session":  (cmd_sessions, True, True),
         "/sessions": (cmd_sessions, True, True),
         "/history":  (cmd_history, True, False),
-        "/usage":    (cmd_usage, False, False),
+        "/usage":    (cmd_usage, False, True),
         "/set":      (cmd_set, True, True),
         "/unset":    (cmd_unset, True, True),
         "/config":   (cmd_config, False, False),

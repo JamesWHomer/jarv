@@ -201,7 +201,13 @@ def get_system_info() -> str:
     return "\n".join(parts)
 
 
-def _dispatch_run_command_with_ui(args: dict, config: dict, history: list | None = None) -> str:
+def _dispatch_run_command_with_ui(
+    args: dict,
+    config: dict,
+    history: list | None = None,
+    usage_path=None,
+    session_id: str | None = None,
+) -> str:
     cmd = args.get("command")
     if not isinstance(cmd, str) or not cmd.strip():
         msg = "[tool argument error: command must be a non-empty string]"
@@ -211,7 +217,13 @@ def _dispatch_run_command_with_ui(args: dict, config: dict, history: list | None
     safety_level = config.get("command_safety", "risky")
     audit = config.get("audit", True)
     allowed, denial = check_command(
-        cmd, safety_level, audit=audit, config=config, history=history
+        cmd,
+        safety_level,
+        audit=audit,
+        config=config,
+        history=history,
+        usage_path=usage_path,
+        session_id=session_id,
     )
     if not allowed:
         console.print(f"[dim]{denial}[/dim]")
@@ -587,7 +599,13 @@ def run_agent(
                         console.print(f"[red]{output}[/red]")
                     else:
                         if item.name == "run_command":
-                            output = _dispatch_run_command_with_ui(args, config, history)
+                            output = _dispatch_run_command_with_ui(
+                                args,
+                                config,
+                                history,
+                                usage_path=usage_path,
+                                session_id=session_context.session_id,
+                            )
                         elif item.name == "spawn":
                             output = _dispatch_spawn_with_ui(args, root_node, artifact_store, client, config)
                         elif item.name == "read_artifact":

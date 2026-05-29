@@ -1,11 +1,13 @@
 import importlib.util
 import json
+from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from .config import CONFIG_DIR
 from .display import console
-from .history import isoformat_utc, utc_now
+from .history import isoformat_utc, parse_timestamp, utc_now
 
 _BREAKDOWN_KEYS = ("system", "tools", "history", "tool_io", "reasoning")
 
@@ -104,6 +106,10 @@ def usage_file_for(history_path: Path) -> Path:
     return history_path.with_name(history_path.name.replace("history", "usage", 1))
 
 
+def global_usage_file() -> Path:
+    return CONFIG_DIR / "usage.json"
+
+
 def _empty_usage(session_id: str | None = None) -> dict:
     return {
         "version": USAGE_VERSION,
@@ -122,6 +128,13 @@ def _empty_usage(session_id: str | None = None) -> dict:
         "last_request": None,
         "last_root_request": None,
         "recent_requests": [],
+    }
+
+
+def _empty_global_usage() -> dict:
+    return {
+        "version": USAGE_VERSION,
+        "records": [],
     }
 
 
@@ -146,6 +159,40 @@ def load_usage(path: Path, session_id: str | None = None, warn: bool = True) -> 
 
 
 def save_usage(data: dict, path: Path, warn: bool = True) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except OSError as e:
+        if warn:
+            console.print(f"[yellow]Could not save usage data:[/yellow] {e}")
+
+
+def load_global_usage(path: Path | None = None, warn: bool = True) -> dict:
+    path = path or global_usage_file()
+    if not path.exists():
+        return _empty_global_usage()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+        if warn:
+            console.print(f"[yellow]Ignoring malformed usage data:[/yellow] {e}")
+        return _empty_global_usage()
+    if not isinstance(data, dict):
+        return _empty_global_usage()
+
+    data.setdefault("version", USAGE_VERSION)
+    records = data.get("records")
+    if not isinstance(records, list):
+        data["records"] = []
+    else:
+        data["records"] = [record for record in records if isinstance(record, dict)]
+        for record in data["records"]:
+            _normalize_token_bucket(record, include_request_count=False)
+    return data
+
+
+def save_global_usage(data: dict, path: Path | None = None, warn: bool = True) -> None:
+    path = path or global_usage_file()
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -280,7 +327,7 @@ def _add_tokens(bucket: dict, record: dict) -> None:
     bucket["request_count"] = int(bucket.get("request_count", 0)) + 1
 
 
-def _normalize_token_bucket(bucket: dict) -> None:
+def _normalize_token_bucket(bucket: dict, *, include_request_count: bool = True) -> None:
     input_tokens = int(bucket.get("input_tokens") or 0)
     cached_input_tokens = int(bucket.get("cached_input_tokens") or 0)
     if "uncached_input_tokens" not in bucket:
@@ -289,7 +336,8 @@ def _normalize_token_bucket(bucket: dict) -> None:
     bucket.setdefault("output_tokens", 0)
     bucket.setdefault("reasoning_output_tokens", 0)
     bucket.setdefault("total_tokens", input_tokens + int(bucket.get("output_tokens") or 0))
-    bucket.setdefault("request_count", 0)
+    if include_request_count:
+        bucket.setdefault("request_count", 0)
 
 
 def _normalize_usage_data(data: dict) -> None:
@@ -311,6 +359,68 @@ def _normalize_usage_data(data: dict) -> None:
         for record in recent:
             if isinstance(record, dict):
                 _normalize_token_bucket(record)
+
+
+def _append_global_usage_record_unlocked(
+    record: dict,
+    path: Path | None = None,
+    warn: bool = True,
+) -> None:
+    data = load_global_usage(path, warn=warn)
+    data["version"] = USAGE_VERSION
+    data["updated_at"] = record.get("created_at") or isoformat_utc(utc_now())
+    data.setdefault("records", []).append(dict(record))
+    save_global_usage(data, path, warn=warn)
+
+
+def append_global_usage_record(
+    record: dict,
+    path: Path | None = None,
+    warn: bool = True,
+) -> None:
+    with _usage_lock:
+        _append_global_usage_record_unlocked(record, path, warn=warn)
+
+
+def load_global_usage_records(
+    path: Path | None = None,
+    *,
+    since: timedelta | None = None,
+    now: datetime | None = None,
+    warn: bool = True,
+) -> list[dict]:
+    records = load_global_usage(path, warn=warn).get("records", [])
+    if not isinstance(records, list):
+        return []
+    valid_records = [record for record in records if isinstance(record, dict)]
+    if since is None:
+        return valid_records
+
+    cutoff = (now or utc_now()) - since
+    filtered: list[dict] = []
+    for record in valid_records:
+        created_at = parse_timestamp(str(record.get("created_at") or ""))
+        if created_at is not None and created_at >= cutoff:
+            filtered.append(record)
+    return filtered
+
+
+def aggregate_usage_records(records: list[dict]) -> dict:
+    aggregate = _empty_usage(None)
+    aggregate["session_id"] = None
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        _normalize_token_bucket(record, include_request_count=False)
+        source = str(record.get("source") or "unknown")
+        model = str(record.get("model") or "unknown")
+        _add_tokens(aggregate.setdefault("totals", {}), record)
+        _add_tokens(aggregate.setdefault("sources", {}).setdefault(source, {}), record)
+        _add_tokens(aggregate.setdefault("models", {}).setdefault(model, {}), record)
+        aggregate["last_request"] = record
+        if source == "root":
+            aggregate["last_root_request"] = record
+    return aggregate
 
 
 _price_map_cache: dict | None = None
@@ -447,9 +557,12 @@ def record_response_usage(
     source: str,
     context_breakdown: dict | None = None,
     output_text: str | None = None,
+    *,
+    record_global: bool = True,
+    global_usage_path: Path | None = None,
 ) -> None:
     try:
-        if usage_path is None:
+        if usage_path is None and not record_global:
             return
         token_usage = usage_from_response(response)
         if token_usage is None:
@@ -459,6 +572,7 @@ def record_response_usage(
 
         record = {
             "created_at": isoformat_utc(utc_now()),
+            "session_id": session_id,
             "model": model,
             "source": source,
             **token_usage,
@@ -470,25 +584,28 @@ def record_response_usage(
             record["estimated_cost_usd"] = estimated_cost
 
         with _usage_lock:
-            data = load_usage(usage_path, session_id, warn=False)
-            data["version"] = USAGE_VERSION
-            data["session_id"] = data.get("session_id") or session_id
-            data["updated_at"] = record["created_at"]
+            if usage_path is not None:
+                data = load_usage(usage_path, session_id, warn=False)
+                data["version"] = USAGE_VERSION
+                data["session_id"] = data.get("session_id") or session_id
+                data["updated_at"] = record["created_at"]
 
-            _add_tokens(data.setdefault("totals", {}), record)
-            _add_tokens(data.setdefault("sources", {}).setdefault(source, {}), record)
-            _add_tokens(data.setdefault("models", {}).setdefault(model, {}), record)
+                _add_tokens(data.setdefault("totals", {}), record)
+                _add_tokens(data.setdefault("sources", {}).setdefault(source, {}), record)
+                _add_tokens(data.setdefault("models", {}).setdefault(model, {}), record)
 
-            data["last_request"] = record
-            if source == "root":
-                data["last_root_request"] = record
+                data["last_request"] = record
+                if source == "root":
+                    data["last_root_request"] = record
 
-            recent = data.setdefault("recent_requests", [])
-            if isinstance(recent, list):
-                recent.append(record)
-                del recent[:-RECENT_REQUEST_LIMIT]
+                recent = data.setdefault("recent_requests", [])
+                if isinstance(recent, list):
+                    recent.append(record)
+                    del recent[:-RECENT_REQUEST_LIMIT]
 
-            save_usage(data, usage_path, warn=False)
+                save_usage(data, usage_path, warn=False)
+            if record_global:
+                _append_global_usage_record_unlocked(record, global_usage_path, warn=False)
     except Exception:
         return
 

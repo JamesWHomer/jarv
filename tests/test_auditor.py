@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from jarv.auditor import _parse_response
 from jarv.auditor import _call_openai_compat
+from jarv.usage import load_global_usage_records, load_usage
 
 
 def test_parse_response_accepts_strict_json():
@@ -122,15 +123,18 @@ def test_parse_response_still_rejects_unclear_text():
     )
 
 
-def _install_fake_openai(monkeypatch, contents):
+def _install_fake_openai(monkeypatch, contents, usages=None):
     calls = []
+    usages = usages or []
 
     class FakeCompletions:
         def create(self, **kwargs):
             calls.append(kwargs)
+            index = len(calls) - 1
             content = contents[len(calls) - 1]
             return SimpleNamespace(
-                choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+                choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
+                usage=usages[index] if index < len(usages) else None,
             )
 
     class FakeOpenAI:
@@ -220,3 +224,60 @@ def test_openai_retry_failure_fails_closed(monkeypatch):
 
     assert result == (False, "could not parse auditor response")
     assert len(calls) == 2
+
+
+def test_openai_auditor_records_usage_metadata(monkeypatch, tmp_path):
+    _install_fake_openai(
+        monkeypatch,
+        ['{"allow": true, "reason": "routine cleanup"}'],
+        usages=[SimpleNamespace(prompt_tokens=20, completion_tokens=5, total_tokens=25)],
+    )
+    usage_path = tmp_path / "usage-test.json"
+    global_path = tmp_path / "usage.json"
+
+    result = _call_openai_compat(
+        {"provider": "openai"},
+        "test-model",
+        "Command: Remove-Item .cache",
+        {"base_url": None},
+        usage_path=usage_path,
+        session_id="session-id",
+        global_usage_path=global_path,
+    )
+
+    session_usage = load_usage(usage_path, "session-id")
+    global_records = load_global_usage_records(global_path)
+
+    assert result == (True, "routine cleanup")
+    assert session_usage["sources"]["auditor"]["request_count"] == 1
+    assert global_records[0]["source"] == "auditor"
+    assert global_records[0]["session_id"] == "session-id"
+    assert global_records[0]["input_tokens"] == 20
+    assert global_records[0]["output_tokens"] == 5
+
+
+def test_openai_auditor_records_estimated_usage_when_provider_omits_usage(monkeypatch, tmp_path):
+    _install_fake_openai(
+        monkeypatch,
+        ['{"allow": true, "reason": "safe version probe"}'],
+    )
+    usage_path = tmp_path / "usage-test.json"
+    global_path = tmp_path / "usage.json"
+
+    result = _call_openai_compat(
+        {"provider": "openai"},
+        "unknown-provider/model",
+        "Command: python --version",
+        {"base_url": None},
+        usage_path=usage_path,
+        session_id="session-id",
+        global_usage_path=global_path,
+    )
+
+    global_records = load_global_usage_records(global_path)
+
+    assert result == (True, "safe version probe")
+    assert global_records[0]["source"] == "auditor"
+    assert global_records[0]["estimated"] is True
+    assert global_records[0]["input_tokens"] > 0
+    assert global_records[0]["output_tokens"] > 0
