@@ -37,6 +37,7 @@ DEFAULT_CONFIG = {
     "subagent_thread_pool_max_workers": 8,
     "check_updates": True,
     "read_only_command_display": "auto",
+    "print_usage_after_agent": False,
 }
 
 def load_config() -> dict:

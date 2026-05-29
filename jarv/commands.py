@@ -137,6 +137,7 @@ def _help_body() -> Group:
     key_table.add_row("subagent_thread_pool_max_workers", "Parallel subagents per spawn call")
     key_table.add_row("check_updates", "Non-blocking background update check on one-shot runs (true/false)")
     key_table.add_row("read_only_command_display", "How read-only commands display (auto, print, inline, fullscreen)")
+    key_table.add_row("print_usage_after_agent", "Print compact token usage after completed agent runs (true/false)")
 
     paths_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
     paths_table.add_column(style="dim", no_wrap=True)
@@ -248,6 +249,7 @@ Keys:
 - `subagent_thread_pool_max_workers` - Max parallel children in one `spawn` batch. Default: `{DEFAULT_CONFIG['subagent_thread_pool_max_workers']}`.
 - `check_updates` - When `true`, a one-shot `jarv <question>` run fires a non-blocking background check against GitHub. If a new version is found it is flagged locally and shown at the start of the next run. Default: `true`. Set to `false` to disable entirely. Heads-up mode (`jarv` with no args) and slash commands do not run this check.
 - `read_only_command_display` - How `/help`, `/about`, `/usage`, and `/config` are displayed in an interactive terminal. `auto` chooses inline for short output and fullscreen for longer output. `print` preserves permanent terminal output. `inline` and `fullscreen` force those temporary views. Default: `auto`.
+- `print_usage_after_agent` - When `true`, print a compact token usage line after each completed agent run. Default: `false`.
 - `/usage` model metadata and cost estimates come from LiteLLM. System-wide views read future usage from `{CONFIG_DIR / "usage.json"}`.
 
 If the config file does not exist, jarv creates it and exits so you can add an API key.

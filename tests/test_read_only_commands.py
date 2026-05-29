@@ -8,6 +8,7 @@ from jarv.config import DEFAULT_CONFIG, validate_config
 
 def test_read_only_command_display_default_is_auto():
     assert DEFAULT_CONFIG["read_only_command_display"] == "auto"
+    assert DEFAULT_CONFIG["print_usage_after_agent"] is False
     assert validate_config(dict(DEFAULT_CONFIG))
 
 
@@ -29,6 +30,20 @@ def test_settings_exposes_read_only_command_display(monkeypatch):
 
     assert updated["read_only_command_display"] == "print"
     assert message == "saved Read-only commands: print"
+
+
+def test_settings_exposes_print_usage_after_agent(monkeypatch):
+    config = dict(DEFAULT_CONFIG)
+    row = next(row for row in settings_command._settings_rows(config) if row["key"] == "print_usage_after_agent")
+
+    assert row["section"] == "display"
+    assert settings_command._settings_value_text(row, config).plain == "off"
+
+    monkeypatch.setattr(settings_command, "save_config", lambda _config: None)
+    updated, message = settings_command._settings_apply_quick(row, config)
+
+    assert updated["print_usage_after_agent"] is True
+    assert message == "saved Print usage after agent: on"
 
 
 def test_help_about_and_config_use_shared_renderer(monkeypatch):

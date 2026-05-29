@@ -179,6 +179,7 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 | `subagent_thread_pool_max_workers` | `8` | Max parallel subagents per `spawn` call. |
 | `check_updates` | `true` | Background update check on startup (non-blocking, throttled to once per 24h). |
 | `read_only_command_display` | `"auto"` | Display mode for `/help`, `/about`, `/usage`, and `/config`: `auto`, `print`, `inline`, or `fullscreen`. |
+| `print_usage_after_agent` | `false` | Print a compact token usage line after each completed agent run. |
 | `system_prompt` | `"You are Jarv..."` | System instructions sent with each request. |
 
 ## Local files

@@ -52,7 +52,14 @@ from .orchestrator import (
 )
 from .safety import check_command
 from .shell import display_command_result, execute_command, truncate_model_output
-from .usage import estimate_context_breakdown, record_response_usage, usage_file_for
+from .usage import (
+    estimate_context_breakdown,
+    format_cost,
+    format_int,
+    load_usage,
+    record_response_usage,
+    usage_file_for,
+)
 
 # Responses API tool format (flat, no "function" wrapper key)
 TOOLS = [RUN_COMMAND_TOOL, SPAWN_TOOL, READ_ARTIFACT_TOOL, ASK_USER_TOOL]
@@ -134,6 +141,53 @@ def response_start_status(seconds: float, has_reasoning: bool) -> str:
     if has_reasoning:
         return f"Thought for {duration}."
     return f"Started responding in {duration}."
+
+
+def _format_agent_usage_line(usage: dict) -> Text | None:
+    totals = usage.get("totals") if isinstance(usage.get("totals"), dict) else {}
+    last_root = usage.get("last_root_request") if isinstance(usage.get("last_root_request"), dict) else None
+    if not isinstance(last_root, dict):
+        return None
+
+    session_total = int(totals.get("total_tokens") or 0)
+    last_total = int(last_root.get("total_tokens") or 0)
+    if session_total <= 0 and last_total <= 0:
+        return None
+
+    input_tokens = int(last_root.get("input_tokens") or 0)
+    cached_input = int(last_root.get("cached_input_tokens") or 0)
+    output_tokens = int(last_root.get("output_tokens") or 0)
+
+    line = Text("Usage: ", style="dim")
+    line.append(format_int(input_tokens), style="bold")
+    line.append(" in", style="dim")
+    if cached_input:
+        line.append(" (", style="dim")
+        line.append(format_int(cached_input), style="cyan")
+        line.append(" cached)", style="dim")
+    line.append(" · ", style="dim")
+    line.append(format_int(output_tokens), style="bold")
+    line.append(" out · ", style="dim")
+    line.append(format_int(last_total), style="bold")
+    line.append(" last · ", style="dim")
+    line.append(format_int(session_total), style="bold")
+    line.append(" session", style="dim")
+
+    estimated_cost = totals.get("estimated_cost_usd")
+    if estimated_cost is not None:
+        line.append(" · est. ", style="dim")
+        line.append(format_cost(float(estimated_cost)), style="green")
+    if last_root.get("estimated"):
+        line.append(" · usage estimated", style="yellow")
+    return line
+
+
+def _print_agent_usage_if_enabled(config: dict, usage_path, session_id: str | None) -> None:
+    if not config.get("print_usage_after_agent", DEFAULT_CONFIG["print_usage_after_agent"]):
+        return
+    usage_line = _format_agent_usage_line(load_usage(usage_path, session_id, warn=False))
+    if usage_line is not None:
+        console.print(usage_line)
 
 
 def to_response_input_item(item: dict) -> dict | None:
@@ -646,6 +700,7 @@ def run_agent(
                 if not incognito:
                     save_history(history, session_context.history_file)
                 save_artifact_store(artifact_store, artifact_file)
+                _print_agent_usage_if_enabled(config, usage_path, session_context.session_id)
                 break
     except KeyboardInterrupt:
         console.print("\n[dim]Interrupted.[/dim]")

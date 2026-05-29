@@ -3,10 +3,13 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from rich.console import Console
 from jarv.agent import (
     build_input,
+    _format_agent_usage_line,
     response_start_status,
     response_wait_label,
     run_agent,
@@ -212,6 +215,107 @@ class AgentInputTests(unittest.TestCase):
 
         self.assertEqual(saved[-1]["role"], "assistant")
         self.assertEqual(saved[-1]["content"], "recovered answer")
+
+    def test_run_agent_does_not_print_usage_by_default(self):
+        with TemporaryDirectory() as tmp:
+            history_file = Path(tmp) / "history.json"
+            context = SessionContext(
+                session_id="session-id",
+                session_label="test session",
+                history_file=history_file,
+                now=datetime(2026, 5, 21, tzinfo=timezone.utc),
+            )
+            response = SimpleNamespace(
+                usage=SimpleNamespace(
+                    input_tokens=1200,
+                    cached_input_tokens=200,
+                    output_tokens=300,
+                    total_tokens=1500,
+                )
+            )
+            console_output = io.StringIO()
+
+            def fake_stream_response(*_args, **_kwargs):
+                yield TextDelta("hello")
+                yield StreamDone(response=response)
+
+            with (
+                patch("jarv.agent.prepare_session_context", return_value=context),
+                patch("jarv.agent.stream_response", side_effect=fake_stream_response),
+                patch("jarv.agent.sys.stdout", new=io.StringIO()),
+                patch("jarv.agent.console", new=Console(file=console_output, force_terminal=False, color_system=None)),
+            ):
+                run_agent("hello!", DEFAULT_CONFIG, client=None)
+
+        self.assertNotIn("Usage:", console_output.getvalue())
+
+    def test_run_agent_prints_usage_when_enabled(self):
+        with TemporaryDirectory() as tmp:
+            history_file = Path(tmp) / "history.json"
+            context = SessionContext(
+                session_id="session-id",
+                session_label="test session",
+                history_file=history_file,
+                now=datetime(2026, 5, 21, tzinfo=timezone.utc),
+            )
+            response = SimpleNamespace(
+                usage=SimpleNamespace(
+                    input_tokens=1200,
+                    cached_input_tokens=200,
+                    output_tokens=300,
+                    total_tokens=1500,
+                )
+            )
+            console_output = io.StringIO()
+
+            def fake_stream_response(*_args, **_kwargs):
+                yield TextDelta("hello")
+                yield StreamDone(response=response)
+
+            with (
+                patch("jarv.agent.prepare_session_context", return_value=context),
+                patch("jarv.agent.stream_response", side_effect=fake_stream_response),
+                patch("jarv.agent.sys.stdout", new=io.StringIO()),
+                patch("jarv.agent.console", new=Console(file=console_output, force_terminal=False, color_system=None)),
+            ):
+                run_agent(
+                    "hello!",
+                    {**DEFAULT_CONFIG, "print_usage_after_agent": True},
+                    client=None,
+                )
+
+        output = console_output.getvalue()
+        self.assertIn("Usage:", output)
+        self.assertIn("1,200 in (200 cached)", output)
+        self.assertIn("300 out", output)
+        self.assertIn("1,500 last", output)
+        self.assertIn("1,500 session", output)
+
+    def test_format_agent_usage_line_marks_estimated_usage(self):
+        line = _format_agent_usage_line(
+            {
+                "totals": {
+                    "total_tokens": 2345,
+                    "estimated_cost_usd": 0.031,
+                },
+                "last_root_request": {
+                    "input_tokens": 1000,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 111,
+                    "total_tokens": 1111,
+                    "estimated": True,
+                },
+            }
+        )
+
+        self.assertIsNotNone(line)
+        plain = line.plain
+        self.assertIn("1,000 in", plain)
+        self.assertIn("111 out", plain)
+        self.assertIn("1,111 last", plain)
+        self.assertIn("2,345 session", plain)
+        self.assertIn("est. $0.03", plain)
+        self.assertIn("usage estimated", plain)
 
 
 if __name__ == "__main__":

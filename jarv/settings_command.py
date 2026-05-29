@@ -123,6 +123,13 @@ def _settings_rows(config: dict) -> list[dict]:
             "desc": "auto, print, inline popup, or fullscreen view",
         },
         {
+            "section": "display",
+            "label": "Print usage after agent",
+            "key": "print_usage_after_agent",
+            "kind": "bool",
+            "desc": "print token totals after completed agent runs",
+        },
+        {
             "section": "command review",
             "label": "Command safety",
             "key": "command_safety",
