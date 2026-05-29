@@ -11,7 +11,7 @@ from rich.table import Table
 from rich.text import Text
 from rich import box
 
-from .command_input import _read_key, mouse_capture
+from .command_input import _read_key_with_repeats, mouse_capture
 from .config import (
     CONFIG_FILE,
     DEFAULT_CONFIG,
@@ -1006,7 +1006,7 @@ def _settings_interactive(config: dict) -> None:
         while True:
             live.refresh()
             try:
-                key = _read_key(text_mode=edit is not None)
+                key, repeat_count = _read_key_with_repeats(text_mode=edit is not None)
             except KeyboardInterrupt:
                 break
 
@@ -1019,9 +1019,9 @@ def _settings_interactive(config: dict) -> None:
                     current_provider = edit.get("selected_provider", config.get("provider", "openai"))
                     current_idx = provider_keys.index(current_provider) if current_provider in provider_keys else 0
                     if key == "UP":
-                        current_idx = max(0, current_idx - 1)
+                        current_idx = max(0, current_idx - repeat_count)
                     elif key == "DOWN":
-                        current_idx = min(len(provider_keys) - 1, current_idx + 1)
+                        current_idx = min(len(provider_keys) - 1, current_idx + repeat_count)
                     elif key == "HOME":
                         current_idx = 0
                     elif key == "END":
@@ -1051,10 +1051,10 @@ def _settings_interactive(config: dict) -> None:
             if key == "ESC":
                 break
             if key in ("UP", "k"):
-                selected = max(0, selected - 1)
+                selected = max(0, selected - repeat_count)
                 flash = None
             elif key in ("DOWN", "j"):
-                selected = min(len(rows) - 1, selected + 1)
+                selected = min(len(rows) - 1, selected + repeat_count)
                 flash = None
             elif key == "HOME":
                 selected = 0

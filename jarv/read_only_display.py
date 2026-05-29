@@ -11,7 +11,7 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.text import Text
 
-from .command_input import _read_key, mouse_capture
+from .command_input import _read_key_with_repeats, mouse_capture
 from .config import CONFIG_FILE, DEFAULT_CONFIG, READ_ONLY_COMMAND_DISPLAY_CHOICES, is_setup_complete
 from .display import (
     PANEL_BORDER_STYLE,
@@ -136,7 +136,7 @@ def _show_inline(body: RenderableType, *, title: str, subtitle: str | None) -> N
         while True:
             live.refresh()
             try:
-                key = _read_key()
+                key, _repeat_count = _read_key_with_repeats()
             except KeyboardInterrupt:
                 break
             if _is_close_key(key):
@@ -212,7 +212,7 @@ def _show_fullscreen(body: RenderableType, *, title: str, subtitle: str | None) 
         while True:
             live.refresh()
             try:
-                key = _read_key()
+                key, repeat_count = _read_key_with_repeats()
             except KeyboardInterrupt:
                 break
             term_w, _ = terminal_size(console=console)
@@ -222,13 +222,13 @@ def _show_fullscreen(body: RenderableType, *, title: str, subtitle: str | None) 
             if _is_close_key(key):
                 break
             if key == "UP":
-                offset = max(0, offset - 1)
+                offset = max(0, offset - repeat_count)
             elif key == "DOWN":
-                offset = min(max_off, offset + 1)
+                offset = min(max_off, offset + repeat_count)
             elif key == "PAGEUP":
-                offset = max(0, offset - page)
+                offset = max(0, offset - (page * repeat_count))
             elif key == "PAGEDOWN":
-                offset = min(max_off, offset + page)
+                offset = min(max_off, offset + (page * repeat_count))
             elif key == "HOME":
                 offset = 0
             elif key == "END":

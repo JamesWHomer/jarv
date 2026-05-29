@@ -58,3 +58,27 @@ def test_read_key_maps_page_like_sgr_wheel_variants(monkeypatch):
     assert command_input._read_key() == "PAGEUP"
     assert command_input._read_key() == "PAGEDOWN"
     assert stdin.remaining == ""
+
+
+def test_read_key_with_repeats_coalesces_identical_navigation(monkeypatch):
+    command_input._PENDING_KEYS.clear()
+    keys = ["DOWN", "DOWN", "DOWN", "ENTER"]
+
+    monkeypatch.setattr(command_input, "_read_key", lambda text_mode=False: keys.pop(0))
+    monkeypatch.setattr(command_input, "_key_available", lambda: bool(keys))
+
+    assert command_input._read_key_with_repeats() == ("DOWN", 3)
+    assert list(command_input._PENDING_KEYS) == ["ENTER"]
+    command_input._PENDING_KEYS.clear()
+
+
+def test_read_key_with_repeats_does_not_drain_non_repeatable_key(monkeypatch):
+    command_input._PENDING_KEYS.clear()
+    keys = ["x", "DOWN"]
+
+    monkeypatch.setattr(command_input, "_read_key", lambda text_mode=False: keys.pop(0))
+    monkeypatch.setattr(command_input, "_key_available", lambda: bool(keys))
+
+    assert command_input._read_key_with_repeats() == ("x", 1)
+    assert keys == ["DOWN"]
+    command_input._PENDING_KEYS.clear()

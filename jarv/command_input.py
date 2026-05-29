@@ -1,11 +1,15 @@
 """Keyboard input helpers shared by interactive command screens."""
 
 import sys
+from collections import deque
+from collections.abc import Iterable
 from contextlib import contextmanager
 
 
 MOUSE_CAPTURE_ENABLE = "\x1b[?1000h\x1b[?1006h"
 MOUSE_CAPTURE_DISABLE = "\x1b[?1006l\x1b[?1000l"
+_PENDING_KEYS: deque[str] = deque()
+_REPEATABLE_NAV_KEYS = frozenset({"UP", "DOWN", "LEFT", "RIGHT", "PAGEUP", "PAGEDOWN"})
 
 
 @contextmanager
@@ -59,6 +63,47 @@ def _parse_sgr_mouse(sequence: str) -> str:
     return "OTHER"
 
 
+def _key_available() -> bool:
+    if _PENDING_KEYS:
+        return True
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            return bool(msvcrt.kbhit())
+        import select
+        return bool(select.select([sys.stdin], [], [], 0)[0])
+    except (ImportError, OSError, TypeError, ValueError):
+        return False
+
+
+def _read_key_with_repeats(
+    text_mode: bool = False,
+    *,
+    repeatable: Iterable[str] = _REPEATABLE_NAV_KEYS,
+    max_count: int = 128,
+) -> tuple[str, int]:
+    """Read one key and fold immediately queued identical navigation repeats.
+
+    Full-screen Rich views are expensive enough that some terminals can queue
+    key-repeat events faster than jarv can redraw. Coalescing identical queued
+    arrows lets menus advance several rows per refresh while preserving the
+    first different key for the next input loop.
+    """
+    key = _read_key(text_mode=text_mode)
+    repeatable_keys = frozenset(repeatable)
+    if key not in repeatable_keys or max_count <= 1:
+        return key, 1
+
+    count = 1
+    while count < max_count and _key_available():
+        next_key = _read_key(text_mode=text_mode)
+        if next_key != key:
+            _PENDING_KEYS.appendleft(next_key)
+            break
+        count += 1
+    return key, count
+
+
 def _read_key(text_mode: bool = False) -> str:
     """Read a single keypress and return a normalised token.
 
@@ -67,6 +112,9 @@ def _read_key(text_mode: bool = False) -> str:
     Ctrl-C.  When ``text_mode`` is True, the convenience q/Q → ESC mapping is
     disabled so a search query can include those letters.
     """
+    if _PENDING_KEYS:
+        return _PENDING_KEYS.popleft()
+
     if sys.platform == "win32":
         import msvcrt
         ch = msvcrt.getwch()

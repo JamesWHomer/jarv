@@ -13,7 +13,7 @@ from rich.table import Table
 from rich.text import Text
 from rich import box
 
-from .command_input import _read_key, mouse_capture
+from .command_input import _read_key_with_repeats, mouse_capture
 from .config import CONFIG_DIR
 from .display import console, flatten_headings, jarv_panel, refresh_on_resize, section_rule, terminal_size
 from .history import (
@@ -954,7 +954,11 @@ def cmd_sessions(args: list | None = None) -> None:
         while True:
             live.refresh()
             try:
-                key = _read_key(text_mode=search_active and preview_sid is None)
+                text_mode = search_active and preview_sid is None
+                key, repeat_count = _read_key_with_repeats(
+                    text_mode=text_mode,
+                    repeatable=() if text_mode else ("UP", "DOWN", "LEFT", "RIGHT", "PAGEUP", "PAGEDOWN"),
+                )
             except KeyboardInterrupt:
                 break
 
@@ -999,19 +1003,19 @@ def cmd_sessions(args: list | None = None) -> None:
                             (i for i, r in enumerate(visible_now) if r["sid"] == preview_sid),
                             _selected_pos(visible_now),
                         )
-                        delta = -1 if key == "LEFT" else 1
+                        delta = -repeat_count if key == "LEFT" else repeat_count
                         pos = max(0, min(len(visible_now) - 1, pos + delta))
                         preview_sid = visible_now[pos]["sid"]
                         selected_sid = preview_sid
                         preview_offset = 0
                 elif key == "UP":
-                    preview_offset = max(0, preview_offset - 1)
+                    preview_offset = max(0, preview_offset - repeat_count)
                 elif key == "DOWN":
-                    preview_offset += 1
+                    preview_offset += repeat_count
                 elif key == "PAGEUP":
-                    preview_offset = max(0, preview_offset - _max_vis())
+                    preview_offset = max(0, preview_offset - (_max_vis() * repeat_count))
                 elif key == "PAGEDOWN":
-                    preview_offset += _max_vis()
+                    preview_offset += _max_vis() * repeat_count
                 elif key == "HOME":
                     preview_offset = 0
                 elif key == "END":
@@ -1048,11 +1052,11 @@ def cmd_sessions(args: list | None = None) -> None:
 
             if key in ("UP", "LEFT"):
                 if visible:
-                    selected_sid = visible[max(0, sel - 1)]["sid"]
+                    selected_sid = visible[max(0, sel - repeat_count)]["sid"]
                 ghost_sid = None
             elif key in ("DOWN", "RIGHT"):
                 if visible:
-                    selected_sid = visible[min(n_vis - 1, sel + 1)]["sid"]
+                    selected_sid = visible[min(n_vis - 1, sel + repeat_count)]["sid"]
                 ghost_sid = None
             elif key == "HOME":
                 if visible:
@@ -1064,11 +1068,11 @@ def cmd_sessions(args: list | None = None) -> None:
                 ghost_sid = None
             elif key == "PAGEUP":
                 if visible:
-                    selected_sid = visible[max(0, sel - _max_vis())]["sid"]
+                    selected_sid = visible[max(0, sel - (_max_vis() * repeat_count))]["sid"]
                 ghost_sid = None
             elif key == "PAGEDOWN":
                 if visible:
-                    selected_sid = visible[min(n_vis - 1, sel + _max_vis())]["sid"]
+                    selected_sid = visible[min(n_vis - 1, sel + (_max_vis() * repeat_count))]["sid"]
                 ghost_sid = None
             elif key == "ENTER":
                 if cur is None:
@@ -1342,7 +1346,7 @@ def cmd_history() -> None:
         while True:
             live.refresh()
             try:
-                key = _read_key()
+                key, repeat_count = _read_key_with_repeats()
             except KeyboardInterrupt:
                 break
             term_w, _ = terminal_size(console=console)
@@ -1353,17 +1357,19 @@ def cmd_history() -> None:
             if key == "ESC":
                 break
             elif key == "UP":
-                offset = max(0, offset - 1)
+                offset = max(0, offset - repeat_count)
             elif key == "DOWN":
-                offset = min(max_off, offset + 1)
+                offset = min(max_off, offset + repeat_count)
             elif key == "LEFT":
-                _jump_to_message(-1)
+                for _ in range(repeat_count):
+                    _jump_to_message(-1)
             elif key == "RIGHT":
-                _jump_to_message(1)
+                for _ in range(repeat_count):
+                    _jump_to_message(1)
             elif key == "PAGEUP":
-                offset = max(0, offset - page)
+                offset = max(0, offset - (page * repeat_count))
             elif key == "PAGEDOWN":
-                offset = min(max_off, offset + page)
+                offset = min(max_off, offset + (page * repeat_count))
             elif key == "HOME":
                 offset = 0
             elif key == "END":

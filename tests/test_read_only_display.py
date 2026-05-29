@@ -64,12 +64,12 @@ def _install_display_harness(monkeypatch, *, width=80, height=24, key="ENTER", f
     monkeypatch.setattr(read_only_display, "refresh_on_resize", noop_context)
     monkeypatch.setattr(read_only_display, "mouse_capture", noop_context)
 
-    def read_key():
+    def read_key_with_repeats():
         if key == "KeyboardInterrupt":
             raise KeyboardInterrupt
-        return key
+        return key, 1
 
-    monkeypatch.setattr(read_only_display, "_read_key", read_key)
+    monkeypatch.setattr(read_only_display, "_read_key_with_repeats", read_key_with_repeats)
     return output
 
 
