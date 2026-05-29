@@ -57,12 +57,26 @@ jobs:
       - name: Extract release notes from annotated tag
         shell: bash
         run: |
+          # actions/checkout can rewrite refs/tags/$GITHUB_REF_NAME to the
+          # target commit, losing the annotated tag message. Re-fetch the real
+          # tag object before reading its contents.
+          git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+
+          tag_type="$(git cat-file -t "refs/tags/${GITHUB_REF_NAME}")"
+          if [ "$tag_type" != "tag" ]; then
+            echo "::error::${GITHUB_REF_NAME} is not an annotated tag. Create releases with: git tag -a ${GITHUB_REF_NAME} -F release-notes.md"
+            exit 1
+          fi
+
           git for-each-ref "refs/tags/${GITHUB_REF_NAME}" --format='%(contents:body)' > release-notes.md
 
-          # Fallback in case the tag has no separate body
-          if [ ! -s release-notes.md ]; then
-            git for-each-ref "refs/tags/${GITHUB_REF_NAME}" --format='%(contents)' > release-notes.md
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "::error::Annotated tag ${GITHUB_REF_NAME} has no release-notes body. Use a tag message with a title line, blank line, then release notes."
+            exit 1
           fi
+
+          echo "Release notes:"
+          cat release-notes.md
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
