@@ -5,17 +5,21 @@ import threading
 
 from . import __version__
 from .config import load_config, validate_config
-from .display import console
-from .unicode_safety import sanitize_text
 
 STDIN_LABEL = "Input from stdin"
+
+
+def _console():
+    from .display import console
+
+    return console
 
 
 def _setup_nudge() -> None:
     """Print a one-line nudge if the env key is missing."""
     from .config import is_setup_complete
     if not is_setup_complete():
-        console.print("[dim]Tip: run [bold cyan]jarv /setup[/bold cyan] to configure your API key and get started.[/dim]\n")
+        _console().print("[dim]Tip: run [bold cyan]jarv /setup[/bold cyan] to configure your API key and get started.[/dim]\n")
 
 
 def _lazy_commands():
@@ -93,6 +97,7 @@ def _maybe_command(first_word: str, rest: list[str]) -> tuple[bool, str, list[st
         return None
 
     full_input = " ".join([first_word] + rest) if rest else first_word
+    console = _console()
     console.print(f"\n[yellow]Did you mean the command [bold]/{name}[/bold] or a message to jarv?[/yellow]")
     console.print(f"  [bold]1.[/bold] Run command [cyan]/{name}[/cyan]")
     console.print(f"  [bold]2.[/bold] Send as message: [dim]{full_input}[/dim]")
@@ -110,6 +115,7 @@ def _maybe_command(first_word: str, rest: list[str]) -> tuple[bool, str, list[st
 def cmd_setup(rest: list[str] | None = None) -> dict | None:
     """Run the interactive setup wizard. Returns config or None."""
     from .setup import run_setup_wizard, SETUP_STEPS
+    console = _console()
     step = None
     if rest:
         step = rest[0].lower().lstrip("-")
@@ -156,6 +162,8 @@ def _read_piped_stdin(max_chars: int, stdin=None) -> tuple[str, bool]:
     except (TypeError, ValueError):
         limit = 200000
 
+    from .unicode_safety import sanitize_text
+
     text = sanitize_text(stdin.read(limit + 1))
     if "\x00" in text:
         raise ValueError("stdin appears to contain binary data; pass text input instead.")
@@ -187,6 +195,7 @@ def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
     query_parts: list[str] = args.query
+    console = _console()
 
     # "jarv help" permanent alias
     if query_parts and query_parts[0].lower() == "help":
@@ -212,8 +221,9 @@ def main() -> None:
             return
 
     # First-run: auto-trigger setup wizard if no config exists yet
-    config = load_config()
     from .config import is_setup_complete
+
+    config = load_config()
     if not is_setup_complete(config):
         result = cmd_setup()
         if result is None or not is_setup_complete(result):
@@ -271,6 +281,7 @@ def main() -> None:
 
 
 def run_heads_up_mode(config: dict, client) -> None:
+    console = _console()
     console.print("[bold cyan]jarv heads-up mode[/bold cyan]")
     console.print("[dim]Type a prompt and press Enter. Use /help for commands. Press Ctrl+C to leave.[/dim]")
     while True:

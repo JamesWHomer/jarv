@@ -69,6 +69,6 @@ def save_artifact_store(store: ArtifactStore, path: Path) -> None:
             for label, art in store._items.items()
         }
     try:
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        path.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
     except OSError as e:
         console.print(f"[yellow]Could not save artifact store:[/yellow] {e}")

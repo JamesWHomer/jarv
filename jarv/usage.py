@@ -110,6 +110,10 @@ def global_usage_file() -> Path:
     return CONFIG_DIR / "usage.json"
 
 
+def global_usage_jsonl_file(path: Path | None = None) -> Path:
+    return (path or global_usage_file()).with_suffix(".jsonl")
+
+
 def _empty_usage(session_id: str | None = None) -> dict:
     return {
         "version": USAGE_VERSION,
@@ -161,7 +165,7 @@ def load_usage(path: Path, session_id: str | None = None, warn: bool = True) -> 
 def save_usage(data: dict, path: Path, warn: bool = True) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        path.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
     except OSError as e:
         if warn:
             console.print(f"[yellow]Could not save usage data:[/yellow] {e}")
@@ -366,11 +370,15 @@ def _append_global_usage_record_unlocked(
     path: Path | None = None,
     warn: bool = True,
 ) -> None:
-    data = load_global_usage(path, warn=warn)
-    data["version"] = USAGE_VERSION
-    data["updated_at"] = record.get("created_at") or isoformat_utc(utc_now())
-    data.setdefault("records", []).append(dict(record))
-    save_global_usage(data, path, warn=warn)
+    jsonl_path = global_usage_jsonl_file(path)
+    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with jsonl_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(dict(record), separators=(",", ":")))
+            f.write("\n")
+    except OSError as e:
+        if warn:
+            console.print(f"[yellow]Could not save usage data:[/yellow] {e}")
 
 
 def append_global_usage_record(
@@ -389,10 +397,25 @@ def load_global_usage_records(
     now: datetime | None = None,
     warn: bool = True,
 ) -> list[dict]:
-    records = load_global_usage(path, warn=warn).get("records", [])
-    if not isinstance(records, list):
-        return []
-    valid_records = [record for record in records if isinstance(record, dict)]
+    legacy_records = load_global_usage(path, warn=warn).get("records", [])
+    valid_records = [record for record in legacy_records if isinstance(record, dict)] if isinstance(legacy_records, list) else []
+
+    jsonl_path = global_usage_jsonl_file(path)
+    if jsonl_path.exists():
+        try:
+            for line in jsonl_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(record, dict):
+                    _normalize_token_bucket(record, include_request_count=False)
+                    valid_records.append(record)
+        except (OSError, UnicodeDecodeError) as e:
+            if warn:
+                console.print(f"[yellow]Could not read usage data:[/yellow] {e}")
     if since is None:
         return valid_records
 

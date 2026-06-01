@@ -207,6 +207,19 @@ def _short_session_id(sid: str) -> str:
     return sid[:16]
 
 
+def _cwd_label(value: str) -> str:
+    path = str(value or "").replace("\\", "/").rstrip("/")
+    if not path:
+        return ""
+    return path.rsplit("/", 1)[-1]
+
+
+def _session_metadata_widths(width: int) -> tuple[int, int]:
+    if width < 36:
+        return (0, max(0, width))
+    return (18, max(0, width - 18))
+
+
 def _sessions_plain(sessions: dict, terminals: dict) -> None:
     """Non-interactive fallback session list (used when stdout is not a tty)."""
     terminal_id, _ = detect_terminal()
@@ -255,7 +268,7 @@ def _sessions_plain(sessions: dict, terminals: dict) -> None:
                     if isinstance(item, dict) and item.get("role") == "user":
                         content = str(item.get("content", "")).replace("\n", " ").strip()
                         if content:
-                            snippet = content[:72] + ("…" if len(content) > 72 else "")
+                            snippet = content[:72] + ("..." if len(content) > 72 else "")
                             break
 
         marker = "[green]●[/green]" if sid == current_session_id else ""
@@ -322,7 +335,8 @@ def cmd_sessions(args: list | None = None) -> None:
 
     sorted_sessions = sorted(sessions.keys(), key=sort_key, reverse=True)
 
-    # Precompute all display data so the live render never blocks on I/O.
+    # Precompute cheap display data only. History and usage sidecars are loaded
+    # lazily for visible rows so first paint is bounded by viewport size.
     rows: list[dict] = []
     for sid in sorted_sessions:
         meta = sessions[sid]
@@ -344,24 +358,20 @@ def cmd_sessions(args: list | None = None) -> None:
         else:
             time_str = "—"
 
-        snippet = ""
-        hp_str = meta.get("history_file")
-        if hp_str:
-            hp = Path(hp_str)
-            if hp.exists():
-                history = load_history(hp)
-                for item in history:
-                    if isinstance(item, dict) and item.get("role") == "user":
-                        content = str(item.get("content", "")).replace("\n", " ").strip()
-                        if content:
-                            snippet = content[:60] + ("…" if len(content) > 60 else "")
-                            break
+        cached_snippet = meta.get("first_user_snippet")
+        if not isinstance(cached_snippet, str):
+            cached_snippet = meta.get("first_message")
+        if not isinstance(cached_snippet, str):
+            cached_snippet = ""
+        snippet = cached_snippet[:60] + ("..." if len(cached_snippet) > 60 else "")
 
         rows.append({
             "sid": sid,
             "short_id": _short_session_id(sid),
             "time_str": time_str,
             "snippet": snippet,
+            "snippet_loaded": bool(cached_snippet),
+            "cwd": _cwd_label(str(meta.get("cwd") or meta.get("working_directory") or "")),
             "is_current": sid == current_session_id,
             "archived": bool(meta.get("archived")),
         })
@@ -419,6 +429,32 @@ def cmd_sessions(args: list | None = None) -> None:
         label = meta.get("label", "") if isinstance(meta.get("label"), str) else ""
         return f"{r['short_id']} {r['sid']} {r.get('snippet', '')} {label}".lower()
 
+    def _first_user_snippet(meta: dict, width: int = 60) -> str:
+        hp_str = meta.get("history_file")
+        if not hp_str:
+            return ""
+        hp = Path(hp_str)
+        if not hp.exists():
+            return ""
+        try:
+            history = load_history(hp)
+        except Exception:
+            return ""
+        for item in history:
+            if isinstance(item, dict) and item.get("role") == "user":
+                content = str(item.get("content", "")).replace("\n", " ").strip()
+                if content:
+                    return content[:width] + ("..." if len(content) > width else "")
+        return ""
+
+    def _ensure_row_metadata(r: dict) -> None:
+        meta = sessions.get(r["sid"], {})
+        if not r.get("snippet_loaded"):
+            r["snippet"] = _first_user_snippet(meta)
+            r["snippet_loaded"] = True
+        if not r.get("cwd"):
+            r["cwd"] = _cwd_label(str(meta.get("cwd") or meta.get("working_directory") or ""))
+
     def _build_search_text(sid: str) -> str:
         meta = sessions.get(sid, {})
         hp_str = meta.get("history_file")
@@ -469,8 +505,14 @@ def cmd_sessions(args: list | None = None) -> None:
             search_text_cache[sid] = text
 
     prefetch_stop = threading.Event()
-    prefetch_thread = threading.Thread(target=_prefetch_worker, daemon=True)
-    prefetch_thread.start()
+    prefetch_thread: threading.Thread | None = None
+
+    def _start_prefetch() -> None:
+        nonlocal prefetch_thread
+        if prefetch_thread is not None:
+            return
+        prefetch_thread = threading.Thread(target=_prefetch_worker, daemon=True)
+        prefetch_thread.start()
 
     def _visible_rows_list() -> list[dict]:
         q = search_query.lower().strip()
@@ -728,6 +770,7 @@ def cmd_sessions(args: list | None = None) -> None:
 
         for i in range(start, end):
             r = visible[i]
+            _ensure_row_metadata(r)
             is_sel = (i == sel) and not search_active
             is_armed = is_sel and arm_delete_sid == r["sid"]
             t = Text(no_wrap=True, overflow="ellipsis")
@@ -743,7 +786,7 @@ def cmd_sessions(args: list | None = None) -> None:
             remaining -= id_width
             time_width = max(0, min(12, remaining))
             remaining -= time_width
-            snippet_width = max(0, remaining)
+            cwd_width, snippet_width = _session_metadata_widths(max(0, remaining))
 
             if is_armed:
                 prefix_style = "bold red"
@@ -785,6 +828,11 @@ def cmd_sessions(args: list | None = None) -> None:
                 else:
                     time_style = "dim"
                 t.append(f"{time_str:<{time_width}}", style=time_style)
+
+            if cwd_width:
+                cwd = _truncate(r.get("cwd") or "", cwd_width)
+                cwd_style = "bold red" if is_armed else ("cyan" if is_sel else "dim")
+                t.append(f"{cwd:<{cwd_width}}", style=cwd_style)
 
             snip = r["snippet"] or "no messages"
             if snippet_width:
@@ -980,6 +1028,7 @@ def cmd_sessions(args: list | None = None) -> None:
                         search_query = search_query[:-1]
                         offset = 0
                 elif key == "CTRL_F":
+                    _start_prefetch()
                     search_active = False
                 elif isinstance(key, str) and len(key) == 1 and key.isprintable():
                     search_query += key
@@ -1099,6 +1148,7 @@ def cmd_sessions(args: list | None = None) -> None:
                     continue
                 break
             elif key == "CTRL_F":
+                _start_prefetch()
                 search_active = True
                 continue
             elif key == "TAB":

@@ -2,8 +2,6 @@ import json
 import sys
 from pathlib import Path
 
-from .display import console
-
 CONFIG_DIR = Path.home() / ".jarv"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
@@ -40,6 +38,12 @@ DEFAULT_CONFIG = {
     "print_usage_after_agent": False,
 }
 
+
+def _console():
+    from .display import console
+
+    return console
+
 def load_config() -> dict:
     CONFIG_DIR.mkdir(exist_ok=True)
     from .history import migrate_flat_session_files
@@ -53,15 +57,16 @@ def load_config() -> dict:
         backup = CONFIG_FILE.with_suffix(".json.bak")
         CONFIG_FILE.replace(backup)
         CONFIG_FILE.write_text(json.dumps(DEFAULT_CONFIG, indent=2), encoding="utf-8")
+        console = _console()
         console.print(f"[red]Config file was invalid JSON:[/red] {e}")
         console.print(f"[yellow]Backed it up to[/yellow] {backup}")
         console.print(f"[green]Created a fresh config at[/green] {CONFIG_FILE}")
         sys.exit(1)
     except (OSError, UnicodeDecodeError) as e:
-        console.print(f"[red]Could not read config:[/red] {e}")
+        _console().print(f"[red]Could not read config:[/red] {e}")
         sys.exit(1)
     if not isinstance(config, dict):
-        console.print(f"[red]Config must be a JSON object:[/red] {CONFIG_FILE}")
+        _console().print(f"[red]Config must be a JSON object:[/red] {CONFIG_FILE}")
         sys.exit(1)
     changed = False
     for k, v in DEFAULT_CONFIG.items():
@@ -107,7 +112,7 @@ def save_config(config: dict) -> None:
     try:
         CONFIG_FILE.write_text(json.dumps(config, indent=2), encoding="utf-8")
     except OSError as e:
-        console.print(f"[red]Could not save config:[/red] {e}")
+        _console().print(f"[red]Could not save config:[/red] {e}")
         sys.exit(1)
 
 
@@ -115,7 +120,7 @@ def validate_config(config: dict) -> bool:
     ok = True
     model = config.get("model")
     if not isinstance(model, str) or not model.strip():
-        console.print("[red]Config 'model' must be a non-empty string.[/red]")
+        _console().print("[red]Config 'model' must be a non-empty string.[/red]")
         ok = False
 
     effort = config.get("reasoning_effort", "")
@@ -129,18 +134,18 @@ def validate_config(config: dict) -> bool:
                 raise ValueError
             config[key] = value
         except (TypeError, ValueError):
-            console.print(f"[red]Config '{key}' must be a positive integer.[/red]")
+            _console().print(f"[red]Config '{key}' must be a positive integer.[/red]")
             ok = False
 
     safety = config.get("command_safety", "risky")
     if safety not in ("all", "risky", "none"):
-        console.print(f"[red]Config 'command_safety' must be one of: all, risky, none.[/red]")
+        _console().print(f"[red]Config 'command_safety' must be one of: all, risky, none.[/red]")
         ok = False
 
     display_mode = config.get("read_only_command_display", "auto")
     if display_mode not in READ_ONLY_COMMAND_DISPLAY_CHOICES:
         choices = ", ".join(READ_ONLY_COMMAND_DISPLAY_CHOICES)
-        console.print(f"[red]Config 'read_only_command_display' must be one of: {choices}.[/red]")
+        _console().print(f"[red]Config 'read_only_command_display' must be one of: {choices}.[/red]")
         ok = False
 
     return ok

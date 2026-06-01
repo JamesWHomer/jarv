@@ -31,7 +31,7 @@ def load_history(path: Path) -> list:
 def save_history(history: list, path: Path) -> None:
     CONFIG_DIR.mkdir(exist_ok=True)
     try:
-        path.write_text(json.dumps(sanitize_json_value(history), indent=2), encoding="utf-8")
+        path.write_text(json.dumps(sanitize_json_value(history), separators=(",", ":")), encoding="utf-8")
     except OSError as e:
         console.print(f"[yellow]Could not save history:[/yellow] {e}")
 

@@ -87,6 +87,16 @@ class ResponseWaitIndicator:
         yield Text(f"{frame}  {response_wait_label(self.has_reasoning)}\u2026  {int(elapsed)}s")
 
 
+def _markdown_tail_source(text: str, max_chars: int) -> str:
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    tail = text[-max_chars:]
+    newline = tail.find("\n")
+    if newline >= 0:
+        tail = tail[newline + 1:]
+    return f"_Earlier streaming content hidden; full reply prints when done._\n\n{tail}"
+
+
 class TailMarkdown:
     """Renders Markdown but keeps only the last `max_lines` rendered rows.
 
@@ -97,8 +107,8 @@ class TailMarkdown:
     never overflows, while still showing the most recent (streaming) tail.
     """
 
-    def __init__(self, text: str, max_lines: int):
-        self._text = text
+    def __init__(self, text: str, max_lines: int, max_source_chars: int = 8000):
+        self._text = _markdown_tail_source(text, max_source_chars)
         self._max_lines = max(1, max_lines)
 
     def __rich_console__(self, console, options):

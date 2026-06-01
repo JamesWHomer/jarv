@@ -109,13 +109,44 @@ class UsageRecordingTests(unittest.TestCase):
             session_usage = load_usage(usage_path, "session-id")
             global_records = load_global_usage_records(global_path)
             aggregate = aggregate_usage_records(global_records)
+            legacy_json_exists = global_path.exists()
+            jsonl_exists = global_path.with_suffix(".jsonl").exists()
 
         self.assertEqual(session_usage["totals"]["request_count"], 2)
+        self.assertFalse(legacy_json_exists)
+        self.assertTrue(jsonl_exists)
         self.assertEqual(len(global_records), 2)
         self.assertEqual([record["source"] for record in global_records], ["root", "subagent"])
         self.assertEqual(aggregate["totals"]["total_tokens"], 30)
         self.assertEqual(aggregate["sources"]["root"]["request_count"], 1)
         self.assertEqual(aggregate["sources"]["subagent"]["request_count"], 1)
+
+    def test_global_usage_records_combine_legacy_json_and_jsonl(self):
+        with TemporaryDirectory() as tmp:
+            global_path = Path(tmp) / "usage.json"
+            global_path.write_text(
+                '{"version":1,"records":[{"created_at":"2026-05-28T00:00:00Z","session_id":"legacy","model":"test-model","source":"root","input_tokens":1,"cached_input_tokens":0,"uncached_input_tokens":1,"output_tokens":2,"reasoning_output_tokens":0,"total_tokens":3}]}',
+                encoding="utf-8",
+            )
+            append_global_usage_record(
+                {
+                    "created_at": "2026-05-29T00:00:00Z",
+                    "session_id": "jsonl",
+                    "model": "test-model",
+                    "source": "root",
+                    "input_tokens": 4,
+                    "cached_input_tokens": 0,
+                    "uncached_input_tokens": 4,
+                    "output_tokens": 5,
+                    "reasoning_output_tokens": 0,
+                    "total_tokens": 9,
+                },
+                global_path,
+            )
+
+            records = load_global_usage_records(global_path)
+
+        self.assertEqual([record["session_id"] for record in records], ["legacy", "jsonl"])
 
     def test_global_usage_records_can_be_filtered_by_time_window(self):
         with TemporaryDirectory() as tmp:
