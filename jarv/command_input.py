@@ -1,5 +1,6 @@
 """Keyboard input helpers shared by interactive command screens."""
 
+import os
 import sys
 from collections import deque
 from collections.abc import Iterable
@@ -10,6 +11,8 @@ MOUSE_CAPTURE_ENABLE = "\x1b[?1000h\x1b[?1006h"
 MOUSE_CAPTURE_DISABLE = "\x1b[?1006l\x1b[?1000l"
 _PENDING_KEYS: deque[str] = deque()
 _REPEATABLE_NAV_KEYS = frozenset({"UP", "DOWN", "LEFT", "RIGHT", "PAGEUP", "PAGEDOWN"})
+_POSIX_INPUT_POLL_INTERVAL = 0.1
+_LAST_TERMINAL_SIZE: tuple[int, int] | None = None
 
 
 @contextmanager
@@ -61,6 +64,45 @@ def _parse_sgr_mouse(sequence: str) -> str:
     if wheel == 3:
         return "PAGEDOWN"
     return "OTHER"
+
+
+def _terminal_size() -> tuple[int, int] | None:
+    for stream in (0, 1, 2):
+        try:
+            size = os.get_terminal_size(stream)
+        except OSError:
+            continue
+        return max(1, size.columns), max(1, size.lines)
+    return None
+
+
+def _terminal_size_changed() -> bool:
+    global _LAST_TERMINAL_SIZE
+
+    size = _terminal_size()
+    if size is None:
+        return False
+    if _LAST_TERMINAL_SIZE is None:
+        _LAST_TERMINAL_SIZE = size
+        return False
+    if size == _LAST_TERMINAL_SIZE:
+        return False
+    _LAST_TERMINAL_SIZE = size
+    return True
+
+
+def _read_posix_char() -> str | None:
+    import select
+
+    if _terminal_size_changed():
+        return None
+
+    while True:
+        readable, _, _ = select.select([sys.stdin], [], [], _POSIX_INPUT_POLL_INTERVAL)
+        if readable:
+            return sys.stdin.read(1)
+        if _terminal_size_changed():
+            return None
 
 
 def _key_available() -> bool:
@@ -147,7 +189,9 @@ def _read_key(text_mode: bool = False) -> str:
         old = termios.tcgetattr(fd)
         try:
             tty.setraw(fd)
-            ch = sys.stdin.read(1)
+            ch = _read_posix_char()
+            if ch is None:
+                return "RESIZE"
             if ch == "\x1b":
                 ch2 = sys.stdin.read(1)
                 if ch2 == "[":

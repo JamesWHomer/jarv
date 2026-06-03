@@ -23,8 +23,19 @@ class FakeStdin:
 
 def _install_posix_input(monkeypatch, text: str) -> FakeStdin:
     stdin = FakeStdin(text)
+
+    def no_terminal_size(_fd):
+        raise OSError
+
+    command_input._LAST_TERMINAL_SIZE = None
     monkeypatch.setattr(command_input.sys, "platform", "linux")
     monkeypatch.setattr(command_input.sys, "stdin", stdin)
+    monkeypatch.setattr(command_input.os, "get_terminal_size", no_terminal_size)
+    monkeypatch.setitem(
+        sys.modules,
+        "select",
+        SimpleNamespace(select=lambda read, _write, _error, _timeout: (read if stdin.remaining else [], [], [])),
+    )
     monkeypatch.setitem(sys.modules, "tty", SimpleNamespace(setraw=lambda _fd: None))
     monkeypatch.setitem(
         sys.modules,
@@ -82,3 +93,18 @@ def test_read_key_with_repeats_does_not_drain_non_repeatable_key(monkeypatch):
     assert command_input._read_key_with_repeats() == ("x", 1)
     assert keys == ["DOWN"]
     command_input._PENDING_KEYS.clear()
+
+
+def test_read_key_returns_resize_when_posix_terminal_size_changes(monkeypatch):
+    _install_posix_input(monkeypatch, "")
+    sizes = [
+        command_input.os.terminal_size((80, 24)),
+        command_input.os.terminal_size((120, 40)),
+    ]
+
+    def terminal_size(_fd):
+        return sizes.pop(0) if len(sizes) > 1 else sizes[0]
+
+    monkeypatch.setattr(command_input.os, "get_terminal_size", terminal_size)
+
+    assert command_input._read_key() == "RESIZE"
