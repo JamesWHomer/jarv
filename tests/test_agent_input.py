@@ -148,7 +148,7 @@ class AgentInputTests(unittest.TestCase):
                 patch("jarv.agent.stream_response", side_effect=fake_stream_response),
                 patch("jarv.agent.sys.stdout", new=io.StringIO()),
             ):
-                run_agent("new prompt", config, client=None)
+                run_agent("new prompt", config, client=object())
 
             saved = load_history(history_file)
 
@@ -182,9 +182,59 @@ class AgentInputTests(unittest.TestCase):
                 patch("jarv.agent.stream_response", side_effect=fake_stream_response),
                 patch("jarv.agent.sys.stdout", new=io.StringIO()),
             ):
-                run_agent("hello!", DEFAULT_CONFIG, client=None)
+                run_agent("hello!", DEFAULT_CONFIG, client=object())
 
         self.assertEqual(captured["kwargs"]["prompt_cache_key"], "jarv:session-id")
+
+    def test_run_agent_starts_wait_indicator_before_lazy_client_creation(self):
+        with TemporaryDirectory() as tmp:
+            history_file = Path(tmp) / "history.json"
+            context = SessionContext(
+                session_id="session-id",
+                session_label="test session",
+                history_file=history_file,
+                now=datetime(2026, 5, 21, tzinfo=timezone.utc),
+            )
+            events = []
+
+            class FakeLive:
+                def __init__(self, *_args, **_kwargs):
+                    pass
+
+                def start(self):
+                    events.append("live_start")
+
+                def stop(self):
+                    events.append("live_stop")
+
+                def update(self, *_args, **_kwargs):
+                    pass
+
+            class TtyStringIO(io.StringIO):
+                def isatty(self):
+                    return True
+
+            def fake_create_client(_config):
+                events.append("create_client")
+                return object()
+
+            def fake_stream_response(*_args, **_kwargs):
+                events.append("stream_response")
+                yield TextDelta("hello")
+                yield StreamDone(response=None)
+
+            with (
+                patch("jarv.agent.prepare_session_context", return_value=context),
+                patch("jarv.agent.create_client", side_effect=fake_create_client),
+                patch("jarv.agent.stream_response", side_effect=fake_stream_response),
+                patch("jarv.agent.sys.stdout", new=TtyStringIO()),
+                patch("jarv.agent.Live", FakeLive),
+            ):
+                run_agent("hello!", DEFAULT_CONFIG, client=None, incognito=True)
+
+        self.assertEqual(events[0], "live_start")
+        self.assertLess(events.index("live_start"), events.index("create_client"))
+        self.assertLess(events.index("create_client"), events.index("stream_response"))
 
     def test_run_agent_persists_text_recovered_from_final_response(self):
         with TemporaryDirectory() as tmp:
@@ -209,7 +259,7 @@ class AgentInputTests(unittest.TestCase):
                 patch("jarv.agent.stream_response", side_effect=fake_stream_response),
                 patch("jarv.agent.sys.stdout", new=io.StringIO()),
             ):
-                run_agent("hello!", DEFAULT_CONFIG, client=None)
+                run_agent("hello!", DEFAULT_CONFIG, client=object())
 
             saved = load_history(history_file)
 
@@ -245,7 +295,7 @@ class AgentInputTests(unittest.TestCase):
                 patch("jarv.agent.sys.stdout", new=io.StringIO()),
                 patch("jarv.agent.console", new=Console(file=console_output, force_terminal=False, color_system=None)),
             ):
-                run_agent("hello!", DEFAULT_CONFIG, client=None)
+                run_agent("hello!", DEFAULT_CONFIG, client=object())
 
         self.assertNotIn("Usage:", console_output.getvalue())
 
@@ -281,7 +331,7 @@ class AgentInputTests(unittest.TestCase):
                 run_agent(
                     "hello!",
                     {**DEFAULT_CONFIG, "print_usage_after_agent": True},
-                    client=None,
+                    client=object(),
                 )
 
         output = console_output.getvalue()

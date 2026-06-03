@@ -29,6 +29,7 @@ from .history import (
 )
 from .artifacts import ArtifactStore, load_artifact_store, save_artifact_store
 from .provider import (
+    create_client,
     ProviderError,
     ReasoningDone,
     ReasoningStarted,
@@ -85,6 +86,21 @@ class ResponseWaitIndicator:
         elapsed = now - self._start
         frame = _THINKING_FRAMES[int(now * 10) % len(_THINKING_FRAMES)]
         yield Text(f"{frame}  {response_wait_label(self.has_reasoning)}\u2026  {int(elapsed)}s")
+
+
+def _start_response_wait_indicator(interactive: bool, start_time: float) -> tuple[ResponseWaitIndicator | None, Live | None]:
+    if not interactive:
+        return None, None
+    wait_indicator = ResponseWaitIndicator(start_time)
+    spinner_live = Live(
+        wait_indicator,
+        refresh_per_second=4,
+        console=console,
+        auto_refresh=True,
+        transient=True,
+    )
+    spinner_live.start()
+    return wait_indicator, spinner_live
 
 
 def _markdown_tail_source(text: str, max_chars: int) -> str:
@@ -472,63 +488,91 @@ def _dispatch_spawn_with_ui(args: dict, root_node, store, client, config) -> str
 def run_agent(
     query: str,
     config: dict,
-    client,
+    client=None,
     propagate_keyboard_interrupt: bool = False,
     new_session: bool = False,
     incognito: bool = False,
 ) -> None:
     interactive = sys.stdout.isatty()
-    if new_session:
-        forget_current_session()
-    session_context = prepare_session_context(mark_message=True)
-    history = [] if (new_session or incognito) else load_history(session_context.history_file)
-    max_history = config.get("max_history", DEFAULT_CONFIG["max_history"])
-    metadata = history_metadata(session_context)
-
-    artifact_file = artifact_file_for(session_context.history_file)
-    artifact_store = load_artifact_store(artifact_file)
-    usage_path = usage_file_for(session_context.history_file)
-    root_node = AgentNode(
-        label="root",
-        depth=0,
-        parent_label=None,
-        task=query,
-        sterile=False,
-        visible_labels=artifact_store.all_labels(),
-        usage_path=usage_path,
-        session_id=session_context.session_id,
-    )
-
-    history.append({"role": "user", "content": query, **metadata})
-
-    redo_path = redo_file_for(session_context.history_file)
-    if redo_path.exists():
-        redo_path.unlink()
-
-    input_items = build_input(history, max_history)
-
-    kwargs = dict(
-        model=config["model"],
-        instructions=(
-            config["system_prompt"]
-            + f"\n\nSystem info:\n{get_system_info()}"
-        ),
-        tools=TOOLS,
-        input=input_items,
-    )
-    effort = config.get("reasoning_effort")
-    if effort:
-        kwargs["reasoning"] = {"effort": effort}
-
     reply_text = ""
     tool_calls = []
+    history: list = []
+    metadata: dict = {}
+    session_context = None
+    artifact_file = None
+    artifact_store = None
+    usage_path = None
+    wait_indicator: ResponseWaitIndicator | None = None
+    spinner_live: Live | None = None
+    stream_live: Live | None = None
+    thought_started = time.perf_counter()
+    wait_indicator, spinner_live = _start_response_wait_indicator(interactive, thought_started)
+
+    def _stop_live_displays() -> None:
+        nonlocal spinner_live, stream_live
+        if spinner_live is not None:
+            spinner_live.stop()
+            spinner_live = None
+        if stream_live is not None:
+            stream_live.stop()
+            stream_live = None
+
     try:
+        if client is None:
+            client = create_client(config)
+
+        if new_session:
+            forget_current_session()
+        session_context = prepare_session_context(mark_message=True)
+        history = [] if (new_session or incognito) else load_history(session_context.history_file)
+        max_history = config.get("max_history", DEFAULT_CONFIG["max_history"])
+        metadata = history_metadata(session_context)
+
+        artifact_file = artifact_file_for(session_context.history_file)
+        artifact_store = load_artifact_store(artifact_file)
+        usage_path = usage_file_for(session_context.history_file)
+        root_node = AgentNode(
+            label="root",
+            depth=0,
+            parent_label=None,
+            task=query,
+            sterile=False,
+            visible_labels=artifact_store.all_labels(),
+            usage_path=usage_path,
+            session_id=session_context.session_id,
+        )
+
+        history.append({"role": "user", "content": query, **metadata})
+
+        redo_path = redo_file_for(session_context.history_file)
+        if redo_path.exists():
+            redo_path.unlink()
+
+        input_items = build_input(history, max_history)
+
+        kwargs = dict(
+            model=config["model"],
+            instructions=(
+                config["system_prompt"]
+                + f"\n\nSystem info:\n{get_system_info()}"
+            ),
+            tools=TOOLS,
+            input=input_items,
+        )
+        effort = config.get("reasoning_effort")
+        if effort:
+            kwargs["reasoning"] = {"effort": effort}
+
         while True:
             reply_text = ""
             tool_calls = []
             reasoning_items = []
             saw_reasoning = False
             got_text = False
+
+            if spinner_live is None:
+                thought_started = time.perf_counter()
+                wait_indicator, spinner_live = _start_response_wait_indicator(interactive, thought_started)
 
             _ctx_breakdown = estimate_context_breakdown(
                 config["model"],
@@ -537,23 +581,6 @@ def run_agent(
                 kwargs.get("input", []),
             )
 
-            thought_started = time.perf_counter()
-            wait_indicator: ResponseWaitIndicator | None = None
-            spinner_live: Live | None = None
-            stream_live: Live | None = None
-            if interactive:
-                # Spinner runs at a low refresh rate to reduce Windows focus
-                # annoyances; once text starts streaming we swap to a faster
-                # Live that progressively renders the Markdown reply.
-                wait_indicator = ResponseWaitIndicator(thought_started)
-                spinner_live = Live(
-                    wait_indicator,
-                    refresh_per_second=4,
-                    console=console,
-                    auto_refresh=True,
-                    transient=True,
-                )
-                spinner_live.start()
             try:
                 final_response = None
                 for event in stream_response(
@@ -629,8 +656,10 @@ def run_agent(
             finally:
                 if spinner_live is not None:
                     spinner_live.stop()
+                    spinner_live = None
                 if stream_live is not None:
                     stream_live.stop()
+                    stream_live = None
             if got_text:
                 if interactive:
                     console.print(Markdown(flatten_headings(reply_text)))
@@ -714,25 +743,30 @@ def run_agent(
                 break
     except KeyboardInterrupt:
         console.print("\n[dim]Interrupted.[/dim]")
-        if not incognito:
+        if session_context is not None and not incognito:
             save_history(history, session_context.history_file)
-        save_artifact_store(artifact_store, artifact_file)
+        if artifact_store is not None and artifact_file is not None:
+            save_artifact_store(artifact_store, artifact_file)
         if propagate_keyboard_interrupt:
             raise
     except ProviderError as e:
         console.print(f"[red]API error:[/red] {escape(str(e))}")
         if reply_text and not tool_calls:
             history.append({"role": "assistant", "content": reply_text, **metadata})
-        if not incognito:
+        if session_context is not None and not incognito:
             save_history(history, session_context.history_file)
-        save_artifact_store(artifact_store, artifact_file)
+        if artifact_store is not None and artifact_file is not None:
+            save_artifact_store(artifact_store, artifact_file)
         raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        if not incognito:
+        if session_context is not None and not incognito:
             save_history(history, session_context.history_file)
-        save_artifact_store(artifact_store, artifact_file)
+        if artifact_store is not None and artifact_file is not None:
+            save_artifact_store(artifact_store, artifact_file)
         raise SystemExit(1)
+    finally:
+        _stop_live_displays()
 
 
 

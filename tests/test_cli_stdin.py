@@ -61,7 +61,7 @@ class CliStdinTests(unittest.TestCase):
             patch("jarv.config.is_setup_complete", return_value=True),
             patch.object(cli, "validate_config", return_value=True),
             patch("jarv.provider.resolve_api_key", return_value="key"),
-            patch("jarv.provider.create_client", return_value=object()),
+            patch("jarv.provider.create_client", return_value=object()) as create_client,
             patch("jarv.agent.run_agent") as run_agent,
         ):
             cli.main()
@@ -70,6 +70,8 @@ class CliStdinTests(unittest.TestCase):
         self.assertIn("summarize this", query)
         self.assertIn("Input from stdin:", query)
         self.assertIn("hello from pipe", query)
+        create_client.assert_not_called()
+        self.assertIsNone(run_agent.call_args.kwargs["client"])
 
     def test_main_ignores_stdin_for_slash_commands(self):
         stdin = PipedStringIO("do not read this")
@@ -100,7 +102,7 @@ class CliStdinTests(unittest.TestCase):
             patch("jarv.config.is_setup_complete", return_value=True),
             patch.object(cli, "validate_config", return_value=True),
             patch("jarv.provider.resolve_api_key", return_value="key"),
-            patch("jarv.provider.create_client", return_value=object()),
+            patch("jarv.provider.create_client", return_value=object()) as create_client,
             patch("jarv.agent.run_agent") as run_agent,
         ):
             cli.main()
@@ -109,6 +111,8 @@ class CliStdinTests(unittest.TestCase):
         query = run_agent.call_args.args[0]
         self.assertIn("history", query)
         self.assertIn("actual stdin", query)
+        create_client.assert_not_called()
+        self.assertIsNone(run_agent.call_args.kwargs["client"])
 
     def test_main_preserves_heads_up_mode_without_args_or_stdin(self):
         config = {

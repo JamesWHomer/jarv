@@ -20,6 +20,22 @@ def test_cli_import_does_not_load_heavy_rendering_or_provider_sdks():
     assert result.stdout.strip() == "[]"
 
 
+def test_ordinary_message_disambiguation_does_not_import_commands():
+    code = (
+        "import sys; "
+        "import jarv.cli; "
+        "jarv.cli._maybe_command('ordinary', []); "
+        "print('jarv.commands' in sys.modules)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    assert result.stdout.strip() == "False"
+
+
 def test_streaming_markdown_preview_bounds_source_text():
     text = "\n".join(f"line {i}" for i in range(2000))
     preview = TailMarkdown(text, max_lines=8, max_source_chars=200)

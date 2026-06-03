@@ -8,6 +8,25 @@ from .config import load_config, validate_config
 
 STDIN_LABEL = "Input from stdin"
 
+_COMMAND_TAKES_REST = {
+    "setup": True,
+    "help": False,
+    "about": False,
+    "update": False,
+    "new": False,
+    "archive": False,
+    "session": True,
+    "sessions": True,
+    "history": False,
+    "usage": True,
+    "set": True,
+    "unset": True,
+    "config": False,
+    "settings": False,
+    "undo": True,
+    "redo": True,
+}
+
 
 def _console():
     from .display import console
@@ -87,12 +106,10 @@ def _maybe_command(first_word: str, rest: list[str]) -> tuple[bool, str, list[st
     None if they want to treat it as a regular message.
     """
     name = first_word.lower()
-    dispatch = _lazy_commands()
-    entry = dispatch.get(f"/{name}")
-    if entry is None:
+    takes_rest = _COMMAND_TAKES_REST.get(name)
+    if takes_rest is None:
         return None
 
-    _, _, takes_rest = entry
     if not takes_rest and rest:
         return None
 
@@ -242,15 +259,13 @@ def main() -> None:
     if args.system:
         config["system_prompt"] = args.system
 
-    from .provider import resolve_api_key, create_client, LOCAL_PROVIDERS
+    from .provider import resolve_api_key, LOCAL_PROVIDERS
 
     provider_name = config.get("provider", "openai")
     api_key = resolve_api_key(config)
     if not api_key and provider_name not in LOCAL_PROVIDERS:
         console.print("[red]No API key found.[/red] Run [bold cyan]jarv /setup[/bold cyan] to get started.")
         sys.exit(1)
-
-    client = create_client(config)
 
     stdin_text = ""
     stdin_truncated = False
@@ -264,17 +279,21 @@ def main() -> None:
     query = _compose_query(query_parts, stdin_text, stdin_truncated)
 
     if not query:
+        from .provider import create_client
+
+        client = create_client(config)
         run_heads_up_mode(config, client)
         return
 
     if config.get("check_updates", True):
-        from .commands import _check_update_background, maybe_print_update_available
+        from .update_check import _check_update_background, maybe_print_update_available
+
         maybe_print_update_available()
         threading.Thread(target=_check_update_background, daemon=True).start()
 
     from .agent import run_agent
     try:
-        run_agent(query, config, client, new_session=args.new, incognito=args.incognito)
+        run_agent(query, config, client=None, new_session=args.new, incognito=args.incognito)
     except KeyboardInterrupt:
         console.print("\n[dim]Interrupted.[/dim]")
         sys.exit(130)
