@@ -10,7 +10,7 @@ from rich.text import Text
 
 from . import __version__
 from .config import CONFIG_DIR, CONFIG_FILE, DEFAULT_CONFIG, load_config, save_config
-from .display import console, flatten_headings, section_rule, status_line
+from .display import console, flatten_headings, status_line
 from .history import (
     SESSIONS_DIR,
     SESSIONS_FILE,
@@ -88,70 +88,70 @@ def cmd_unset(args: list) -> None:
 
 
 def _help_body() -> Group:
+    def literal_command(value: str) -> Text:
+        return Text(value, style="bold cyan", no_wrap=True)
+
+    usage_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
+    usage_table.add_column(style="bold cyan", no_wrap=True)
+    usage_table.add_column(style="white")
+    usage_table.add_row("jarv", "Start heads-up mode for repeated prompts")
+    usage_table.add_row("jarv <prompt>", "Ask once, then exit")
+    usage_table.add_row("command | jarv <instruction>", "Attach piped stdin to a one-shot prompt")
+    usage_table.add_row("git diff | jarv review this", "Review a patch from stdin")
+    usage_table.add_row("jarv help", "Show this help")
+
+    flag_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
+    flag_table.add_column(style="bold yellow", no_wrap=True)
+    flag_table.add_column(style="white")
+    flag_table.add_row("-m, --model MODEL", "Override the model for this run")
+    flag_table.add_row("-e, --effort EFFORT", "Override reasoning effort")
+    flag_table.add_row("--timeout SECONDS", "Override shell command timeout")
+    flag_table.add_row("-s, --system PROMPT", "Override the system prompt")
+    flag_table.add_row("--new", "Start this run with a fresh session")
+    flag_table.add_row("--incognito", "Do not load or save session history")
+    flag_table.add_row("--version", "Print the version and exit")
+
     cmd_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
+    cmd_table.add_column(style="dim", no_wrap=True)
     cmd_table.add_column(style="bold cyan", no_wrap=True)
     cmd_table.add_column(style="white")
-    cmd_table.add_row("jarv", "Start heads-up mode for repeated prompts")
-    cmd_table.add_row("jarv <question>", "Ask jarv anything")
-    cmd_table.add_row("jarv /set <key> <value>", "Set a config value")
-    cmd_table.add_row("jarv /unset <key>", "Reset a config key to its default")
-    cmd_table.add_row("jarv /new", "Start a fresh session on the next message")
-    cmd_table.add_row("jarv /archive", "Archive this terminal's session and start a fresh one")
-    cmd_table.add_row("jarv /sessions, /session", "List sessions (all in a TTY; 5 most recent when piped/non-TTY)")
-    cmd_table.add_row("jarv /sessions <id>", "Load a specific session into this terminal by id prefix")
-    cmd_table.add_row("jarv /history", "Show recent conversation history")
-    cmd_table.add_row("jarv /usage [day|week|month|--all]", "Show session or system-wide token usage")
-    cmd_table.add_row("jarv /undo [n]", "Unsend the last n exchanges (default 1)")
-    cmd_table.add_row("jarv /redo [n]", "Restore the last n undone exchanges (default 1)")
-    cmd_table.add_row("jarv /settings", "Open the interactive settings menu")
-    cmd_table.add_row("jarv /config", "Show raw config values")
-    cmd_table.add_row("jarv /update", "Update jarv to the latest version")
-    cmd_table.add_row("jarv /about", "Show detailed information about jarv")
-    cmd_table.add_row("jarv /setup", "Run the setup wizard")
-    cmd_table.add_row("jarv /help", "Show this help")
+    cmd_table.add_row("chat", literal_command("/new"), "Start a fresh session on the next message")
+    cmd_table.add_row("chat", literal_command("/history"), "Show recent conversation history")
+    cmd_table.add_row("chat", literal_command("/undo [n]"), "Unsend the last n exchanges")
+    cmd_table.add_row("chat", literal_command("/redo [n]"), "Restore undone exchanges")
+    cmd_table.add_row("sessions", literal_command("/sessions, /session"), "List sessions")
+    cmd_table.add_row("sessions", literal_command("/sessions <id>"), "Load a session by id prefix")
+    cmd_table.add_row("sessions", literal_command("/archive"), "Archive this session and start fresh")
+    cmd_table.add_row("settings", literal_command("/settings"), "Open common controls")
+    cmd_table.add_row("settings", literal_command("/config"), "Show raw config values")
+    cmd_table.add_row("settings", literal_command("/set <key> <value>"), "Set a raw config value")
+    cmd_table.add_row("settings", literal_command("/unset <key>"), "Reset or remove a raw config value")
+    cmd_table.add_row("settings", literal_command("/setup [provider|key|model|safety|base_url]"), "Run setup or jump to a step")
+    cmd_table.add_row("usage", literal_command("/usage [day|week|month|--all [--since 24h]]"), "Show token usage")
+    cmd_table.add_row("updates", literal_command("/update"), "Update jarv")
+    cmd_table.add_row("info", literal_command("/help"), "Show this help")
+    cmd_table.add_row("info", literal_command("/about"), "Show detailed reference info")
+    cmd_table.add_row("heads-up", literal_command("exit, quit, /exit, /quit"), "Leave heads-up mode")
 
-    key_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
-    key_table.add_column(style="bold yellow", no_wrap=True)
-    key_table.add_column(style="white")
-    key_table.add_row("provider", "API provider (openai, openrouter, anthropic, gemini, groq, deepseek, ...)")
-    key_table.add_row("api_key", "API key (or use provider-specific env var)")
-    key_table.add_row("base_url", "Custom API base URL (overrides provider default)")
-    key_table.add_row("model", "Model name (default: gpt-5.4-mini)")
-    key_table.add_row("reasoning_effort", "Reasoning effort value (empty to disable)")
-    key_table.add_row("max_history", "Recent history items included as model context")
-    key_table.add_row("max_stdin_chars", "Maximum piped stdin characters attached to one-shot prompts")
-    key_table.add_row("max_tool_output_chars", "Maximum tool output characters returned to the model")
-    key_table.add_row("command_timeout", "Seconds before a shell command is killed")
-    key_table.add_row("command_safety", "Command confirmation level (all, risky, none)")
-    key_table.add_row("audit", "LLM auditor for flagged commands (true/false)")
-    key_table.add_row("auditor_auto_approve", "Let auditor auto-approve safe commands (true/false)")
-    key_table.add_row("auditor_model", "Model for auditor (empty = active model)")
-    key_table.add_row("system_prompt", "System prompt sent to the model")
-    key_table.add_row("max_subagent_depth", "Max spawn depth for nested subagents")
-    key_table.add_row("subagent_thread_pool_max_workers", "Parallel subagents per spawn call")
-    key_table.add_row("check_updates", "Non-blocking background update check on one-shot runs (true/false)")
-    key_table.add_row("read_only_command_display", "How read-only commands display (auto, print, inline, fullscreen)")
-    key_table.add_row("print_usage_after_agent", "Print compact token usage after completed agent runs (true/false)")
-
-    paths_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
-    paths_table.add_column(style="dim", no_wrap=True)
-    paths_table.add_column(style="dim")
-    paths_table.add_row("Config", str(CONFIG_FILE))
-    paths_table.add_row("Sessions index", str(SESSIONS_FILE))
-    paths_table.add_row("Session data", str(SESSIONS_DIR))
+    more = Text.assemble(
+        ("Use ", "white"),
+        ("/settings", "bold cyan"),
+        (" for common controls and ", "white"),
+        ("/config", "bold cyan"),
+        (" for raw values. Use ", "white"),
+        ("/about", "bold cyan"),
+        (" for detailed reference info, internals, and longer examples. README/GitHub: ", "white"),
+        ("https://github.com/JamesWHomer/jarv", "bold cyan"),
+    )
 
     return Group(
-        section_rule("commands"),
+        usage_table,
+        Text(""),
+        flag_table,
         Text(""),
         cmd_table,
         Text(""),
-        section_rule("config keys"),
-        Text(""),
-        key_table,
-        Text(""),
-        section_rule("paths"),
-        Text(""),
-        paths_table,
+        more,
     )
 
 
@@ -165,9 +165,7 @@ def print_help(*, mode: str | None = None, include_setup_nudge: bool = True) -> 
 
 
 def _about_body() -> Markdown:
-    about = f"""# jarv
-
-jarv is a command-line AI assistant that supports multiple AI providers including OpenAI, Anthropic, Google Gemini, OpenRouter, Groq, DeepSeek, and more.
+    about = f"""jarv is a command-line AI assistant that supports multiple AI providers including OpenAI, Anthropic, Google Gemini, OpenRouter, Groq, DeepSeek, and more.
 
 ## Basic usage
 
@@ -382,11 +380,7 @@ def cmd_config() -> None:
             val = Text(repr(v))
         table.add_row(k, val)
 
-    body = Group(
-        section_rule("settings"),
-        Text(""),
-        table,
-    )
+    body = Group(table)
     show_read_only_command(body, title="config", subtitle=str(CONFIG_FILE), config=config)
 
 

@@ -1,9 +1,26 @@
+import io
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+from rich.console import Console
+
 from jarv import commands, settings_command, usage_command
 from jarv.config import DEFAULT_CONFIG, validate_config
+
+
+def _render_help_text() -> str:
+    output = io.StringIO()
+    console = Console(file=output, force_terminal=False, color_system=None, width=180)
+    console.print(commands._help_body())
+    return output.getvalue()
+
+
+def _render_read_only_text(body) -> str:
+    output = io.StringIO()
+    console = Console(file=output, force_terminal=False, color_system=None, width=180)
+    console.print(body)
+    return output.getvalue()
 
 
 def test_read_only_command_display_default_is_auto():
@@ -57,6 +74,85 @@ def test_help_about_and_config_use_shared_renderer(monkeypatch):
 
     assert [call["title"] for call in calls] == ["help", "about", "config"]
     assert calls[2]["config"]["read_only_command_display"] == "auto"
+
+
+def test_help_is_compact_and_task_focused():
+    help_text = _render_help_text()
+
+    expected = [
+        "jarv <prompt>",
+        "command | jarv <instruction>",
+        "git diff | jarv review this",
+        "jarv help",
+        "-m, --model MODEL",
+        "-e, --effort EFFORT",
+        "--timeout SECONDS",
+        "-s, --system PROMPT",
+        "--new",
+        "--incognito",
+        "--version",
+        "/sessions, /session",
+        "/setup [provider|key|model|safety|base_url]",
+        "/usage [day|week|month|--all [--since 24h]]",
+        "exit, quit, /exit, /quit",
+        "/settings",
+        "/config",
+        "/about",
+        "https://github.com/JamesWHomer/jarv",
+    ]
+
+    for item in expected:
+        assert item in help_text
+
+
+def test_read_only_bodies_do_not_repeat_panel_titles(monkeypatch):
+    help_text = _render_help_text()
+    about_text = _render_read_only_text(commands._about_body())
+    config_bodies = []
+
+    monkeypatch.setattr(commands, "show_read_only_command", lambda body, **_kwargs: config_bodies.append(body))
+    monkeypatch.setattr(commands, "load_config", lambda: dict(DEFAULT_CONFIG))
+
+    commands.cmd_config()
+    config_text = _render_read_only_text(config_bodies[0])
+
+    for label in ["usage", "flags", "commands", "more"]:
+        assert f"{label} ─" not in help_text
+    assert not about_text.lstrip().startswith("jarv\n")
+    assert "settings ─" not in config_text
+
+
+def test_help_omits_reference_config_and_path_sections():
+    help_text = _render_help_text()
+    lower_help = help_text.lower()
+
+    assert "config keys" not in lower_help
+    assert "paths" not in lower_help
+    assert "sessions index" not in lower_help
+    assert "session data" not in lower_help
+    assert str(commands.CONFIG_FILE) not in help_text
+    assert str(commands.SESSIONS_FILE) not in help_text
+    assert str(commands.SESSIONS_DIR) not in help_text
+
+    removed_config_rows = [
+        "api_key",
+        "max_history",
+        "max_stdin_chars",
+        "max_tool_output_chars",
+        "command_timeout",
+        "command_safety",
+        "audit",
+        "auditor_auto_approve",
+        "auditor_model",
+        "system_prompt",
+        "max_subagent_depth",
+        "subagent_thread_pool_max_workers",
+        "check_updates",
+        "read_only_command_display",
+        "print_usage_after_agent",
+    ]
+    for row in removed_config_rows:
+        assert row not in help_text
 
 
 def test_usage_empty_state_uses_shared_renderer(monkeypatch):
