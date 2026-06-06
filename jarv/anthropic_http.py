@@ -1,0 +1,537 @@
+"""Direct HTTP transport and protocol conversion for Anthropic Messages."""
+
+from __future__ import annotations
+
+import json
+import time
+from collections.abc import Iterator
+from typing import Any
+
+from .cancellation import CancellationToken
+from .unicode_safety import sanitize_json_value
+
+
+ANTHROPIC_API_URL = "https://api.anthropic.com"
+ANTHROPIC_VERSION = "2023-06-01"
+DEFAULT_MAX_TOKENS = 8192
+_RETRYABLE_STATUS_CODES = {408, 409, 429, 500, 502, 503, 504, 529}
+_THINKING_BUDGETS = {
+    "minimal": 1024,
+    "low": 1024,
+    "medium": 2048,
+    "high": 4096,
+    "xhigh": 8192,
+    "max": 16384,
+}
+
+
+class AnthropicHTTPError(Exception):
+    """An error returned by Anthropic's HTTP API."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        error_type: str | None = None,
+        request_id: str | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.error_type = error_type
+        self.request_id = request_id
+        details = []
+        if status_code is not None:
+            details.append(str(status_code))
+        if error_type:
+            details.append(error_type)
+        prefix = "Anthropic API error"
+        if details:
+            prefix += f" ({', '.join(details)})"
+        if request_id:
+            message = f"{message} [request_id={request_id}]"
+        super().__init__(f"{prefix}: {message}")
+
+
+def create_client(config: dict, api_key: str):
+    """Create a persistent httpx client for Anthropic."""
+    import httpx
+
+    base_url = config.get("base_url") or ANTHROPIC_API_URL
+    timeout = httpx.Timeout(
+        float(config.get("anthropic_timeout", 600)),
+        connect=float(config.get("anthropic_connect_timeout", 10)),
+    )
+    return httpx.Client(
+        base_url=base_url.rstrip("/"),
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": ANTHROPIC_VERSION,
+            "content-type": "application/json",
+            "user-agent": "jarv",
+        },
+        timeout=timeout,
+    )
+
+
+def _append_message(messages: list[dict], role: str, blocks: list[dict]) -> None:
+    if not blocks:
+        return
+    if messages and messages[-1]["role"] == role:
+        existing = messages[-1]["content"]
+        if isinstance(existing, list):
+            existing.extend(blocks)
+            return
+    messages.append({"role": role, "content": blocks})
+
+
+def _tool_input(arguments: Any) -> Any:
+    if not isinstance(arguments, str):
+        return arguments if arguments is not None else {}
+    try:
+        return json.loads(arguments or "{}")
+    except json.JSONDecodeError:
+        return {}
+
+
+def to_messages(input_items: list[dict]) -> list[dict]:
+    """Convert Jarv's Responses-style history to Anthropic content blocks."""
+    messages: list[dict] = []
+    i = 0
+    while i < len(input_items):
+        item = input_items[i]
+        role = item.get("role")
+        typ = item.get("type")
+
+        if role in ("user", "assistant"):
+            _append_message(
+                messages,
+                role,
+                [{"type": "text", "text": str(item.get("content") or "")}],
+            )
+            i += 1
+            continue
+
+        if typ == "reasoning":
+            provider_content = item.get("provider_content")
+            if isinstance(provider_content, list):
+                blocks = [
+                    block
+                    for block in provider_content
+                    if isinstance(block, dict)
+                    and block.get("type") in ("thinking", "redacted_thinking")
+                ]
+                _append_message(messages, "assistant", blocks)
+            i += 1
+            continue
+
+        if typ == "function_call":
+            blocks = []
+            while i < len(input_items) and input_items[i].get("type") == "function_call":
+                call = input_items[i]
+                call_id = str(call.get("call_id") or call.get("id") or "")
+                blocks.append({
+                    "type": "tool_use",
+                    "id": call_id,
+                    "name": str(call.get("name") or ""),
+                    "input": _tool_input(call.get("arguments")),
+                })
+                i += 1
+            _append_message(messages, "assistant", blocks)
+            continue
+
+        if typ == "function_call_output":
+            blocks = []
+            while (
+                i < len(input_items)
+                and input_items[i].get("type") == "function_call_output"
+            ):
+                result = input_items[i]
+                blocks.append({
+                    "type": "tool_result",
+                    "tool_use_id": str(result.get("call_id") or ""),
+                    "content": str(result.get("output") or ""),
+                })
+                i += 1
+            _append_message(messages, "user", blocks)
+            continue
+
+        i += 1
+
+    return messages
+
+
+def to_tools(tools: list[dict]) -> list[dict]:
+    result = []
+    for tool in tools:
+        function = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+        if tool.get("type") != "function" or not function.get("name"):
+            continue
+        converted = {
+            "name": function["name"],
+            "description": function.get("description", ""),
+            "input_schema": function.get("parameters", {"type": "object"}),
+        }
+        if tool.get("cache_control"):
+            converted["cache_control"] = tool["cache_control"]
+        result.append(converted)
+    return result
+
+
+def _uses_adaptive_thinking(model: str) -> bool:
+    lowered = model.lower()
+    return any(version in lowered for version in ("-4-6", "-4.6", "-4-7", "-4.7"))
+
+
+def _apply_reasoning(payload: dict, model: str, reasoning: dict | None) -> None:
+    effort = str((reasoning or {}).get("effort") or "").lower()
+    if not effort or effort == "none":
+        return
+    if _uses_adaptive_thinking(model):
+        payload["thinking"] = {"type": "adaptive"}
+        payload["output_config"] = {"effort": effort}
+        return
+    budget = _THINKING_BUDGETS.get(effort)
+    if budget is None:
+        raise ValueError(f"Unsupported Anthropic reasoning effort: {effort}")
+    payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
+    if payload["max_tokens"] <= budget:
+        payload["max_tokens"] = budget + 1024
+
+
+def build_payload(
+    config: dict,
+    model: str,
+    instructions: str,
+    tools: list[dict],
+    input_items: list[dict],
+    *,
+    reasoning: dict | None = None,
+    stream: bool = False,
+    max_tokens: int | None = None,
+) -> dict:
+    payload: dict[str, Any] = {
+        "model": model,
+        "max_tokens": int(
+            max_tokens
+            if max_tokens is not None
+            else config.get("anthropic_max_tokens", DEFAULT_MAX_TOKENS)
+        ),
+        "messages": to_messages(input_items),
+    }
+    if instructions:
+        payload["system"] = instructions
+    converted_tools = to_tools(tools)
+    if converted_tools:
+        payload["tools"] = converted_tools
+    if stream:
+        payload["stream"] = True
+    _apply_reasoning(payload, model, reasoning)
+    return sanitize_json_value(payload)
+
+
+def _response_error(response, data: dict | None = None) -> AnthropicHTTPError:
+    if data is None:
+        try:
+            data = response.json()
+        except Exception:
+            data = {}
+    error = data.get("error") if isinstance(data, dict) else None
+    error = error if isinstance(error, dict) else {}
+    try:
+        response_text = response.text
+    except Exception:
+        response_text = ""
+    message = str(error.get("message") or response_text or "request failed")
+    return AnthropicHTTPError(
+        message,
+        status_code=getattr(response, "status_code", None),
+        error_type=str(error.get("type") or "") or None,
+        request_id=(
+            response.headers.get("request-id")
+            or response.headers.get("x-request-id")
+            or (str(data.get("request_id")) if isinstance(data, dict) and data.get("request_id") else None)
+        ),
+    )
+
+
+def _retry_delay(response, attempt: int) -> float:
+    retry_after = response.headers.get("retry-after")
+    if retry_after:
+        try:
+            return min(max(float(retry_after), 0.0), 30.0)
+        except ValueError:
+            pass
+    return min(0.5 * (2 ** attempt), 4.0)
+
+
+def _sleep(
+    delay: float,
+    cancellation_token: CancellationToken | None,
+) -> None:
+    deadline = time.monotonic() + delay
+    while True:
+        if cancellation_token is not None:
+            cancellation_token.throw_if_cancelled()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(remaining, 0.05))
+
+
+def _send_with_retries(
+    client,
+    payload: dict,
+    *,
+    stream: bool,
+    cancellation_token: CancellationToken | None,
+    max_retries: int,
+):
+    import httpx
+
+    for attempt in range(max_retries + 1):
+        if cancellation_token is not None:
+            cancellation_token.throw_if_cancelled()
+        request = client.build_request("POST", "/v1/messages", json=payload)
+        try:
+            response = client.send(request, stream=stream)
+        except httpx.TransportError:
+            if attempt >= max_retries:
+                raise
+            _sleep(min(0.5 * (2 ** attempt), 4.0), cancellation_token)
+            continue
+        if response.status_code not in _RETRYABLE_STATUS_CODES or attempt >= max_retries:
+            return response
+        delay = _retry_delay(response, attempt)
+        response.close()
+        _sleep(delay, cancellation_token)
+    raise RuntimeError("unreachable")
+
+
+def create_message(
+    client,
+    payload: dict,
+    *,
+    cancellation_token: CancellationToken | None = None,
+    max_retries: int = 2,
+) -> dict:
+    """Create one non-streaming Anthropic message."""
+    response = _send_with_retries(
+        client,
+        payload,
+        stream=False,
+        cancellation_token=cancellation_token,
+        max_retries=max_retries,
+    )
+    try:
+        if response.status_code >= 400:
+            raise _response_error(response)
+        data = response.json()
+        if not isinstance(data, dict):
+            raise AnthropicHTTPError("response was not a JSON object")
+        return normalize_response(data)
+    finally:
+        response.close()
+
+
+def iter_sse(response) -> Iterator[tuple[str, dict]]:
+    """Parse an Anthropic SSE response, including multiline data fields."""
+    event_name = ""
+    data_lines: list[str] = []
+    for line in response.iter_lines():
+        if line == "":
+            if data_lines:
+                raw = "\n".join(data_lines)
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    raise AnthropicHTTPError(f"invalid SSE JSON: {exc}") from exc
+                if isinstance(data, dict):
+                    yield event_name or str(data.get("type") or ""), data
+            event_name = ""
+            data_lines = []
+            continue
+        if line.startswith(":"):
+            continue
+        field, separator, value = line.partition(":")
+        if separator and value.startswith(" "):
+            value = value[1:]
+        if field == "event":
+            event_name = value
+        elif field == "data":
+            data_lines.append(value)
+    if data_lines:
+        data = json.loads("\n".join(data_lines))
+        if isinstance(data, dict):
+            yield event_name or str(data.get("type") or ""), data
+
+
+def _normalized_usage(usage: dict | None) -> dict:
+    source = usage if isinstance(usage, dict) else {}
+    uncached = int(source.get("input_tokens") or 0)
+    cache_write = int(source.get("cache_creation_input_tokens") or 0)
+    cached = int(source.get("cache_read_input_tokens") or 0)
+    output = int(source.get("output_tokens") or 0)
+    return {
+        **source,
+        "input_tokens": uncached + cache_write + cached,
+        "uncached_input_tokens": uncached + cache_write,
+        "cached_input_tokens": cached,
+        "output_tokens": output,
+        "total_tokens": uncached + cache_write + cached + output,
+    }
+
+
+def normalize_response(data: dict) -> dict:
+    content = data.get("content")
+    blocks = content if isinstance(content, list) else []
+    return {
+        **data,
+        "content": blocks,
+        "output_text": "".join(
+            str(block.get("text") or "")
+            for block in blocks
+            if isinstance(block, dict) and block.get("type") == "text"
+        ),
+        "usage": _normalized_usage(data.get("usage")),
+    }
+
+
+def stream_message(
+    client,
+    payload: dict,
+    *,
+    cancellation_token: CancellationToken | None = None,
+    max_retries: int = 2,
+) -> Iterator[dict]:
+    """Yield normalized protocol events from an Anthropic SSE message."""
+    response = _send_with_retries(
+        client,
+        payload,
+        stream=True,
+        cancellation_token=cancellation_token,
+        max_retries=max_retries,
+    )
+    if response.status_code >= 400:
+        try:
+            response.read()
+            data = response.json()
+        except Exception:
+            data = None
+        response.close()
+        raise _response_error(response, data)
+
+    unregister = (
+        cancellation_token.register(response.close)
+        if cancellation_token is not None else lambda: None
+    )
+    message: dict[str, Any] = {"content": [], "usage": {}}
+    blocks: dict[int, dict] = {}
+    try:
+        for event_name, event in iter_sse(response):
+            if cancellation_token is not None:
+                cancellation_token.throw_if_cancelled()
+            event_type = str(event.get("type") or event_name)
+
+            if event_type == "error":
+                raise AnthropicHTTPError(
+                    str((event.get("error") or {}).get("message") or "stream failed"),
+                    error_type=str((event.get("error") or {}).get("type") or "") or None,
+                    request_id=str(event.get("request_id") or "") or None,
+                )
+            if event_type == "message_start":
+                started = event.get("message")
+                if isinstance(started, dict):
+                    message.update(started)
+                    message["content"] = []
+                    message["usage"] = dict(started.get("usage") or {})
+                continue
+            if event_type == "content_block_start":
+                index = int(event.get("index") or 0)
+                block = dict(event.get("content_block") or {})
+                if block.get("type") == "tool_use":
+                    block["_partial_json"] = ""
+                blocks[index] = block
+                if block.get("type") in ("thinking", "redacted_thinking"):
+                    yield {"type": "reasoning_started", "id": f"thinking_{index}"}
+                continue
+            if event_type == "content_block_delta":
+                index = int(event.get("index") or 0)
+                delta = event.get("delta") or {}
+                block = blocks.setdefault(index, {})
+                delta_type = delta.get("type")
+                if delta_type == "text_delta":
+                    text = str(delta.get("text") or "")
+                    block["text"] = str(block.get("text") or "") + text
+                    if text:
+                        yield {"type": "text_delta", "delta": text}
+                elif delta_type == "thinking_delta":
+                    block["thinking"] = (
+                        str(block.get("thinking") or "") + str(delta.get("thinking") or "")
+                    )
+                elif delta_type == "signature_delta":
+                    block["signature"] = (
+                        str(block.get("signature") or "") + str(delta.get("signature") or "")
+                    )
+                elif delta_type == "input_json_delta":
+                    block["_partial_json"] = (
+                        str(block.get("_partial_json") or "")
+                        + str(delta.get("partial_json") or "")
+                    )
+                continue
+            if event_type == "content_block_stop":
+                index = int(event.get("index") or 0)
+                block = blocks.pop(index, {})
+                block_type = block.get("type")
+                if block_type == "tool_use":
+                    raw = str(block.pop("_partial_json", "") or "")
+                    if raw:
+                        try:
+                            block["input"] = json.loads(raw)
+                        except json.JSONDecodeError:
+                            block["input"] = {}
+                            arguments = raw
+                        else:
+                            arguments = json.dumps(
+                                block["input"],
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            )
+                    else:
+                        arguments = json.dumps(
+                            block.get("input") if block.get("input") is not None else {},
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                    yield {
+                        "type": "tool_call",
+                        "id": str(block.get("id") or ""),
+                        "name": str(block.get("name") or ""),
+                        "arguments": arguments,
+                    }
+                elif block_type in ("thinking", "redacted_thinking"):
+                    yield {
+                        "type": "reasoning_done",
+                        "id": f"thinking_{index}",
+                        "provider_content": [block],
+                    }
+                message.setdefault("content", []).append(block)
+                continue
+            if event_type == "message_delta":
+                delta = event.get("delta")
+                if isinstance(delta, dict):
+                    message.update(delta)
+                usage = event.get("usage")
+                if isinstance(usage, dict):
+                    message.setdefault("usage", {}).update(usage)
+                continue
+            if event_type == "message_stop":
+                yield {"type": "done", "response": normalize_response(message)}
+                return
+            # ping and forward-compatible unknown events are intentionally ignored.
+    finally:
+        unregister()
+        response.close()
+
+    if cancellation_token is not None:
+        cancellation_token.throw_if_cancelled()
+    raise AnthropicHTTPError("stream ended before message_stop")
