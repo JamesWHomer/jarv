@@ -162,7 +162,7 @@ def _install_fake_litellm(monkeypatch, contents):
     return calls
 
 
-def test_anthropic_opus_4_7_auditor_omits_deprecated_temperature(monkeypatch):
+def test_litellm_auditor_omits_temperature(monkeypatch):
     calls = _install_fake_litellm(
         monkeypatch,
         ['{"allow": true, "reason": "safe status check"}'],
@@ -179,7 +179,7 @@ def test_anthropic_opus_4_7_auditor_omits_deprecated_temperature(monkeypatch):
     assert "temperature" not in calls[0]
 
 
-def test_anthropic_opus_4_7_retry_also_omits_deprecated_temperature(monkeypatch):
+def test_litellm_auditor_retry_also_omits_temperature(monkeypatch):
     calls = _install_fake_litellm(
         monkeypatch,
         [
@@ -199,19 +199,20 @@ def test_anthropic_opus_4_7_retry_also_omits_deprecated_temperature(monkeypatch)
     assert all("temperature" not in call for call in calls)
 
 
-def test_older_anthropic_auditor_keeps_temperature_zero(monkeypatch):
+def test_non_anthropic_litellm_auditor_omits_temperature(monkeypatch):
     calls = _install_fake_litellm(
         monkeypatch,
         ['{"allow": true, "reason": "safe status check"}'],
     )
 
     _call_litellm(
-        {"provider": "anthropic"},
-        "claude-opus-4-6",
+        {"provider": "gemini"},
+        "gemini-3-flash-preview",
         "Command: git status",
     )
 
-    assert calls[0]["temperature"] == 0
+    assert calls[0]["model"] == "gemini/gemini-3-flash-preview"
+    assert "temperature" not in calls[0]
 
 
 def test_openai_direct_request_avoids_fragile_response_options(monkeypatch):
