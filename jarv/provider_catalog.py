@@ -44,12 +44,11 @@ PROVIDERS = {
         "label": "Fireworks AI",
     },
     "anthropic": {
-        "backend": "litellm",
+        "backend": "anthropic",
         "base_url": None,
         "env_key": "ANTHROPIC_API_KEY",
         "key_url": "https://console.anthropic.com/settings/keys",
         "label": "Anthropic",
-        "litellm_prefix": "anthropic",
     },
     "gemini": {
         "backend": "litellm",

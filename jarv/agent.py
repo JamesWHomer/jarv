@@ -234,7 +234,14 @@ def to_response_input_item(item: dict) -> dict | None:
         if role == "assistant":
             return {"role": "assistant", "content": str(item.get("content") or "")}
         if typ == "reasoning" and "id" in item:
-            return {"type": "reasoning", "id": responses_input_id(str(item["id"]), "rs"), "summary": item.get("summary", [])}
+            result = {
+                "type": "reasoning",
+                "id": responses_input_id(str(item["id"]), "rs"),
+                "summary": item.get("summary", []),
+            }
+            if item.get("provider_content"):
+                result["provider_content"] = item["provider_content"]
+            return result
         if typ == "function_call":
             return {
                 "type": "function_call",
@@ -569,12 +576,15 @@ def run_agent(
         }
         for item in reasoning_items:
             if str(item.id) not in recorded_reasoning_ids:
-                history.append({
+                stored_reasoning = {
                     "type": "reasoning",
                     "id": item.id,
                     "summary": [],
                     **metadata,
-                })
+                }
+                if item.provider_content:
+                    stored_reasoning["provider_content"] = item.provider_content
+                history.append(stored_reasoning)
 
         if reply_text:
             history.append({"role": "assistant", "content": reply_text, **metadata})
@@ -779,6 +789,8 @@ def run_agent(
                 new_input_items = []
                 for ri in reasoning_items:
                     rd = {"type": "reasoning", "id": ri.id, "summary": [], **metadata}
+                    if ri.provider_content:
+                        rd["provider_content"] = ri.provider_content
                     history.append(rd)
                     api_item = to_response_input_item(rd)
                     if api_item is not None:

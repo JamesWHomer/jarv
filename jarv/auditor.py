@@ -118,7 +118,17 @@ def audit_command(
     backend = info.get("backend", "openai_compat")
 
     try:
-        if backend == "litellm":
+        if backend == "anthropic":
+            return _call_anthropic(
+                config,
+                model,
+                user_message,
+                usage_path=usage_path,
+                session_id=session_id,
+                global_usage_path=global_usage_path,
+                cancellation_token=cancellation_token,
+            )
+        elif backend == "litellm":
             return _call_litellm(
                 config,
                 model,
@@ -240,6 +250,8 @@ def _auditor_messages(user_message: str, *, retry: bool = False) -> list[dict[st
 
 
 def _response_text(response: Any) -> str:
+    if isinstance(response, dict):
+        return str(response.get("output_text") or "")
     try:
         return str(response.choices[0].message.content or "")
     except Exception:
@@ -312,6 +324,82 @@ def _is_direct_openai(config: dict, info: dict) -> bool:
     """Return True when the OpenAI SDK is talking to OpenAI directly."""
     provider = config.get("provider", "openai")
     return provider == "openai" and not (config.get("base_url") or info.get("base_url"))
+
+
+def _call_anthropic(
+    config: dict,
+    model: str,
+    user_message: str,
+    *,
+    usage_path: Path | None = None,
+    session_id: str | None = None,
+    global_usage_path: Path | None = None,
+    cancellation_token: CancellationToken | None = None,
+) -> tuple[bool, str]:
+    from .anthropic_http import build_payload, create_client, create_message
+
+    client = create_client(config, resolve_api_key(config))
+    unregister = (
+        cancellation_token.register(client.close)
+        if cancellation_token is not None else lambda: None
+    )
+    try:
+        messages = _auditor_messages(user_message)
+        response = create_message(
+            client,
+            build_payload(
+                config,
+                model,
+                messages[0]["content"],
+                [],
+                [messages[1]],
+                max_tokens=100,
+            ),
+            cancellation_token=cancellation_token,
+            max_retries=int(config.get("anthropic_max_retries", 2)),
+        )
+        content = _response_text(response)
+        _record_auditor_response(
+            usage_path,
+            session_id,
+            model,
+            response,
+            messages,
+            content,
+            global_usage_path=global_usage_path,
+        )
+        parsed = _parse_response(content)
+        if not _is_parse_failure(parsed):
+            return parsed
+
+        retry_messages = _auditor_messages(user_message, retry=True)
+        retry_response = create_message(
+            client,
+            build_payload(
+                config,
+                model,
+                retry_messages[0]["content"],
+                [],
+                [retry_messages[1]],
+                max_tokens=100,
+            ),
+            cancellation_token=cancellation_token,
+            max_retries=int(config.get("anthropic_max_retries", 2)),
+        )
+        retry_content = _response_text(retry_response)
+        _record_auditor_response(
+            usage_path,
+            session_id,
+            model,
+            retry_response,
+            retry_messages,
+            retry_content,
+            global_usage_path=global_usage_path,
+        )
+        return _parse_response(retry_content)
+    finally:
+        unregister()
+        client.close()
 
 
 def _call_litellm(

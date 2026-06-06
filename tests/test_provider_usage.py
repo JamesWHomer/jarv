@@ -416,7 +416,7 @@ class ProviderUsageTests(unittest.TestCase):
         fake_litellm = SimpleNamespace(completion=lambda **_kwargs: FakeStream(chunks))
 
         with patch("jarv.litellm_compat.import_litellm", return_value=fake_litellm):
-            events = list(_stream_litellm({"provider": "anthropic"}, "model", "system", [], []))
+            events = list(_stream_litellm({"provider": "gemini"}, "model", "system", [], []))
 
         self.assertIsInstance(events[0], ReasoningStarted)
         self.assertIsInstance(events[1], TextDelta)
@@ -451,7 +451,7 @@ class ProviderUsageTests(unittest.TestCase):
         fake_litellm = SimpleNamespace(completion=lambda **_kwargs: FakeStream(chunks))
 
         with patch("jarv.litellm_compat.import_litellm", return_value=fake_litellm):
-            events = list(_stream_litellm({"provider": "anthropic"}, "model", "system", [], []))
+            events = list(_stream_litellm({"provider": "gemini"}, "model", "system", [], []))
 
         self.assertIsInstance(events[0], ReasoningStarted)
         self.assertIsInstance(events[1], TextDelta)
@@ -478,7 +478,7 @@ class ProviderUsageTests(unittest.TestCase):
 
         with patch("jarv.litellm_compat.import_litellm", return_value=fake_litellm):
             list(_stream_litellm(
-                {"provider": "anthropic"},
+                {"provider": "gemini"},
                 "model",
                 "system",
                 [],

@@ -41,6 +41,7 @@ class ToolCallDone:
 class ReasoningDone:
     id: str
     summary: list
+    provider_content: list[dict] | None = None
 
 
 @dataclass
@@ -300,7 +301,12 @@ def create_client(config: dict):
             kwargs["base_url"] = base_url
         return OpenAI(**kwargs)
 
-    # litellm doesn't use a persistent client
+    if backend == "anthropic":
+        from .anthropic_http import create_client as create_anthropic_client
+
+        return create_anthropic_client(config, api_key)
+
+    # LiteLLM doesn't use a persistent client.
     return None
 
 
@@ -417,11 +423,16 @@ def _stream_responses_api(
     client, model, instructions, tools, input_items, reasoning=None, prompt_cache_key=None,
     cancellation_token: CancellationToken | None = None,
 ) -> Iterator:
+    responses_input = []
+    for item in input_items:
+        if isinstance(item, dict) and "provider_content" in item:
+            item = {key: value for key, value in item.items() if key != "provider_content"}
+        responses_input.append(item)
     kwargs: dict[str, Any] = dict(
         model=model,
         instructions=instructions,
         tools=tools,
-        input=input_items,
+        input=responses_input,
     )
     if reasoning:
         kwargs["reasoning"] = reasoning
@@ -569,7 +580,55 @@ def _stream_chat_completions(
 
 
 # ---------------------------------------------------------------------------
-# Backend: litellm (Anthropic, Gemini, Ollama)
+# Backend: Anthropic Messages over direct HTTP
+# ---------------------------------------------------------------------------
+
+def _stream_anthropic(
+    client, config, model, instructions, tools, input_items, reasoning=None,
+    cancellation_token: CancellationToken | None = None,
+) -> Iterator:
+    from .anthropic_http import build_payload, stream_message
+
+    payload = build_payload(
+        config,
+        model,
+        instructions,
+        tools,
+        input_items,
+        reasoning=reasoning,
+        stream=True,
+    )
+    for event in stream_message(
+        client,
+        payload,
+        cancellation_token=cancellation_token,
+        max_retries=int(config.get("anthropic_max_retries", 2)),
+    ):
+        event_type = event.get("type")
+        if event_type == "text_delta":
+            yield TextDelta(str(event.get("delta") or ""))
+        elif event_type == "reasoning_started":
+            yield ReasoningStarted(id=str(event.get("id") or ""))
+        elif event_type == "reasoning_done":
+            yield ReasoningDone(
+                id=str(event.get("id") or ""),
+                summary=[],
+                provider_content=event.get("provider_content"),
+            )
+        elif event_type == "tool_call":
+            call_id = str(event.get("id") or f"call_{uuid.uuid4().hex[:12]}")
+            yield ToolCallDone(
+                id=call_id,
+                call_id=call_id,
+                name=str(event.get("name") or ""),
+                arguments=str(event.get("arguments") or "{}"),
+            )
+        elif event_type == "done":
+            yield StreamDone(response=event.get("response"))
+
+
+# ---------------------------------------------------------------------------
+# Backend: LiteLLM (Gemini, Ollama)
 # ---------------------------------------------------------------------------
 
 def _stream_litellm(
@@ -682,6 +741,11 @@ def _stream_response_direct(
         elif backend == "openai_compat":
             yield from _stream_chat_completions(
                 client, model, instructions, tools, input_items, reasoning,
+                cancellation_token,
+            )
+        elif backend == "anthropic":
+            yield from _stream_anthropic(
+                client, config, model, instructions, tools, input_items, reasoning,
                 cancellation_token,
             )
         elif backend == "litellm":

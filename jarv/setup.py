@@ -322,6 +322,26 @@ def test_connection(config: dict) -> bool:
                 client = create_client(config)
                 client.models.list()
 
+            elif backend == "anthropic":
+                from .anthropic_http import build_payload, create_message
+
+                client = create_client(config)
+                try:
+                    create_message(
+                        client,
+                        build_payload(
+                            config,
+                            config.get("model", ""),
+                            "",
+                            [],
+                            [{"role": "user", "content": "hi"}],
+                            max_tokens=1,
+                        ),
+                        max_retries=0,
+                    )
+                finally:
+                    client.close()
+
             elif backend == "litellm":
                 from .litellm_compat import import_litellm
 

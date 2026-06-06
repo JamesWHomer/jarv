@@ -442,7 +442,7 @@ def _settings_provider_note(provider_key: str) -> str:
     notes = {
         "openai": "OpenAI-hosted models through the Responses API",
         "openrouter": "one API key for a marketplace of third-party models",
-        "anthropic": "Anthropic-hosted Claude models through LiteLLM",
+        "anthropic": "Anthropic-hosted Claude models through the Messages API",
         "gemini": "Google AI Studio Gemini models through LiteLLM",
         "groq": "Groq-hosted OpenAI-compatible chat endpoint",
         "deepseek": "DeepSeek-hosted OpenAI-compatible chat endpoint",

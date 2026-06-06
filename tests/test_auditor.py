@@ -2,6 +2,7 @@ import sys
 from types import SimpleNamespace
 
 from jarv.auditor import _parse_response
+from jarv.auditor import _call_anthropic
 from jarv.auditor import _call_litellm
 from jarv.auditor import _call_openai_compat
 from jarv.usage import load_global_usage_records, load_usage
@@ -169,13 +170,13 @@ def test_litellm_auditor_omits_temperature(monkeypatch):
     )
 
     result = _call_litellm(
-        {"provider": "anthropic"},
-        "claude-opus-4-7",
+        {"provider": "gemini"},
+        "gemini-3-flash-preview",
         "Command: git status",
     )
 
     assert result == (True, "safe status check")
-    assert calls[0]["model"] == "anthropic/claude-opus-4-7"
+    assert calls[0]["model"] == "gemini/gemini-3-flash-preview"
     assert "temperature" not in calls[0]
 
 
@@ -189,8 +190,8 @@ def test_litellm_auditor_retry_also_omits_temperature(monkeypatch):
     )
 
     result = _call_litellm(
-        {"provider": "anthropic"},
-        "claude-opus-4-7",
+        {"provider": "gemini"},
+        "gemini-3-flash-preview",
         "Command: python --version",
     )
 
@@ -212,6 +213,40 @@ def test_non_anthropic_litellm_auditor_omits_temperature(monkeypatch):
     )
 
     assert calls[0]["model"] == "gemini/gemini-3-flash-preview"
+    assert "temperature" not in calls[0]
+
+
+def test_anthropic_auditor_uses_direct_messages_api(monkeypatch):
+    calls = []
+
+    class FakeClient:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        "jarv.anthropic_http.create_client",
+        lambda _config, _api_key: FakeClient(),
+    )
+
+    def create_message(_client, payload, **_kwargs):
+        calls.append(payload)
+        return {
+            "output_text": '{"allow": true, "reason": "safe status check"}',
+            "usage": {"input_tokens": 5, "output_tokens": 3},
+        }
+
+    monkeypatch.setattr("jarv.anthropic_http.create_message", create_message)
+
+    result = _call_anthropic(
+        {"provider": "anthropic", "api_key": "sk-ant-test"},
+        "claude-opus-4-7",
+        "Command: git status",
+    )
+
+    assert result == (True, "safe status check")
+    assert calls[0]["model"] == "claude-opus-4-7"
+    assert calls[0]["max_tokens"] == 100
+    assert calls[0]["messages"][0]["role"] == "user"
     assert "temperature" not in calls[0]
 
 

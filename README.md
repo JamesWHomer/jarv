@@ -210,6 +210,7 @@ System-wide usage tracking starts from the version that records `~/.jarv/usage.j
 | Package | Role |
 | --- | --- |
 | [openai](https://pypi.org/project/openai/) | Responses API client |
+| [httpx](https://pypi.org/project/httpx/) | Direct Anthropic Messages API transport |
 | [rich](https://pypi.org/project/rich/) | Terminal styling, live rendering, markdown |
 | [litellm](https://pypi.org/project/litellm/) | Token counting, model pricing, context window metadata |
 

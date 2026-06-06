@@ -318,7 +318,14 @@ def run_subagent_loop(
 
         new_input: list[dict] = []
         for ri in reasoning_items:
-            new_input.append({"type": "reasoning", "id": responses_input_id(str(ri.id), "rs"), "summary": []})
+            item = {
+                "type": "reasoning",
+                "id": responses_input_id(str(ri.id), "rs"),
+                "summary": [],
+            }
+            if ri.provider_content:
+                item["provider_content"] = ri.provider_content
+            new_input.append(item)
 
         for item in tool_calls:
             try:
