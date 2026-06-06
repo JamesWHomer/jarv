@@ -33,7 +33,7 @@ from .undo_commands import cmd_redo, cmd_undo
 from .update_check import (
     UPDATE_CHECK_INTERVAL_HOURS,
     UPDATE_FLAG_FILE,
-    _fetch_latest_pypi_version,
+    _fetch_latest_pypi_release,
 )
 from .usage_command import cmd_usage
 
@@ -293,63 +293,91 @@ def print_about(*, mode: str | None = None, include_setup_nudge: bool = True) ->
 
 def _is_pipx_env() -> bool:
     """Detect if jarv is running inside a pipx-managed virtualenv."""
-    exe = Path(sys.executable).resolve()
-    return "pipx" in exe.parts
+    return any(part.lower() == "pipx" for part in Path(sys.executable).parts)
 
-def _run_pip_upgrade() -> subprocess.CompletedProcess:
+def _run_pip_upgrade(package_spec: str) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--upgrade", "jarv"],
+        [sys.executable, "-m", "pip", "install", "--upgrade", package_spec],
         capture_output=True, text=True,
     )
 
 def _is_externally_managed_error(result: subprocess.CompletedProcess) -> bool:
     return result.returncode != 0 and "externally-managed-environment" in (result.stderr or "")
 
+def _installed_version() -> str | None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import importlib.metadata as m; print(m.version('jarv'))",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+def _pipx_installed_version() -> str | None:
+    result = subprocess.run(
+        ["pipx", "runpip", "jarv", "show", "jarv"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        if line.startswith("Version:"):
+            return line.partition(":")[2].strip() or None
+    return None
+
 def cmd_update() -> None:
     console.print("[dim]⟳ Checking for updates…[/dim]")
-    latest = _fetch_latest_pypi_version()
-    if latest is None:
+    release = _fetch_latest_pypi_release()
+    if release is None:
         console.print("[bold red]✗[/bold red] [red]Could not reach PyPI.[/red]")
         return
+    latest, artifact_url = release
     if latest == __version__:
         console.print(f"[bold green]✓[/bold green] [green]Already up to date.[/green] [dim](v{__version__})[/dim]")
         return
     console.print(f"[bold cyan]↓[/bold cyan] Update found [dim](v{__version__} → v{latest})[/dim]. Installing…")
 
-    if _is_pipx_env():
-        with console.status("[dim]Running pipx upgrade…[/dim]", spinner="dots"):
-            result = subprocess.run(
-                ["pipx", "upgrade", "jarv"],
-                capture_output=True, text=True,
-            )
-    else:
-        with console.status("[dim]Running pip install…[/dim]", spinner="dots"):
-            result = _run_pip_upgrade()
-        if _is_externally_managed_error(result):
-            console.print("[dim]System Python detected — retrying with pipx…[/dim]")
-            pipx_available = subprocess.run(
-                ["pipx", "--version"], capture_output=True, text=True,
-            ).returncode == 0
-            if pipx_available:
-                with console.status("[dim]Running pipx upgrade…[/dim]", spinner="dots"):
-                    result = subprocess.run(
-                        ["pipx", "upgrade", "jarv"],
-                        capture_output=True, text=True,
-                    )
-            else:
-                console.print("[bold red]✗[/bold red] [red]Update failed:[/red] pip is blocked by your system Python (PEP 668).")
-                console.print("[dim]Install pipx and reinstall jarv with it:[/dim]")
-                console.print("  [bold]brew install pipx && pipx install jarv[/bold]")
-                return
+    install_target = "pipx environment" if _is_pipx_env() else "active environment"
+    with console.status(f"[dim]Installing release into {install_target}…[/dim]", spinner="dots"):
+        result = _run_pip_upgrade(artifact_url)
+    installed_version = _installed_version
+    if _is_externally_managed_error(result):
+        console.print("[dim]System Python detected — retrying with pipx…[/dim]")
+        pipx_available = subprocess.run(
+            ["pipx", "--version"], capture_output=True, text=True,
+        ).returncode == 0
+        if pipx_available:
+            with console.status("[dim]Installing release with pipx…[/dim]", spinner="dots"):
+                result = subprocess.run(
+                    ["pipx", "install", "--force", artifact_url],
+                    capture_output=True, text=True,
+                )
+            installed_version = _pipx_installed_version
+        else:
+            console.print("[bold red]✗[/bold red] [red]Update failed:[/red] pip is blocked by your system Python (PEP 668).")
+            console.print("[dim]Install pipx and reinstall jarv with it:[/dim]")
+            console.print("  [bold]brew install pipx && pipx install jarv[/bold]")
+            return
 
+    installed = installed_version() if result.returncode == 0 else None
     if result.returncode == 0:
-        UPDATE_FLAG_FILE.unlink(missing_ok=True)
-        console.print("[bold green]✓[/bold green] [green]Updated successfully.[/green] [dim]Run jarv again to use the new version.[/dim]")
-    else:
-        console.print("[bold red]✗[/bold red] [red]Update failed:[/red]")
-        output = "\n".join(filter(None, [result.stdout.strip(), result.stderr.strip()]))
-        if output:
-            console.print(output, style="dim")
+        if installed == latest:
+            UPDATE_FLAG_FILE.unlink(missing_ok=True)
+            console.print("[bold green]✓[/bold green] [green]Updated successfully.[/green] [dim]Run jarv again to use the new version.[/dim]")
+            return
+
+    console.print("[bold red]✗[/bold red] [red]Update failed:[/red]")
+    output = "\n".join(filter(None, [result.stdout.strip(), result.stderr.strip()]))
+    if result.returncode == 0:
+        output = f"Expected jarv {latest}, but the active installation is {installed or 'unknown'}."
+    if output:
+        console.print(output, style="dim")
 
 
 def cmd_new() -> None:

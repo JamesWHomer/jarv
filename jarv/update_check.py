@@ -12,14 +12,32 @@ LAST_CHECK_FILE = CONFIG_DIR / "last_update_check.txt"
 UPDATE_CHECK_INTERVAL_HOURS = 24
 
 
-def _fetch_latest_pypi_version() -> str | None:
+def _fetch_latest_pypi_release() -> tuple[str, str] | None:
     try:
         req = urllib.request.Request(PYPI_VERSION_URL, headers={"User-Agent": "jarv-updater"})
         with urllib.request.urlopen(req, timeout=3) as resp:
             data = json.loads(resp.read())
-            return data["info"]["version"]
+        version = data["info"]["version"]
+        artifacts = data.get("urls", [])
+        wheel = next(
+            (item["url"] for item in artifacts if item.get("packagetype") == "bdist_wheel"),
+            None,
+        )
+        source = next(
+            (item["url"] for item in artifacts if item.get("packagetype") == "sdist"),
+            None,
+        )
+        artifact_url = wheel or source
+        if not artifact_url:
+            return None
+        return version, artifact_url
     except Exception:
         return None
+
+
+def _fetch_latest_pypi_version() -> str | None:
+    release = _fetch_latest_pypi_release()
+    return release[0] if release else None
 
 
 def _should_check_now() -> bool:
