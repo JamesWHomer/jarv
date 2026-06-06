@@ -2,6 +2,7 @@ import sys
 from types import SimpleNamespace
 
 from jarv.auditor import _parse_response
+from jarv.auditor import _call_litellm
 from jarv.auditor import _call_openai_compat
 from jarv.usage import load_global_usage_records, load_usage
 
@@ -143,6 +144,74 @@ def _install_fake_openai(monkeypatch, contents, usages=None):
 
     monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAI))
     return calls
+
+
+def _install_fake_litellm(monkeypatch, contents):
+    calls = []
+
+    def completion(**kwargs):
+        calls.append(kwargs)
+        content = contents[len(calls) - 1]
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
+            usage=None,
+        )
+
+    fake = SimpleNamespace(completion=completion)
+    monkeypatch.setattr("jarv.litellm_compat.import_litellm", lambda: fake)
+    return calls
+
+
+def test_anthropic_opus_4_7_auditor_omits_deprecated_temperature(monkeypatch):
+    calls = _install_fake_litellm(
+        monkeypatch,
+        ['{"allow": true, "reason": "safe status check"}'],
+    )
+
+    result = _call_litellm(
+        {"provider": "anthropic"},
+        "claude-opus-4-7",
+        "Command: git status",
+    )
+
+    assert result == (True, "safe status check")
+    assert calls[0]["model"] == "anthropic/claude-opus-4-7"
+    assert "temperature" not in calls[0]
+
+
+def test_anthropic_opus_4_7_retry_also_omits_deprecated_temperature(monkeypatch):
+    calls = _install_fake_litellm(
+        monkeypatch,
+        [
+            "I cannot determine this from context.",
+            '{"allow": true, "reason": "safe version probe"}',
+        ],
+    )
+
+    result = _call_litellm(
+        {"provider": "anthropic"},
+        "claude-opus-4-7",
+        "Command: python --version",
+    )
+
+    assert result == (True, "safe version probe")
+    assert len(calls) == 2
+    assert all("temperature" not in call for call in calls)
+
+
+def test_older_anthropic_auditor_keeps_temperature_zero(monkeypatch):
+    calls = _install_fake_litellm(
+        monkeypatch,
+        ['{"allow": true, "reason": "safe status check"}'],
+    )
+
+    _call_litellm(
+        {"provider": "anthropic"},
+        "claude-opus-4-6",
+        "Command: git status",
+    )
+
+    assert calls[0]["temperature"] == 0
 
 
 def test_openai_direct_request_avoids_fragile_response_options(monkeypatch):

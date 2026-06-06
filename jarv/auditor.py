@@ -379,12 +379,25 @@ def _call_litellm(
 
 
 def _litellm_kwargs(litellm_model: str, messages: list[dict[str, str]]) -> dict:
-    return {
+    kwargs = {
         "model": litellm_model,
         "messages": messages,
-        "temperature": 0,
         "max_tokens": 100,
     }
+    if not _anthropic_model_without_sampling(litellm_model):
+        kwargs["temperature"] = 0
+    return kwargs
+
+
+def _anthropic_model_without_sampling(litellm_model: str) -> bool:
+    """Return True for Anthropic models that reject sampling parameters."""
+    match = re.search(
+        r"(?:^|/)claude-opus-(\d+)-(\d+)(?:-|$)",
+        litellm_model.lower(),
+    )
+    if not match or not litellm_model.lower().startswith("anthropic/"):
+        return False
+    return tuple(map(int, match.groups())) >= (4, 7)
 
 
 def _is_parse_failure(parsed: tuple[bool, str]) -> bool:
