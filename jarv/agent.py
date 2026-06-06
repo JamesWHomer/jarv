@@ -4,6 +4,7 @@ import platform
 import sys
 import threading
 import time
+from dataclasses import dataclass
 
 from rich import box
 from rich.console import Group
@@ -16,6 +17,7 @@ from rich.segment import Segment
 from rich.text import Text
 
 from .config import DEFAULT_CONFIG
+from .cancellation import CancellationToken, TurnCancelled
 from .display import console, flatten_headings, terminal_size
 from .history import (
     artifact_file_for,
@@ -67,6 +69,12 @@ TOOLS = [RUN_COMMAND_TOOL, SPAWN_TOOL, READ_ARTIFACT_TOOL, ASK_USER_TOOL]
 
 
 _THINKING_FRAMES = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"]
+
+
+@dataclass(frozen=True)
+class AgentRunResult:
+    cancelled: bool = False
+    prompt: str | None = None
 
 
 def response_wait_label(has_reasoning: bool) -> str:
@@ -287,6 +295,7 @@ def _dispatch_run_command_with_ui(
     history: list | None = None,
     usage_path=None,
     session_id: str | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> str:
     cmd = args.get("command")
     if not isinstance(cmd, str) or not cmd.strip():
@@ -304,6 +313,7 @@ def _dispatch_run_command_with_ui(
         history=history,
         usage_path=usage_path,
         session_id=session_id,
+        cancellation_token=cancellation_token,
     )
     if not allowed:
         console.print(f"[dim]{denial}[/dim]")
@@ -312,7 +322,11 @@ def _dispatch_run_command_with_ui(
     console.print()
     console.print(Rule(f"[bold yellow]$ {escape(cmd)}[/bold yellow]", style="yellow", align="left"))
     console.print("[dim]Running command...[/dim]")
-    result = execute_command(cmd, config.get("command_timeout", 60))
+    result = execute_command(
+        cmd,
+        config.get("command_timeout", 60),
+        cancellation_token=cancellation_token,
+    )
     display_command_result(result)
     console.print(Rule(style="bright_black"))
     return result.to_model_output()
@@ -365,14 +379,23 @@ def _dispatch_ask_user(args: dict) -> str:
     console.print("[bold cyan]> [/bold cyan]", end="")
     try:
         answer = _read_user_input()
-    except (KeyboardInterrupt, EOFError):
+    except KeyboardInterrupt:
+        raise
+    except EOFError:
         answer = "[no response]"
         console.print(f"\n[dim]{answer}[/dim]")
     console.print()
     return answer
 
 
-def _dispatch_spawn_with_ui(args: dict, root_node, store, client, config) -> str:
+def _dispatch_spawn_with_ui(
+    args: dict,
+    root_node,
+    store,
+    client,
+    config,
+    cancellation_token: CancellationToken | None = None,
+) -> str:
     children_raw = args.get("children")
     if not isinstance(children_raw, list) or not children_raw:
         msg = "[tool argument error: children must be a non-empty list]"
@@ -473,7 +496,16 @@ def _dispatch_spawn_with_ui(args: dict, root_node, store, client, config) -> str
                 observer=observer,
                 usage_path=root_node.usage_path,
                 session_id=root_node.session_id,
+                cancellation_token=cancellation_token,
             )
+        except (KeyboardInterrupt, TurnCancelled):
+            with lock:
+                for state in states.values():
+                    if state["status"] == "running":
+                        state["status"] = "cancelled"
+                        state["reason"] = "cancelled"
+            live.update(SpawnPanel())
+            raise
         except DepthExceeded as e:
             output = f"[error: {e}]"
             live.update(Text(output, style="red"))
@@ -492,7 +524,7 @@ def run_agent(
     propagate_keyboard_interrupt: bool = False,
     new_session: bool = False,
     incognito: bool = False,
-) -> None:
+) -> AgentRunResult:
     interactive = sys.stdout.isatty()
     reply_text = ""
     tool_calls = []
@@ -505,6 +537,9 @@ def run_agent(
     wait_indicator: ResponseWaitIndicator | None = None
     spinner_live: Live | None = None
     stream_live: Live | None = None
+    reasoning_items = []
+    active_tool_call = None
+    cancellation_token = CancellationToken()
     thought_started = time.perf_counter()
     wait_indicator, spinner_live = _start_response_wait_indicator(interactive, thought_started)
 
@@ -516,6 +551,73 @@ def run_agent(
         if stream_live is not None:
             stream_live.stop()
             stream_live = None
+
+    def _save_turn_state() -> None:
+        if session_context is not None and not incognito:
+            redo_path = redo_file_for(session_context.history_file)
+            if redo_path.exists():
+                redo_path.unlink()
+            save_history(history, session_context.history_file)
+        if artifact_store is not None and artifact_file is not None:
+            save_artifact_store(artifact_store, artifact_file)
+
+    def _checkpoint_cancelled_turn() -> None:
+        recorded_reasoning_ids = {
+            str(item.get("id"))
+            for item in history
+            if isinstance(item, dict) and item.get("type") == "reasoning"
+        }
+        for item in reasoning_items:
+            if str(item.id) not in recorded_reasoning_ids:
+                history.append({
+                    "type": "reasoning",
+                    "id": item.id,
+                    "summary": [],
+                    **metadata,
+                })
+
+        if reply_text:
+            history.append({"role": "assistant", "content": reply_text, **metadata})
+
+        recorded_call_ids = {
+            str(item.get("call_id"))
+            for item in history
+            if isinstance(item, dict) and item.get("type") == "function_call"
+        }
+        active_call_id = (
+            str(active_tool_call.call_id)
+            if active_tool_call is not None else None
+        )
+        for item in tool_calls:
+            if str(item.call_id) in recorded_call_ids:
+                continue
+            if str(item.call_id) == active_call_id:
+                output = "[cancelled by user; execution may have made partial changes]"
+            else:
+                output = "[cancelled by user before execution]"
+            history.extend([
+                {
+                    "type": "function_call",
+                    "id": item.id,
+                    "call_id": item.call_id,
+                    "name": item.name,
+                    "arguments": item.arguments,
+                    **metadata,
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": item.call_id,
+                    "output": output,
+                    **metadata,
+                },
+            ])
+
+        history.append({
+            "role": "assistant",
+            "content": "[Turn cancelled by user.]",
+            **metadata,
+        })
+        _save_turn_state()
 
     try:
         if client is None:
@@ -543,10 +645,6 @@ def run_agent(
         )
 
         history.append({"role": "user", "content": query, **metadata})
-
-        redo_path = redo_file_for(session_context.history_file)
-        if redo_path.exists():
-            redo_path.unlink()
 
         input_items = build_input(history, max_history)
 
@@ -589,6 +687,7 @@ def run_agent(
                     kwargs["tools"], kwargs["input"],
                     reasoning=kwargs.get("reasoning"),
                     prompt_cache_key=f"jarv:{session_context.session_id}",
+                    cancellation_token=cancellation_token,
                 ):
                     if isinstance(event, TextDelta):
                         if not got_text:
@@ -685,6 +784,7 @@ def run_agent(
                     if api_item is not None:
                         new_input_items.append(api_item)
                 for item in tool_calls:
+                    active_tool_call = item
                     try:
                         args = json.loads(item.arguments or "{}")
                     except json.JSONDecodeError as e:
@@ -698,11 +798,27 @@ def run_agent(
                                 history,
                                 usage_path=usage_path,
                                 session_id=session_context.session_id,
+                                cancellation_token=cancellation_token,
                             )
                         elif item.name == "spawn":
-                            output = _dispatch_spawn_with_ui(args, root_node, artifact_store, client, config)
+                            output = _dispatch_spawn_with_ui(
+                                args,
+                                root_node,
+                                artifact_store,
+                                client,
+                                config,
+                                cancellation_token=cancellation_token,
+                            )
                         elif item.name == "read_artifact":
-                            output = dispatch_tool(item.name, args, root_node, artifact_store, client, config)
+                            output = dispatch_tool(
+                                item.name,
+                                args,
+                                root_node,
+                                artifact_store,
+                                client,
+                                config,
+                                cancellation_token=cancellation_token,
+                            )
                             console.print(f"[dim]read_artifact({args.get('label')!r})[/dim]")
                         elif item.name == "ask_user":
                             output = _dispatch_ask_user(args)
@@ -729,6 +845,7 @@ def run_agent(
                         **metadata,
                     }
                     history.extend([fc, fco])
+                    active_tool_call = None
                     for stored_item in (fc, fco):
                         api_item = to_response_input_item(stored_item)
                         if api_item is not None:
@@ -736,19 +853,15 @@ def run_agent(
                 kwargs["input"] = kwargs["input"] + new_input_items
             else:
                 history.append({"role": "assistant", "content": reply_text, **metadata})
-                if not incognito:
-                    save_history(history, session_context.history_file)
-                save_artifact_store(artifact_store, artifact_file)
+                _save_turn_state()
                 _print_agent_usage_if_enabled(config, usage_path, session_context.session_id)
                 break
-    except KeyboardInterrupt:
-        console.print("\n[dim]Interrupted.[/dim]")
-        if session_context is not None and not incognito:
-            save_history(history, session_context.history_file)
-        if artifact_store is not None and artifact_file is not None:
-            save_artifact_store(artifact_store, artifact_file)
-        if propagate_keyboard_interrupt:
-            raise
+        return AgentRunResult()
+    except (KeyboardInterrupt, TurnCancelled):
+        cancellation_token.cancel()
+        if session_context is not None:
+            _checkpoint_cancelled_turn()
+        return AgentRunResult(cancelled=True, prompt=query)
     except ProviderError as e:
         console.print(f"[red]API error:[/red] {escape(str(e))}")
         if reply_text and not tool_calls:

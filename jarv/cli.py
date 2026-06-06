@@ -1,4 +1,5 @@
 import argparse
+import importlib
 import os
 import sys
 import threading
@@ -32,6 +33,22 @@ def _console():
     from .display import console
 
     return console
+
+
+def _start_agent_import() -> tuple[dict, threading.Event]:
+    state: dict = {}
+    ready = threading.Event()
+
+    def load() -> None:
+        try:
+            state["module"] = importlib.import_module("jarv.agent")
+        except BaseException as exc:
+            state["error"] = exc
+        finally:
+            ready.set()
+
+    threading.Thread(target=load, daemon=True, name="jarv-agent-import").start()
+    return state, ready
 
 
 def _setup_nudge() -> None:
@@ -281,8 +298,9 @@ def main() -> None:
     if not query:
         from .provider import create_client
 
+        agent_loader = _start_agent_import()
         client = create_client(config)
-        run_heads_up_mode(config, client)
+        run_heads_up_mode(config, client, agent_loader=agent_loader)
         return
 
     if config.get("check_updates", True):
@@ -293,22 +311,38 @@ def main() -> None:
 
     from .agent import run_agent
     try:
-        run_agent(query, config, client=None, new_session=args.new, incognito=args.incognito)
+        result = run_agent(query, config, client=None, new_session=args.new, incognito=args.incognito)
+        if getattr(result, "cancelled", False) is True:
+            console.print("\n[dim]Cancelled.[/dim]")
+            sys.exit(130)
     except KeyboardInterrupt:
-        console.print("\n[dim]Interrupted.[/dim]")
+        console.print("\n[dim]Cancelled.[/dim]")
         sys.exit(130)
 
 
-def run_heads_up_mode(config: dict, client) -> None:
+def run_heads_up_mode(
+    config: dict,
+    client,
+    agent_loader: tuple[dict, threading.Event] | None = None,
+) -> None:
     console = _console()
     console.print("[bold cyan]jarv heads-up mode[/bold cyan]")
-    console.print("[dim]Type a prompt and press Enter. Use /help for commands. Press Ctrl+C to leave.[/dim]")
+    console.print("[dim]Type a prompt and press Enter. Use /help for commands. Ctrl+C clears; press it again to leave.[/dim]")
+    agent_import, agent_ready = agent_loader or _start_agent_import()
+    prefill = ""
     while True:
         try:
-            query = console.input("\n[bold cyan]jarv>[/bold cyan] ").strip()
+            from .command_input import read_editable_line
+
+            console.print()
+            query = read_editable_line(
+                "\x1b[1;36mjarv>\x1b[0m ",
+                initial=prefill,
+            ).strip()
         except (EOFError, KeyboardInterrupt):
             console.print("\n[dim]Goodbye.[/dim]")
             return
+        prefill = ""
 
         if not query:
             continue
@@ -337,11 +371,16 @@ def run_heads_up_mode(config: dict, client) -> None:
             continue
 
         try:
-            from .agent import run_agent
-            run_agent(query, config, client, propagate_keyboard_interrupt=True)
+            agent_ready.wait()
+            if "error" in agent_import:
+                raise agent_import["error"]
+            result = agent_import["module"].run_agent(query, config, client)
+            if getattr(result, "cancelled", False) is True:
+                console.print("\n[dim]Cancelled.[/dim]")
+                prefill = result.prompt or query
         except KeyboardInterrupt:
-            console.print("\n[dim]Goodbye.[/dim]")
-            return
+            console.print("\n[dim]Cancelled.[/dim]")
+            prefill = query
 
 
 if __name__ == "__main__":

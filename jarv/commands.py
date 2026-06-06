@@ -193,7 +193,7 @@ def _about_body() -> Markdown:
 
 ## Heads-up mode
 
-Run `jarv` with no prompt to start an interactive session. Type a prompt and press Enter to send it. Commands start with `/` (e.g. `/new`, `/history`). Type `exit`, `quit`, or `/exit`, or press Ctrl+C, to leave.
+Run `jarv` with no prompt to start an interactive session. Type a prompt and press Enter to send it. Commands start with `/` (e.g. `/new`, `/history`). During a response, Ctrl+C stops further work, checkpoints the turn in history/context, and restores its prompt. Use `/undo` to remove that turn. At the prompt, Ctrl+C clears text and exits when the prompt is already empty. Type `exit`, `quit`, or `/exit` to leave directly.
 
 ## How jarv works
 

@@ -7,6 +7,9 @@ Supports two streaming backends:
 
 import hashlib
 import os
+import queue
+import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -14,6 +17,7 @@ from typing import Any, Iterator
 
 from .provider_catalog import KEY_PATTERNS, LOCAL_PROVIDERS, PROVIDERS
 from .unicode_safety import sanitize_json_value
+from .cancellation import CancellationToken, TurnCancelled
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +415,7 @@ def _accumulate_tool_delta(accumulators: dict[int, dict], tc_delta) -> None:
 
 def _stream_responses_api(
     client, model, instructions, tools, input_items, reasoning=None, prompt_cache_key=None,
+    cancellation_token: CancellationToken | None = None,
 ) -> Iterator:
     kwargs: dict[str, Any] = dict(
         model=model,
@@ -430,46 +435,63 @@ def _stream_responses_api(
     yielded_reasoning_ids: set[str] = set()
     try:
         with client.responses.stream(**kwargs) as stream:
-            for event in stream:
-                if event.type == "response.created":
-                    response = _value(event, "response")
-                    response_id = str(_value(response, "id") or response_id or "")
-                    continue
-                response = _value(event, "response")
-                if response is not None and _value(response, "id"):
-                    response_id = str(_value(response, "id"))
-                if not reasoning_started and _response_event_has_reasoning_started(event):
-                    reasoning_started = True
-                    item = _value(event, "item")
-                    yield ReasoningStarted(id=str(_value(item, "id") or ""))
-                if event.type == "response.output_text.delta":
-                    yield TextDelta(event.delta)
-                elif event.type == "response.output_item.done":
-                    if event.item.type == "function_call":
-                        yielded_tool_call_ids.update(
-                            {str(event.item.id or ""), str(event.item.call_id or "")}
-                        )
-                        yield ToolCallDone(
-                            id=event.item.id,
-                            call_id=event.item.call_id,
-                            name=event.item.name,
-                            arguments=event.item.arguments,
-                        )
-                    elif event.item.type == "reasoning":
-                        yielded_reasoning_ids.add(str(event.item.id or ""))
-                        yield ReasoningDone(
-                            id=event.item.id,
-                            summary=getattr(event.item, "summary", []),
-                        )
+            unregister = (
+                cancellation_token.register(stream.close)
+                if cancellation_token is not None else lambda: None
+            )
             try:
-                final_response = stream.get_final_response()
-            except Exception:
-                final_response = (
-                    _retrieve_completed_response(client, response_id)
-                    if response_id else None
-                )
-            yield StreamDone(response=final_response)
+                for event in stream:
+                    if cancellation_token is not None:
+                        cancellation_token.throw_if_cancelled()
+                    if event.type == "response.created":
+                        response = _value(event, "response")
+                        response_id = str(_value(response, "id") or response_id or "")
+                        continue
+                    response = _value(event, "response")
+                    if response is not None and _value(response, "id"):
+                        response_id = str(_value(response, "id"))
+                    if not reasoning_started and _response_event_has_reasoning_started(event):
+                        reasoning_started = True
+                        item = _value(event, "item")
+                        yield ReasoningStarted(id=str(_value(item, "id") or ""))
+                    if event.type == "response.output_text.delta":
+                        yield TextDelta(event.delta)
+                    elif event.type == "response.output_item.done":
+                        if event.item.type == "function_call":
+                            yielded_tool_call_ids.update(
+                                {str(event.item.id or ""), str(event.item.call_id or "")}
+                            )
+                            yield ToolCallDone(
+                                id=event.item.id,
+                                call_id=event.item.call_id,
+                                name=event.item.name,
+                                arguments=event.item.arguments,
+                            )
+                        elif event.item.type == "reasoning":
+                            yielded_reasoning_ids.add(str(event.item.id or ""))
+                            yield ReasoningDone(
+                                id=event.item.id,
+                                summary=getattr(event.item, "summary", []),
+                            )
+                if cancellation_token is not None:
+                    cancellation_token.throw_if_cancelled()
+                try:
+                    final_response = stream.get_final_response()
+                except Exception:
+                    if cancellation_token is not None:
+                        cancellation_token.throw_if_cancelled()
+                    final_response = (
+                        _retrieve_completed_response(client, response_id)
+                        if response_id else None
+                    )
+                yield StreamDone(response=final_response)
+            finally:
+                unregister()
+    except TurnCancelled:
+        raise
     except Exception:
+        if cancellation_token is not None:
+            cancellation_token.throw_if_cancelled()
         if response_id:
             recovered_response = _retrieve_completed_response(client, response_id)
             if recovered_response is not None:
@@ -489,6 +511,7 @@ def _stream_responses_api(
 
 def _stream_chat_completions(
     client, model, instructions, tools, input_items, reasoning=None,
+    cancellation_token: CancellationToken | None = None,
 ) -> Iterator:
     messages = sanitize_json_value(_to_chat_messages(instructions, input_items))
 
@@ -508,8 +531,15 @@ def _stream_chat_completions(
     reasoning_started = False
 
     stream = client.chat.completions.create(**sanitize_json_value(kwargs))
+    unregister = (
+        cancellation_token.register(stream.close)
+        if cancellation_token is not None and hasattr(stream, "close")
+        else lambda: None
+    )
     try:
         for chunk in stream:
+            if cancellation_token is not None:
+                cancellation_token.throw_if_cancelled()
             if getattr(chunk, "usage", None):
                 final_chunk = chunk
             if not chunk.choices:
@@ -529,9 +559,12 @@ def _stream_chat_completions(
             if chunk.choices[0].finish_reason:
                 yield from _flush_tool_calls(accumulators)
     finally:
+        unregister()
         if hasattr(stream, "close"):
             stream.close()
 
+    if cancellation_token is not None:
+        cancellation_token.throw_if_cancelled()
     yield StreamDone(response=final_chunk)
 
 
@@ -541,6 +574,7 @@ def _stream_chat_completions(
 
 def _stream_litellm(
     config, model, instructions, tools, input_items, reasoning=None,
+    cancellation_token: CancellationToken | None = None,
 ) -> Iterator:
     from .litellm_compat import import_litellm
 
@@ -573,32 +607,97 @@ def _stream_litellm(
     final_chunk = None
     reasoning_started = False
 
-    for chunk in litellm.completion(**sanitize_json_value(kwargs)):
-        if getattr(chunk, "usage", None):
-            final_chunk = chunk
-        if not chunk.choices:
-            continue
+    stream = litellm.completion(**sanitize_json_value(kwargs))
 
-        delta = chunk.choices[0].delta
-        if not reasoning_started and (_has_reasoning_signal(delta) or _has_reasoning_signal(chunk.choices[0])):
-            reasoning_started = True
-            yield ReasoningStarted(id="")
-        text_delta = _text_from_content(_value(delta, "content"))
-        if text_delta:
-            yield TextDelta(text_delta)
-        if getattr(delta, "tool_calls", None):
-            for tc_delta in delta.tool_calls:
-                _accumulate_tool_delta(accumulators, tc_delta)
+    def close_stream() -> None:
+        try:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
+                return
+            inner = getattr(stream, "completion_stream", None)
+            close = getattr(inner, "close", None)
+            if callable(close):
+                close()
+        except Exception:
+            pass
 
-        if chunk.choices[0].finish_reason:
-            yield from _flush_tool_calls(accumulators)
+    unregister = (
+        cancellation_token.register(close_stream)
+        if cancellation_token is not None else lambda: None
+    )
+    try:
+        for chunk in stream:
+            if cancellation_token is not None:
+                cancellation_token.throw_if_cancelled()
+            if getattr(chunk, "usage", None):
+                final_chunk = chunk
+            if not chunk.choices:
+                continue
 
+            delta = chunk.choices[0].delta
+            if not reasoning_started and (_has_reasoning_signal(delta) or _has_reasoning_signal(chunk.choices[0])):
+                reasoning_started = True
+                yield ReasoningStarted(id="")
+            text_delta = _text_from_content(_value(delta, "content"))
+            if text_delta:
+                yield TextDelta(text_delta)
+            if getattr(delta, "tool_calls", None):
+                for tc_delta in delta.tool_calls:
+                    _accumulate_tool_delta(accumulators, tc_delta)
+
+            if chunk.choices[0].finish_reason:
+                yield from _flush_tool_calls(accumulators)
+    finally:
+        unregister()
+        close_stream()
+
+    if cancellation_token is not None:
+        cancellation_token.throw_if_cancelled()
     yield StreamDone(response=final_chunk)
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+def _stream_response_direct(
+    client,
+    config: dict,
+    model: str,
+    instructions: str,
+    tools: list,
+    input_items: list,
+    reasoning: dict | None = None,
+    prompt_cache_key: str | None = None,
+    cancellation_token: CancellationToken | None = None,
+) -> Iterator:
+    backend = get_backend(config)
+    try:
+        if backend == "responses":
+            yield from _stream_responses_api(
+                client, model, instructions, tools, input_items, reasoning, prompt_cache_key,
+                cancellation_token,
+            )
+        elif backend == "openai_compat":
+            yield from _stream_chat_completions(
+                client, model, instructions, tools, input_items, reasoning,
+                cancellation_token,
+            )
+        elif backend == "litellm":
+            yield from _stream_litellm(
+                config, model, instructions, tools, input_items, reasoning,
+                cancellation_token,
+            )
+        else:
+            raise ProviderError(f"Unknown backend: {backend}")
+    except ProviderError:
+        raise
+    except TurnCancelled:
+        raise
+    except Exception as e:
+        raise ProviderError(str(e)) from e
+
 
 def stream_response(
     client,
@@ -609,28 +708,49 @@ def stream_response(
     input_items: list,
     reasoning: dict | None = None,
     prompt_cache_key: str | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> Iterator:
-    """Stream a response using the configured provider.
+    """Stream a normalized response, with interruptible waits on Windows."""
+    direct = _stream_response_direct(
+        client,
+        config,
+        model,
+        instructions,
+        tools,
+        input_items,
+        reasoning,
+        prompt_cache_key,
+        cancellation_token,
+    )
+    if sys.platform != "win32" or cancellation_token is None:
+        yield from direct
+        return
 
-    Yields TextDelta, ToolCallDone, ReasoningStarted, ReasoningDone, and StreamDone events.
-    """
-    backend = get_backend(config)
-    try:
-        if backend == "responses":
-            yield from _stream_responses_api(
-                client, model, instructions, tools, input_items, reasoning, prompt_cache_key,
-            )
-        elif backend == "openai_compat":
-            yield from _stream_chat_completions(
-                client, model, instructions, tools, input_items, reasoning,
-            )
-        elif backend == "litellm":
-            yield from _stream_litellm(
-                config, model, instructions, tools, input_items, reasoning,
-            )
+    events: queue.SimpleQueue[tuple[str, Any]] = queue.SimpleQueue()
+
+    def produce() -> None:
+        try:
+            for event in direct:
+                events.put(("event", event))
+        except BaseException as exc:
+            events.put(("error", exc))
         else:
-            raise ProviderError(f"Unknown backend: {backend}")
-    except ProviderError:
+            events.put(("done", None))
+
+    threading.Thread(target=produce, daemon=True, name="jarv-provider-stream").start()
+    try:
+        while True:
+            cancellation_token.throw_if_cancelled()
+            try:
+                kind, value = events.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            if kind == "event":
+                yield value
+            elif kind == "error":
+                raise value
+            else:
+                return
+    except (KeyboardInterrupt, GeneratorExit):
+        cancellation_token.cancel()
         raise
-    except Exception as e:
-        raise ProviderError(str(e)) from e

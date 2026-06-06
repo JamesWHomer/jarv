@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from rich.console import Console
 from jarv.agent import (
+    _dispatch_ask_user,
     build_input,
     _format_agent_usage_line,
     response_start_status,
@@ -17,7 +18,8 @@ from jarv.agent import (
 )
 from jarv.config import DEFAULT_CONFIG
 from jarv.history import SessionContext, load_history, save_history
-from jarv.provider import StreamDone, TextDelta
+from jarv.history import redo_file_for
+from jarv.provider import StreamDone, TextDelta, ToolCallDone
 
 
 class AgentInputTests(unittest.TestCase):
@@ -160,6 +162,104 @@ class AgentInputTests(unittest.TestCase):
             "new prompt",
             "four",
         ])
+
+    def test_run_agent_cancellation_checkpoints_turn_and_clears_redo(self):
+        with TemporaryDirectory() as tmp:
+            history_file = Path(tmp) / "history.json"
+            existing = [
+                {"role": "user", "content": "old prompt"},
+                {"role": "assistant", "content": "old answer"},
+            ]
+            save_history(existing, history_file)
+            redo_path = redo_file_for(history_file)
+            redo_path.write_text('[[{"role":"user","content":"redo me"}]]', encoding="utf-8")
+            artifact_path = history_file.with_name("artifacts.json")
+            artifact_path.write_text(
+                '{"existing":{"longform":"kept","tldr":"kept","owner_label":"old"}}',
+                encoding="utf-8",
+            )
+            artifact_before = artifact_path.read_text(encoding="utf-8")
+            context = SessionContext(
+                session_id="session-id",
+                session_label="test session",
+                history_file=history_file,
+                now=datetime(2026, 5, 21, tzinfo=timezone.utc),
+            )
+
+            def interrupted_stream(*_args, **_kwargs):
+                yield TextDelta("partial")
+                raise KeyboardInterrupt
+
+            with (
+                patch("jarv.agent.prepare_session_context", return_value=context),
+                patch("jarv.agent.stream_response", side_effect=interrupted_stream),
+                patch("jarv.agent.sys.stdout", new=io.StringIO()),
+            ):
+                result = run_agent("edit this prompt", DEFAULT_CONFIG, client=object())
+
+            saved = load_history(history_file)
+            redo_exists = redo_path.exists()
+            artifact_after = artifact_path.read_text(encoding="utf-8")
+
+        self.assertTrue(result.cancelled)
+        self.assertEqual(result.prompt, "edit this prompt")
+        self.assertEqual(saved[:2], existing)
+        self.assertEqual(saved[2]["content"], "edit this prompt")
+        self.assertEqual(saved[3]["content"], "partial")
+        self.assertEqual(saved[4]["content"], "[Turn cancelled by user.]")
+        self.assertFalse(redo_exists)
+        self.assertEqual(artifact_after, artifact_before)
+
+    def test_run_agent_cancellation_records_interrupted_and_pending_tools(self):
+        with TemporaryDirectory() as tmp:
+            history_file = Path(tmp) / "history.json"
+            context = SessionContext(
+                session_id="session-id",
+                session_label="test session",
+                history_file=history_file,
+                now=datetime(2026, 5, 21, tzinfo=timezone.utc),
+            )
+
+            def tool_stream(*_args, **_kwargs):
+                yield ToolCallDone(
+                    id="fc_active",
+                    call_id="call_active",
+                    name="run_command",
+                    arguments='{"command":"change-files"}',
+                )
+                yield ToolCallDone(
+                    id="fc_pending",
+                    call_id="call_pending",
+                    name="run_command",
+                    arguments='{"command":"more-changes"}',
+                )
+                yield StreamDone(response=None)
+
+            with (
+                patch("jarv.agent.prepare_session_context", return_value=context),
+                patch("jarv.agent.stream_response", side_effect=tool_stream),
+                patch(
+                    "jarv.agent._dispatch_run_command_with_ui",
+                    side_effect=KeyboardInterrupt,
+                ),
+                patch("jarv.agent.sys.stdout", new=io.StringIO()),
+            ):
+                result = run_agent("change the files", DEFAULT_CONFIG, client=object())
+
+            saved = load_history(history_file)
+
+        self.assertTrue(result.cancelled)
+        self.assertEqual(saved[0]["content"], "change the files")
+        self.assertEqual(saved[1]["call_id"], "call_active")
+        self.assertIn("may have made partial changes", saved[2]["output"])
+        self.assertEqual(saved[3]["call_id"], "call_pending")
+        self.assertIn("before execution", saved[4]["output"])
+        self.assertEqual(saved[5]["content"], "[Turn cancelled by user.]")
+
+    def test_ask_user_ctrl_c_propagates_to_cancel_turn(self):
+        with patch("jarv.agent._read_user_input", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                _dispatch_ask_user({"question": "Continue?"})
 
     def test_run_agent_passes_session_prompt_cache_key(self):
         with TemporaryDirectory() as tmp:

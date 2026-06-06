@@ -150,7 +150,7 @@ def _read_key(text_mode: bool = False) -> str:
     """Read a single keypress and return a normalised token.
 
     Returns one of: UP, DOWN, LEFT, RIGHT, HOME, END, PAGEUP, PAGEDOWN,
-    ENTER, ESC, TAB, CTRL_F, BACKSPACE, or the raw character.  Raises KeyboardInterrupt on
+    ENTER, ESC, TAB, CTRL_F, BACKSPACE, DELETE, or the raw character. Raises KeyboardInterrupt on
     Ctrl-C.  When ``text_mode`` is True, the convenience q/Q → ESC mapping is
     disabled so a search query can include those letters.
     """
@@ -165,7 +165,7 @@ def _read_key(text_mode: bool = False) -> str:
             return {
                 "H": "UP", "P": "DOWN", "K": "LEFT", "M": "RIGHT",
                 "G": "HOME", "O": "END",
-                "I": "PAGEUP", "Q": "PAGEDOWN",
+                "I": "PAGEUP", "Q": "PAGEDOWN", "S": "DELETE",
             }.get(second, "OTHER")
         if ch == "\r":
             return "ENTER"
@@ -200,10 +200,12 @@ def _read_key(text_mode: bool = False) -> str:
                         return _parse_sgr_mouse(_read_until_any({"M", "m"}))
                     if ch3 in ("5", "6"):
                         sys.stdin.read(1)  # consume trailing ~
+                    if ch3 == "3":
+                        sys.stdin.read(1)  # consume trailing ~
                     return {
                         "A": "UP", "B": "DOWN", "D": "LEFT", "C": "RIGHT",
                         "H": "HOME", "F": "END",
-                        "5": "PAGEUP", "6": "PAGEDOWN",
+                        "5": "PAGEUP", "6": "PAGEDOWN", "3": "DELETE",
                     }.get(ch3, "OTHER")
                 return "ESC"
             if ch in ("\r", "\n"):
@@ -221,4 +223,83 @@ def _read_key(text_mode: bool = False) -> str:
             return ch
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def _render_editable_line(
+    prompt: str,
+    text: str,
+    cursor: int,
+    *,
+    write=None,
+) -> None:
+    write = write or sys.stdout.write
+    write("\r\x1b[2K")
+    write(prompt)
+    write(text)
+    trailing = len(text) - cursor
+    if trailing:
+        write(f"\x1b[{trailing}D")
+    sys.stdout.flush()
+
+
+def read_editable_line(
+    prompt: str,
+    initial: str = "",
+    *,
+    read_key=None,
+    write=None,
+) -> str:
+    """Read one editable line with cross-platform raw key handling."""
+    read_key = read_key or (lambda: _read_key(text_mode=True))
+    write = write or sys.stdout.write
+    chars = list(initial.replace("\r", " ").replace("\n", " "))
+    cursor = len(chars)
+
+    _render_editable_line(prompt, "".join(chars), cursor, write=write)
+    try:
+        while True:
+            try:
+                key = read_key()
+            except KeyboardInterrupt:
+                if chars:
+                    chars.clear()
+                    cursor = 0
+                    _render_editable_line(prompt, "", cursor, write=write)
+                    continue
+                raise
+
+            if key == "ENTER":
+                write("\n")
+                return "".join(chars)
+            if key == "LEFT":
+                cursor = max(0, cursor - 1)
+            elif key == "RIGHT":
+                cursor = min(len(chars), cursor + 1)
+            elif key == "HOME":
+                cursor = 0
+            elif key == "END":
+                cursor = len(chars)
+            elif key == "BACKSPACE":
+                if cursor:
+                    del chars[cursor - 1]
+                    cursor -= 1
+            elif key == "DELETE":
+                if cursor < len(chars):
+                    del chars[cursor]
+            elif key == "\x04":
+                if not chars:
+                    raise EOFError
+                if cursor < len(chars):
+                    del chars[cursor]
+            elif key in ("RESIZE", "OTHER", "ESC"):
+                continue
+            elif len(key) == 1 and key >= " ":
+                chars.insert(cursor, key)
+                cursor += 1
+            else:
+                continue
+
+            _render_editable_line(prompt, "".join(chars), cursor, write=write)
+    finally:
+        sys.stdout.flush()
 

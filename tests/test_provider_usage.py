@@ -1,4 +1,6 @@
 import unittest
+import threading
+import time
 from unittest.mock import patch
 from types import SimpleNamespace
 
@@ -12,7 +14,9 @@ from jarv.provider import (
     _stream_responses_api,
     response_output_text,
     responses_input_id,
+    stream_response,
 )
+from jarv.cancellation import CancellationToken, TurnCancelled
 
 
 class FakeStream:
@@ -306,6 +310,87 @@ class ProviderUsageTests(unittest.TestCase):
         self.assertIsInstance(events[-1], StreamDone)
         self.assertIs(events[-1].response, recovered)
         self.assertEqual(response_output_text(events[-1].response), "partial and recovered")
+
+    def test_cancelled_responses_stream_skips_recovery(self):
+        token = CancellationToken()
+        retrieve_calls = []
+
+        class CancelledStream(FakeResponseStream):
+            def __iter__(self):
+                yield SimpleNamespace(
+                    type="response.created",
+                    response=SimpleNamespace(id="resp_cancelled"),
+                )
+                token.cancel()
+                raise RuntimeError("closed")
+
+        client = SimpleNamespace(
+            responses=SimpleNamespace(
+                stream=lambda **_kwargs: CancelledStream([]),
+                retrieve=lambda response_id: retrieve_calls.append(response_id),
+            )
+        )
+
+        with self.assertRaises(TurnCancelled):
+            list(_stream_responses_api(
+                client,
+                "model",
+                "system",
+                [],
+                [],
+                cancellation_token=token,
+            ))
+
+        self.assertEqual(retrieve_calls, [])
+
+    def test_windows_stream_bridge_observes_cancellation_promptly(self):
+        token = CancellationToken()
+
+        def blocking_direct(*_args, **_kwargs):
+            while True:
+                token.throw_if_cancelled()
+                time.sleep(0.005)
+                if False:
+                    yield None
+
+        timer = threading.Timer(0.02, token.cancel)
+        timer.start()
+        started = time.perf_counter()
+        try:
+            with (
+                patch("jarv.provider.sys.platform", "win32"),
+                patch("jarv.provider._stream_response_direct", side_effect=blocking_direct),
+            ):
+                with self.assertRaises(TurnCancelled):
+                    list(stream_response(
+                        object(), {}, "model", "system", [], [],
+                        cancellation_token=token,
+                    ))
+        finally:
+            timer.cancel()
+
+        self.assertLess(time.perf_counter() - started, 0.25)
+
+    def test_posix_streaming_stays_on_calling_thread(self):
+        token = CancellationToken()
+        caller_thread = threading.get_ident()
+        producer_threads = []
+
+        def direct(*_args, **_kwargs):
+            producer_threads.append(threading.get_ident())
+            yield TextDelta("ok")
+
+        with (
+            patch("jarv.provider.sys.platform", "linux"),
+            patch("jarv.provider._stream_response_direct", side_effect=direct),
+        ):
+            events = list(stream_response(
+                object(), {}, "model", "system", [], [],
+                cancellation_token=token,
+            ))
+
+        self.assertEqual(events[0].delta, "ok")
+        self.assertEqual(producer_threads, [caller_thread])
 
     def test_litellm_stream_emits_reasoning_started_from_thinking_blocks(self):
         chunks = [

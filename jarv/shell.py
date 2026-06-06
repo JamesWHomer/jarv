@@ -2,8 +2,10 @@ import os
 import platform
 import signal
 import subprocess
+import time
 from dataclasses import dataclass
 
+from .cancellation import CancellationToken, TurnCancelled
 from .display import display_output, console
 
 
@@ -65,7 +67,11 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
             proc.kill()
 
 
-def execute_command(command: str, timeout: int | float = 60) -> CommandResult:
+def execute_command(
+    command: str,
+    timeout: int | float = 60,
+    cancellation_token: CancellationToken | None = None,
+) -> CommandResult:
     try:
         timeout = float(timeout)
         if timeout <= 0:
@@ -107,9 +113,25 @@ def execute_command(command: str, timeout: int | float = 60) -> CommandResult:
                 errors="replace",
                 preexec_fn=os.setsid,
             )
+        unregister = (
+            cancellation_token.register(lambda: _kill_process_tree(proc))
+            if cancellation_token is not None else lambda: None
+        )
+        started = time.monotonic()
         try:
-            stdout, stderr = proc.communicate(timeout=timeout)
-            return CommandResult(command, stdout or "", stderr or "", proc.returncode, timeout=timeout)
+            while True:
+                if cancellation_token is not None:
+                    cancellation_token.throw_if_cancelled()
+                remaining = timeout - (time.monotonic() - started)
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                try:
+                    stdout, stderr = proc.communicate(timeout=min(0.05, remaining))
+                    if cancellation_token is not None:
+                        cancellation_token.throw_if_cancelled()
+                    return CommandResult(command, stdout or "", stderr or "", proc.returncode, timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    continue
         except KeyboardInterrupt:
             _kill_process_tree(proc)
             proc.wait()
@@ -118,7 +140,11 @@ def execute_command(command: str, timeout: int | float = 60) -> CommandResult:
             _kill_process_tree(proc)
             stdout, stderr = proc.communicate()
             return CommandResult(command, stdout or "", stderr or "", proc.returncode, timed_out=True, timeout=timeout)
+        finally:
+            unregister()
     except KeyboardInterrupt:
+        raise
+    except TurnCancelled:
         raise
     except Exception as e:
         return CommandResult(command, "", f"[error: {e}]", None, timeout=timeout)

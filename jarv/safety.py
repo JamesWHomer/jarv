@@ -8,6 +8,7 @@ from rich.console import Group
 from rich.markup import escape
 from rich.text import Text
 
+from .cancellation import CancellationToken, TurnCancelled
 from .display import console, jarv_panel
 
 SAFETY_LEVELS = ("all", "risky", "none")
@@ -215,7 +216,7 @@ def prompt_confirmation(command: str, reason: str) -> bool:
     prompt = "[bold]Allow this command?[/bold] [dim]\\[y/N][/dim] [bold cyan]\u203a[/bold cyan] "
     try:
         choice = console.input(prompt).strip().lower()
-    except (KeyboardInterrupt, EOFError):
+    except EOFError:
         console.print("[dim]  denied.[/dim]")
         return False
 
@@ -235,6 +236,7 @@ def check_command(
     history: list | None = None,
     usage_path: Path | None = None,
     session_id: str | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> tuple[bool, str]:
     """Gate a command according to the configured safety level.
 
@@ -252,7 +254,10 @@ def check_command(
     if safety_level == "all":
         reason = "all commands require approval"
         if audit:
-            return _audit_gate(command, reason, config, history, usage_path, session_id)
+            return _audit_gate(
+                command, reason, config, history, usage_path, session_id,
+                cancellation_token,
+            )
         if not prompt_confirmation(command, reason):
             return False, "[command denied by user — safety level is set to 'all']"
         return True, ""
@@ -261,7 +266,10 @@ def check_command(
     is_risky, reason = classify_command(command)
     if is_risky:
         if audit:
-            return _audit_gate(command, reason, config, history, usage_path, session_id)
+            return _audit_gate(
+                command, reason, config, history, usage_path, session_id,
+                cancellation_token,
+            )
         if not prompt_confirmation(command, reason):
             return False, f"[command denied by user — detected as risky: {reason}]"
     return True, ""
@@ -327,6 +335,7 @@ def _audit_gate(
     history: list | None,
     usage_path: Path | None,
     session_id: str | None,
+    cancellation_token: CancellationToken | None,
 ) -> tuple[bool, str]:
     """Show the safety panel with an integrated auditor spinner.
 
@@ -349,6 +358,7 @@ def _audit_gate(
             history,
             usage_path=usage_path,
             session_id=session_id,
+            cancellation_token=cancellation_token,
         )
         if allow:
             console.print(f"[green]  ✓ auditor:[/green] [dim]{auditor_reason}[/dim]")
@@ -366,9 +376,13 @@ def _audit_gate(
                 history,
                 usage_path=usage_path,
                 session_id=session_id,
+                cancellation_token=cancellation_token,
             )
             audit_state["allow"] = a
             audit_state["reason"] = r
+        except TurnCancelled:
+            audit_state["cancelled"] = True
+            audit_state["reason"] = "cancelled"
         except Exception as e:
             audit_state["reason"] = f"auditor unavailable ({type(e).__name__})"
         audit_state["done"] = True
@@ -377,7 +391,12 @@ def _audit_gate(
     thread.start()
 
     auto_approve = (config or {}).get("auditor_auto_approve", True)
-    approved = _live_audit_poll(body, audit_state, auto_approve=auto_approve)
+    approved = _live_audit_poll(
+        body,
+        audit_state,
+        auto_approve=auto_approve,
+        cancellation_token=cancellation_token,
+    )
 
     if approved:
         return True, ""
@@ -406,7 +425,13 @@ def _read_key():
     return None
 
 
-def _live_audit_poll(body, audit_state: dict, *, auto_approve: bool = True) -> bool:
+def _live_audit_poll(
+    body,
+    audit_state: dict,
+    *,
+    auto_approve: bool = True,
+    cancellation_token: CancellationToken | None = None,
+) -> bool:
     """Render the safety panel + auditor + prompt with Rich Live while
     polling for keyboard input and auditor completion concurrently."""
     from rich.live import Live
@@ -426,7 +451,6 @@ def _live_audit_poll(body, audit_state: dict, *, auto_approve: bool = True) -> b
         restore_term = lambda: termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
     approved = False
-    cancelled = False
 
     try:
         console.print()
@@ -434,6 +458,10 @@ def _live_audit_poll(body, audit_state: dict, *, auto_approve: bool = True) -> b
             console.show_cursor(True)
             prefilled = False
             while True:
+                if cancellation_token is not None:
+                    cancellation_token.throw_if_cancelled()
+                if audit_state.get("cancelled"):
+                    raise TurnCancelled
                 # Pre-fill the auditor's recommendation once it arrives, but
                 # only if the user hasn't already started typing.
                 if audit_state["done"] and not buf and not prefilled:
@@ -464,8 +492,7 @@ def _live_audit_poll(body, audit_state: dict, *, auto_approve: bool = True) -> b
                             renderable.show_auditor = False
                         buf.clear()
                         live.refresh()
-                        cancelled = True
-                        break
+                        raise KeyboardInterrupt
                     elif ch in ("\x08", "\x7f"):
                         if buf:
                             buf.pop()
@@ -477,8 +504,6 @@ def _live_audit_poll(body, audit_state: dict, *, auto_approve: bool = True) -> b
         if restore_term:
             restore_term()
 
-    if cancelled:
-        console.print("[dim]  denied.[/dim]")
-    elif not approved:
+    if not approved:
         console.print()
     return approved

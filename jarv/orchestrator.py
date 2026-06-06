@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable
 
 from .artifacts import ArtifactStore
+from .cancellation import CancellationToken, TurnCancelled
 from .config import DEFAULT_CONFIG
 from .safety import check_command
 from .provider import (
@@ -172,6 +173,7 @@ def dispatch_tool(
     config: dict,
     on_run_command: Callable[[str], str] | None = None,
     spawn_observer: "SpawnObserver | None" = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> str:
     """Execute a non-finish tool call and return the model-visible output string.
 
@@ -191,12 +193,17 @@ def dispatch_tool(
             config=config,
             usage_path=node.usage_path,
             session_id=node.session_id,
+            cancellation_token=cancellation_token,
         )
         if not allowed:
             return denial
         if on_run_command is not None:
             return on_run_command(cmd)
-        result = execute_command(cmd, config.get("command_timeout", 60))
+        result = execute_command(
+            cmd,
+            config.get("command_timeout", 60),
+            cancellation_token=cancellation_token,
+        )
         return result.to_model_output()
 
     if name == "read_artifact":
@@ -215,7 +222,15 @@ def dispatch_tool(
         if not isinstance(children, list) or not children:
             return "[tool argument error: children must be a non-empty list]"
         try:
-            results = spawn_batch(node, children, store, client, config, observer=spawn_observer)
+            results = spawn_batch(
+                node,
+                children,
+                store,
+                client,
+                config,
+                observer=spawn_observer,
+                cancellation_token=cancellation_token,
+            )
         except DepthExceeded as e:
             return f"[error: {e}]"
         return json.dumps(results)
@@ -229,6 +244,7 @@ def run_subagent_loop(
     client,
     config: dict,
     spawn_observer: "SpawnObserver | None" = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> tuple[str | None, str]:
     """Run a single subagent to completion.
 
@@ -255,6 +271,8 @@ def run_subagent_loop(
         kwargs["reasoning"] = {"effort": effort}
 
     while True:
+        if cancellation_token is not None:
+            cancellation_token.throw_if_cancelled()
         tool_calls: list = []
         reasoning_items: list = []
         context_breakdown = estimate_context_breakdown(
@@ -271,6 +289,7 @@ def run_subagent_loop(
                 kwargs["tools"], kwargs["input"],
                 reasoning=kwargs.get("reasoning"),
                 prompt_cache_key=f"jarv:{node.session_id}" if node.session_id else None,
+                cancellation_token=cancellation_token,
             ):
                 if isinstance(event, ToolCallDone):
                     tool_calls.append(event)
@@ -289,6 +308,8 @@ def run_subagent_loop(
             )
         except ProviderError as e:
             return None, f"provider error: {e}"
+        except TurnCancelled:
+            raise
         except Exception as e:
             return None, f"stream error: {e}"
 
@@ -316,6 +337,7 @@ def run_subagent_loop(
                     output = dispatch_tool(
                         item.name, args, node, store, client, config,
                         spawn_observer=spawn_observer,
+                        cancellation_token=cancellation_token,
                     )
 
             output = truncate_model_output(
@@ -362,6 +384,7 @@ def spawn_batch(
     observer: "SpawnObserver | None" = None,
     usage_path: Path | None = None,
     session_id: str | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> list[dict]:
     """Spawn N children in parallel, block until all finish, return status reports."""
     new_depth = parent.depth + 1
@@ -404,26 +427,58 @@ def spawn_batch(
 
     pool_size = max(1, int(config.get("subagent_thread_pool_max_workers", 8)))
     raw_results: dict[str, dict] = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=pool_size) as ex:
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=pool_size)
+    future_to_node = {}
+    try:
         future_to_node = {
-            ex.submit(run_subagent_loop, n, store, client, config, observer): n
+            ex.submit(
+                run_subagent_loop,
+                n,
+                store,
+                client,
+                config,
+                observer,
+                cancellation_token,
+            ): n
             for n in nodes
         }
-        for fut in concurrent.futures.as_completed(future_to_node):
-            n = future_to_node[fut]
-            try:
-                longform, tldr_or_reason = fut.result()
-            except Exception as e:
-                result = {"label": n.label, "status": "failed", "reason": f"unhandled exception: {e}"}
-            else:
-                if longform is not None:
-                    store.put(n.label, longform, tldr_or_reason, n.label)
-                    parent.visible_labels.add(n.label)
-                    result = {"label": n.label, "status": "done", "tldr": tldr_or_reason}
+        pending = set(future_to_node)
+        while pending:
+            if cancellation_token is not None:
+                cancellation_token.throw_if_cancelled()
+            done, pending = concurrent.futures.wait(
+                pending,
+                timeout=0.05,
+                return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+            for fut in done:
+                n = future_to_node[fut]
+                try:
+                    longform, tldr_or_reason = fut.result()
+                except TurnCancelled:
+                    raise
+                except Exception as e:
+                    result = {"label": n.label, "status": "failed", "reason": f"unhandled exception: {e}"}
                 else:
-                    result = {"label": n.label, "status": "failed", "reason": tldr_or_reason}
-            raw_results[n.label] = result
-            if observer is not None:
-                observer.on_child_done(parent.label, n.label, result)
+                    if longform is not None:
+                        store.put(n.label, longform, tldr_or_reason, n.label)
+                        parent.visible_labels.add(n.label)
+                        result = {"label": n.label, "status": "done", "tldr": tldr_or_reason}
+                    else:
+                        result = {"label": n.label, "status": "failed", "reason": tldr_or_reason}
+                raw_results[n.label] = result
+                if observer is not None:
+                    observer.on_child_done(parent.label, n.label, result)
+    except (KeyboardInterrupt, TurnCancelled):
+        if cancellation_token is not None:
+            cancellation_token.cancel()
+        raise
+    finally:
+        if cancellation_token is not None and cancellation_token.cancelled:
+            for future in future_to_node:
+                future.cancel()
+            ex.shutdown(wait=False, cancel_futures=True)
+        else:
+            ex.shutdown(wait=True)
 
     return [raw_results[spec["label"]] for spec in child_specs if spec.get("label") in raw_results]

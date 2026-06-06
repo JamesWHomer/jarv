@@ -108,3 +108,60 @@ def test_read_key_returns_resize_when_posix_terminal_size_changes(monkeypatch):
     monkeypatch.setattr(command_input.os, "get_terminal_size", terminal_size)
 
     assert command_input._read_key() == "RESIZE"
+
+
+def test_read_key_maps_posix_delete(monkeypatch):
+    stdin = _install_posix_input(monkeypatch, "\x1b[3~")
+
+    assert command_input._read_key(text_mode=True) == "DELETE"
+    assert stdin.remaining == ""
+
+
+def test_read_editable_line_edits_prefilled_text():
+    keys = iter(["LEFT", "LEFT", "X", "DELETE", "ENTER"])
+    output = []
+
+    result = command_input.read_editable_line(
+        "jarv> ",
+        initial="hello",
+        read_key=lambda: next(keys),
+        write=output.append,
+    )
+
+    assert result == "helXo"
+    assert output[-1] == "\n"
+
+
+def test_read_editable_line_ctrl_c_clears_before_exiting():
+    actions = iter([KeyboardInterrupt(), "h", "i", "ENTER"])
+
+    def read_key():
+        action = next(actions)
+        if isinstance(action, BaseException):
+            raise action
+        return action
+
+    result = command_input.read_editable_line(
+        "jarv> ",
+        initial="restore me",
+        read_key=read_key,
+        write=lambda _text: None,
+    )
+
+    assert result == "hi"
+
+
+def test_read_editable_line_ctrl_c_exits_when_empty():
+    def interrupt():
+        raise KeyboardInterrupt
+
+    try:
+        command_input.read_editable_line(
+            "jarv> ",
+            read_key=interrupt,
+            write=lambda _text: None,
+        )
+    except KeyboardInterrupt:
+        pass
+    else:
+        raise AssertionError("empty Ctrl+C should exit the line editor")

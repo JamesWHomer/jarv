@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .cancellation import CancellationToken, TurnCancelled
 from .display import console
 from .provider import resolve_api_key, PROVIDERS, LOCAL_PROVIDERS
 from .usage import estimate_context_breakdown, record_response_usage
@@ -95,6 +96,7 @@ def audit_command(
     usage_path: Path | None = None,
     session_id: str | None = None,
     global_usage_path: Path | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> tuple[bool, str]:
     """Run the auditor on a flagged command.
 
@@ -124,6 +126,7 @@ def audit_command(
                 usage_path=usage_path,
                 session_id=session_id,
                 global_usage_path=global_usage_path,
+                cancellation_token=cancellation_token,
             )
         else:
             return _call_openai_compat(
@@ -134,7 +137,10 @@ def audit_command(
                 usage_path=usage_path,
                 session_id=session_id,
                 global_usage_path=global_usage_path,
+                cancellation_token=cancellation_token,
             )
+    except TurnCancelled:
+        raise
     except Exception as e:
         # If auditor fails, fall back to user prompt
         return False, f"auditor unavailable ({type(e).__name__})"
@@ -149,6 +155,7 @@ def _call_openai_compat(
     usage_path: Path | None = None,
     session_id: str | None = None,
     global_usage_path: Path | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> tuple[bool, str]:
     from openai import OpenAI
 
@@ -162,48 +169,63 @@ def _call_openai_compat(
         kwargs["base_url"] = base_url
 
     client = OpenAI(**kwargs)
+    close_client = getattr(client, "close", lambda: None)
+    unregister = (
+        cancellation_token.register(close_client)
+        if cancellation_token is not None else lambda: None
+    )
 
-    messages = _auditor_messages(user_message)
-    kwargs = _openai_compat_kwargs(
-        config,
-        model,
-        info,
-        messages,
-    )
-    response = client.chat.completions.create(**kwargs)
-    content = _response_text(response)
-    _record_auditor_response(
-        usage_path,
-        session_id,
-        model,
-        response,
-        messages,
-        content,
-        global_usage_path=global_usage_path,
-    )
-    parsed = _parse_response(content)
-    if not _is_parse_failure(parsed):
-        return parsed
+    try:
+        if cancellation_token is not None:
+            cancellation_token.throw_if_cancelled()
+        messages = _auditor_messages(user_message)
+        kwargs = _openai_compat_kwargs(
+            config,
+            model,
+            info,
+            messages,
+        )
+        response = client.chat.completions.create(**kwargs)
+        if cancellation_token is not None:
+            cancellation_token.throw_if_cancelled()
+        content = _response_text(response)
+        _record_auditor_response(
+            usage_path,
+            session_id,
+            model,
+            response,
+            messages,
+            content,
+            global_usage_path=global_usage_path,
+        )
+        parsed = _parse_response(content)
+        if not _is_parse_failure(parsed):
+            return parsed
 
-    retry_messages = _auditor_messages(user_message, retry=True)
-    retry_kwargs = _openai_compat_kwargs(
-        config,
-        model,
-        info,
-        retry_messages,
-    )
-    retry_response = client.chat.completions.create(**retry_kwargs)
-    retry_content = _response_text(retry_response)
-    _record_auditor_response(
-        usage_path,
-        session_id,
-        model,
-        retry_response,
-        retry_messages,
-        retry_content,
-        global_usage_path=global_usage_path,
-    )
-    return _parse_response(retry_content)
+        retry_messages = _auditor_messages(user_message, retry=True)
+        retry_kwargs = _openai_compat_kwargs(
+            config,
+            model,
+            info,
+            retry_messages,
+        )
+        retry_response = client.chat.completions.create(**retry_kwargs)
+        if cancellation_token is not None:
+            cancellation_token.throw_if_cancelled()
+        retry_content = _response_text(retry_response)
+        _record_auditor_response(
+            usage_path,
+            session_id,
+            model,
+            retry_response,
+            retry_messages,
+            retry_content,
+            global_usage_path=global_usage_path,
+        )
+        return _parse_response(retry_content)
+    finally:
+        unregister()
+        close_client()
 
 
 def _auditor_messages(user_message: str, *, retry: bool = False) -> list[dict[str, str]]:
@@ -300,6 +322,7 @@ def _call_litellm(
     usage_path: Path | None = None,
     session_id: str | None = None,
     global_usage_path: Path | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> tuple[bool, str]:
     from .litellm_compat import import_litellm
 
@@ -316,7 +339,11 @@ def _call_litellm(
     if api_key and api_key != "not-needed":
         kwargs["api_key"] = api_key
 
+    if cancellation_token is not None:
+        cancellation_token.throw_if_cancelled()
     response = litellm.completion(**kwargs)
+    if cancellation_token is not None:
+        cancellation_token.throw_if_cancelled()
     content = _response_text(response)
     _record_auditor_response(
         usage_path,
@@ -336,6 +363,8 @@ def _call_litellm(
     if api_key and api_key != "not-needed":
         retry_kwargs["api_key"] = api_key
     retry_response = litellm.completion(**retry_kwargs)
+    if cancellation_token is not None:
+        cancellation_token.throw_if_cancelled()
     retry_content = _response_text(retry_response)
     _record_auditor_response(
         usage_path,

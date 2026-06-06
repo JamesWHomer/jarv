@@ -1,6 +1,7 @@
 import io
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import jarv.cli as cli
@@ -134,6 +135,52 @@ class CliStdinTests(unittest.TestCase):
             cli.main()
 
         heads_up.assert_called_once()
+
+    def test_main_exits_130_when_one_shot_turn_is_cancelled(self):
+        config = {
+            "provider": "openai",
+            "model": "test-model",
+            "max_stdin_chars": 200000,
+            "check_updates": False,
+        }
+
+        with (
+            patch.object(sys, "argv", ["jarv", "cancel", "me"]),
+            patch.object(sys, "stdin", TtyStringIO("")),
+            patch.object(cli, "load_config", return_value=config),
+            patch("jarv.config.is_setup_complete", return_value=True),
+            patch.object(cli, "validate_config", return_value=True),
+            patch("jarv.provider.resolve_api_key", return_value="key"),
+            patch("jarv.agent.run_agent", return_value=SimpleNamespace(cancelled=True)),
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                cli.main()
+
+        self.assertEqual(raised.exception.code, 130)
+
+    def test_heads_up_mode_restores_cancelled_prompt(self):
+        initial_values = []
+        calls = 0
+
+        def read_line(_prompt, initial=""):
+            nonlocal calls
+            initial_values.append(initial)
+            calls += 1
+            if calls == 1:
+                return "draft prompt"
+            raise KeyboardInterrupt
+
+        with (
+            patch("jarv.command_input.read_editable_line", side_effect=read_line),
+            patch(
+                "jarv.agent.run_agent",
+                return_value=SimpleNamespace(cancelled=True, prompt="draft prompt"),
+            ) as run_agent,
+        ):
+            cli.run_heads_up_mode({"model": "test"}, client=object())
+
+        run_agent.assert_called_once()
+        self.assertEqual(initial_values, ["", "draft prompt"])
 
 
 if __name__ == "__main__":
