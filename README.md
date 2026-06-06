@@ -26,6 +26,8 @@ To upgrade:
 jarv /update
 ```
 
+![jarv update demo](https://github.com/user-attachments/assets/5dbbb528-6b6f-4d04-bc2d-d68652e67fc9)
+
 ## Usage
 
 ### One-shot mode
@@ -61,6 +63,8 @@ jarv> /new
 - During a response, Ctrl+C stops further work, checkpoints the turn in history/context, and restores the prompt for editing. Use `/undo` to remove the turn.
 - At the prompt, Ctrl+C clears existing text; press it again on an empty prompt to exit.
 - You can also exit with `exit`, `quit`, or `/exit`.
+
+![jarv interactive session](https://github.com/user-attachments/assets/d56b491b-4498-43f9-a93b-cfee7aee4791)
 
 ### Flags
 
@@ -128,6 +132,8 @@ The terminal shows a live progress panel as children run, with a green checkmark
 
 ## Commands
 
+![jarv slash commands](https://github.com/user-attachments/assets/ed723bce-229e-47db-82a4-c26af2c623ad)
+
 | Command | Description |
 | --- | --- |
 | `/help` | Show all commands |
@@ -159,6 +165,8 @@ Each terminal is automatically bound to its own session. Jarv identifies termina
 - `/sessions` opens an interactive browser (arrow keys to navigate, Enter to load, `a` to archive, `d` to delete, `p` to preview, `Tab` to switch views, Ctrl+F to search).
 - `/history` opens an interactive transcript where Up/Down scroll and Left/Right jump to the previous or next chat/reply.
 - `/undo` and `/redo` let you step through recent exchanges.
+
+![jarv session undo](https://github.com/user-attachments/assets/957729b0-3925-461d-a65c-25cf030ffaa6)
 
 ## Config
 
