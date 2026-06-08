@@ -352,13 +352,16 @@ def run_subagent_loop(
                 config.get("max_tool_output_chars", DEFAULT_CONFIG["max_tool_output_chars"]),
             )
 
-            new_input.append({
+            function_call = {
                 "type": "function_call",
                 "id": responses_input_id(str(item.id), "fc"),
                 "call_id": item.call_id,
                 "name": item.name,
                 "arguments": item.arguments,
-            })
+            }
+            if item.provider_content:
+                function_call["provider_content"] = item.provider_content
+            new_input.append(function_call)
             new_input.append({
                 "type": "function_call_output",
                 "call_id": item.call_id,

@@ -1,9 +1,4 @@
-"""Multi-provider abstraction layer.
-
-Supports two streaming backends:
-- OpenAI Responses API (for OpenAI models — superior tool calling)
-- Chat Completions API (for all other providers via OpenAI SDK or litellm)
-"""
+"""Multi-provider abstraction layer over direct HTTP transports."""
 
 import hashlib
 import os
@@ -35,6 +30,7 @@ class ToolCallDone:
     call_id: str
     name: str
     arguments: str
+    provider_content: list[dict] | None = None
 
 
 @dataclass
@@ -207,19 +203,6 @@ def _is_response_complete(response: Any) -> bool:
     return False
 
 
-def _retrieve_completed_response(client: Any, response_id: str, attempts: int = 4) -> Any | None:
-    for attempt in range(attempts):
-        try:
-            response = client.responses.retrieve(response_id)
-        except Exception:
-            response = None
-        if response is not None and _is_response_complete(response):
-            return response
-        if attempt < attempts - 1:
-            time.sleep(0.25 * (attempt + 1))
-    return None
-
-
 def _events_from_recovered_response(
     response: Any,
     yielded_tool_call_ids: set[str],
@@ -289,25 +272,26 @@ def create_client(config: dict):
     api_key = resolve_api_key(config)
 
     if backend in ("responses", "openai_compat"):
-        from openai import OpenAI
+        from .openai_http import create_client as create_openai_client
 
-        kwargs: dict[str, Any] = {"api_key": api_key or "not-needed"}
         base_url = config.get("base_url")
         if not base_url:
             provider_name = config.get("provider", "openai")
             info = PROVIDERS.get(provider_name, {})
             base_url = info.get("base_url")
-        if base_url:
-            kwargs["base_url"] = base_url
-        return OpenAI(**kwargs)
+        return create_openai_client(config, api_key, base_url)
 
     if backend == "anthropic":
         from .anthropic_http import create_client as create_anthropic_client
 
         return create_anthropic_client(config, api_key)
 
-    # LiteLLM doesn't use a persistent client.
-    return None
+    if backend == "gemini":
+        from .gemini_http import create_client as create_gemini_client
+
+        return create_gemini_client(config, api_key)
+
+    raise ProviderError(f"Unknown backend: {backend}")
 
 
 # ---------------------------------------------------------------------------
@@ -423,88 +407,86 @@ def _stream_responses_api(
     client, model, instructions, tools, input_items, reasoning=None, prompt_cache_key=None,
     cancellation_token: CancellationToken | None = None,
 ) -> Iterator:
-    responses_input = []
-    for item in input_items:
-        if isinstance(item, dict) and "provider_content" in item:
-            item = {key: value for key, value in item.items() if key != "provider_content"}
-        responses_input.append(item)
-    kwargs: dict[str, Any] = dict(
-        model=model,
-        instructions=instructions,
-        tools=tools,
-        input=responses_input,
+    from .openai_http import (
+        build_responses_payload,
+        retrieve_response,
+        stream_response as stream_openai_response,
     )
-    if reasoning:
-        kwargs["reasoning"] = reasoning
-    if prompt_cache_key:
-        kwargs["prompt_cache_key"] = prompt_cache_key
-    kwargs = sanitize_json_value(kwargs)
 
+    payload = build_responses_payload(
+        model,
+        instructions,
+        tools,
+        input_items,
+        reasoning=reasoning,
+        prompt_cache_key=prompt_cache_key,
+    )
     reasoning_started = False
     response_id: str | None = None
     yielded_tool_call_ids: set[str] = set()
     yielded_reasoning_ids: set[str] = set()
     try:
-        with client.responses.stream(**kwargs) as stream:
-            unregister = (
-                cancellation_token.register(stream.close)
-                if cancellation_token is not None else lambda: None
-            )
-            try:
-                for event in stream:
-                    if cancellation_token is not None:
-                        cancellation_token.throw_if_cancelled()
-                    if event.type == "response.created":
-                        response = _value(event, "response")
-                        response_id = str(_value(response, "id") or response_id or "")
-                        continue
-                    response = _value(event, "response")
-                    if response is not None and _value(response, "id"):
-                        response_id = str(_value(response, "id"))
-                    if not reasoning_started and _response_event_has_reasoning_started(event):
-                        reasoning_started = True
-                        item = _value(event, "item")
-                        yield ReasoningStarted(id=str(_value(item, "id") or ""))
-                    if event.type == "response.output_text.delta":
-                        yield TextDelta(event.delta)
-                    elif event.type == "response.output_item.done":
-                        if event.item.type == "function_call":
-                            yielded_tool_call_ids.update(
-                                {str(event.item.id or ""), str(event.item.call_id or "")}
-                            )
-                            yield ToolCallDone(
-                                id=event.item.id,
-                                call_id=event.item.call_id,
-                                name=event.item.name,
-                                arguments=event.item.arguments,
-                            )
-                        elif event.item.type == "reasoning":
-                            yielded_reasoning_ids.add(str(event.item.id or ""))
-                            yield ReasoningDone(
-                                id=event.item.id,
-                                summary=getattr(event.item, "summary", []),
-                            )
-                if cancellation_token is not None:
-                    cancellation_token.throw_if_cancelled()
-                try:
-                    final_response = stream.get_final_response()
-                except Exception:
-                    if cancellation_token is not None:
-                        cancellation_token.throw_if_cancelled()
-                    final_response = (
-                        _retrieve_completed_response(client, response_id)
-                        if response_id else None
+        for event in stream_openai_response(
+            client,
+            payload,
+            cancellation_token=cancellation_token,
+        ):
+            event_type = str(event.get("type") or "")
+            response = event.get("response")
+            if isinstance(response, dict) and response.get("id"):
+                response_id = str(response["id"])
+            if event_type == "response.created":
+                continue
+            if not reasoning_started and _response_event_has_reasoning_started(event):
+                reasoning_started = True
+                item = event.get("item") if isinstance(event.get("item"), dict) else {}
+                yield ReasoningStarted(id=str(item.get("id") or ""))
+            if event_type == "response.output_text.delta":
+                yield TextDelta(str(event.get("delta") or ""))
+            elif event_type == "response.output_item.done":
+                item = event.get("item") if isinstance(event.get("item"), dict) else {}
+                if item.get("type") == "function_call":
+                    yielded_tool_call_ids.update(
+                        {str(item.get("id") or ""), str(item.get("call_id") or "")}
                     )
-                yield StreamDone(response=final_response)
-            finally:
-                unregister()
+                    yield ToolCallDone(
+                        id=str(item.get("id") or ""),
+                        call_id=str(item.get("call_id") or ""),
+                        name=str(item.get("name") or ""),
+                        arguments=str(item.get("arguments") or "{}"),
+                    )
+                elif item.get("type") == "reasoning":
+                    item_id = str(item.get("id") or "")
+                    yielded_reasoning_ids.add(item_id)
+                    yield ReasoningDone(
+                        id=item_id,
+                        summary=item.get("summary") or [],
+                    )
+            elif event_type == "response.completed":
+                yield StreamDone(response=response)
+                return
+        raise ProviderError("OpenAI response stream ended before response.completed")
     except TurnCancelled:
         raise
     except Exception:
         if cancellation_token is not None:
             cancellation_token.throw_if_cancelled()
         if response_id:
-            recovered_response = _retrieve_completed_response(client, response_id)
+            recovered_response = None
+            for attempt in range(4):
+                try:
+                    candidate = retrieve_response(
+                        client,
+                        response_id,
+                        cancellation_token=cancellation_token,
+                    )
+                except Exception:
+                    candidate = None
+                if candidate is not None and _is_response_complete(candidate):
+                    recovered_response = candidate
+                    break
+                if attempt < 3:
+                    time.sleep(0.25 * (attempt + 1))
             if recovered_response is not None:
                 yield from _events_from_recovered_response(
                     recovered_response,
@@ -517,62 +499,64 @@ def _stream_responses_api(
 
 
 # ---------------------------------------------------------------------------
-# Backend: Chat Completions via OpenAI SDK (OpenAI-compatible providers)
+# Backend: OpenAI-compatible Chat Completions over direct HTTP
 # ---------------------------------------------------------------------------
 
 def _stream_chat_completions(
     client, model, instructions, tools, input_items, reasoning=None,
     cancellation_token: CancellationToken | None = None,
 ) -> Iterator:
-    messages = sanitize_json_value(_to_chat_messages(instructions, input_items))
+    from .openai_http import build_chat_payload, stream_chat
 
-    kwargs: dict[str, Any] = dict(
-        model=model,
-        messages=messages,
-        stream=True,
-        stream_options={"include_usage": True},
+    payload = build_chat_payload(
+        model,
+        sanitize_json_value(_to_chat_messages(instructions, input_items)),
+        sanitize_json_value(_to_chat_tools(tools)) if tools else None,
+        reasoning=reasoning,
     )
-    if tools:
-        kwargs["tools"] = sanitize_json_value(_to_chat_tools(tools))
-    if reasoning and reasoning.get("effort"):
-        kwargs["reasoning_effort"] = reasoning["effort"]
-
     accumulators: dict[int, dict] = {}
-    final_chunk = None
+    final_chunk: dict[str, Any] = {}
     reasoning_started = False
-
-    stream = client.chat.completions.create(**sanitize_json_value(kwargs))
-    unregister = (
-        cancellation_token.register(stream.close)
-        if cancellation_token is not None and hasattr(stream, "close")
-        else lambda: None
-    )
-    try:
-        for chunk in stream:
-            if cancellation_token is not None:
-                cancellation_token.throw_if_cancelled()
-            if getattr(chunk, "usage", None):
-                final_chunk = chunk
-            if not chunk.choices:
-                continue
-
-            delta = chunk.choices[0].delta
-            if not reasoning_started and (_has_reasoning_signal(delta) or _has_reasoning_signal(chunk.choices[0])):
-                reasoning_started = True
-                yield ReasoningStarted(id="")
-            text_delta = _text_from_content(_value(delta, "content")) if delta else ""
-            if text_delta:
-                yield TextDelta(text_delta)
-            if delta and getattr(delta, "tool_calls", None):
-                for tc_delta in delta.tool_calls:
-                    _accumulate_tool_delta(accumulators, tc_delta)
-
-            if chunk.choices[0].finish_reason:
-                yield from _flush_tool_calls(accumulators)
-    finally:
-        unregister()
-        if hasattr(stream, "close"):
-            stream.close()
+    for chunk in stream_chat(
+        client,
+        payload,
+        cancellation_token=cancellation_token,
+    ):
+        if chunk.get("usage"):
+            final_chunk["usage"] = chunk["usage"]
+        for key in ("id", "model", "created"):
+            if key in chunk:
+                final_chunk[key] = chunk[key]
+        choices = chunk.get("choices")
+        if not isinstance(choices, list) or not choices:
+            continue
+        choice = choices[0] if isinstance(choices[0], dict) else {}
+        delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
+        if not reasoning_started and (
+            _has_reasoning_signal(delta) or _has_reasoning_signal(choice)
+        ):
+            reasoning_started = True
+            yield ReasoningStarted(id="")
+        text_delta = _text_from_content(delta.get("content"))
+        if text_delta:
+            yield TextDelta(text_delta)
+        tool_calls = delta.get("tool_calls")
+        if isinstance(tool_calls, list):
+            for tc_delta in tool_calls:
+                if not isinstance(tc_delta, dict):
+                    continue
+                idx = int(tc_delta.get("index") or 0)
+                acc = accumulators.setdefault(
+                    idx, {"id": "", "name": "", "arguments": ""}
+                )
+                if tc_delta.get("id"):
+                    acc["id"] = str(tc_delta["id"])
+                function = tc_delta.get("function")
+                if isinstance(function, dict):
+                    acc["name"] += str(function.get("name") or "")
+                    acc["arguments"] += str(function.get("arguments") or "")
+        if choice.get("finish_reason"):
+            yield from _flush_tool_calls(accumulators)
 
     if cancellation_token is not None:
         cancellation_token.throw_if_cancelled()
@@ -628,92 +612,56 @@ def _stream_anthropic(
 
 
 # ---------------------------------------------------------------------------
-# Backend: LiteLLM (Gemini, Ollama)
+# Backend: Gemini over direct HTTP
 # ---------------------------------------------------------------------------
 
-def _stream_litellm(
-    config, model, instructions, tools, input_items, reasoning=None,
+def _stream_gemini(
+    client, config, model, instructions, tools, input_items, reasoning=None,
     cancellation_token: CancellationToken | None = None,
 ) -> Iterator:
-    from .litellm_compat import import_litellm
+    from .gemini_http import build_payload, stream_content
 
-    litellm = import_litellm()
-
-    messages = sanitize_json_value(_to_chat_messages(instructions, input_items))
-    provider_name = config.get("provider", "")
-
-    litellm_model = model
-    prefix = PROVIDERS.get(provider_name, {}).get("litellm_prefix")
-    if prefix and "/" not in model:
-        litellm_model = f"{prefix}/{model}"
-
-    kwargs: dict[str, Any] = dict(
-        model=litellm_model,
-        messages=messages,
-        stream=True,
-        stream_options={"include_usage": True},
-    )
-    if tools:
-        kwargs["tools"] = sanitize_json_value(_to_chat_tools(tools))
-    if reasoning and reasoning.get("effort"):
-        kwargs["reasoning_effort"] = reasoning["effort"]
-
-    api_key = resolve_api_key(config)
-    if api_key and api_key != "not-needed":
-        kwargs["api_key"] = api_key
-
-    accumulators: dict[int, dict] = {}
-    final_chunk = None
-    reasoning_started = False
-
-    stream = litellm.completion(**sanitize_json_value(kwargs))
-
-    def close_stream() -> None:
-        try:
-            close = getattr(stream, "close", None)
-            if callable(close):
-                close()
-                return
-            inner = getattr(stream, "completion_stream", None)
-            close = getattr(inner, "close", None)
-            if callable(close):
-                close()
-        except Exception:
-            pass
-
-    unregister = (
-        cancellation_token.register(close_stream)
-        if cancellation_token is not None else lambda: None
-    )
-    try:
-        for chunk in stream:
-            if cancellation_token is not None:
-                cancellation_token.throw_if_cancelled()
-            if getattr(chunk, "usage", None):
-                final_chunk = chunk
-            if not chunk.choices:
-                continue
-
-            delta = chunk.choices[0].delta
-            if not reasoning_started and (_has_reasoning_signal(delta) or _has_reasoning_signal(chunk.choices[0])):
-                reasoning_started = True
-                yield ReasoningStarted(id="")
-            text_delta = _text_from_content(_value(delta, "content"))
-            if text_delta:
-                yield TextDelta(text_delta)
-            if getattr(delta, "tool_calls", None):
-                for tc_delta in delta.tool_calls:
-                    _accumulate_tool_delta(accumulators, tc_delta)
-
-            if chunk.choices[0].finish_reason:
-                yield from _flush_tool_calls(accumulators)
-    finally:
-        unregister()
-        close_stream()
-
-    if cancellation_token is not None:
-        cancellation_token.throw_if_cancelled()
-    yield StreamDone(response=final_chunk)
+    reasoning_parts: list[dict] = []
+    for event in stream_content(
+        client,
+        model,
+        build_payload(
+            config,
+            model,
+            instructions,
+            tools,
+            input_items,
+            reasoning=reasoning,
+        ),
+        cancellation_token=cancellation_token,
+        max_retries=int(config.get("gemini_max_retries", 2)),
+    ):
+        event_type = event.get("type")
+        if event_type == "text_delta":
+            yield TextDelta(str(event.get("delta") or ""))
+        elif event_type == "reasoning_started":
+            yield ReasoningStarted(id=str(event.get("id") or ""))
+        elif event_type == "reasoning_part":
+            content = event.get("provider_content")
+            if isinstance(content, list):
+                reasoning_parts.extend(content)
+        elif event_type == "reasoning_done":
+            yield ReasoningDone(
+                id=str(event.get("id") or ""),
+                summary=[],
+                provider_content=reasoning_parts,
+            )
+        elif event_type == "tool_call":
+            call_id = str(event.get("id") or f"call_{uuid.uuid4().hex[:12]}")
+            yield ToolCallDone(
+                id=call_id,
+                call_id=call_id,
+                name=str(event.get("name") or ""),
+                arguments=str(event.get("arguments") or "{}"),
+                provider_content=event.get("provider_content"),
+            )
+        elif event_type == "done":
+            yield StreamDone(response=event.get("response"))
 
 
 # ---------------------------------------------------------------------------
@@ -748,9 +696,9 @@ def _stream_response_direct(
                 client, config, model, instructions, tools, input_items, reasoning,
                 cancellation_token,
             )
-        elif backend == "litellm":
-            yield from _stream_litellm(
-                config, model, instructions, tools, input_items, reasoning,
+        elif backend == "gemini":
+            yield from _stream_gemini(
+                client, config, model, instructions, tools, input_items, reasoning,
                 cancellation_token,
             )
         else:

@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from jarv.usage import (
     append_global_usage_record,
     aggregate_usage_records,
+    estimate_token_cost_usd,
+    known_context_window,
     load_global_usage_records,
     load_usage,
     record_response_usage,
@@ -14,6 +16,18 @@ from jarv.usage import (
 
 
 class UsageRecordingTests(unittest.TestCase):
+    def test_bundled_metadata_prices_cached_input_separately(self):
+        record = {
+            "input_tokens": 1_000_000,
+            "cached_input_tokens": 500_000,
+            "output_tokens": 100_000,
+        }
+        self.assertEqual(known_context_window("gpt-5.4-mini"), 272_000)
+        self.assertAlmostEqual(
+            estimate_token_cost_usd(record, "gpt-5.4-mini"),
+            0.8625,
+        )
+
     def test_records_estimated_usage_when_provider_omits_usage(self):
         with TemporaryDirectory() as tmp:
             usage_path = Path(tmp) / "usage-test.json"

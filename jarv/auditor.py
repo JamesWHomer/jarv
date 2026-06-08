@@ -128,8 +128,8 @@ def audit_command(
                 global_usage_path=global_usage_path,
                 cancellation_token=cancellation_token,
             )
-        elif backend == "litellm":
-            return _call_litellm(
+        elif backend == "gemini":
+            return _call_gemini(
                 config,
                 model,
                 user_message,
@@ -167,19 +167,15 @@ def _call_openai_compat(
     global_usage_path: Path | None = None,
     cancellation_token: CancellationToken | None = None,
 ) -> tuple[bool, str]:
-    from openai import OpenAI
+    from .openai_http import build_chat_payload, create_chat, create_client
 
     api_key = resolve_api_key(config)
     base_url = config.get("base_url")
     if not base_url:
         base_url = info.get("base_url")
 
-    kwargs = {"api_key": api_key or "not-needed"}
-    if base_url:
-        kwargs["base_url"] = base_url
-
-    client = OpenAI(**kwargs)
-    close_client = getattr(client, "close", lambda: None)
+    client = create_client(config, api_key, base_url)
+    close_client = client.close
     unregister = (
         cancellation_token.register(close_client)
         if cancellation_token is not None else lambda: None
@@ -195,7 +191,11 @@ def _call_openai_compat(
             info,
             messages,
         )
-        response = client.chat.completions.create(**kwargs)
+        response = create_chat(
+            client,
+            build_chat_payload(**kwargs, stream=False),
+            cancellation_token=cancellation_token,
+        )
         if cancellation_token is not None:
             cancellation_token.throw_if_cancelled()
         content = _response_text(response)
@@ -219,7 +219,11 @@ def _call_openai_compat(
             info,
             retry_messages,
         )
-        retry_response = client.chat.completions.create(**retry_kwargs)
+        retry_response = create_chat(
+            client,
+            build_chat_payload(**retry_kwargs, stream=False),
+            cancellation_token=cancellation_token,
+        )
         if cancellation_token is not None:
             cancellation_token.throw_if_cancelled()
         retry_content = _response_text(retry_response)
@@ -251,7 +255,15 @@ def _auditor_messages(user_message: str, *, retry: bool = False) -> list[dict[st
 
 def _response_text(response: Any) -> str:
     if isinstance(response, dict):
-        return str(response.get("output_text") or "")
+        direct = response.get("output_text")
+        if isinstance(direct, str):
+            return direct
+        choices = response.get("choices")
+        if isinstance(choices, list) and choices:
+            message = choices[0].get("message") if isinstance(choices[0], dict) else None
+            if isinstance(message, dict):
+                return str(message.get("content") or "")
+        return ""
     try:
         return str(response.choices[0].message.content or "")
     except Exception:
@@ -321,7 +333,7 @@ def _uses_max_completion_tokens(config: dict, model: str, info: dict) -> bool:
 
 
 def _is_direct_openai(config: dict, info: dict) -> bool:
-    """Return True when the OpenAI SDK is talking to OpenAI directly."""
+    """Return True when the request targets OpenAI directly."""
     provider = config.get("provider", "openai")
     return provider == "openai" and not (config.get("base_url") or info.get("base_url"))
 
@@ -402,7 +414,7 @@ def _call_anthropic(
         client.close()
 
 
-def _call_litellm(
+def _call_gemini(
     config: dict,
     model: str,
     user_message: str,
@@ -412,66 +424,72 @@ def _call_litellm(
     global_usage_path: Path | None = None,
     cancellation_token: CancellationToken | None = None,
 ) -> tuple[bool, str]:
-    from .litellm_compat import import_litellm
+    from .gemini_http import build_payload, create_client, generate_content
 
-    litellm = import_litellm()
-
-    provider_name = config.get("provider", "")
-    prefix = PROVIDERS.get(provider_name, {}).get("litellm_prefix", "")
-    litellm_model = f"{prefix}/{model}" if prefix and "/" not in model else model
-
-    messages = _auditor_messages(user_message)
-    kwargs = _litellm_kwargs(litellm_model, messages)
-
-    api_key = resolve_api_key(config)
-    if api_key and api_key != "not-needed":
-        kwargs["api_key"] = api_key
-
-    if cancellation_token is not None:
-        cancellation_token.throw_if_cancelled()
-    response = litellm.completion(**kwargs)
-    if cancellation_token is not None:
-        cancellation_token.throw_if_cancelled()
-    content = _response_text(response)
-    _record_auditor_response(
-        usage_path,
-        session_id,
-        model,
-        response,
-        messages,
-        content,
-        global_usage_path=global_usage_path,
+    client = create_client(config, resolve_api_key(config))
+    unregister = (
+        cancellation_token.register(client.close)
+        if cancellation_token is not None else lambda: None
     )
-    parsed = _parse_response(content)
-    if not _is_parse_failure(parsed):
-        return parsed
+    try:
+        messages = _auditor_messages(user_message)
+        response = generate_content(
+            client,
+            model,
+            build_payload(
+                config,
+                model,
+                messages[0]["content"],
+                [],
+                [messages[1]],
+                max_output_tokens=100,
+            ),
+            cancellation_token=cancellation_token,
+            max_retries=int(config.get("gemini_max_retries", 2)),
+        )
+        content = _response_text(response)
+        _record_auditor_response(
+            usage_path,
+            session_id,
+            model,
+            response,
+            messages,
+            content,
+            global_usage_path=global_usage_path,
+        )
+        parsed = _parse_response(content)
+        if not _is_parse_failure(parsed):
+            return parsed
 
-    retry_messages = _auditor_messages(user_message, retry=True)
-    retry_kwargs = _litellm_kwargs(litellm_model, retry_messages)
-    if api_key and api_key != "not-needed":
-        retry_kwargs["api_key"] = api_key
-    retry_response = litellm.completion(**retry_kwargs)
-    if cancellation_token is not None:
-        cancellation_token.throw_if_cancelled()
-    retry_content = _response_text(retry_response)
-    _record_auditor_response(
-        usage_path,
-        session_id,
-        model,
-        retry_response,
-        retry_messages,
-        retry_content,
-        global_usage_path=global_usage_path,
-    )
-    return _parse_response(retry_content)
-
-
-def _litellm_kwargs(litellm_model: str, messages: list[dict[str, str]]) -> dict:
-    return {
-        "model": litellm_model,
-        "messages": messages,
-        "max_tokens": 100,
-    }
+        retry_messages = _auditor_messages(user_message, retry=True)
+        retry_response = generate_content(
+            client,
+            model,
+            build_payload(
+                config,
+                model,
+                retry_messages[0]["content"],
+                [],
+                [retry_messages[1]],
+                max_output_tokens=100,
+            ),
+            cancellation_token=cancellation_token,
+            max_retries=int(config.get("gemini_max_retries", 2)),
+        )
+        retry_content = _response_text(retry_response)
+        _record_auditor_response(
+            usage_path,
+            session_id,
+            model,
+            retry_response,
+            retry_messages,
+            retry_content,
+            global_usage_path=global_usage_path,
+        )
+        return _parse_response(retry_content)
+    finally:
+        unregister()
+        client.close()
 
 
 def _is_parse_failure(parsed: tuple[bool, str]) -> bool:

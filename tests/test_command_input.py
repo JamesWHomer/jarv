@@ -1,4 +1,5 @@
 import sys
+from collections import deque
 from types import SimpleNamespace
 
 from jarv import command_input
@@ -129,6 +130,52 @@ def test_read_editable_line_edits_prefilled_text():
     )
 
     assert result == "helXo"
+    assert output[-1] == "\n"
+
+
+def test_render_editable_line_keeps_long_input_on_one_terminal_row():
+    output = []
+
+    command_input._render_editable_line(
+        "\x1b[1;36mjarv>\x1b[0m ",
+        "abcdefghijklmnopqrstuvwxyz",
+        26,
+        write=output.append,
+        columns=16,
+    )
+
+    rendered = "".join(output)
+    assert rendered == "\r\x1b[2K\x1b[1;36mjarv>\x1b[0m rstuvwxyz"
+    assert "abcdefghijklmnopqr" not in rendered
+
+
+def test_render_editable_line_accounts_for_wide_unicode_characters():
+    output = []
+
+    command_input._render_editable_line(
+        "jarv> ",
+        "ab界cd",
+        5,
+        write=output.append,
+        columns=11,
+    )
+
+    assert "".join(output) == "\r\x1b[2Kjarv> 界cd"
+
+
+def test_read_editable_line_batches_queued_paste_before_redrawing():
+    keys = deque([*"a long pasted prompt", "ENTER"])
+    output = []
+
+    result = command_input.read_editable_line(
+        "jarv> ",
+        read_key=keys.popleft,
+        key_available=lambda: bool(keys),
+        write=output.append,
+    )
+
+    assert result == "a long pasted prompt"
+    assert output.count("\r\x1b[2K") == 2
     assert output[-1] == "\n"
 
 

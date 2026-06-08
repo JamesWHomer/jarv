@@ -71,6 +71,21 @@ class AgentInputTests(unittest.TestCase):
         self.assertTrue(api_item["id"].startswith("fc_"))
         self.assertEqual(api_item["call_id"], "call_7119a55952524247b01522fc")
 
+    def test_function_call_preserves_provider_content_for_gemini_replay(self):
+        provider_content = [{
+            "functionCall": {"name": "run_command", "args": {}},
+            "thoughtSignature": "signed",
+        }]
+        api_item = to_response_input_item({
+            "type": "function_call",
+            "id": "call_1",
+            "call_id": "call_1",
+            "name": "run_command",
+            "arguments": "{}",
+            "provider_content": provider_content,
+        })
+        self.assertEqual(api_item["provider_content"], provider_content)
+
     def test_reasoning_id_is_shortened_for_responses_input(self):
         item = {
             "type": "reasoning",

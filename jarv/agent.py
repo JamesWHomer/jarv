@@ -243,13 +243,16 @@ def to_response_input_item(item: dict) -> dict | None:
                 result["provider_content"] = item["provider_content"]
             return result
         if typ == "function_call":
-            return {
+            result = {
                 "type": "function_call",
                 "id": responses_input_id(str(item["id"]), "fc"),
                 "call_id": item["call_id"],
                 "name": item["name"],
                 "arguments": item["arguments"],
             }
+            if item.get("provider_content"):
+                result["provider_content"] = item["provider_content"]
+            return result
         if typ == "function_call_output":
             return {
                 "type": "function_call_output",
@@ -605,15 +608,18 @@ def run_agent(
                 output = "[cancelled by user; execution may have made partial changes]"
             else:
                 output = "[cancelled by user before execution]"
+            stored_call = {
+                "type": "function_call",
+                "id": item.id,
+                "call_id": item.call_id,
+                "name": item.name,
+                "arguments": item.arguments,
+                **metadata,
+            }
+            if item.provider_content:
+                stored_call["provider_content"] = item.provider_content
             history.extend([
-                {
-                    "type": "function_call",
-                    "id": item.id,
-                    "call_id": item.call_id,
-                    "name": item.name,
-                    "arguments": item.arguments,
-                    **metadata,
-                },
+                stored_call,
                 {
                     "type": "function_call_output",
                     "call_id": item.call_id,
@@ -850,6 +856,8 @@ def run_agent(
                         "arguments": item.arguments,
                         **metadata,
                     }
+                    if item.provider_content:
+                        fc["provider_content"] = item.provider_content
                     fco = {
                         "type": "function_call_output",
                         "call_id": item.call_id,

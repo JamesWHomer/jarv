@@ -8,7 +8,7 @@ def test_cli_import_does_not_load_heavy_rendering_or_provider_sdks():
     code = (
         "import sys; "
         "import jarv.cli; "
-        "blocked = ['rich.markdown', 'httpx', 'openai', 'litellm', 'jarv.agent']; "
+        "blocked = ['rich.markdown', 'httpx', 'jarv.agent']; "
         "print([name for name in blocked if name in sys.modules])"
     )
     result = subprocess.run(

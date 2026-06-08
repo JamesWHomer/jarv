@@ -242,7 +242,7 @@ Keys:
 - `check_updates` - When `true`, a one-shot `jarv <question>` run fires a non-blocking background check against GitHub. If a new version is found it is flagged locally and shown at the start of the next run. Default: `true`. Set to `false` to disable entirely. Heads-up mode (`jarv` with no args) and slash commands do not run this check.
 - `read_only_command_display` - How `/help`, `/about`, `/usage`, and `/config` are displayed in an interactive terminal. `auto` chooses inline for short output and fullscreen for longer output. `print` preserves permanent terminal output. `inline` and `fullscreen` force those temporary views. Default: `auto`.
 - `print_usage_after_agent` - When `true`, print a compact token usage line after each completed agent run. Default: `false`.
-- `/usage` model metadata and cost estimates come from LiteLLM. System-wide views read future usage from `{CONFIG_DIR / "usage.json"}`.
+- `/usage` uses bundled metadata for known models. System-wide views read future usage from `{CONFIG_DIR / "usage.json"}`.
 
 If the config file does not exist, jarv creates it and exits so you can add an API key.
 If the config file is invalid JSON, jarv backs it up and creates a fresh default config.

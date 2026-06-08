@@ -1,4 +1,3 @@
-import importlib.util
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -18,16 +17,8 @@ def _estimated_token_count(text: str) -> int:
     return max(1, len(text) // 4)
 
 
-def _litellm_token_count(model: str, text: str) -> int:
-    if not text:
-        return 0
-    try:
-        from .litellm_compat import import_litellm
-
-        token_counter = import_litellm().token_counter
-        return max(0, int(token_counter(model=model, text=text)))
-    except Exception:
-        return _estimated_token_count(text)
+def _token_count(_model: str, text: str) -> int:
+    return _estimated_token_count(text)
 
 
 def _item_text(item: dict) -> str:
@@ -57,11 +48,10 @@ def estimate_context_breakdown(
     """Estimate token counts split by context category.
 
     Returns a dict with keys: system, tools, history, tool_io, reasoning.
-    Uses a cheap character-based heuristic by default so request startup is not
-    blocked by importing/running LiteLLM tokenization. Set precise=True for
-    LiteLLM's token_counter, falling back to the same heuristic.
+    Uses a cheap character-based heuristic. ``precise`` remains accepted for
+    API compatibility but no longer imports a provider SDK.
     """
-    count_tokens = _litellm_token_count if precise else (lambda _model, text: _estimated_token_count(text))
+    count_tokens = _token_count
     try:
         system_tokens = count_tokens(model, instructions)
         tools_tokens = count_tokens(model, json.dumps(tools))
@@ -298,7 +288,7 @@ def estimated_usage_from_context(
     input_tokens = 0
     if isinstance(context_breakdown, dict):
         input_tokens = sum(int(context_breakdown.get(k) or 0) for k in _BREAKDOWN_KEYS)
-    output_tokens = _litellm_token_count(model, output_text or "")
+    output_tokens = _token_count(model, output_text or "")
 
     if input_tokens <= 0 and output_tokens <= 0:
         return None
@@ -446,68 +436,50 @@ def aggregate_usage_records(records: list[dict]) -> dict:
     return aggregate
 
 
-_price_map_cache: dict | None = None
-_price_map_lock = Lock()
-
-# Litellm ships the data under different filenames across versions.
-_PRICE_MAP_FILENAMES = [
-    "model_prices_and_context_window.json",
-    "model_prices_and_context_window_backup.json",
-]
-
-
-def _expand_aliases(price_map: dict) -> dict:
-    """Promote alias entries to top-level keys (mirrors litellm's own logic)."""
-    to_add: dict = {}
-    for entry in price_map.values():
-        if not isinstance(entry, dict):
-            continue
-        for alias in entry.get("aliases") or []:
-            if isinstance(alias, str) and alias not in price_map and alias not in to_add:
-                to_add[alias] = entry
-    price_map.update(to_add)
-    return price_map
-
-
-def _load_price_map() -> dict:
-    global _price_map_cache
-    if _price_map_cache is not None:
-        return _price_map_cache
-    with _price_map_lock:
-        if _price_map_cache is not None:
-            return _price_map_cache
-        try:
-            spec = importlib.util.find_spec("litellm")
-            if spec is not None and spec.origin:
-                pkg_dir = Path(spec.origin).parent
-                for filename in _PRICE_MAP_FILENAMES:
-                    json_path = pkg_dir / filename
-                    if json_path.exists():
-                        data = json.loads(json_path.read_text(encoding="utf-8"))
-                        if isinstance(data, dict) and data:
-                            _price_map_cache = _expand_aliases(data)
-                            return _price_map_cache
-        except Exception:
-            pass
-        _price_map_cache = {}
-        return _price_map_cache
+_MODEL_METADATA = {
+    "gpt-5.5": (1_050_000, 5.0, 0.5, 30.0),
+    "gpt-5.4-mini": (272_000, 0.75, 0.075, 4.5),
+    "gpt-5.4-nano": (272_000, 0.2, 0.02, 1.25),
+    "claude-opus-4-7": (1_000_000, 5.0, 0.5, 25.0),
+    "claude-sonnet-4-6": (1_000_000, 3.0, 0.3, 15.0),
+    "claude-haiku-4-5": (200_000, 1.0, 0.1, 5.0),
+    "gemini-3.1-pro-preview": (1_048_576, 2.0, 0.2, 12.0),
+    "gemini-3-flash-preview": (1_048_576, 0.5, 0.05, 3.0),
+    "anthropic/claude-opus-4.7": (1_000_000, 5.0, 0.5, 25.0),
+    "anthropic/claude-sonnet-4.6": (1_000_000, 3.0, 0.3, 15.0),
+    "anthropic/claude-opus-4.6": (1_000_000, 5.0, 0.5, 25.0),
+    "google/gemini-3-flash-preview": (1_048_576, 0.5, 0.05, 3.0),
+    "deepseek/deepseek-v3.2": (163_840, 0.28, None, 0.4),
+    "google/gemini-2.5-flash": (1_048_576, 0.3, None, 2.5),
+    "openai/gpt-oss-120b": (131_072, 0.15, 0.075, 0.6),
+    "llama-3.3-70b-versatile": (128_000, 0.59, None, 0.79),
+    "llama-3.1-8b-instant": (128_000, 0.05, None, 0.08),
+    "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": (
+        None, 0.27, None, 0.85,
+    ),
+    "accounts/fireworks/models/qwen3-8b": (40_960, 0.2, None, 0.2),
+}
 
 
-def _litellm_model_info(model: str | None) -> dict | None:
+def _model_info(model: str | None) -> dict | None:
     if not model:
         return None
-    price_map = _load_price_map()
-    info = price_map.get(model)
-    if info is None:
-        # Try stripping provider prefix (e.g. "openai/gpt-4o" -> "gpt-4o")
-        short = model.split("/", 1)[-1] if "/" in model else None
-        if short:
-            info = price_map.get(short)
-    return info if isinstance(info, dict) else None
+    values = _MODEL_METADATA.get(model)
+    if values is None and "/" in model:
+        values = _MODEL_METADATA.get(model.split("/", 1)[-1])
+    if values is None:
+        return None
+    context, input_price, cached_price, output_price = values
+    return {
+        "max_input_tokens": context,
+        "input_price": input_price,
+        "cached_input_price": cached_price,
+        "output_price": output_price,
+    }
 
 
 def known_context_window(model: str | None) -> int | None:
-    info = _litellm_model_info(model)
+    info = _model_info(model)
     window = _int_value(info, "max_input_tokens")
     if window is None or window <= 0:
         return None
@@ -515,21 +487,18 @@ def known_context_window(model: str | None) -> int | None:
 
 
 def token_prices_for_model(model: str | None) -> dict[str, float] | None:
-    info = _litellm_model_info(model)
+    info = _model_info(model)
     if info is None:
         return None
 
     input_price = _first_present(
-        _float_value(info, "input_cost_per_token"),
-        _float_value(info, "prompt_cost_per_token"),
+        _float_value(info, "input_price"),
     )
     cached_input_price = _first_present(
-        _float_value(info, "cache_read_input_token_cost"),
-        _float_value(info, "cached_input_cost_per_token"),
+        _float_value(info, "cached_input_price"),
     )
     output_price = _first_present(
-        _float_value(info, "output_cost_per_token"),
-        _float_value(info, "completion_cost_per_token"),
+        _float_value(info, "output_price"),
     )
 
     if input_price is None or output_price is None:
@@ -539,11 +508,11 @@ def token_prices_for_model(model: str | None) -> dict[str, float] | None:
     if cached_input_price is not None and cached_input_price < 0:
         return None
     prices = {
-        "input": input_price * TOKENS_PER_MILLION,
-        "output": output_price * TOKENS_PER_MILLION,
+        "input": input_price,
+        "output": output_price,
     }
     if cached_input_price is not None:
-        prices["cached_input"] = cached_input_price * TOKENS_PER_MILLION
+        prices["cached_input"] = cached_input_price
     return prices
 
 

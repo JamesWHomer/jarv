@@ -1,9 +1,6 @@
-import sys
-from types import SimpleNamespace
-
 from jarv.auditor import _parse_response
 from jarv.auditor import _call_anthropic
-from jarv.auditor import _call_litellm
+from jarv.auditor import _call_gemini
 from jarv.auditor import _call_openai_compat
 from jarv.usage import load_global_usage_records, load_usage
 
@@ -125,95 +122,77 @@ def test_parse_response_still_rejects_unclear_text():
     )
 
 
-def _install_fake_openai(monkeypatch, contents, usages=None):
+def _install_fake_chat(monkeypatch, contents, usages=None):
     calls = []
     usages = usages or []
 
-    class FakeCompletions:
-        def create(self, **kwargs):
-            calls.append(kwargs)
-            index = len(calls) - 1
-            content = contents[len(calls) - 1]
-            return SimpleNamespace(
-                choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
-                usage=usages[index] if index < len(usages) else None,
-            )
+    class FakeClient:
+        def close(self):
+            pass
 
-    class FakeOpenAI:
-        def __init__(self, **_kwargs):
-            self.chat = SimpleNamespace(completions=FakeCompletions())
+    monkeypatch.setattr(
+        "jarv.openai_http.create_client",
+        lambda *_args, **_kwargs: FakeClient(),
+    )
 
-    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAI))
-    return calls
-
-
-def _install_fake_litellm(monkeypatch, contents):
-    calls = []
-
-    def completion(**kwargs):
-        calls.append(kwargs)
+    def create_chat(_client, payload, **_kwargs):
+        calls.append(payload)
+        index = len(calls) - 1
         content = contents[len(calls) - 1]
-        return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
-            usage=None,
-        )
+        return {
+            "choices": [{"message": {"content": content}}],
+            "usage": usages[index] if index < len(usages) else None,
+        }
 
-    fake = SimpleNamespace(completion=completion)
-    monkeypatch.setattr("jarv.litellm_compat.import_litellm", lambda: fake)
+    monkeypatch.setattr("jarv.openai_http.create_chat", create_chat)
     return calls
 
 
-def test_litellm_auditor_omits_temperature(monkeypatch):
-    calls = _install_fake_litellm(
+def test_openai_compatible_auditor_uses_direct_http(monkeypatch):
+    calls = _install_fake_chat(
         monkeypatch,
         ['{"allow": true, "reason": "safe status check"}'],
     )
 
-    result = _call_litellm(
-        {"provider": "gemini"},
-        "gemini-3-flash-preview",
+    result = _call_openai_compat(
+        {"provider": "groq", "api_key": "test"},
+        "model",
         "Command: git status",
+        {"base_url": "https://example.test/v1"},
     )
 
     assert result == (True, "safe status check")
-    assert calls[0]["model"] == "gemini/gemini-3-flash-preview"
-    assert "temperature" not in calls[0]
+    assert calls[0]["model"] == "model"
 
 
-def test_litellm_auditor_retry_also_omits_temperature(monkeypatch):
-    calls = _install_fake_litellm(
-        monkeypatch,
-        [
-            "I cannot determine this from context.",
-            '{"allow": true, "reason": "safe version probe"}',
-        ],
+def test_gemini_auditor_uses_direct_generate_content(monkeypatch):
+    calls = []
+
+    class FakeClient:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        "jarv.gemini_http.create_client",
+        lambda *_args, **_kwargs: FakeClient(),
     )
 
-    result = _call_litellm(
-        {"provider": "gemini"},
-        "gemini-3-flash-preview",
-        "Command: python --version",
-    )
+    def generate_content(_client, model, payload, **_kwargs):
+        calls.append((model, payload))
+        return {
+            "output_text": '{"allow": true, "reason": "safe status check"}',
+            "usage": {"input_tokens": 4, "output_tokens": 3},
+        }
 
-    assert result == (True, "safe version probe")
-    assert len(calls) == 2
-    assert all("temperature" not in call for call in calls)
-
-
-def test_non_anthropic_litellm_auditor_omits_temperature(monkeypatch):
-    calls = _install_fake_litellm(
-        monkeypatch,
-        ['{"allow": true, "reason": "safe status check"}'],
-    )
-
-    _call_litellm(
-        {"provider": "gemini"},
+    monkeypatch.setattr("jarv.gemini_http.generate_content", generate_content)
+    result = _call_gemini(
+        {"provider": "gemini", "api_key": "test"},
         "gemini-3-flash-preview",
         "Command: git status",
     )
-
-    assert calls[0]["model"] == "gemini/gemini-3-flash-preview"
-    assert "temperature" not in calls[0]
+    assert result == (True, "safe status check")
+    assert calls[0][0] == "gemini-3-flash-preview"
+    assert calls[0][1]["generationConfig"]["maxOutputTokens"] == 100
 
 
 def test_anthropic_auditor_uses_direct_messages_api(monkeypatch):
@@ -251,7 +230,7 @@ def test_anthropic_auditor_uses_direct_messages_api(monkeypatch):
 
 
 def test_openai_direct_request_avoids_fragile_response_options(monkeypatch):
-    calls = _install_fake_openai(
+    calls = _install_fake_chat(
         monkeypatch,
         ['{"allow": true, "reason": "routine cleanup"}'],
     )
@@ -269,7 +248,7 @@ def test_openai_direct_request_avoids_fragile_response_options(monkeypatch):
 
 
 def test_openai_reasoning_model_uses_larger_budget_without_extra_options(monkeypatch):
-    calls = _install_fake_openai(
+    calls = _install_fake_chat(
         monkeypatch,
         ['{"allow": true, "reason": "safe status check"}'],
     )
@@ -289,7 +268,7 @@ def test_openai_reasoning_model_uses_larger_budget_without_extra_options(monkeyp
 
 
 def test_openai_unparsable_response_retries_once(monkeypatch):
-    calls = _install_fake_openai(
+    calls = _install_fake_chat(
         monkeypatch,
         [
             "I cannot determine this from context.",
@@ -312,7 +291,7 @@ def test_openai_unparsable_response_retries_once(monkeypatch):
 
 
 def test_openai_retry_failure_fails_closed(monkeypatch):
-    calls = _install_fake_openai(
+    calls = _install_fake_chat(
         monkeypatch,
         [
             "I cannot determine this from context.",
@@ -332,10 +311,10 @@ def test_openai_retry_failure_fails_closed(monkeypatch):
 
 
 def test_openai_auditor_records_usage_metadata(monkeypatch, tmp_path):
-    _install_fake_openai(
+    _install_fake_chat(
         monkeypatch,
         ['{"allow": true, "reason": "routine cleanup"}'],
-        usages=[SimpleNamespace(prompt_tokens=20, completion_tokens=5, total_tokens=25)],
+        usages=[{"prompt_tokens": 20, "completion_tokens": 5, "total_tokens": 25}],
     )
     usage_path = tmp_path / "usage-test.json"
     global_path = tmp_path / "usage.json"
@@ -362,7 +341,7 @@ def test_openai_auditor_records_usage_metadata(monkeypatch, tmp_path):
 
 
 def test_openai_auditor_records_estimated_usage_when_provider_omits_usage(monkeypatch, tmp_path):
-    _install_fake_openai(
+    _install_fake_chat(
         monkeypatch,
         ['{"allow": true, "reason": "safe version probe"}'],
     )

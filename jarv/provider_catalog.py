@@ -51,20 +51,18 @@ PROVIDERS = {
         "label": "Anthropic",
     },
     "gemini": {
-        "backend": "litellm",
+        "backend": "gemini",
         "base_url": None,
         "env_key": "GEMINI_API_KEY",
         "key_url": "https://aistudio.google.com/apikey",
         "label": "Google Gemini",
-        "litellm_prefix": "gemini",
     },
     "ollama": {
-        "backend": "litellm",
-        "base_url": None,
+        "backend": "openai_compat",
+        "base_url": "http://localhost:11434/v1",
         "env_key": None,
         "key_url": None,
         "label": "Ollama",
-        "litellm_prefix": "ollama",
     },
     "lm_studio": {
         "backend": "openai_compat",

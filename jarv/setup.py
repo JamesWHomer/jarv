@@ -194,12 +194,7 @@ def setup_model(config: dict) -> dict:
             if model_choice.lower() in ("b", "back"):
                 raise GoBack()
             model = model_choice or default_model
-            if _is_known_litellm_model(model):
-                break
-            console.print(f"  [yellow]Model '{model}' not found.[/yellow] Are you sure it's correct?")
-            confirm = Prompt.ask("  ", choices=["continue", "retry"], default="retry", console=console)
-            if confirm == "continue":
-                break
+            break
 
     config["model"] = model
     return config
@@ -319,8 +314,13 @@ def test_connection(config: dict) -> bool:
                 urllib.request.urlopen(req, timeout=5)
 
             elif backend in ("responses", "openai_compat"):
+                from .openai_http import list_models
+
                 client = create_client(config)
-                client.models.list()
+                try:
+                    list_models(client)
+                finally:
+                    client.close()
 
             elif backend == "anthropic":
                 from .anthropic_http import build_payload, create_message
@@ -342,20 +342,14 @@ def test_connection(config: dict) -> bool:
                 finally:
                     client.close()
 
-            elif backend == "litellm":
-                from .litellm_compat import import_litellm
+            elif backend == "gemini":
+                from .gemini_http import list_models
 
-                litellm = import_litellm()
-                api_key = resolve_api_key(config)
-                model = config.get("model", "")
-                prefix = PROVIDERS.get(provider_name, {}).get("litellm_prefix")
-                litellm_model = f"{prefix}/{model}" if prefix and "/" not in model else model
-                litellm.completion(
-                    model=litellm_model,
-                    messages=[{"role": "user", "content": "hi"}],
-                    max_tokens=1,
-                    api_key=api_key,
-                )
+                client = create_client(config)
+                try:
+                    list_models(client)
+                finally:
+                    client.close()
 
         console.print("  [green]✓[/green] [bold green]Connected![/bold green]")
         return True
@@ -526,23 +520,6 @@ def _resolve_provider(choice: str) -> str | None:
     return None
 
 
-def _is_known_litellm_model(model_name: str) -> bool:
-    try:
-        import json
-        from importlib.resources import files
-        from .litellm_compat import import_litellm
-
-        import_litellm()
-        data = json.loads(
-            files("litellm")
-            .joinpath("model_prices_and_context_window_backup.json")
-            .read_text(encoding="utf-8")
-        )
-        return model_name in data
-    except Exception:
-        return False
-
-
 def _resolve_model(provider_name: str, choice: str) -> str | None:
     models = PROVIDER_MODELS.get(provider_name, [])
     try:
@@ -555,6 +532,4 @@ def _resolve_model(provider_name: str, choice: str) -> str | None:
     for name, _ in models:
         if choice.lower() == name.lower():
             return name
-    if _is_known_litellm_model(choice):
-        return choice
     return None

@@ -1,0 +1,340 @@
+"""Direct HTTP transport and history conversion for the Gemini API."""
+
+from __future__ import annotations
+
+import json
+import uuid
+from collections.abc import Iterator
+from typing import Any
+from urllib.parse import quote
+
+from .cancellation import CancellationToken
+from .http_transport import (
+    ProviderHTTPError,
+    create_client as create_http_client,
+    iter_sse_json,
+    request_json,
+    response_error,
+    send_with_retries,
+)
+from .unicode_safety import sanitize_json_value
+
+
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta"
+_THINKING_BUDGETS = {
+    "minimal": 512,
+    "low": 1024,
+    "medium": 4096,
+    "high": 8192,
+    "xhigh": 16384,
+    "max": 24576,
+}
+
+
+def create_client(config: dict, api_key: str):
+    return create_http_client(
+        config.get("base_url") or GEMINI_API_URL,
+        {
+            "x-goog-api-key": api_key,
+            "content-type": "application/json",
+            "user-agent": "jarv",
+        },
+        timeout=float(config.get("gemini_timeout", 600)),
+        connect_timeout=float(config.get("gemini_connect_timeout", 10)),
+    )
+
+
+def list_models(client, *, max_retries: int = 0) -> dict:
+    return request_json("Gemini", client, "GET", "/models", max_retries=max_retries)
+
+
+def _append_content(contents: list[dict], role: str, parts: list[dict]) -> None:
+    if not parts:
+        return
+    if contents and contents[-1]["role"] == role:
+        contents[-1]["parts"].extend(parts)
+    else:
+        contents.append({"role": role, "parts": parts})
+
+
+def _json_value(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value if value is not None else {}
+    try:
+        return json.loads(value or "{}")
+    except json.JSONDecodeError:
+        return {"result": value}
+
+
+def to_contents(input_items: list[dict]) -> list[dict]:
+    contents: list[dict] = []
+    call_names: dict[str, str] = {}
+    i = 0
+    while i < len(input_items):
+        item = input_items[i]
+        role = item.get("role")
+        typ = item.get("type")
+        if role in ("user", "assistant"):
+            _append_content(
+                contents,
+                "model" if role == "assistant" else "user",
+                [{"text": str(item.get("content") or "")}],
+            )
+            i += 1
+            continue
+        if typ == "reasoning":
+            provider_content = item.get("provider_content")
+            if isinstance(provider_content, list):
+                _append_content(
+                    contents,
+                    "model",
+                    [dict(part) for part in provider_content if isinstance(part, dict)],
+                )
+            i += 1
+            continue
+        if typ == "function_call":
+            parts = []
+            while i < len(input_items) and input_items[i].get("type") == "function_call":
+                call = input_items[i]
+                call_id = str(call.get("call_id") or call.get("id") or "")
+                name = str(call.get("name") or "")
+                call_names[call_id] = name
+                provider_content = call.get("provider_content")
+                if isinstance(provider_content, list) and provider_content:
+                    parts.extend(
+                        dict(part) for part in provider_content if isinstance(part, dict)
+                    )
+                else:
+                    parts.append({
+                        "functionCall": {
+                            "name": name,
+                            "args": _json_value(call.get("arguments")),
+                        }
+                    })
+                i += 1
+            _append_content(contents, "model", parts)
+            continue
+        if typ == "function_call_output":
+            parts = []
+            while (
+                i < len(input_items)
+                and input_items[i].get("type") == "function_call_output"
+            ):
+                result = input_items[i]
+                call_id = str(result.get("call_id") or "")
+                parts.append({
+                    "functionResponse": {
+                        "name": call_names.get(call_id, call_id),
+                        "response": {"result": _json_value(result.get("output"))},
+                    }
+                })
+                i += 1
+            _append_content(contents, "user", parts)
+            continue
+        i += 1
+    return contents
+
+
+def to_tools(tools: list[dict]) -> list[dict]:
+    declarations = []
+    for tool in tools:
+        function = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+        if tool.get("type") != "function" or not function.get("name"):
+            continue
+        declarations.append({
+            "name": function["name"],
+            "description": function.get("description", ""),
+            "parameters": function.get("parameters", {"type": "object"}),
+        })
+    return [{"functionDeclarations": declarations}] if declarations else []
+
+
+def _apply_reasoning(config: dict, payload: dict, model: str, reasoning: dict | None) -> None:
+    effort = str((reasoning or {}).get("effort") or "").lower()
+    if not effort or effort == "none":
+        return
+    thinking: dict[str, Any] = {"includeThoughts": True}
+    if model.lower().startswith("gemini-3"):
+        if "pro" in model.lower():
+            thinking["thinkingLevel"] = "low" if effort in ("minimal", "low") else "high"
+        else:
+            thinking["thinkingLevel"] = "high" if effort in ("xhigh", "max") else effort
+    else:
+        thinking["thinkingBudget"] = _THINKING_BUDGETS.get(effort, -1)
+    payload.setdefault("generationConfig", {})["thinkingConfig"] = thinking
+
+
+def build_payload(
+    config: dict,
+    model: str,
+    instructions: str,
+    tools: list[dict],
+    input_items: list[dict],
+    *,
+    reasoning: dict | None = None,
+    max_output_tokens: int | None = None,
+) -> dict:
+    payload: dict[str, Any] = {"contents": to_contents(input_items)}
+    if instructions:
+        payload["systemInstruction"] = {"parts": [{"text": instructions}]}
+    converted_tools = to_tools(tools)
+    if converted_tools:
+        payload["tools"] = converted_tools
+    if max_output_tokens is not None:
+        payload.setdefault("generationConfig", {})["maxOutputTokens"] = max_output_tokens
+    _apply_reasoning(config, payload, model, reasoning)
+    return sanitize_json_value(payload)
+
+
+def _path(model: str, method: str) -> str:
+    return f"/models/{quote(model, safe='')}{method}"
+
+
+def normalize_response(data: dict) -> dict:
+    usage = data.get("usageMetadata") if isinstance(data.get("usageMetadata"), dict) else {}
+    input_tokens = int(usage.get("promptTokenCount") or 0)
+    cached = int(usage.get("cachedContentTokenCount") or 0)
+    output_tokens = int(usage.get("candidatesTokenCount") or 0)
+    reasoning_tokens = int(usage.get("thoughtsTokenCount") or 0)
+    parts = []
+    candidates = data.get("candidates")
+    if isinstance(candidates, list) and candidates:
+        content = candidates[0].get("content")
+        if isinstance(content, dict) and isinstance(content.get("parts"), list):
+            parts = content["parts"]
+    return {
+        **data,
+        "output_text": "".join(
+            str(part.get("text") or "")
+            for part in parts
+            if isinstance(part, dict) and not part.get("thought")
+        ),
+        "usage": {
+            "input_tokens": input_tokens,
+            "cached_input_tokens": cached,
+            "uncached_input_tokens": max(input_tokens - cached, 0),
+            "output_tokens": output_tokens,
+            "reasoning_output_tokens": reasoning_tokens,
+            "total_tokens": int(
+                usage.get("totalTokenCount")
+                or input_tokens + output_tokens + reasoning_tokens
+            ),
+        },
+    }
+
+
+def generate_content(
+    client,
+    model: str,
+    payload: dict,
+    *,
+    cancellation_token: CancellationToken | None = None,
+    max_retries: int = 2,
+) -> dict:
+    data = request_json(
+        "Gemini",
+        client,
+        "POST",
+        _path(model, ":generateContent"),
+        json_body=payload,
+        cancellation_token=cancellation_token,
+        max_retries=max_retries,
+    )
+    return normalize_response(data)
+
+
+def stream_content(
+    client,
+    model: str,
+    payload: dict,
+    *,
+    cancellation_token: CancellationToken | None = None,
+    max_retries: int = 2,
+) -> Iterator[dict]:
+    response = send_with_retries(
+        client,
+        "POST",
+        _path(model, ":streamGenerateContent"),
+        json_body=payload,
+        params={"alt": "sse"},
+        stream=True,
+        cancellation_token=cancellation_token,
+        max_retries=max_retries,
+    )
+    if response.status_code >= 400:
+        try:
+            response.read()
+            data = response.json()
+        except Exception:
+            data = None
+        response.close()
+        raise response_error("Gemini", response, data)
+    unregister = (
+        cancellation_token.register(response.close)
+        if cancellation_token is not None else lambda: None
+    )
+    final: dict[str, Any] = {"candidates": [], "usageMetadata": {}}
+    reasoning_started = False
+    try:
+        for _event_name, chunk in iter_sse_json("Gemini", response):
+            if cancellation_token is not None:
+                cancellation_token.throw_if_cancelled()
+            if isinstance(chunk.get("error"), dict):
+                error = chunk["error"]
+                raise ProviderHTTPError(
+                    "Gemini",
+                    str(error.get("message") or "stream failed"),
+                    status_code=error.get("code"),
+                    error_type=str(error.get("status") or "") or None,
+                )
+            if isinstance(chunk.get("usageMetadata"), dict):
+                final["usageMetadata"] = chunk["usageMetadata"]
+            candidates = chunk.get("candidates")
+            if not isinstance(candidates, list) or not candidates:
+                continue
+            final["candidates"] = candidates
+            content = candidates[0].get("content")
+            parts = content.get("parts") if isinstance(content, dict) else []
+            if not isinstance(parts, list):
+                continue
+            for part in parts:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("thought"):
+                    if not reasoning_started:
+                        reasoning_started = True
+                        yield {"type": "reasoning_started", "id": "gemini-thinking"}
+                    yield {
+                        "type": "reasoning_part",
+                        "provider_content": [dict(part)],
+                    }
+                    continue
+                text = part.get("text")
+                if isinstance(text, str) and text:
+                    yield {"type": "text_delta", "delta": text}
+                function_call = part.get("functionCall")
+                if isinstance(function_call, dict):
+                    call_id = str(
+                        function_call.get("id") or f"call_{uuid.uuid4().hex[:12]}"
+                    )
+                    yield {
+                        "type": "tool_call",
+                        "id": call_id,
+                        "name": str(function_call.get("name") or ""),
+                        "arguments": json.dumps(
+                            function_call.get("args") or {},
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                        "provider_content": [dict(part)],
+                    }
+        if reasoning_started:
+            yield {
+                "type": "reasoning_done",
+                "id": "gemini-thinking",
+                "provider_content": [],
+            }
+        yield {"type": "done", "response": normalize_response(final)}
+    finally:
+        unregister()
+        response.close()

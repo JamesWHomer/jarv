@@ -1,10 +1,13 @@
 """Keyboard input helpers shared by interactive command screens."""
 
 import os
+import re
 import sys
 from collections import deque
 from collections.abc import Iterable
 from contextlib import contextmanager
+
+from rich.cells import cell_len, get_character_cell_size
 
 
 MOUSE_CAPTURE_ENABLE = "\x1b[?1000h\x1b[?1006h"
@@ -13,6 +16,7 @@ _PENDING_KEYS: deque[str] = deque()
 _REPEATABLE_NAV_KEYS = frozenset({"UP", "DOWN", "LEFT", "RIGHT", "PAGEUP", "PAGEDOWN"})
 _POSIX_INPUT_POLL_INTERVAL = 0.1
 _LAST_TERMINAL_SIZE: tuple[int, int] | None = None
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 @contextmanager
@@ -231,12 +235,40 @@ def _render_editable_line(
     cursor: int,
     *,
     write=None,
+    columns: int | None = None,
 ) -> None:
     write = write or sys.stdout.write
+    if columns is None:
+        size = _terminal_size()
+        columns = size[0] if size is not None else 80
+
+    prompt_width = cell_len(_ANSI_ESCAPE_RE.sub("", prompt))
+    # Keep one column unused so writing at the right edge cannot auto-wrap.
+    available = max(1, columns - prompt_width - 1)
+
+    start = cursor
+    cursor_column = 0
+    while start:
+        width = get_character_cell_size(text[start - 1])
+        if cursor_column + width > available:
+            break
+        start -= 1
+        cursor_column += width
+
+    end = cursor
+    visible_width = cursor_column
+    while end < len(text):
+        width = get_character_cell_size(text[end])
+        if visible_width + width > available:
+            break
+        end += 1
+        visible_width += width
+    visible = text[start:end]
+
     write("\r\x1b[2K")
     write(prompt)
-    write(text)
-    trailing = len(text) - cursor
+    write(visible)
+    trailing = visible_width - cursor_column
     if trailing:
         write(f"\x1b[{trailing}D")
     sys.stdout.flush()
@@ -247,19 +279,25 @@ def read_editable_line(
     initial: str = "",
     *,
     read_key=None,
+    key_available=None,
     write=None,
 ) -> str:
     """Read one editable line with cross-platform raw key handling."""
-    read_key = read_key or (lambda: _read_key(text_mode=True))
+    if read_key is None:
+        read_key = lambda: _read_key(text_mode=True)
+        key_available = key_available or _key_available
+    else:
+        key_available = key_available or (lambda: False)
     write = write or sys.stdout.write
     chars = list(initial.replace("\r", " ").replace("\n", " "))
     cursor = len(chars)
+    pending: deque[str] = deque()
 
     _render_editable_line(prompt, "".join(chars), cursor, write=write)
     try:
         while True:
             try:
-                key = read_key()
+                key = pending.popleft() if pending else read_key()
             except KeyboardInterrupt:
                 if chars:
                     chars.clear()
@@ -294,8 +332,16 @@ def read_editable_line(
             elif key in ("RESIZE", "OTHER", "ESC"):
                 continue
             elif len(key) == 1 and key >= " ":
-                chars.insert(cursor, key)
-                cursor += 1
+                inserted = [key]
+                while key_available():
+                    next_key = read_key()
+                    if len(next_key) == 1 and next_key >= " ":
+                        inserted.append(next_key)
+                        continue
+                    pending.append(next_key)
+                    break
+                chars[cursor:cursor] = inserted
+                cursor += len(inserted)
             else:
                 continue
 

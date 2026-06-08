@@ -1,347 +1,181 @@
-import unittest
 import threading
 import time
+import unittest
 from unittest.mock import patch
-from types import SimpleNamespace
 
+from jarv.cancellation import CancellationToken, TurnCancelled
 from jarv.provider import (
     ReasoningDone,
     ReasoningStarted,
     StreamDone,
     TextDelta,
+    ToolCallDone,
     _stream_chat_completions,
-    _stream_litellm,
+    _stream_gemini,
     _stream_responses_api,
     response_output_text,
     responses_input_id,
     stream_response,
 )
-from jarv.cancellation import CancellationToken, TurnCancelled
-
-
-class FakeStream:
-    def __init__(self, chunks):
-        self.chunks = chunks
-
-    def __iter__(self):
-        return iter(self.chunks)
-
-    def close(self):
-        pass
-
-
-class FakeResponseStream(FakeStream):
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        pass
-
-    def get_final_response(self):
-        return SimpleNamespace(usage=None)
-
-
-class BrokenResponseStream(FakeResponseStream):
-    def __iter__(self):
-        yield SimpleNamespace(
-            type="response.created",
-            response=SimpleNamespace(id="resp_123"),
-        )
-        yield SimpleNamespace(type="response.output_text.delta", delta="partial")
-        raise RuntimeError("incomplete chunked read")
 
 
 class ProviderUsageTests(unittest.TestCase):
-    def test_responses_input_id_keeps_valid_id(self):
+    def test_responses_input_id_normalizes_invalid_ids(self):
         self.assertEqual(responses_input_id("fc_123", "fc"), "fc_123")
+        shortened = responses_input_id("call_" + ("x" * 100), "fc")
+        self.assertTrue(shortened.startswith("fc_"))
+        self.assertLessEqual(len(shortened), 64)
 
-    def test_responses_input_id_shortens_overlong_id(self):
-        item_id = "fc_" + ("x" * 100)
+    def test_response_output_text_supports_direct_http_dict(self):
+        response = {
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": "hello"}],
+            }]
+        }
+        self.assertEqual(response_output_text(response), "hello")
 
-        result = responses_input_id(item_id, "fc")
-
-        self.assertLessEqual(len(result), 64)
-        self.assertTrue(result.startswith("fc_"))
-        self.assertEqual(result, responses_input_id(item_id, "fc"))
-        self.assertNotEqual(result, item_id)
-
-    def test_responses_input_id_replaces_wrong_prefix(self):
-        result = responses_input_id("call_7119a55952524247b01522fc", "fc")
-
-        self.assertLessEqual(len(result), 64)
-        self.assertTrue(result.startswith("fc_"))
-
-    def test_chat_stream_keeps_usage_when_final_chunk_has_choices(self):
-        usage = SimpleNamespace(prompt_tokens=12, completion_tokens=3, total_tokens=15)
-        chunks = [
-            SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        delta=SimpleNamespace(content="hi", tool_calls=None),
-                        finish_reason=None,
-                    )
-                ],
-                usage=None,
-            ),
-            SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        delta=SimpleNamespace(content=None, tool_calls=None),
-                        finish_reason="stop",
-                    )
-                ],
-                usage=usage,
-            ),
-        ]
-
-        stream = FakeStream(chunks)
-        client = SimpleNamespace(
-            chat=SimpleNamespace(
-                completions=SimpleNamespace(create=lambda **_kwargs: stream)
-            )
-        )
-
-        events = list(_stream_chat_completions(client, "model", "system", [], []))
-
-        self.assertIsInstance(events[0], TextDelta)
-        self.assertIsInstance(events[-1], StreamDone)
-        self.assertIs(events[-1].response, chunks[-1])
-
-    def test_chat_stream_emits_reasoning_started_from_reasoning_content(self):
-        chunks = [
-            SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        delta=SimpleNamespace(reasoning_content="thinking", content=None, tool_calls=None),
-                        finish_reason=None,
-                    )
-                ],
-                usage=None,
-            ),
-            SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        delta=SimpleNamespace(content="hi", tool_calls=None),
-                        finish_reason="stop",
-                    )
-                ],
-                usage=None,
-            ),
-        ]
-        client = SimpleNamespace(
-            chat=SimpleNamespace(
-                completions=SimpleNamespace(create=lambda **_kwargs: FakeStream(chunks))
-            )
-        )
-
-        events = list(_stream_chat_completions(client, "model", "system", [], []))
-
-        self.assertIsInstance(events[0], ReasoningStarted)
-        self.assertIsInstance(events[1], TextDelta)
-
-    def test_chat_stream_emits_reasoning_started_from_extra_reasoning(self):
-        chunks = [
-            SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        delta=SimpleNamespace(
-                            additional_kwargs={"reasoning": "thinking"},
-                            content=None,
-                            tool_calls=None,
-                        ),
-                        finish_reason=None,
-                    )
-                ],
-                usage=None,
-            ),
-            SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        delta=SimpleNamespace(content="hi", tool_calls=None),
-                        finish_reason="stop",
-                    )
-                ],
-                usage=None,
-            ),
-        ]
-        client = SimpleNamespace(
-            chat=SimpleNamespace(
-                completions=SimpleNamespace(create=lambda **_kwargs: FakeStream(chunks))
-            )
-        )
-
-        events = list(_stream_chat_completions(client, "model", "system", [], []))
-
-        self.assertIsInstance(events[0], ReasoningStarted)
-        self.assertIsInstance(events[1], TextDelta)
-
-    def test_chat_stream_emits_reasoning_started_from_content_block(self):
-        chunks = [
-            SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        delta=SimpleNamespace(
-                            content=[{"type": "thinking", "thinking": "thinking"}],
-                            tool_calls=None,
-                        ),
-                        finish_reason="stop",
-                    )
-                ],
-                usage=None,
-            ),
-        ]
-        client = SimpleNamespace(
-            chat=SimpleNamespace(
-                completions=SimpleNamespace(create=lambda **_kwargs: FakeStream(chunks))
-            )
-        )
-
-        events = list(_stream_chat_completions(client, "model", "system", [], []))
-
-        self.assertIsInstance(events[0], ReasoningStarted)
-
-    def test_chat_stream_sanitizes_lone_surrogates_before_api_call(self):
+    def test_responses_stream_maps_reasoning_tools_cache_key_and_usage(self):
         captured = {}
-        stream = FakeStream([])
 
-        def create(**kwargs):
-            captured["kwargs"] = kwargs
-            return stream
+        def fake_stream(_client, payload, **_kwargs):
+            captured["payload"] = payload
+            yield {
+                "type": "response.created",
+                "response": {"id": "resp_1"},
+            }
+            yield {
+                "type": "response.output_item.added",
+                "item": {"type": "reasoning", "id": "rs_1"},
+            }
+            yield {"type": "response.output_text.delta", "delta": "hi"}
+            yield {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": "run",
+                    "arguments": "{}",
+                },
+            }
+            yield {
+                "type": "response.output_item.done",
+                "item": {"type": "reasoning", "id": "rs_1", "summary": []},
+            }
+            yield {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_1",
+                    "status": "completed",
+                    "usage": {
+                        "input_tokens": 20,
+                        "input_tokens_details": {"cached_tokens": 12},
+                        "output_tokens": 3,
+                    },
+                    "output": [],
+                },
+            }
 
-        client = SimpleNamespace(
-            chat=SimpleNamespace(
-                completions=SimpleNamespace(
-                    create=create
-                )
-            )
-        )
-
-        list(_stream_chat_completions(
-            client,
-            "model",
-            "system\udc8f",
-            [],
-            [{"role": "user", "content": "abc\udc8fdef"}],
-        ))
-
-        messages = captured["kwargs"]["messages"]
-        self.assertEqual(messages[0]["content"], "system?")
-        self.assertEqual(messages[1]["content"], "abc?def")
-        str(captured["kwargs"]).encode("utf-8")
-
-    def test_responses_stream_emits_reasoning_started_before_text(self):
-        stream = FakeResponseStream([
-            SimpleNamespace(
-                type="response.output_item.added",
-                item=SimpleNamespace(type="reasoning", id="rs_123"),
-            ),
-            SimpleNamespace(type="response.output_text.delta", delta="hi"),
-            SimpleNamespace(
-                type="response.output_item.done",
-                item=SimpleNamespace(type="reasoning", id="rs_123", summary=[]),
-            ),
-        ])
-        client = SimpleNamespace(
-            responses=SimpleNamespace(stream=lambda **_kwargs: stream)
-        )
-
-        events = list(_stream_responses_api(client, "model", "system", [], []))
-
-        self.assertIsInstance(events[0], ReasoningStarted)
-        self.assertEqual(events[0].id, "rs_123")
-        self.assertIsInstance(events[1], TextDelta)
-        self.assertIsInstance(events[2], ReasoningDone)
-        self.assertIsInstance(events[-1], StreamDone)
-
-    def test_responses_stream_emits_reasoning_started_from_reasoning_text_delta(self):
-        stream = FakeResponseStream([
-            SimpleNamespace(type="response.reasoning_text.delta", delta="thinking"),
-            SimpleNamespace(type="response.output_text.delta", delta="hi"),
-        ])
-        client = SimpleNamespace(
-            responses=SimpleNamespace(stream=lambda **_kwargs: stream)
-        )
-
-        events = list(_stream_responses_api(client, "model", "system", [], []))
-
-        self.assertIsInstance(events[0], ReasoningStarted)
-        self.assertIsInstance(events[1], TextDelta)
-
-    def test_responses_stream_forwards_prompt_cache_key(self):
-        captured = {}
-        stream = FakeResponseStream([])
-
-        def response_stream(**kwargs):
-            captured["kwargs"] = kwargs
-            return stream
-
-        client = SimpleNamespace(
-            responses=SimpleNamespace(stream=response_stream)
-        )
-
-        list(_stream_responses_api(
-            client,
-            "model",
-            "system",
-            [],
-            [],
-            prompt_cache_key="jarv:session-id",
-        ))
-
-        self.assertEqual(captured["kwargs"]["prompt_cache_key"], "jarv:session-id")
-
-    def test_responses_stream_recovers_completed_response_after_disconnect(self):
-        recovered = SimpleNamespace(
-            id="resp_123",
-            status="completed",
-            output_text="partial and recovered",
-            output=[],
-        )
-        client = SimpleNamespace(
-            responses=SimpleNamespace(
-                stream=lambda **_kwargs: BrokenResponseStream([]),
-                retrieve=lambda response_id: recovered if response_id == "resp_123" else None,
-            )
-        )
-
-        events = list(_stream_responses_api(client, "model", "system", [], []))
-
-        self.assertIsInstance(events[0], TextDelta)
-        self.assertIsInstance(events[-1], StreamDone)
-        self.assertIs(events[-1].response, recovered)
-        self.assertEqual(response_output_text(events[-1].response), "partial and recovered")
-
-    def test_cancelled_responses_stream_skips_recovery(self):
-        token = CancellationToken()
-        retrieve_calls = []
-
-        class CancelledStream(FakeResponseStream):
-            def __iter__(self):
-                yield SimpleNamespace(
-                    type="response.created",
-                    response=SimpleNamespace(id="resp_cancelled"),
-                )
-                token.cancel()
-                raise RuntimeError("closed")
-
-        client = SimpleNamespace(
-            responses=SimpleNamespace(
-                stream=lambda **_kwargs: CancelledStream([]),
-                retrieve=lambda response_id: retrieve_calls.append(response_id),
-            )
-        )
-
-        with self.assertRaises(TurnCancelled):
-            list(_stream_responses_api(
-                client,
+        with patch("jarv.openai_http.stream_response", side_effect=fake_stream):
+            events = list(_stream_responses_api(
+                object(),
                 "model",
                 "system",
                 [],
                 [],
-                cancellation_token=token,
+                prompt_cache_key="jarv:session",
             ))
 
-        self.assertEqual(retrieve_calls, [])
+        self.assertEqual(captured["payload"]["prompt_cache_key"], "jarv:session")
+        self.assertIsInstance(events[0], ReasoningStarted)
+        self.assertIsInstance(events[1], TextDelta)
+        self.assertIsInstance(events[2], ToolCallDone)
+        self.assertIsInstance(events[3], ReasoningDone)
+        self.assertIsInstance(events[4], StreamDone)
+
+    def test_responses_stream_recovers_after_disconnect(self):
+        def broken(_client, _payload, **_kwargs):
+            yield {"type": "response.created", "response": {"id": "resp_1"}}
+            yield {"type": "response.output_text.delta", "delta": "partial"}
+            raise RuntimeError("disconnect")
+
+        recovered = {
+            "id": "resp_1",
+            "status": "completed",
+            "output_text": "partial and recovered",
+            "output": [],
+        }
+        with (
+            patch("jarv.openai_http.stream_response", side_effect=broken),
+            patch("jarv.openai_http.retrieve_response", return_value=recovered),
+        ):
+            events = list(_stream_responses_api(
+                object(), "model", "system", [], []
+            ))
+        self.assertEqual(response_output_text(events[-1].response), "partial and recovered")
+
+    def test_chat_stream_maps_reasoning_tools_and_usage(self):
+        chunks = [
+            {
+                "id": "chat_1",
+                "choices": [{
+                    "delta": {"reasoning_content": "thinking"},
+                    "finish_reason": None,
+                }],
+            },
+            {
+                "choices": [{
+                    "delta": {
+                        "content": "hi",
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call_1",
+                            "function": {"name": "run", "arguments": "{}"},
+                        }],
+                    },
+                    "finish_reason": "tool_calls",
+                }],
+            },
+            {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 2}},
+        ]
+        with patch("jarv.openai_http.stream_chat", return_value=iter(chunks)):
+            events = list(_stream_chat_completions(
+                object(), "model", "system", [], []
+            ))
+        self.assertIsInstance(events[0], ReasoningStarted)
+        self.assertIsInstance(events[1], TextDelta)
+        self.assertIsInstance(events[2], ToolCallDone)
+        self.assertEqual(events[-1].response["usage"]["prompt_tokens"], 5)
+
+    def test_gemini_stream_preserves_thought_and_tool_signatures(self):
+        protocol_events = [
+            {"type": "reasoning_started", "id": "gemini-thinking"},
+            {
+                "type": "reasoning_part",
+                "provider_content": [{"text": "thought", "thought": True}],
+            },
+            {
+                "type": "tool_call",
+                "id": "call_1",
+                "name": "run",
+                "arguments": "{}",
+                "provider_content": [{
+                    "functionCall": {"name": "run", "args": {}},
+                    "thoughtSignature": "signed",
+                }],
+            },
+            {"type": "reasoning_done", "id": "gemini-thinking"},
+            {"type": "done", "response": {"usage": {"input_tokens": 2}}},
+        ]
+        with patch("jarv.gemini_http.stream_content", return_value=iter(protocol_events)):
+            events = list(_stream_gemini(
+                object(), {"provider": "gemini"}, "model", "system", [], []
+            ))
+        reasoning = next(event for event in events if isinstance(event, ReasoningDone))
+        tool = next(event for event in events if isinstance(event, ToolCallDone))
+        self.assertTrue(reasoning.provider_content[0]["thought"])
+        self.assertEqual(tool.provider_content[0]["thoughtSignature"], "signed")
 
     def test_windows_stream_bridge_observes_cancellation_promptly(self):
         token = CancellationToken()
@@ -368,11 +202,9 @@ class ProviderUsageTests(unittest.TestCase):
                     ))
         finally:
             timer.cancel()
-
         self.assertLess(time.perf_counter() - started, 0.25)
 
     def test_posix_streaming_stays_on_calling_thread(self):
-        token = CancellationToken()
         caller_thread = threading.get_ident()
         producer_threads = []
 
@@ -384,109 +216,9 @@ class ProviderUsageTests(unittest.TestCase):
             patch("jarv.provider.sys.platform", "linux"),
             patch("jarv.provider._stream_response_direct", side_effect=direct),
         ):
-            events = list(stream_response(
-                object(), {}, "model", "system", [], [],
-                cancellation_token=token,
-            ))
-
+            events = list(stream_response(object(), {}, "model", "system", [], []))
         self.assertEqual(events[0].delta, "ok")
         self.assertEqual(producer_threads, [caller_thread])
-
-    def test_litellm_stream_emits_reasoning_started_from_thinking_blocks(self):
-        chunks = [
-            SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        delta=SimpleNamespace(thinking_blocks=[{"type": "thinking"}], content=None, tool_calls=None),
-                        finish_reason=None,
-                    )
-                ],
-                usage=None,
-            ),
-            SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        delta=SimpleNamespace(content="hi", tool_calls=None),
-                        finish_reason="stop",
-                    )
-                ],
-                usage=None,
-            ),
-        ]
-        fake_litellm = SimpleNamespace(completion=lambda **_kwargs: FakeStream(chunks))
-
-        with patch("jarv.litellm_compat.import_litellm", return_value=fake_litellm):
-            events = list(_stream_litellm({"provider": "gemini"}, "model", "system", [], []))
-
-        self.assertIsInstance(events[0], ReasoningStarted)
-        self.assertIsInstance(events[1], TextDelta)
-
-    def test_litellm_stream_emits_reasoning_started_from_provider_specific_reasoning(self):
-        chunks = [
-            SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        delta=SimpleNamespace(
-                            content=None,
-                            tool_calls=None,
-                            provider_specific_fields={
-                                "reasoningContent": {"type": "thinking_delta", "text": "thinking"}
-                            },
-                        ),
-                        finish_reason=None,
-                    )
-                ],
-                usage=None,
-            ),
-            SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        delta=SimpleNamespace(content="hi", tool_calls=None),
-                        finish_reason="stop",
-                    )
-                ],
-                usage=None,
-            ),
-        ]
-        fake_litellm = SimpleNamespace(completion=lambda **_kwargs: FakeStream(chunks))
-
-        with patch("jarv.litellm_compat.import_litellm", return_value=fake_litellm):
-            events = list(_stream_litellm({"provider": "gemini"}, "model", "system", [], []))
-
-        self.assertIsInstance(events[0], ReasoningStarted)
-        self.assertIsInstance(events[1], TextDelta)
-
-    def test_litellm_stream_forwards_reasoning_effort(self):
-        captured = {}
-        chunks = [
-            SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        delta=SimpleNamespace(content="hi", tool_calls=None),
-                        finish_reason="stop",
-                    )
-                ],
-                usage=None,
-            ),
-        ]
-
-        def completion(**kwargs):
-            captured["kwargs"] = kwargs
-            return FakeStream(chunks)
-
-        fake_litellm = SimpleNamespace(completion=completion)
-
-        with patch("jarv.litellm_compat.import_litellm", return_value=fake_litellm):
-            list(_stream_litellm(
-                {"provider": "gemini"},
-                "model",
-                "system",
-                [],
-                [],
-                reasoning={"effort": "high"},
-            ))
-
-        self.assertEqual(captured["kwargs"]["reasoning_effort"], "high")
 
 
 if __name__ == "__main__":
