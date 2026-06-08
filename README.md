@@ -132,8 +132,6 @@ The terminal shows a live progress panel as children run, with a green checkmark
 
 ## Commands
 
-![jarv slash commands](https://github.com/user-attachments/assets/ed723bce-229e-47db-82a4-c26af2c623ad)
-
 | Command | Description |
 | --- | --- |
 | `/help` | Show all commands |
