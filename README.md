@@ -164,8 +164,6 @@ Each terminal is automatically bound to its own session. Jarv identifies termina
 - `/history` opens an interactive transcript where Up/Down scroll and Left/Right jump to the previous or next chat/reply.
 - `/undo` and `/redo` let you step through recent exchanges.
 
-![jarv session undo](https://github.com/user-attachments/assets/957729b0-3925-461d-a65c-25cf030ffaa6)
-
 ## Config
 
 Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` for the common controls, or edit the file directly with `/set` and `/unset`.
