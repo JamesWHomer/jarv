@@ -103,6 +103,7 @@ def _help_body() -> Group:
     flag_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
     flag_table.add_column(style="bold yellow", no_wrap=True)
     flag_table.add_column(style="white")
+    flag_table.add_row("--provider PROVIDER", "Override the provider for this run")
     flag_table.add_row("-m, --model MODEL", "Override the model for this run")
     flag_table.add_row("-e, --effort EFFORT", "Override reasoning effort")
     flag_table.add_row("--timeout SECONDS", "Override shell command timeout")

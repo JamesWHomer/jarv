@@ -72,6 +72,7 @@ Flags override config values for a single run and work in both one-shot and head
 
 | Flag | Short | Description |
 | --- | --- | --- |
+| `--provider PROVIDER` | | Override the provider (`openai`, `anthropic`, `gemini`, etc.) |
 | `--model MODEL` | `-m` | Override the model (e.g. `gpt-5.4-mini`) |
 | `--effort EFFORT` | `-e` | Override reasoning effort (`low` / `medium` / `high`) |
 | `--timeout SECONDS` | | Override command timeout in seconds |
@@ -81,6 +82,7 @@ Flags override config values for a single run and work in both one-shot and head
 | `--version` | | Print the version and exit |
 
 ```bash
+jarv --provider anthropic -m claude-sonnet-4-6 "summarise this repo"
 jarv -m gpt-5.4-mini "summarise this repo"
 jarv --effort high "refactor the auth module"
 jarv --new "start fresh without prior context"

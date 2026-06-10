@@ -18,6 +18,12 @@ class TtyStringIO(io.StringIO):
 
 
 class CliStdinTests(unittest.TestCase):
+    def test_parser_accepts_provider_override(self):
+        args = cli._build_parser().parse_args(["--provider", "ANTHROPIC", "hello"])
+
+        self.assertEqual(args.provider, "anthropic")
+        self.assertEqual(args.query, ["hello"])
+
     def test_compose_query_uses_args_only_when_no_stdin(self):
         self.assertEqual(cli._compose_query(["review", "this"]), "review this")
 
@@ -73,6 +79,32 @@ class CliStdinTests(unittest.TestCase):
         self.assertIn("hello from pipe", query)
         create_client.assert_not_called()
         self.assertIsNone(run_agent.call_args.kwargs["client"])
+
+    def test_main_applies_provider_override_without_running_setup(self):
+        config = {
+            "provider": "openai",
+            "model": "test-model",
+            "max_stdin_chars": 200000,
+            "check_updates": False,
+        }
+
+        with (
+            patch.object(sys, "argv", ["jarv", "--provider", "anthropic", "hello"]),
+            patch.object(sys, "stdin", TtyStringIO("")),
+            patch.object(cli, "load_config", return_value=config),
+            patch("jarv.config.is_setup_complete", return_value=False),
+            patch.object(cli, "cmd_setup") as setup,
+            patch.object(cli, "validate_config", return_value=True),
+            patch("jarv.provider.resolve_api_key", return_value="key") as resolve_key,
+            patch("jarv.agent.run_agent") as run_agent,
+        ):
+            cli.main()
+
+        setup.assert_not_called()
+        runtime_config = run_agent.call_args.args[1]
+        self.assertEqual(runtime_config["provider"], "anthropic")
+        self.assertEqual(config["provider"], "openai")
+        self.assertEqual(resolve_key.call_args.args[0]["provider"], "anthropic")
 
     def test_main_ignores_stdin_for_slash_commands(self):
         stdin = PipedStringIO("do not read this")

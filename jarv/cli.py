@@ -165,12 +165,21 @@ def cmd_setup(rest: list[str] | None = None) -> dict | None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    from .provider_catalog import PROVIDERS
+
     parser = argparse.ArgumentParser(
         prog="jarv",
         description="AI-powered CLI agent",
         add_help=True,
     )
     parser.add_argument("query", nargs="*", help="Prompt to run (omit for heads-up mode)")
+    parser.add_argument(
+        "--provider",
+        choices=sorted(PROVIDERS),
+        type=str.lower,
+        metavar="PROVIDER",
+        help="Override provider for this run",
+    )
     parser.add_argument("-m", "--model", metavar="MODEL", help="Override model for this run (e.g. gpt-4o)")
     parser.add_argument("-e", "--effort", metavar="EFFORT", help="Override reasoning effort (low/medium/high)")
     parser.add_argument("--timeout", type=int, metavar="SECONDS", help="Override command timeout in seconds")
@@ -257,16 +266,16 @@ def main() -> None:
     # First-run: auto-trigger setup wizard if no config exists yet
     from .config import is_setup_complete
 
-    config = load_config()
-    if not is_setup_complete(config):
+    config = dict(load_config())
+    if not args.provider and not is_setup_complete(config):
         result = cmd_setup()
         if result is None or not is_setup_complete(result):
             sys.exit(1)
         config = result
-    if not validate_config(config):
-        sys.exit(1)
 
     # Apply flag overrides on top of config
+    if args.provider:
+        config["provider"] = args.provider
     if args.model:
         config["model"] = args.model
     if args.effort:
@@ -275,6 +284,9 @@ def main() -> None:
         config["command_timeout"] = args.timeout
     if args.system:
         config["system_prompt"] = args.system
+
+    if not validate_config(config):
+        sys.exit(1)
 
     from .provider import resolve_api_key, LOCAL_PROVIDERS
 

@@ -84,6 +84,7 @@ def test_help_is_compact_and_task_focused():
         "command | jarv <instruction>",
         "git diff | jarv review this",
         "jarv help",
+        "--provider PROVIDER",
         "-m, --model MODEL",
         "-e, --effort EFFORT",
         "--timeout SECONDS",
