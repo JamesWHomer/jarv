@@ -101,3 +101,46 @@ def test_refresh_on_resize_responds_to_sigwinch(monkeypatch):
 
     assert live.refresh_count >= 1
     assert fake_signal.handler is fake_signal.SIG_IGN
+
+
+def test_refresh_on_resize_uses_slower_polling_while_size_changes(monkeypatch):
+    console = FakeConsole()
+    live = FakeLive()
+    refresh_times = []
+
+    def fail(_fd):
+        raise OSError
+
+    def refresh():
+        live.refresh_count += 1
+        refresh_times.append(time.monotonic())
+
+    monkeypatch.setattr(display.os, "get_terminal_size", fail)
+    live.refresh = refresh
+
+    with refresh_on_resize(live, console=console, interval=0.02, active_interval=0.08):
+        console.width = 90
+        deadline = time.monotonic() + 1
+        while live.refresh_count == 0 and time.monotonic() < deadline:
+            time.sleep(0.005)
+
+        assert live.refresh_count == 1
+
+        console.width = 100
+        time.sleep(0.04)
+        assert live.refresh_count == 1
+
+        deadline = time.monotonic() + 1
+        while live.refresh_count < 2 and time.monotonic() < deadline:
+            time.sleep(0.005)
+
+        assert live.refresh_count == 2
+        assert refresh_times[1] - refresh_times[0] >= 0.06
+
+        time.sleep(0.1)
+        console.width = 110
+        deadline = time.monotonic() + 1
+        while live.refresh_count < 3 and time.monotonic() < deadline:
+            time.sleep(0.005)
+
+    assert live.refresh_count == 3

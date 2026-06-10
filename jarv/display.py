@@ -2,6 +2,7 @@ import os
 import re
 import signal
 import threading
+import time
 from contextlib import contextmanager
 
 from rich import box
@@ -16,6 +17,7 @@ ACCENT_STYLE = "bold cyan"
 TITLE_STYLE = "bold bright_white"
 
 RESIZE_REFRESH_INTERVAL = 0.1
+RESIZE_ACTIVE_INTERVAL = 0.2
 
 STEP_DOT_DONE = "\u25cf"
 STEP_DOT_ACTIVE = "\u25cf"
@@ -79,6 +81,7 @@ def refresh_on_resize(
     *,
     console: Console = console,
     interval: float = RESIZE_REFRESH_INTERVAL,
+    active_interval: float = RESIZE_ACTIVE_INTERVAL,
     on_change=None,
 ):
     """Refresh a Rich Live display when the terminal dimensions change.
@@ -100,16 +103,25 @@ def refresh_on_resize(
 
     def _watch() -> None:
         nonlocal last_size
+        next_interval = interval
+
         while not stop.is_set():
-            changed.wait(interval)
-            changed.clear()
+            deadline = time.monotonic() + next_interval
+            while not stop.is_set():
+                signaled = changed.wait(max(0.0, deadline - time.monotonic()))
+                changed.clear()
+                if not signaled or next_interval == interval:
+                    break
             if stop.is_set():
                 break
+
             current_size = terminal_size(console=console)
-            if current_size == last_size:
-                continue
-            last_size = current_size
-            _repaint()
+            if current_size != last_size:
+                last_size = current_size
+                _repaint()
+                next_interval = active_interval
+            else:
+                next_interval = interval
 
     if hasattr(signal, "SIGWINCH"):
         try:
