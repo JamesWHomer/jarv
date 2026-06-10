@@ -1,6 +1,9 @@
 import json
+import threading
+import time
 
 import httpx
+import pytest
 
 from jarv import model_catalog, settings_command
 from jarv.anthropic_http import list_models as list_anthropic_models
@@ -160,14 +163,19 @@ def test_catalog_uses_disk_cache_when_refresh_fails(tmp_path, monkeypatch):
     assert json.loads((tmp_path / "openai.json").read_text())["provider"] == "openai"
 
 
-def test_settings_refreshes_catalog_when_model_editor_opens(monkeypatch):
+def test_settings_opens_model_editor_from_cache_without_refresh(monkeypatch):
     calls = []
 
-    def choices(_config, *, refresh=False):
-        calls.append(refresh)
+    def choices(_config):
+        calls.append("cached")
         return [("gpt-5.6", "Flagship")]
 
-    monkeypatch.setattr(model_catalog, "get_model_choices", choices)
+    monkeypatch.setattr(model_catalog, "get_cached_model_choices", choices)
+    monkeypatch.setattr(
+        model_catalog,
+        "refresh_model_choices",
+        lambda _config: pytest.fail("model editor performed a blocking refresh"),
+    )
     row = {"key": "model", "kind": "text", "label": "Model"}
 
     edit = settings_command._settings_begin_edit(
@@ -175,8 +183,106 @@ def test_settings_refreshes_catalog_when_model_editor_opens(monkeypatch):
         {"provider": "openai", "model": "gpt-5.5"},
     )
 
-    assert calls == [True]
+    assert calls == ["cached"]
     assert edit["model_choices"] == [("gpt-5.6", "Flagship")]
+    assert edit["catalog_status"] == "loading"
+
+
+def test_cached_model_choices_never_attempt_discovery(tmp_path, monkeypatch):
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(
+        model_catalog,
+        "discover_models",
+        lambda _config: pytest.fail("cached lookup attempted network discovery"),
+    )
+    model_catalog.clear_memory_cache()
+
+    choices = model_catalog.get_cached_model_choices({"provider": "openai"})
+
+    assert choices
+
+
+def test_catalog_refresher_is_non_blocking_and_deduplicates(monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+    completed = threading.Event()
+    calls = []
+    callbacks = []
+
+    def refresh(_config):
+        calls.append("refresh")
+        started.set()
+        assert release.wait(1)
+        return [("gpt-5.6-mini", "Balanced")]
+
+    monkeypatch.setattr(model_catalog, "refresh_model_choices", refresh)
+    refresher = settings_command._ModelCatalogRefresher()
+
+    before = time.monotonic()
+    first = refresher.request(
+        {"provider": "openai"},
+        lambda provider, choices, generation: callbacks.append(
+            (provider, choices, generation)
+        ),
+    )
+    assert time.monotonic() - before < 0.1
+    assert started.wait(1)
+
+    second = refresher.request(
+        {"provider": "openai"},
+        lambda provider, choices, generation: (
+            callbacks.append((provider, choices, generation)),
+            completed.set(),
+        ),
+    )
+    release.set()
+
+    assert completed.wait(1)
+    refresher.close()
+    assert calls == ["refresh"]
+    assert first < second
+    assert callbacks == [
+        ("openai", [("gpt-5.6-mini", "Balanced")], second),
+    ]
+
+
+def test_provider_commit_uses_cached_models_without_refresh(monkeypatch):
+    provider_choices = {
+        "openai": [
+            ("gpt-5.6", "Flagship"),
+            ("gpt-5.6-mini", "Balanced"),
+        ],
+        "anthropic": [
+            ("claude-opus-4-8", "Flagship"),
+            ("claude-sonnet-4-6", "Balanced"),
+        ],
+    }
+
+    monkeypatch.setattr(
+        model_catalog,
+        "get_cached_model_choices",
+        lambda config: provider_choices[config["provider"]],
+    )
+    monkeypatch.setattr(
+        model_catalog,
+        "refresh_model_choices",
+        lambda _config: pytest.fail("provider commit performed a live refresh"),
+    )
+    monkeypatch.setattr(settings_command, "save_config", lambda _config: None)
+    edit = {
+        "row": {"key": "provider", "kind": "setup", "label": "Provider"},
+        "buffer": "",
+        "selected_provider": "anthropic",
+    }
+
+    config, _message, _style, done = settings_command._settings_commit_edit(
+        edit,
+        {"provider": "openai", "model": "gpt-5.6-mini"},
+    )
+
+    assert done is True
+    assert config["provider"] == "anthropic"
+    assert config["model"] == "claude-sonnet-4-6"
 
 
 def test_single_column_model_descriptions_align_with_settings_description_column():
