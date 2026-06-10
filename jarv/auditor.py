@@ -9,6 +9,7 @@ it recommends caution).
 
 import json
 import re
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -55,7 +56,41 @@ def _get_auditor_model(config: dict) -> str:
     auditor_model = config.get("auditor_model", "")
     if auditor_model:
         return auditor_model
-    return config.get("model", "gpt-4.1-mini")
+    return config.get("model", "gpt-5.4-mini")
+
+
+_AUDITOR_CLIENTS: dict[tuple, Any] = {}
+_AUDITOR_CLIENTS_LOCK = threading.Lock()
+
+
+def _auditor_client_key(backend: str, config: dict, info: dict | None = None) -> tuple:
+    from .provider import resolve_api_key
+
+    provider = config.get("provider", "openai")
+    api_key = resolve_api_key(config)
+    base_url = config.get("base_url") or (info or {}).get("base_url") or ""
+    return (backend, provider, api_key, base_url)
+
+
+def _get_auditor_client(backend: str, config: dict, info: dict | None = None):
+    key = _auditor_client_key(backend, config, info)
+    with _AUDITOR_CLIENTS_LOCK:
+        client = _AUDITOR_CLIENTS.get(key)
+        if client is None:
+            if backend == "anthropic":
+                from .anthropic_http import create_client
+
+                client = create_client(config, key[2])
+            elif backend == "gemini":
+                from .gemini_http import create_client
+
+                client = create_client(config, key[2])
+            else:
+                from .openai_http import create_client
+
+                client = create_client(config, key[2], key[3] or None)
+            _AUDITOR_CLIENTS[key] = client
+        return client
 
 
 def _build_context_summary(history: list, max_chars: int = 600) -> str:
@@ -167,19 +202,9 @@ def _call_openai_compat(
     global_usage_path: Path | None = None,
     cancellation_token: CancellationToken | None = None,
 ) -> tuple[bool, str]:
-    from .openai_http import build_chat_payload, create_chat, create_client
+    from .openai_http import build_chat_payload, create_chat
 
-    api_key = resolve_api_key(config)
-    base_url = config.get("base_url")
-    if not base_url:
-        base_url = info.get("base_url")
-
-    client = create_client(config, api_key, base_url)
-    close_client = client.close
-    unregister = (
-        cancellation_token.register(close_client)
-        if cancellation_token is not None else lambda: None
-    )
+    client = _get_auditor_client("openai_compat", config, info)
 
     try:
         if cancellation_token is not None:
@@ -238,8 +263,8 @@ def _call_openai_compat(
         )
         return _parse_response(retry_content)
     finally:
-        unregister()
-        close_client()
+        if cancellation_token is not None:
+            cancellation_token.throw_if_cancelled()
 
 
 def _auditor_messages(user_message: str, *, retry: bool = False) -> list[dict[str, str]]:
@@ -348,13 +373,9 @@ def _call_anthropic(
     global_usage_path: Path | None = None,
     cancellation_token: CancellationToken | None = None,
 ) -> tuple[bool, str]:
-    from .anthropic_http import build_payload, create_client, create_message
+    from .anthropic_http import build_payload, create_message
 
-    client = create_client(config, resolve_api_key(config))
-    unregister = (
-        cancellation_token.register(client.close)
-        if cancellation_token is not None else lambda: None
-    )
+    client = _get_auditor_client("anthropic", config)
     try:
         messages = _auditor_messages(user_message)
         response = create_message(
@@ -410,8 +431,8 @@ def _call_anthropic(
         )
         return _parse_response(retry_content)
     finally:
-        unregister()
-        client.close()
+        if cancellation_token is not None:
+            cancellation_token.throw_if_cancelled()
 
 
 def _call_gemini(
@@ -424,13 +445,9 @@ def _call_gemini(
     global_usage_path: Path | None = None,
     cancellation_token: CancellationToken | None = None,
 ) -> tuple[bool, str]:
-    from .gemini_http import build_payload, create_client, generate_content
+    from .gemini_http import build_payload, generate_content
 
-    client = create_client(config, resolve_api_key(config))
-    unregister = (
-        cancellation_token.register(client.close)
-        if cancellation_token is not None else lambda: None
-    )
+    client = _get_auditor_client("gemini", config)
     try:
         messages = _auditor_messages(user_message)
         response = generate_content(
@@ -488,8 +505,8 @@ def _call_gemini(
         )
         return _parse_response(retry_content)
     finally:
-        unregister()
-        client.close()
+        if cancellation_token is not None:
+            cancellation_token.throw_if_cancelled()
 
 
 def _is_parse_failure(parsed: tuple[bool, str]) -> bool:

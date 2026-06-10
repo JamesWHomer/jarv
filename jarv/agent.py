@@ -75,6 +75,7 @@ _THINKING_FRAMES = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", 
 class AgentRunResult:
     cancelled: bool = False
     prompt: str | None = None
+    error: str | None = None
 
 
 def response_wait_label(has_reasoning: bool) -> str:
@@ -890,14 +891,14 @@ def run_agent(
             save_history(history, session_context.history_file)
         if artifact_store is not None and artifact_file is not None:
             save_artifact_store(artifact_store, artifact_file)
-        raise SystemExit(1)
+        return AgentRunResult(error=str(e))
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         if session_context is not None and not incognito:
             save_history(history, session_context.history_file)
         if artifact_store is not None and artifact_file is not None:
             save_artifact_store(artifact_store, artifact_file)
-        raise SystemExit(1)
+        return AgentRunResult(error=str(e))
     finally:
         _stop_live_displays()
 

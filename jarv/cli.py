@@ -327,6 +327,8 @@ def main() -> None:
         if getattr(result, "cancelled", False) is True:
             console.print("\n[dim]Cancelled.[/dim]")
             sys.exit(130)
+        if isinstance(getattr(result, "error", None), str):
+            sys.exit(1)
     except KeyboardInterrupt:
         console.print("\n[dim]Cancelled.[/dim]")
         sys.exit(130)
@@ -390,6 +392,8 @@ def run_heads_up_mode(
             if getattr(result, "cancelled", False) is True:
                 console.print("\n[dim]Cancelled.[/dim]")
                 prefill = result.prompt or query
+            elif isinstance(getattr(result, "error", None), str):
+                continue
         except KeyboardInterrupt:
             console.print("\n[dim]Cancelled.[/dim]")
             prefill = query
