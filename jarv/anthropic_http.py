@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from typing import Any
 
 from .cancellation import CancellationToken
+from .http_transport import request_json
 from .unicode_safety import sanitize_json_value
 
 
@@ -71,6 +72,34 @@ def create_client(config: dict, api_key: str):
         },
         timeout=timeout,
     )
+
+
+def list_models(client, *, max_retries: int = 0) -> dict:
+    """List all models visible to the current Anthropic account."""
+    models: list[dict] = []
+    after_id: str | None = None
+    while True:
+        params: dict[str, Any] = {"limit": 1000}
+        if after_id:
+            params["after_id"] = after_id
+        page = request_json(
+            "Anthropic",
+            client,
+            "GET",
+            "/v1/models",
+            params=params,
+            max_retries=max_retries,
+        )
+        data = page.get("data")
+        if isinstance(data, list):
+            models.extend(item for item in data if isinstance(item, dict))
+        if not page.get("has_more"):
+            break
+        next_id = page.get("last_id")
+        if not isinstance(next_id, str) or not next_id or next_id == after_id:
+            break
+        after_id = next_id
+    return {"data": models, "has_more": False}
 
 
 def _append_message(messages: list[dict], role: str, blocks: list[dict]) -> None:

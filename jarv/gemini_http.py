@@ -45,7 +45,28 @@ def create_client(config: dict, api_key: str):
 
 
 def list_models(client, *, max_retries: int = 0) -> dict:
-    return request_json("Gemini", client, "GET", "/models", max_retries=max_retries)
+    models: list[dict] = []
+    page_token: str | None = None
+    while True:
+        params = {"pageSize": 1000}
+        if page_token:
+            params["pageToken"] = page_token
+        page = request_json(
+            "Gemini",
+            client,
+            "GET",
+            "/models",
+            params=params,
+            max_retries=max_retries,
+        )
+        data = page.get("models")
+        if isinstance(data, list):
+            models.extend(item for item in data if isinstance(item, dict))
+        next_token = page.get("nextPageToken")
+        if not isinstance(next_token, str) or not next_token or next_token == page_token:
+            break
+        page_token = next_token
+    return {"models": models}
 
 
 def _append_content(contents: list[dict], role: str, parts: list[dict]) -> None:
