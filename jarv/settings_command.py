@@ -382,6 +382,16 @@ def _settings_resolve_model(config: dict, choice: str) -> str:
     return raw
 
 
+def _settings_column_layout(inner_width: int) -> tuple[int, int, int, int]:
+    """Return label/value widths and value/description start columns."""
+    prefix_width = 3
+    label_width = min(22, max(10, inner_width // 4))
+    value_width = min(28, max(10, inner_width // 3))
+    value_start = prefix_width + label_width + 2
+    description_start = value_start + value_width + 2
+    return label_width, value_width, value_start, description_start
+
+
 def _settings_choice_grid_lines(
     items: list[tuple[int, str, str]],
     inner_width: int,
@@ -389,6 +399,7 @@ def _settings_choice_grid_lines(
     max_lines: int | None = None,
     max_columns: int = 1,
     more_hint: str = "type a number/name",
+    align_descriptions: bool = False,
 ) -> list[Text]:
     if not items:
         return []
@@ -411,6 +422,9 @@ def _settings_choice_grid_lines(
         max(len(primary) for _idx, primary, _secondary in items),
         max(1, cell_width // 2),
     )
+    _label_width, _value_width, _value_start, description_start = (
+        _settings_column_layout(inner_width)
+    )
 
     def _cell(idx: int, primary: str, secondary: str) -> str:
         marker = f"{idx:>2}. "
@@ -418,6 +432,20 @@ def _settings_choice_grid_lines(
         if not secondary or body_width < 18:
             return marker + _clip_text(primary or secondary, body_width)
         if columns == 1:
+            if align_descriptions:
+                secondary_column = max(
+                    len(indent) + len(marker) + 3,
+                    description_start,
+                )
+                primary_width = max(
+                    1,
+                    secondary_column - len(indent) - len(marker) - 2,
+                )
+                remaining = max(0, inner_width - secondary_column)
+                cell = marker + f"{_clip_text(primary, primary_width):<{primary_width}}"
+                if remaining:
+                    cell += "  " + _clip_text(secondary, remaining)
+                return cell
             primary_width = min(single_column_primary_width, body_width)
             remaining = max(0, body_width - primary_width - 2)
             cell = marker + f"{_clip_text(primary, primary_width):<{primary_width}}"
@@ -511,9 +539,17 @@ def _settings_provider_choice_lines(
     ]
 
     number_width = 2
-    label_width = min(18, max(10, inner_width // 4))
-    key_width = min(14, max(8, inner_width // 5))
-    note_width = max(0, inner_width - 5 - number_width - label_width - key_width - 6)
+    _settings_label_width, settings_value_width, value_start, description_start = (
+        _settings_column_layout(inner_width)
+    )
+    prefix_width = 3
+    number_gap = 2
+    label_width = max(
+        1,
+        value_start - prefix_width - number_width - number_gap - 2,
+    )
+    key_width = settings_value_width
+    note_width = max(0, inner_width - description_start)
 
     entries: list[tuple[str, tuple[int, str, str, str] | None]] = []
     for title, items in sections:
@@ -726,6 +762,7 @@ def _settings_editor_lines(
             max_lines=choice_line_budget,
             max_columns=1,
             more_hint="type a number/name/custom",
+            align_descriptions=True,
         )
 
     return intro + choices + tail
@@ -933,8 +970,9 @@ def _settings_interactive(config: dict) -> None:
 
             is_selected = idx == selected
             prefix = " \u203a " if is_selected else "   "
-            label_width = min(22, max(10, inner_width // 4))
-            value_width = min(28, max(10, inner_width // 3))
+            label_width, value_width, _value_start, _description_start = (
+                _settings_column_layout(inner_width)
+            )
             desc_width = max(0, inner_width - len(prefix) - label_width - value_width - 4)
 
             line = Text(no_wrap=True, overflow="crop")
