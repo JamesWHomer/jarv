@@ -16,12 +16,14 @@ from .artifacts import ArtifactStore
 from .cancellation import CancellationToken, TurnCancelled
 from .config import DEFAULT_CONFIG
 from .safety import check_command
+from .anthropic_http import DEFAULT_SUBAGENT_MAX_TOKENS
 from .provider import (
     ProviderError,
     StreamDone,
     TextDelta,
     ToolCallDone,
     ReasoningDone,
+    get_backend,
     responses_input_id,
     stream_response,
 )
@@ -238,6 +240,24 @@ def dispatch_tool(
     return f"[unknown tool: {name}]"
 
 
+_FINISH_NUDGE = (
+    "You must call the finish tool to complete your task. "
+    "Plain text outside a tool call is discarded and will fail this run. "
+    "Call finish(longform, tldr) now."
+)
+
+_FINISH_TRUNCATION_NUDGE = (
+    "Your finish() call was truncated by the output token limit. "
+    "Call finish(longform, tldr) again with a shorter longform."
+)
+
+
+def _subagent_max_tokens(config: dict) -> int | None:
+    if get_backend(config) != "anthropic":
+        return None
+    return int(config.get("anthropic_subagent_max_tokens", DEFAULT_SUBAGENT_MAX_TOKENS))
+
+
 def run_subagent_loop(
     node: AgentNode,
     store: ArtifactStore,
@@ -270,6 +290,10 @@ def run_subagent_loop(
     if effort:
         kwargs["reasoning"] = {"effort": effort}
 
+    max_tokens = _subagent_max_tokens(config)
+    finish_nudge_sent = False
+    finish_truncation_nudge_sent = False
+
     while True:
         if cancellation_token is not None:
             cancellation_token.throw_if_cancelled()
@@ -289,6 +313,7 @@ def run_subagent_loop(
                 kwargs["tools"], kwargs["input"],
                 reasoning=kwargs.get("reasoning"),
                 prompt_cache_key=f"jarv:{node.session_id}" if node.session_id else None,
+                max_tokens=max_tokens,
                 cancellation_token=cancellation_token,
             ):
                 if isinstance(event, ToolCallDone):
@@ -314,7 +339,31 @@ def run_subagent_loop(
             return None, f"stream error: {e}"
 
         if not tool_calls:
+            if not finish_nudge_sent:
+                finish_nudge_sent = True
+                kwargs["input"] = kwargs["input"] + [{"role": "user", "content": _FINISH_NUDGE}]
+                continue
             return None, "subagent terminated without calling finish"
+
+        stop_reason = (
+            final_response.get("stop_reason")
+            if isinstance(final_response, dict) else None
+        )
+        truncated_finish = False
+        for item in tool_calls:
+            if item.name != "finish":
+                continue
+            try:
+                json.loads(item.arguments or "{}")
+            except json.JSONDecodeError:
+                if stop_reason == "max_tokens" and not finish_truncation_nudge_sent:
+                    finish_truncation_nudge_sent = True
+                    truncated_finish = True
+                    break
+
+        if truncated_finish:
+            kwargs["input"] = kwargs["input"] + [{"role": "user", "content": _FINISH_TRUNCATION_NUDGE}]
+            continue
 
         new_input: list[dict] = []
         for ri in reasoning_items:

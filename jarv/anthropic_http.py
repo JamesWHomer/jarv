@@ -15,6 +15,8 @@ from .unicode_safety import sanitize_json_value
 ANTHROPIC_API_URL = "https://api.anthropic.com"
 ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_MAX_TOKENS = 8192
+DEFAULT_SUBAGENT_MAX_TOKENS = 16384
+_CACHE_CONTROL = {"type": "ephemeral"}
 _RETRYABLE_STATUS_CODES = {408, 409, 429, 500, 502, 503, 504, 529}
 _THINKING_BUDGETS = {
     "minimal": 1024,
@@ -211,6 +213,49 @@ def _uses_adaptive_thinking(model: str) -> bool:
     return any(version in lowered for version in ("-4-6", "-4.6", "-4-7", "-4.7"))
 
 
+def _mark_last_block_cached(content: Any) -> list[dict]:
+    """Return content blocks with cache_control on the final block."""
+    if isinstance(content, str):
+        return [{"type": "text", "text": content, "cache_control": _CACHE_CONTROL}]
+    if not isinstance(content, list) or not content:
+        return [{"type": "text", "text": "", "cache_control": _CACHE_CONTROL}]
+    blocks: list[dict] = []
+    for block in content:
+        blocks.append(dict(block) if isinstance(block, dict) else block)
+    last = dict(blocks[-1])
+    last["cache_control"] = _CACHE_CONTROL
+    blocks[-1] = last
+    return blocks
+
+
+def _apply_prompt_caching(payload: dict) -> None:
+    """Place explicit cache breakpoints on tools, system, and stable message prefix."""
+    tools = payload.get("tools")
+    if isinstance(tools, list) and tools:
+        last_tool = dict(tools[-1])
+        last_tool["cache_control"] = _CACHE_CONTROL
+        tools[-1] = last_tool
+
+    instructions = payload.get("system")
+    if instructions:
+        text = instructions if isinstance(instructions, str) else str(instructions)
+        payload["system"] = [{
+            "type": "text",
+            "text": text,
+            "cache_control": _CACHE_CONTROL,
+        }]
+
+    messages = payload.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return
+    target = messages[-2] if len(messages) >= 2 else messages[0]
+    if not isinstance(target, dict):
+        return
+    target = dict(target)
+    target["content"] = _mark_last_block_cached(target.get("content"))
+    messages[-2 if len(messages) >= 2 else 0] = target
+
+
 def _apply_reasoning(payload: dict, model: str, reasoning: dict | None) -> None:
     effort = str((reasoning or {}).get("effort") or "").lower()
     if not effort or effort == "none":
@@ -255,6 +300,8 @@ def build_payload(
     if stream:
         payload["stream"] = True
     _apply_reasoning(payload, model, reasoning)
+    if config.get("anthropic_prompt_caching", True):
+        _apply_prompt_caching(payload)
     return sanitize_json_value(payload)
 
 

@@ -569,6 +569,7 @@ def _stream_chat_completions(
 
 def _stream_anthropic(
     client, config, model, instructions, tools, input_items, reasoning=None,
+    max_tokens: int | None = None,
     cancellation_token: CancellationToken | None = None,
 ) -> Iterator:
     from .anthropic_http import build_payload, stream_message
@@ -581,6 +582,7 @@ def _stream_anthropic(
         input_items,
         reasoning=reasoning,
         stream=True,
+        max_tokens=max_tokens,
     )
     for event in stream_message(
         client,
@@ -677,6 +679,7 @@ def _stream_response_direct(
     input_items: list,
     reasoning: dict | None = None,
     prompt_cache_key: str | None = None,
+    max_tokens: int | None = None,
     cancellation_token: CancellationToken | None = None,
 ) -> Iterator:
     backend = get_backend(config)
@@ -694,6 +697,7 @@ def _stream_response_direct(
         elif backend == "anthropic":
             yield from _stream_anthropic(
                 client, config, model, instructions, tools, input_items, reasoning,
+                max_tokens,
                 cancellation_token,
             )
         elif backend == "gemini":
@@ -720,6 +724,7 @@ def stream_response(
     input_items: list,
     reasoning: dict | None = None,
     prompt_cache_key: str | None = None,
+    max_tokens: int | None = None,
     cancellation_token: CancellationToken | None = None,
 ) -> Iterator:
     """Stream a normalized response, with interruptible waits on Windows."""
@@ -732,6 +737,7 @@ def stream_response(
         input_items,
         reasoning,
         prompt_cache_key,
+        max_tokens,
         cancellation_token,
     )
     if sys.platform != "win32" or cancellation_token is None:

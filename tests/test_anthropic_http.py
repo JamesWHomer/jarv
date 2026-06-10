@@ -87,9 +87,50 @@ def test_payload_preserves_signed_thinking_and_tool_history():
         "id": "toolu_1",
         "name": "run_command",
         "input": {"command": "git status"},
+        "cache_control": {"type": "ephemeral"},
     }
     assert payload["messages"][2]["content"][0]["type"] == "tool_result"
     assert payload["tools"][0]["input_schema"] == {"type": "object"}
+
+
+def test_build_payload_applies_prompt_caching_breakpoints():
+    payload = build_payload(
+        {},
+        "claude-opus-4-7",
+        "system instructions",
+        [{
+            "type": "function",
+            "name": "run_command",
+            "description": "Run a command",
+            "parameters": {"type": "object"},
+        }],
+        [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "working"},
+            {"role": "user", "content": "latest"},
+        ],
+    )
+
+    assert payload["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert payload["system"] == [{
+        "type": "text",
+        "text": "system instructions",
+        "cache_control": {"type": "ephemeral"},
+    }]
+    assert payload["messages"][1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_build_payload_skips_caching_when_disabled():
+    payload = build_payload(
+        {"anthropic_prompt_caching": False},
+        "claude-opus-4-7",
+        "system",
+        [{"type": "function", "name": "finish", "parameters": {"type": "object"}}],
+        [{"role": "user", "content": "hi"}],
+    )
+
+    assert "cache_control" not in payload["tools"][0]
+    assert payload["system"] == "system"
 
 
 def test_legacy_model_maps_reasoning_effort_to_budget():
