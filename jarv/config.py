@@ -148,4 +148,25 @@ def validate_config(config: dict) -> bool:
         _console().print(f"[red]Config 'read_only_command_display' must be one of: {choices}.[/red]")
         ok = False
 
+    try:
+        depth = int(config.get("max_subagent_depth", DEFAULT_CONFIG["max_subagent_depth"]))
+        if depth < 0:
+            raise ValueError
+        config["max_subagent_depth"] = depth
+    except (TypeError, ValueError):
+        _console().print("[red]Config 'max_subagent_depth' must be a non-negative integer.[/red]")
+        ok = False
+
+    try:
+        workers = int(config.get(
+            "subagent_thread_pool_max_workers",
+            DEFAULT_CONFIG["subagent_thread_pool_max_workers"],
+        ))
+        if workers <= 0:
+            raise ValueError
+        config["subagent_thread_pool_max_workers"] = workers
+    except (TypeError, ValueError):
+        _console().print("[red]Config 'subagent_thread_pool_max_workers' must be a positive integer.[/red]")
+        ok = False
+
     return ok

@@ -54,17 +54,31 @@ def coerce_value(value: str):
     return value
 
 
+def _mask_config_value(key: str, value) -> str:
+    if key == "api_key" and value:
+        return "[dim]***[/dim]"
+    if key == "api_keys" and isinstance(value, dict) and value:
+        masked = {k: ("***" if v else v) for k, v in value.items()}
+        return f"[green]{repr(masked)}[/green]"
+    return f"[green]{repr(value)}[/green]"
+
+
 def cmd_set(args: list) -> None:
     if len(args) < 2:
         console.print(status_line("✗", "jarv /set <key> <value>", prefix_style="bold red", message_style="dim"))
         console.print(f"  [dim]Keys: {', '.join(DEFAULT_CONFIG.keys())}[/dim]")
         return
     key, raw = args[0], " ".join(args[1:])
+    if key not in DEFAULT_CONFIG:
+        console.print(
+            f"[yellow]⚠[/yellow] [yellow]Unknown config key[/yellow] [bold]{key}[/bold] "
+            f"[dim](known: {', '.join(DEFAULT_CONFIG.keys())})[/dim]"
+        )
     config = load_config()
     value = coerce_value(raw)
     config[key] = value
     save_config(config)
-    display = "[dim]***[/dim]" if key == "api_key" else f"[green]{repr(value)}[/green]"
+    display = _mask_config_value(key, value)
     console.print(f"[bold cyan]✓[/bold cyan] [bold cyan]{key}[/bold cyan] [dim]=[/dim] {display}")
 
 
@@ -399,6 +413,9 @@ def cmd_config() -> None:
     for k, v in config.items():
         if k == "api_key" and v:
             val = Text("***", style="dim")
+        elif k == "api_keys" and isinstance(v, dict) and v:
+            masked = {pk: ("***" if pv else pv) for pk, pv in v.items()}
+            val = Text(repr(masked), style="green")
         elif isinstance(v, bool):
             val = Text(repr(v), style="bold magenta")
         elif isinstance(v, (int, float)):
