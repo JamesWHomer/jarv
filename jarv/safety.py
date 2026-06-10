@@ -14,6 +14,9 @@ from .display import console, jarv_panel
 SAFETY_LEVELS = ("all", "risky", "none")
 DEFAULT_SAFETY_LEVEL = "risky"
 
+# Serialize interactive approval/audit prompts across concurrent subagent workers.
+_APPROVAL_LOCK = threading.Lock()
+
 # Each pattern is (compiled_regex, description) for user-facing confirmation.
 # Patterns are designed to work across Windows (PowerShell/cmd) and Unix shells.
 _RISKY_PATTERNS: list[tuple[re.Pattern, str]] = []
@@ -28,6 +31,9 @@ _p(r"\brm\s+(-[^\s]*[rf]|--recursive|--force)", "recursive/forced file deletion 
 _p(r"\brmdir\s+/s\b", "recursive directory deletion (rmdir /s)")
 _p(r"\bdel\s+.*/[sqf]", "forced file deletion (del)")
 _p(r"\bRemove-Item\b.*-(Recurse|Force)", "recursive/forced file deletion (Remove-Item)")
+_p(r"\bRemove-Item\b.*\s-[rfRF]\b", "recursive/forced file deletion (Remove-Item -r/-f)")
+_p(r"\b(ri|rm)\s+.*\s-[rfRF]\b", "recursive/forced file deletion (PowerShell alias)")
+_p(r"\b(python|python3|py)\s+(-c|--command)\b", "inline Python execution")
 _p(r"\bshred\b", "secure file destruction (shred)")
 _p(r"\bwipe\b", "disk/file wiping")
 
@@ -251,6 +257,23 @@ def check_command(
     if safety_level == "none":
         return True, ""
 
+    with _APPROVAL_LOCK:
+        return _check_command_locked(
+            command, safety_level, audit, config, history,
+            usage_path, session_id, cancellation_token,
+        )
+
+
+def _check_command_locked(
+    command: str,
+    safety_level: str,
+    audit: bool,
+    config: dict | None,
+    history: list | None,
+    usage_path: Path | None,
+    session_id: str | None,
+    cancellation_token: CancellationToken | None,
+) -> tuple[bool, str]:
     if safety_level == "all":
         reason = "all commands require approval"
         if audit:
