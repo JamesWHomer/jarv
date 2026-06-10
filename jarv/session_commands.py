@@ -207,17 +207,18 @@ def _short_session_id(sid: str) -> str:
     return sid[:16]
 
 
-def _cwd_label(value: str) -> str:
-    path = str(value or "").replace("\\", "/").rstrip("/")
-    if not path:
-        return ""
-    return path.rsplit("/", 1)[-1]
+def _session_row_widths(width: int) -> tuple[int, int, int]:
+    """Allocate session, date, and message columns within a row."""
+    date_width = min(7, max(0, width))
+    if width <= date_width:
+        return (0, date_width, 0)
 
-
-def _session_metadata_widths(width: int) -> tuple[int, int]:
-    if width < 36:
-        return (0, max(0, width))
-    return (18, max(0, width - 18))
+    gutter_width = 2
+    message_min_width = 16
+    fixed_width = date_width + (2 * gutter_width)
+    session_width = min(28, max(0, width - fixed_width - message_min_width))
+    message_width = max(0, width - session_width - fixed_width)
+    return (session_width, date_width, message_width)
 
 
 def _sessions_plain(sessions: dict, terminals: dict) -> None:
@@ -371,7 +372,6 @@ def cmd_sessions(args: list | None = None) -> None:
             "time_str": time_str,
             "snippet": snippet,
             "snippet_loaded": bool(cached_snippet),
-            "cwd": _cwd_label(str(meta.get("cwd") or meta.get("working_directory") or "")),
             "is_current": sid == current_session_id,
             "archived": bool(meta.get("archived")),
         })
@@ -452,8 +452,6 @@ def cmd_sessions(args: list | None = None) -> None:
         if not r.get("snippet_loaded"):
             r["snippet"] = _first_user_snippet(meta)
             r["snippet_loaded"] = True
-        if not r.get("cwd"):
-            r["cwd"] = _cwd_label(str(meta.get("cwd") or meta.get("working_directory") or ""))
 
     def _build_search_text(sid: str) -> str:
         meta = sessions.get(sid, {})
@@ -781,12 +779,8 @@ def cmd_sessions(args: list | None = None) -> None:
                 marker = "⌫  "
             else:
                 marker = "   "
-            remaining = inner_width - len(prefix) - len(marker)
-            id_width = max(0, min(24, remaining))
-            remaining -= id_width
-            time_width = max(0, min(12, remaining))
-            remaining -= time_width
-            cwd_width, snippet_width = _session_metadata_widths(max(0, remaining))
+            remaining = max(0, inner_width - len(prefix) - len(marker))
+            id_width, time_width, snippet_width = _session_row_widths(remaining)
 
             if is_armed:
                 prefix_style = "bold red"
@@ -818,6 +812,7 @@ def cmd_sessions(args: list | None = None) -> None:
                 else:
                     id_style = "cyan"
                 t.append(f"{short_id:<{id_width}}", style=id_style)
+                t.append("  ")
 
             if time_width:
                 time_str = _truncate(r["time_str"], time_width)
@@ -828,11 +823,7 @@ def cmd_sessions(args: list | None = None) -> None:
                 else:
                     time_style = "dim"
                 t.append(f"{time_str:<{time_width}}", style=time_style)
-
-            if cwd_width:
-                cwd = _truncate(r.get("cwd") or "", cwd_width)
-                cwd_style = "bold red" if is_armed else ("cyan" if is_sel else "dim")
-                t.append(f"{cwd:<{cwd_width}}", style=cwd_style)
+                t.append("  ")
 
             snip = r["snippet"] or "no messages"
             if snippet_width:
