@@ -2,6 +2,8 @@
 
 import sys
 import textwrap
+import threading
+from collections.abc import Callable
 
 from rich.console import Group
 from rich.live import Live
@@ -20,6 +22,96 @@ from .config import (
     save_config,
 )
 from .display import console, jarv_panel, refresh_on_resize, section_rule, terminal_size
+
+
+class _ModelCatalogRefresher:
+    """Deduplicate delayed catalog refreshes and keep network work off the UI thread."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._generation = 0
+        self._timers: dict[str, threading.Timer] = {}
+        self._inflight: set[str] = set()
+        self._latest: dict[str, tuple[int, dict, Callable]] = {}
+        self._closed = False
+
+    def request(
+        self,
+        config: dict,
+        callback: Callable[[str, list[tuple[str, str]], int], None],
+        *,
+        delay: float = 0,
+    ) -> int:
+        from .model_catalog import catalog_cache_key
+
+        snapshot = dict(config)
+        key = catalog_cache_key(snapshot)
+        with self._lock:
+            if self._closed:
+                return self._generation
+            self._generation += 1
+            generation = self._generation
+            self._latest[key] = (generation, snapshot, callback)
+            timer = self._timers.pop(key, None)
+            if timer is not None:
+                timer.cancel()
+            if key in self._inflight:
+                return generation
+            timer = threading.Timer(delay, self._launch, args=(key,))
+            timer.daemon = True
+            self._timers[key] = timer
+            timer.start()
+        return generation
+
+    def _launch(self, key: str) -> None:
+        with self._lock:
+            self._timers.pop(key, None)
+            pending = self._latest.get(key)
+            if pending is None or key in self._inflight:
+                return
+            self._inflight.add(key)
+            _generation, snapshot, _callback = pending
+        threading.Thread(
+            target=self._refresh,
+            args=(key, snapshot),
+            daemon=True,
+            name="jarv-model-catalog",
+        ).start()
+
+    def _refresh(self, key: str, snapshot: dict) -> None:
+        from .model_catalog import get_cached_model_choices, refresh_model_choices
+
+        try:
+            choices = refresh_model_choices(snapshot)
+        except Exception:
+            choices = get_cached_model_choices(snapshot)
+        with self._lock:
+            self._inflight.discard(key)
+            pending = self._latest.pop(key, None)
+            closed = self._closed
+        if pending is None or closed:
+            return
+        generation, _latest_snapshot, callback = pending
+        callback(str(snapshot.get("provider", "openai")), choices, generation)
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            timers = list(self._timers.values())
+            self._timers.clear()
+            self._latest.clear()
+        for timer in timers:
+            timer.cancel()
+
+    def cancel_pending(self) -> None:
+        with self._lock:
+            timers = list(self._timers.values())
+            self._timers.clear()
+            for key in list(self._latest):
+                if key not in self._inflight:
+                    self._latest.pop(key, None)
+        for timer in timers:
+            timer.cancel()
 
 
 _SETTINGS_SAFETY_CHOICES = (
@@ -310,9 +402,11 @@ def _settings_model_choices(
     *,
     refresh: bool = False,
 ) -> list[tuple[str, str]]:
-    from .model_catalog import get_model_choices
+    from .model_catalog import get_cached_model_choices, refresh_model_choices
 
-    return get_model_choices(config, refresh=refresh)
+    if refresh:
+        return refresh_model_choices(config)
+    return get_cached_model_choices(config)
 
 
 def _settings_default_model(config: dict) -> str:
@@ -365,11 +459,17 @@ def _settings_resolve_provider(choice: str) -> str | None:
     return None
 
 
-def _settings_resolve_model(config: dict, choice: str) -> str:
+def _settings_resolve_model(
+    config: dict,
+    choice: str,
+    *,
+    models: list[tuple[str, str]] | None = None,
+) -> str:
     raw = choice.strip()
     if not raw:
         return str(config.get("model") or _settings_default_model(config))
-    models = _settings_model_choices(config)
+    if models is None:
+        models = _settings_model_choices(config)
     try:
         idx = int(raw)
         if models and 1 <= idx <= len(models):
@@ -643,7 +743,9 @@ def _settings_begin_edit(row: dict, config: dict) -> dict:
     if key == "provider":
         edit["selected_provider"] = config.get("provider", "openai")
     elif key == "model":
-        edit["model_choices"] = _settings_model_choices(config, refresh=True)
+        edit["model_choices"] = _settings_model_choices(config)
+        edit["catalog_provider"] = config.get("provider", "openai")
+        edit["catalog_status"] = "loading"
     return edit
 
 
@@ -675,8 +777,20 @@ def _settings_editor_lines(
         models = edit.get("model_choices")
         if not isinstance(models, list):
             models = _settings_model_choices(config)
+        catalog_status = edit.get("catalog_status")
         if models:
             intro.append(Text(_clip_text(f"  provider: {provider_label}", inner_width), style="dim"))
+            if catalog_status == "loading":
+                intro.append(Text(_clip_text("  Checking for newer models...", inner_width), style="dim italic"))
+            elif catalog_status == "updated":
+                intro.append(Text(_clip_text("  Model list updated.", inner_width), style="green"))
+            elif catalog_status == "current":
+                intro.append(Text(_clip_text("  Model list is current.", inner_width), style="dim"))
+            elif catalog_status == "deferred":
+                intro.append(Text(
+                    _clip_text("  New models will appear next time this editor opens.", inner_width),
+                    style="dim",
+                ))
             choice_items = [(idx, name, desc) for idx, (name, desc) in enumerate(models, 1)]
             prompt = "Model number/name/custom"
         else:
@@ -821,7 +935,12 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
         return config, "saved API key", "green", True
 
     if key == "model":
-        model = _settings_resolve_model(config, raw)
+        models = edit.get("model_choices")
+        model = _settings_resolve_model(
+            config,
+            raw,
+            models=models if isinstance(models, list) else None,
+        )
         if not model.strip():
             edit["error"] = "Model must not be empty."
             return config, edit["error"], "red", False
@@ -878,6 +997,46 @@ def _settings_interactive(config: dict) -> None:
     scroll_start = 0
     flash: tuple[str, str] | None = None
     edit: dict | None = None
+    catalog_refresher = _ModelCatalogRefresher()
+    live_holder: list[Live] = []
+
+    def _catalog_refreshed(
+        provider: str,
+        choices: list[tuple[str, str]],
+        generation: int,
+    ) -> None:
+        current_edit = edit
+        if (
+            current_edit is not None
+            and current_edit["row"]["key"] == "model"
+            and current_edit.get("catalog_provider") == provider
+            and current_edit.get("catalog_generation") == generation
+        ):
+            previous = current_edit.get("model_choices")
+            if current_edit.get("catalog_input_dirty"):
+                current_edit["catalog_status"] = "deferred"
+            else:
+                current_edit["model_choices"] = list(choices)
+                current_edit["catalog_status"] = "updated" if choices != previous else "current"
+        if live_holder:
+            live_holder[0].refresh()
+
+    def _request_catalog_refresh(
+        provider: str,
+        *,
+        target_edit: dict | None = None,
+        delay: float = 0,
+    ) -> None:
+        probe = dict(config)
+        probe["provider"] = provider
+        generation = catalog_refresher.request(
+            probe,
+            _catalog_refreshed,
+            delay=delay,
+        )
+        if target_edit is not None:
+            target_edit["catalog_generation"] = generation
+            target_edit["catalog_input_dirty"] = False
 
     def _footer() -> str:
         return "\u2191\u2193 select   Enter edit/toggle   r reset   q exit"
@@ -1081,6 +1240,7 @@ def _settings_interactive(config: dict) -> None:
         transient=False,
         vertical_overflow="crop",
     ) as live, refresh_on_resize(live), mouse_capture():
+        live_holder.append(live)
         while True:
             live.refresh()
             try:
@@ -1107,6 +1267,11 @@ def _settings_interactive(config: dict) -> None:
                     edit["selected_provider"] = provider_keys[current_idx]
                     edit["buffer"] = ""
                     edit["error"] = ""
+                    catalog_refresher.cancel_pending()
+                    _request_catalog_refresh(
+                        provider_keys[current_idx],
+                        delay=0.2,
+                    )
                 elif key == "ENTER":
                     config, message, style, done = _settings_commit_edit(edit, config)
                     if done:
@@ -1120,9 +1285,13 @@ def _settings_interactive(config: dict) -> None:
                 elif key == "BACKSPACE":
                     if edit["buffer"]:
                         edit["buffer"] = edit["buffer"][:-1]
+                    if edit["row"]["key"] == "model":
+                        edit["catalog_input_dirty"] = True
                     edit["error"] = ""
                 elif isinstance(key, str) and len(key) == 1 and key.isprintable():
                     edit["buffer"] += key
+                    if edit["row"]["key"] == "model":
+                        edit["catalog_input_dirty"] = True
                     edit["error"] = ""
                 continue
 
@@ -1145,6 +1314,12 @@ def _settings_interactive(config: dict) -> None:
                 quick = _settings_apply_quick(row, config)
                 if quick is None:
                     edit = _settings_begin_edit(row, config)
+                    if row["key"] == "model":
+                        _request_catalog_refresh(
+                            str(config.get("provider", "openai")),
+                            target_edit=edit,
+                            delay=0.01,
+                        )
                     flash = None
                     continue
                 config, message = quick
@@ -1155,6 +1330,7 @@ def _settings_interactive(config: dict) -> None:
                 rows = _settings_rows(config)
                 flash = (message, "cyan")
 
+    catalog_refresher.close()
     console.print("[dim]\u25cb Settings closed.[/dim]")
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -25,9 +26,10 @@ class CatalogModel:
 
 
 _MEMORY_CHOICES: dict[str, list[tuple[str, str]]] = {}
+_CACHE_LOCK = threading.RLock()
 
 
-def _cache_key(config: dict) -> str:
+def catalog_cache_key(config: dict) -> str:
     provider = str(config.get("provider", "openai"))
     base_url = str(config.get("base_url") or "")
     return f"{provider}|{base_url}"
@@ -438,11 +440,30 @@ def get_model_choices(
     refresh: bool = False,
 ) -> list[tuple[str, str]]:
     """Return live recommendations, using cache and bundled fallbacks on failure."""
-    provider = str(config.get("provider", "openai"))
-    key = _cache_key(config)
-    if not refresh and key in _MEMORY_CHOICES:
-        return list(_MEMORY_CHOICES[key])
+    if not refresh:
+        return get_cached_model_choices(config)
+    return refresh_model_choices(config)
 
+
+def get_cached_model_choices(config: dict) -> list[tuple[str, str]]:
+    """Return choices without network access, using memory, disk, then fallbacks."""
+    provider = str(config.get("provider", "openai"))
+    key = catalog_cache_key(config)
+    with _CACHE_LOCK:
+        if key in _MEMORY_CHOICES:
+            return list(_MEMORY_CHOICES[key])
+
+    models = _read_cache(provider)
+    choices = _merge_fallbacks(provider, recommend_models(provider, models))
+    with _CACHE_LOCK:
+        _MEMORY_CHOICES[key] = list(choices)
+    return list(choices)
+
+
+def refresh_model_choices(config: dict) -> list[tuple[str, str]]:
+    """Refresh choices from the provider, falling back to cached data on failure."""
+    provider = str(config.get("provider", "openai"))
+    key = catalog_cache_key(config)
     models: list[CatalogModel] = []
     try:
         models = discover_models(config)
@@ -454,8 +475,9 @@ def get_model_choices(
         models = _read_cache(provider)
 
     choices = _merge_fallbacks(provider, recommend_models(provider, models))
-    _MEMORY_CHOICES[key] = list(choices)
-    return choices
+    with _CACHE_LOCK:
+        _MEMORY_CHOICES[key] = list(choices)
+    return list(choices)
 
 
 def get_default_model(
@@ -478,4 +500,5 @@ def get_default_model(
 
 def clear_memory_cache() -> None:
     """Clear process-local choices. Intended for tests and explicit refreshes."""
-    _MEMORY_CHOICES.clear()
+    with _CACHE_LOCK:
+        _MEMORY_CHOICES.clear()
