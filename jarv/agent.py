@@ -17,6 +17,7 @@ from rich.segment import Segment
 from rich.text import Text
 
 from .config import DEFAULT_CONFIG
+from .context_budget import build_input, maybe_compact_history, trim_turn_input
 from .cancellation import CancellationToken, TurnCancelled
 from .display import console, flatten_headings, terminal_size
 from .history import (
@@ -263,26 +264,6 @@ def to_response_input_item(item: dict) -> dict | None:
     except KeyError:
         return None
     return None
-
-
-def build_input(history: list, max_history: int) -> list:
-    """Convert stored history to Responses API input format."""
-    slice_ = history[-max_history:]
-    # Drop leading non-user items to avoid orphaned tool call pairs after truncation.
-    for i, m in enumerate(slice_):
-        if isinstance(m, dict) and m.get("role") == "user":
-            slice_ = slice_[i:]
-            break
-    else:
-        slice_ = []
-    items = []
-    for m in slice_:
-        if not isinstance(m, dict):
-            continue
-        api_item = to_response_input_item(m)
-        if api_item is not None:
-            items.append(api_item)
-    return items
 
 
 def get_system_info() -> str:
@@ -644,7 +625,6 @@ def run_agent(
             forget_current_session()
         session_context = prepare_session_context(mark_message=True)
         history = [] if (new_session or incognito) else load_history(session_context.history_file)
-        max_history = config.get("max_history", DEFAULT_CONFIG["max_history"])
         metadata = history_metadata(session_context)
 
         artifact_file = artifact_file_for(session_context.history_file)
@@ -663,14 +643,29 @@ def run_agent(
 
         history.append({"role": "user", "content": query, **metadata})
 
-        input_items = build_input(history, max_history)
+        instructions = (
+            config["system_prompt"]
+            + f"\n\nSystem info:\n{get_system_info()}"
+        )
+        maybe_compact_history(
+            history,
+            model=config["model"],
+            config=config,
+            instructions=instructions,
+            tools=TOOLS,
+            metadata=metadata,
+        )
+        input_items = build_input(
+            history,
+            model=config["model"],
+            config=config,
+            instructions=instructions,
+            tools=TOOLS,
+        )
 
         kwargs = dict(
             model=config["model"],
-            instructions=(
-                config["system_prompt"]
-                + f"\n\nSystem info:\n{get_system_info()}"
-            ),
+            instructions=instructions,
             tools=TOOLS,
             input=input_items,
         )
@@ -871,7 +866,13 @@ def run_agent(
                         api_item = to_response_input_item(stored_item)
                         if api_item is not None:
                             new_input_items.append(api_item)
-                kwargs["input"] = kwargs["input"] + new_input_items
+                kwargs["input"] = trim_turn_input(
+                    kwargs["input"] + new_input_items,
+                    model=config["model"],
+                    config=config,
+                    instructions=kwargs["instructions"],
+                    tools=kwargs["tools"],
+                )
             else:
                 history.append({"role": "assistant", "content": reply_text, **metadata})
                 _save_turn_state()

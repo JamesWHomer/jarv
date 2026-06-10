@@ -100,14 +100,24 @@ class AgentInputTests(unittest.TestCase):
 
     def test_build_input_limits_context_without_mutating_history(self):
         history = [
-            {"role": "user", "content": "old"},
-            {"role": "assistant", "content": "older answer"},
+            {"role": "user", "content": "old " + ("x" * 800)},
+            {"role": "assistant", "content": "older answer " + ("y" * 800)},
             {"role": "user", "content": "new"},
             {"role": "assistant", "content": "newer answer"},
         ]
         original = [dict(item) for item in history]
+        config = {
+            **DEFAULT_CONFIG,
+            "context_window_fallback": 400,
+        }
 
-        api_items = build_input(history, max_history=2)
+        api_items = build_input(
+            history,
+            model="unknown-model",
+            config=config,
+            instructions="system",
+            tools=[],
+        )
 
         self.assertEqual(
             api_items,
@@ -118,7 +128,7 @@ class AgentInputTests(unittest.TestCase):
         )
         self.assertEqual(history, original)
 
-    def test_build_input_counts_tool_call_and_output_as_history_items(self):
+    def test_build_input_drops_orphaned_tool_pairs_when_budget_is_tight(self):
         history = [
             {"role": "user", "content": "run a command"},
             {
@@ -131,13 +141,25 @@ class AgentInputTests(unittest.TestCase):
             {
                 "type": "function_call_output",
                 "call_id": "call_1",
-                "output": "C:\\work",
+                "output": "x" * 2000,
             },
             {"role": "assistant", "content": "done"},
         ]
+        config = {
+            **DEFAULT_CONFIG,
+            "context_window_fallback": 80,
+        }
 
-        self.assertEqual(len(build_input(history, max_history=4)), 4)
-        self.assertEqual(build_input(history, max_history=3), [])
+        self.assertEqual(
+            len(build_input(
+                history,
+                model="unknown-model",
+                config=config,
+                instructions="",
+                tools=[],
+            )),
+            0,
+        )
 
     def test_run_agent_persists_full_history_even_when_context_limit_is_lower(self):
         with TemporaryDirectory() as tmp:
@@ -154,7 +176,10 @@ class AgentInputTests(unittest.TestCase):
                 history_file=history_file,
                 now=datetime(2026, 5, 21, tzinfo=timezone.utc),
             )
-            config = {**DEFAULT_CONFIG, "max_history": 2}
+            config = {
+                **DEFAULT_CONFIG,
+                "context_window_fallback": 400,
+            }
 
             def fake_stream_response(*_args, **_kwargs):
                 yield TextDelta("four")

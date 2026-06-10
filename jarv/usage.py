@@ -21,6 +21,11 @@ def _token_count(_model: str, text: str) -> int:
     return _estimated_token_count(text)
 
 
+def estimate_item_tokens(model: str, item: dict) -> int:
+    """Estimate tokens for one API input item using the len//4 heuristic."""
+    return _token_count(model, _item_text(item))
+
+
 def _item_text(item: dict) -> str:
     """Extract meaningful text from an API input item for token estimation."""
     role = item.get("role")
@@ -478,12 +483,49 @@ def _model_info(model: str | None) -> dict | None:
     }
 
 
-def known_context_window(model: str | None) -> int | None:
+def _context_window_from_catalog(model: str, config: dict) -> int | None:
+    from .model_catalog import _read_cache
+
+    provider = str(config.get("provider", "openai"))
+    suffix = model.split("/", 1)[-1] if model else ""
+    for catalog_model in _read_cache(provider):
+        model_id = catalog_model.id
+        if model_id != model and model_id != suffix and not model_id.endswith(f"/{suffix}"):
+            continue
+        metadata = catalog_model.metadata if isinstance(catalog_model.metadata, dict) else {}
+        for key in ("context_length", "inputTokenLimit"):
+            value = metadata.get(key)
+            if isinstance(value, (int, float)) and value > 0:
+                return int(value)
+    return None
+
+
+def known_context_window(model: str | None, config: dict | None = None) -> int | None:
+    if model and config:
+        catalog_window = _context_window_from_catalog(model, config)
+        if catalog_window is not None:
+            return catalog_window
     info = _model_info(model)
     window = _int_value(info, "max_input_tokens")
     if window is None or window <= 0:
         return None
     return window
+
+
+def resolve_context_window(model: str | None, config: dict | None = None) -> int:
+    """Return the best-known context window, falling back to config/default."""
+    from .config import DEFAULT_CONFIG
+
+    window = known_context_window(model, config=config)
+    if window is not None and window > 0:
+        return window
+    fallback = DEFAULT_CONFIG["context_window_fallback"]
+    if config is not None:
+        try:
+            fallback = int(config.get("context_window_fallback", fallback))
+        except (TypeError, ValueError):
+            pass
+    return max(fallback, 1)
 
 
 def token_prices_for_model(model: str | None) -> dict[str, float] | None:

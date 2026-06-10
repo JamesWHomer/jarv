@@ -23,6 +23,10 @@ DEFAULT_CONFIG = {
     "model": "gpt-5.4-mini",
     "reasoning_effort": "",
     "max_history": 40,
+    "context_budget_ratio": 0.75,
+    "context_compaction_threshold": 0.85,
+    "context_output_reserve_ratio": 0.15,
+    "context_window_fallback": 128_000,
     "max_stdin_chars": 200000,
     "max_tool_output_chars": 20000,
     "command_timeout": 60,
@@ -167,6 +171,32 @@ def validate_config(config: dict) -> bool:
         config["subagent_thread_pool_max_workers"] = workers
     except (TypeError, ValueError):
         _console().print("[red]Config 'subagent_thread_pool_max_workers' must be a positive integer.[/red]")
+        ok = False
+
+    for key in (
+        "context_budget_ratio",
+        "context_compaction_threshold",
+        "context_output_reserve_ratio",
+    ):
+        try:
+            value = float(config.get(key, DEFAULT_CONFIG[key]))
+            if not (0.0 < value < 1.0):
+                raise ValueError
+            config[key] = value
+        except (TypeError, ValueError):
+            _console().print(f"[red]Config '{key}' must be a number between 0 and 1.[/red]")
+            ok = False
+
+    try:
+        fallback = int(config.get(
+            "context_window_fallback",
+            DEFAULT_CONFIG["context_window_fallback"],
+        ))
+        if fallback <= 0:
+            raise ValueError
+        config["context_window_fallback"] = fallback
+    except (TypeError, ValueError):
+        _console().print("[red]Config 'context_window_fallback' must be a positive integer.[/red]")
         ok = False
 
     return ok
