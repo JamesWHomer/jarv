@@ -179,21 +179,40 @@ def test_settings_refreshes_catalog_when_model_editor_opens(monkeypatch):
     assert edit["model_choices"] == [("gpt-5.6", "Flagship")]
 
 
-def test_single_column_model_descriptions_follow_model_names():
+def test_single_column_model_descriptions_align_with_settings_description_column():
+    inner_width = 140
     lines = settings_command._settings_choice_grid_lines(
         [
             (1, "gpt-5.5", "Flagship - latest GPT"),
             (2, "gpt-5.4-mini", "Balanced - latest GPT mini"),
             (3, "gpt-5.4-nano", "Budget - latest GPT nano"),
         ],
-        140,
+        inner_width,
         max_columns=1,
+        align_descriptions=True,
     )
 
     rendered = [line.plain for line in lines]
-    assert rendered[0].index("Flagship") < 25
-    assert rendered[1].index("Balanced") == rendered[0].index("Flagship")
-    assert rendered[2].index("Budget") == rendered[0].index("Flagship")
+    description_start = settings_command._settings_column_layout(inner_width)[3]
+    assert rendered[0].index("Flagship") == description_start
+    assert rendered[1].index("Balanced") == description_start
+    assert rendered[2].index("Budget") == description_start
+
+
+def test_provider_editor_aligns_keys_and_notes_with_settings_columns():
+    inner_width = 140
+    lines = settings_command._settings_provider_choice_lines(
+        {"provider": "openai"},
+        inner_width,
+        selected_provider="openai",
+    )
+    openai = next(line.plain for line in lines if "OpenAI-hosted" in line.plain)
+    _label_width, _value_width, value_start, description_start = (
+        settings_command._settings_column_layout(inner_width)
+    )
+
+    assert openai.index("openai") == value_start
+    assert openai.index("OpenAI-hosted") == description_start
 
 
 def test_anthropic_model_listing_follows_pagination():
