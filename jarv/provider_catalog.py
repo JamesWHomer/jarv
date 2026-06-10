@@ -1,4 +1,4 @@
-"""Shared provider and model catalog used by setup, runtime, and settings."""
+"""Shared provider configuration and offline model fallbacks."""
 
 PROVIDERS = {
     "openai": {
@@ -103,7 +103,9 @@ PROVIDER_CHOICES = [
     ("vllm", "vLLM", "local-model"),
 ]
 
-PROVIDER_MODELS = {
+# These are deliberately small offline fallbacks. The interactive selectors use
+# live provider catalogs through model_catalog.get_model_choices().
+FALLBACK_PROVIDER_MODELS = {
     "openai": [
         ("gpt-5.5", "Flagship — largest, smartest"),
         ("gpt-5.4-mini", "Balanced — faster, cheaper"),
@@ -157,4 +159,9 @@ PROVIDER_MODELS = {
         ("accounts/fireworks/models/qwen3-8b", "Budget — Qwen3 8B"),
     ],
 }
+
+# Backwards-compatible export for integrations that imported the old static
+# catalog. Jarv itself treats these entries as fallbacks, not authoritative
+# provider model lists.
+PROVIDER_MODELS = FALLBACK_PROVIDER_MODELS
 

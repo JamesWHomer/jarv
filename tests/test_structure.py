@@ -1,6 +1,6 @@
 from jarv import commands
 from jarv.provider import KEY_PATTERNS, LOCAL_PROVIDERS, PROVIDERS
-from jarv.provider_catalog import PROVIDER_CHOICES, PROVIDER_MODELS
+from jarv.provider_catalog import FALLBACK_PROVIDER_MODELS, PROVIDER_CHOICES
 
 
 def test_command_facade_exports_moved_handlers():
@@ -21,5 +21,8 @@ def test_provider_catalog_covers_setup_choices():
     assert set(KEY_PATTERNS) <= provider_keys
 
     for provider, _label, default_model in PROVIDER_CHOICES:
-        preset_models = {model for model, _description in PROVIDER_MODELS.get(provider, [])}
+        preset_models = {
+            model
+            for model, _description in FALLBACK_PROVIDER_MODELS.get(provider, [])
+        }
         assert provider in LOCAL_PROVIDERS or default_model in preset_models

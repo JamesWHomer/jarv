@@ -7,7 +7,7 @@ from rich.text import Text
 
 from .display import console, jarv_panel, section_rule
 from .provider import PROVIDERS, LOCAL_PROVIDERS, KEY_PATTERNS
-from .provider_catalog import PROVIDER_CHOICES, PROVIDER_MODELS
+from .provider_catalog import PROVIDER_CHOICES
 
 
 class GoBack(Exception):
@@ -148,22 +148,30 @@ def setup_model(config: dict) -> dict:
     console.print(section_rule("Model", step=3, total=TOTAL_STEPS))
     console.print()
 
-    models = PROVIDER_MODELS.get(provider_name)
+    from .model_catalog import get_default_model, get_model_choices
+
+    with console.status("  [dim]Loading available models...[/dim]", spinner="dots"):
+        models = get_model_choices(config, refresh=True)
     if models:
+        default_model = get_default_model(config, choices=models)
+        default_index = next(
+            (idx for idx, (name, _desc) in enumerate(models, 1) if name == default_model),
+            1,
+        )
         for i, (name, desc) in enumerate(models, 1):
-            default_tag = " [green]← default[/green]" if i == 1 else ""
+            default_tag = " [green]← default[/green]" if name == default_model else ""
             console.print(f"  [bold cyan]{i}.[/bold cyan] [bold]{name}[/bold] [dim]— {desc}[/dim]{default_tag}")
         console.print()
 
         while True:
             model_choice = Prompt.ask(
                 "  [bold]Pick a model[/bold] [dim](number or name, b=back)[/dim]",
-                default="1",
+                default=str(default_index),
                 console=console,
             ).strip()
             if model_choice.lower() in ("b", "back"):
                 raise GoBack()
-            model = _resolve_model(provider_name, model_choice)
+            model = _resolve_model(provider_name, model_choice, models=models)
             if model is not None:
                 break
             try:
@@ -520,8 +528,16 @@ def _resolve_provider(choice: str) -> str | None:
     return None
 
 
-def _resolve_model(provider_name: str, choice: str) -> str | None:
-    models = PROVIDER_MODELS.get(provider_name, [])
+def _resolve_model(
+    provider_name: str,
+    choice: str,
+    *,
+    models: list[tuple[str, str]] | None = None,
+) -> str | None:
+    if models is None:
+        from .model_catalog import get_model_choices
+
+        models = get_model_choices({"provider": provider_name})
     try:
         idx = int(choice)
         if 1 <= idx <= len(models):

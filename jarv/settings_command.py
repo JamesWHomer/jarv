@@ -305,17 +305,35 @@ def _settings_provider_choices() -> list[tuple[str, str, str]]:
     return list(PROVIDER_CHOICES)
 
 
-def _settings_model_choices(config: dict) -> list[tuple[str, str]]:
-    from .provider_catalog import PROVIDER_MODELS
+def _settings_model_choices(
+    config: dict,
+    *,
+    refresh: bool = False,
+) -> list[tuple[str, str]]:
+    from .model_catalog import get_model_choices
 
-    return list(PROVIDER_MODELS.get(config.get("provider", "openai"), []))
+    return get_model_choices(config, refresh=refresh)
 
 
 def _settings_default_model(config: dict) -> str:
-    return _settings_default_model_for_provider(config.get("provider", "openai"))
+    return _settings_default_model_for_provider(
+        config.get("provider", "openai"),
+        config=config,
+    )
 
 
-def _settings_default_model_for_provider(provider: str) -> str:
+def _settings_default_model_for_provider(
+    provider: str,
+    *,
+    config: dict | None = None,
+) -> str:
+    from .model_catalog import get_default_model
+
+    probe = dict(config or {})
+    probe["provider"] = provider
+    choices = _settings_model_choices(probe)
+    if choices:
+        return get_default_model(probe, choices=choices)
     for key, _label, model in _settings_provider_choices():
         if key == provider:
             return model
@@ -389,12 +407,23 @@ def _settings_choice_grid_lines(
     columns = max(1, min(columns, max_columns, len(items)))
     row_count = (len(items) + columns - 1) // columns
     cell_width = max(8, (usable_width - (columns - 1) * len(gap)) // columns)
+    single_column_primary_width = min(
+        max(len(primary) for _idx, primary, _secondary in items),
+        max(1, cell_width // 2),
+    )
 
     def _cell(idx: int, primary: str, secondary: str) -> str:
         marker = f"{idx:>2}. "
         body_width = max(1, cell_width - len(marker))
         if not secondary or body_width < 18:
             return marker + _clip_text(primary or secondary, body_width)
+        if columns == 1:
+            primary_width = min(single_column_primary_width, body_width)
+            remaining = max(0, body_width - primary_width - 2)
+            cell = marker + f"{_clip_text(primary, primary_width):<{primary_width}}"
+            if remaining:
+                cell += "  " + _clip_text(secondary, remaining)
+            return cell
 
         secondary_width = min(18, max(8, body_width // 3))
         primary_width = max(1, body_width - secondary_width - 1)
@@ -577,6 +606,8 @@ def _settings_begin_edit(row: dict, config: dict) -> dict:
     edit = {"row": row, "buffer": buffer, "secret": False, "readonly": False, "error": ""}
     if key == "provider":
         edit["selected_provider"] = config.get("provider", "openai")
+    elif key == "model":
+        edit["model_choices"] = _settings_model_choices(config, refresh=True)
     return edit
 
 
@@ -605,7 +636,9 @@ def _settings_editor_lines(
         choice_items = []
         prompt = ""
     elif key == "model":
-        models = _settings_model_choices(config)
+        models = edit.get("model_choices")
+        if not isinstance(models, list):
+            models = _settings_model_choices(config)
         if models:
             intro.append(Text(_clip_text(f"  provider: {provider_label}", inner_width), style="dim"))
             choice_items = [(idx, name, desc) for idx, (name, desc) in enumerate(models, 1)]
@@ -712,7 +745,7 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
             return config, f"{row['label']} unchanged", "dim", True
         old_provider = config.get("provider", "openai")
         old_model = str(config.get("model") or "")
-        old_default = _settings_default_model_for_provider(old_provider)
+        old_default = _settings_default_model_for_provider(old_provider, config=config)
         provider = selected_provider
         if provider is None:
             edit["error"] = "Unknown provider. Enter a listed number or provider name."
@@ -727,7 +760,7 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
                 or (provider_models and old_model not in provider_models)
             )
         ):
-            config["model"] = _settings_default_model_for_provider(provider)
+            config["model"] = _settings_default_model_for_provider(provider, config=config)
         save_config(config)
         message = f"saved Provider: {_settings_value_text(row, config).plain}"
         if config.get("model") != old_model:
