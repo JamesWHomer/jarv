@@ -15,6 +15,7 @@ from typing import Callable
 from .artifacts import ArtifactStore
 from .cancellation import CancellationToken, TurnCancelled
 from .config import DEFAULT_CONFIG
+from .context_budget import trim_turn_input
 from .safety import check_command
 from .anthropic_http import DEFAULT_SUBAGENT_MAX_TOKENS
 from .provider import (
@@ -141,6 +142,7 @@ class AgentNode:
     visible_labels: set[str] = field(default_factory=set)
     usage_path: Path | None = None
     session_id: str | None = None
+    incognito: bool = False
 
 
 def build_subagent_tools(sterile: bool) -> list[dict]:
@@ -188,12 +190,14 @@ def dispatch_tool(
             return "[tool argument error: command must be a non-empty string]"
         safety_level = config.get("command_safety", "risky")
         audit = config.get("audit", True)
+        auditor_history = [{"role": "user", "content": node.task}] if node.task else None
         allowed, denial = check_command(
             cmd,
             safety_level,
             audit=audit,
             config=config,
-            usage_path=node.usage_path,
+            history=auditor_history,
+            usage_path=None if node.incognito else node.usage_path,
             session_id=node.session_id,
             cancellation_token=cancellation_token,
         )
@@ -235,6 +239,8 @@ def dispatch_tool(
             )
         except DepthExceeded as e:
             return f"[error: {e}]"
+        except ValueError as e:
+            return f"[tool argument error: {e}]"
         return json.dumps(results)
 
     return f"[unknown tool: {name}]"
@@ -322,15 +328,16 @@ def run_subagent_loop(
                     reasoning_items.append(event)
                 elif isinstance(event, StreamDone):
                     final_response = event.response
-            record_response_usage(
-                node.usage_path,
-                node.session_id,
-                config["model"],
-                final_response,
-                "subagent",
-                context_breakdown=context_breakdown,
-                output_text="\n".join(f"{item.name} {item.arguments}" for item in tool_calls),
-            )
+            if not node.incognito:
+                record_response_usage(
+                    node.usage_path,
+                    node.session_id,
+                    config["model"],
+                    final_response,
+                    "subagent",
+                    context_breakdown=context_breakdown,
+                    output_text="\n".join(f"{item.name} {item.arguments}" for item in tool_calls),
+                )
         except ProviderError as e:
             return None, f"provider error: {e}"
         except TurnCancelled:
@@ -417,7 +424,13 @@ def run_subagent_loop(
                 "output": output,
             })
 
-        kwargs["input"] = kwargs["input"] + new_input
+        kwargs["input"] = trim_turn_input(
+            kwargs["input"] + new_input,
+            model=config["model"],
+            config=config,
+            instructions=kwargs["instructions"],
+            tools=kwargs["tools"],
+        )
 
 
 class SpawnObserver:
@@ -454,6 +467,7 @@ def spawn_batch(
         )
 
     nodes: list[AgentNode] = []
+    seen_labels: set[str] = set()
     child_usage_path = usage_path if usage_path is not None else parent.usage_path
     child_session_id = session_id if session_id is not None else parent.session_id
     for spec in child_specs:
@@ -463,6 +477,9 @@ def spawn_batch(
         task = spec.get("task")
         if not isinstance(label, str) or not label:
             raise ValueError("each child needs a non-empty 'label'")
+        if label in seen_labels:
+            raise ValueError(f"duplicate child label '{label}'")
+        seen_labels.add(label)
         if not isinstance(task, str) or not task:
             raise ValueError(f"child '{label}' needs a non-empty 'task'")
         sterile = bool(spec.get("sterile", True))
@@ -479,6 +496,7 @@ def spawn_batch(
             visible_labels=valid_deps,
             usage_path=child_usage_path,
             session_id=child_session_id,
+            incognito=parent.incognito,
         ))
 
     if observer is not None:

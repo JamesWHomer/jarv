@@ -277,7 +277,7 @@ def test_non_streaming_request_retries_retryable_status(monkeypatch):
             },
         )
 
-    monkeypatch.setattr("jarv.anthropic_http._sleep", lambda _delay, _token: None)
+    monkeypatch.setattr("jarv.http_transport._sleep", lambda _delay, _token: None)
     client = _client(handler)
     try:
         response = create_message(

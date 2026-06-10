@@ -9,6 +9,8 @@ from .config import load_config, validate_config
 
 STDIN_LABEL = "Input from stdin"
 
+_CONFIG_MUTATING_COMMANDS = frozenset({"/set", "/unset", "/settings", "/setup"})
+
 _COMMAND_TAKES_REST = {
     "setup": True,
     "help": False,
@@ -110,6 +112,65 @@ def _run_slash_command(command: str, rest: list[str]) -> bool:
     else:
         handler()
     return True
+
+
+def _apply_cli_overrides(config: dict, args: argparse.Namespace) -> dict:
+    """Apply one-run CLI flag overrides on top of a loaded config."""
+    config = dict(config)
+    if args.provider:
+        config["provider"] = args.provider
+    if args.model:
+        config["model"] = args.model
+    if args.effort:
+        config["reasoning_effort"] = args.effort
+    if args.timeout is not None:
+        config["command_timeout"] = args.timeout
+    if args.system:
+        config["system_prompt"] = args.system
+    return config
+
+
+def _client_needs_refresh(old: dict, new: dict) -> bool:
+    keys = ("provider", "base_url", "api_key", "api_keys")
+    return any(old.get(key) != new.get(key) for key in keys)
+
+
+def _reload_heads_up_runtime(
+    config: dict,
+    client,
+    args: argparse.Namespace,
+) -> tuple[dict, object]:
+    """Reload config from disk and recreate the API client when needed."""
+    from .provider import create_client
+
+    refreshed = _apply_cli_overrides(load_config(), args)
+    if not validate_config(refreshed):
+        return config, client
+    if _client_needs_refresh(config, refreshed) or client is None:
+        client = create_client(refreshed)
+    return refreshed, client
+
+
+def _handle_heads_up_slash_command(
+    command: str,
+    rest: list[str],
+    *,
+    config: dict,
+    client,
+    args: argparse.Namespace | None,
+    unknown_help_hint: bool = False,
+) -> tuple[dict, object]:
+    """Run a slash command and reload heads-up runtime after config changes."""
+    handled = _run_slash_command(command, rest)
+    if not handled:
+        console = _console()
+        console.print(f"[red]Unknown command:[/red] {command}")
+        if unknown_help_hint:
+            console.print("[dim]Run [bold]/help[/bold] for a list of commands.[/dim]")
+        return config, client
+    if args is not None and command in _CONFIG_MUTATING_COMMANDS:
+        return _reload_heads_up_runtime(config, client, args)
+    return config, client
 
 
 def _maybe_command(first_word: str, rest: list[str]) -> tuple[bool, str, list[str]] | None:
@@ -240,8 +301,8 @@ def main() -> None:
     query_parts: list[str] = args.query
     console = _console()
 
-    # "jarv help" permanent alias
-    if query_parts and query_parts[0].lower() == "help":
+    # "jarv help" permanent alias (only when help is the sole argument)
+    if len(query_parts) == 1 and query_parts[0].lower() == "help":
         from .commands import print_help
         print_help(mode="print", include_setup_nudge=False)
         return
@@ -273,17 +334,7 @@ def main() -> None:
             sys.exit(1)
         config = result
 
-    # Apply flag overrides on top of config
-    if args.provider:
-        config["provider"] = args.provider
-    if args.model:
-        config["model"] = args.model
-    if args.effort:
-        config["reasoning_effort"] = args.effort
-    if args.timeout is not None:
-        config["command_timeout"] = args.timeout
-    if args.system:
-        config["system_prompt"] = args.system
+    config = _apply_cli_overrides(config, args)
 
     if not validate_config(config):
         sys.exit(1)
@@ -312,7 +363,7 @@ def main() -> None:
 
         agent_loader = _start_agent_import()
         client = create_client(config)
-        run_heads_up_mode(config, client, agent_loader=agent_loader)
+        run_heads_up_mode(config, client, args=args, agent_loader=agent_loader)
         return
 
     if config.get("check_updates", True):
@@ -337,6 +388,8 @@ def main() -> None:
 def run_heads_up_mode(
     config: dict,
     client,
+    *,
+    args: argparse.Namespace | None = None,
     agent_loader: tuple[dict, threading.Event] | None = None,
 ) -> None:
     console = _console()
@@ -370,9 +423,14 @@ def run_heads_up_mode(
             if command in {"/exit", "/quit"}:
                 console.print("[dim]Goodbye.[/dim]")
                 return
-            if not _run_slash_command(command, parts[1:]):
-                console.print(f"[red]Unknown command:[/red] {command}")
-                console.print("[dim]Run [bold]/help[/bold] for a list of commands.[/dim]")
+            config, client = _handle_heads_up_slash_command(
+                command,
+                parts[1:],
+                config=config,
+                client=client,
+                args=args,
+                unknown_help_hint=True,
+            )
             continue
 
         # Check if user typed a command name without the slash
@@ -380,8 +438,13 @@ def run_heads_up_mode(
         result = _maybe_command(parts[0], parts[1:])
         if result is not None:
             _, command, rest = result
-            if not _run_slash_command(command, rest):
-                console.print(f"[red]Unknown command:[/red] {command}")
+            config, client = _handle_heads_up_slash_command(
+                command,
+                rest,
+                config=config,
+                client=client,
+                args=args,
+            )
             continue
 
         try:

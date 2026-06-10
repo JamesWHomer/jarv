@@ -17,9 +17,10 @@ from rich.segment import Segment
 from rich.text import Text
 
 from .config import DEFAULT_CONFIG
-from .context_budget import build_input, maybe_compact_history, trim_turn_input
+from .context_budget import build_input, trim_turn_input
 from .cancellation import CancellationToken, TurnCancelled
-from .display import console, flatten_headings, terminal_size
+from .command_input import read_editable_line
+from .display import console, flatten_headings, terminal_size, track_live_display
 from .history import (
     artifact_file_for,
     forget_current_session,
@@ -324,53 +325,18 @@ def _dispatch_run_command_with_ui(
     return result.to_model_output()
 
 
-def _read_user_input() -> str:
-    """Read a line of input without Windows console template recall.
-
-    On Windows, the console remembers the last ReadConsole input as a
-    "template" that the right-arrow key replays character by character.
-    Reading via msvcrt avoids that buffer entirely.
-    """
-    if sys.platform == "win32":
-        import msvcrt
-        chars: list[str] = []
-        while True:
-            ch = msvcrt.getwch()
-            if ch in ("\r", "\n"):
-                sys.stdout.write("\n")
-                sys.stdout.flush()
-                break
-            if ch == "\x03":
-                raise KeyboardInterrupt
-            if ch in ("\x04", "\x1a"):
-                raise EOFError
-            if ch in ("\b", "\x7f"):
-                if chars:
-                    chars.pop()
-                    sys.stdout.write("\b \b")
-                    sys.stdout.flush()
-                continue
-            if ch in ("\x00", "\xe0"):
-                msvcrt.getwch()
-                continue
-            chars.append(ch)
-            sys.stdout.write(ch)
-            sys.stdout.flush()
-        return "".join(chars)
-    return input()
-
-
 def _dispatch_ask_user(args: dict) -> str:
     question = args.get("question")
     if not isinstance(question, str) or not question.strip():
         msg = "[tool argument error: question must be a non-empty string]"
         console.print(f"[red]{msg}[/red]")
         return msg
+    if not sys.stdin.isatty():
+        return "[non-interactive session; user unavailable]"
     console.print()
     console.print(Panel(question, border_style="cyan", box=box.ROUNDED, padding=(0, 1)))
-    console.print("[bold cyan]> [/bold cyan]", end="")
     try:
-        answer = _read_user_input()
+        answer = read_editable_line("\x1b[1;36m>\x1b[0m ").strip()
     except KeyboardInterrupt:
         raise
     except EOFError:
@@ -470,7 +436,7 @@ def _dispatch_spawn_with_ui(
             )
 
     console.print()
-    with Live(
+    with track_live_display(), Live(
         SpawnPanel(),
         refresh_per_second=10,
         console=console,
@@ -501,6 +467,10 @@ def _dispatch_spawn_with_ui(
         except DepthExceeded as e:
             output = f"[error: {e}]"
             live.update(Text(output, style="red"))
+            return output
+        except ValueError as e:
+            output = f"[tool argument error: {e}]"
+            console.print(f"[red]{output}[/red]")
             return output
         live.update(SpawnPanel())
         output = json.dumps(results)
@@ -545,7 +515,9 @@ def run_agent(
             stream_live = None
 
     def _save_turn_state() -> None:
-        if session_context is not None and not incognito:
+        if incognito:
+            return
+        if session_context is not None:
             redo_path = redo_file_for(session_context.history_file)
             if redo_path.exists():
                 redo_path.unlink()
@@ -623,7 +595,10 @@ def run_agent(
 
         if new_session:
             forget_current_session()
-        session_context = prepare_session_context(mark_message=True)
+        session_context = prepare_session_context(
+            mark_message=not incognito,
+            persist_metadata=not incognito,
+        )
         history = [] if (new_session or incognito) else load_history(session_context.history_file)
         metadata = history_metadata(session_context)
 
@@ -639,6 +614,7 @@ def run_agent(
             visible_labels=artifact_store.all_labels(),
             usage_path=usage_path,
             session_id=session_context.session_id,
+            incognito=incognito,
         )
 
         history.append({"role": "user", "content": query, **metadata})
@@ -646,14 +622,6 @@ def run_agent(
         instructions = (
             config["system_prompt"]
             + f"\n\nSystem info:\n{get_system_info()}"
-        )
-        maybe_compact_history(
-            history,
-            model=config["model"],
-            config=config,
-            instructions=instructions,
-            tools=TOOLS,
-            metadata=metadata,
         )
         input_items = build_input(
             history,
@@ -753,17 +721,18 @@ def run_agent(
                 if final_text and len(final_text) >= len(reply_text):
                     reply_text = final_text
                     got_text = True
-                record_response_usage(
-                    usage_path,
-                    session_context.session_id,
-                    config["model"],
-                    final_response,
-                    "root",
-                    context_breakdown=_ctx_breakdown,
-                    output_text=reply_text or "\n".join(
-                        f"{item.name} {item.arguments}" for item in tool_calls
-                    ),
-                )
+                if not incognito:
+                    record_response_usage(
+                        usage_path,
+                        session_context.session_id,
+                        config["model"],
+                        final_response,
+                        "root",
+                        context_breakdown=_ctx_breakdown,
+                        output_text=reply_text or "\n".join(
+                            f"{item.name} {item.arguments}" for item in tool_calls
+                        ),
+                    )
             finally:
                 if spinner_live is not None:
                     spinner_live.stop()
@@ -888,16 +857,16 @@ def run_agent(
         console.print(f"[red]API error:[/red] {escape(str(e))}")
         if reply_text and not tool_calls:
             history.append({"role": "assistant", "content": reply_text, **metadata})
-        if session_context is not None and not incognito:
+        if not incognito and session_context is not None:
             save_history(history, session_context.history_file)
-        if artifact_store is not None and artifact_file is not None:
+        if not incognito and artifact_store is not None and artifact_file is not None:
             save_artifact_store(artifact_store, artifact_file)
         return AgentRunResult(error=str(e))
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        if session_context is not None and not incognito:
+        if not incognito and session_context is not None:
             save_history(history, session_context.history_file)
-        if artifact_store is not None and artifact_file is not None:
+        if not incognito and artifact_store is not None and artifact_file is not None:
             save_artifact_store(artifact_store, artifact_file)
         return AgentRunResult(error=str(e))
     finally:

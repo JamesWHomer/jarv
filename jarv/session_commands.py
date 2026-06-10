@@ -15,7 +15,15 @@ from rich import box
 
 from .command_input import _read_key_with_repeats, mouse_capture
 from .config import CONFIG_DIR
-from .display import console, flatten_headings, jarv_panel, refresh_on_resize, section_rule, terminal_size
+from .display import (
+    console,
+    flatten_headings,
+    jarv_panel,
+    refresh_on_resize,
+    rendered_text_lines,
+    section_rule,
+    terminal_size,
+)
 from .history import (
     SESSIONS_DIR,
     artifact_file_for,
@@ -101,21 +109,8 @@ def _history_content_to_str(content) -> str:
     return str(content)
 
 
-def _rendered_text_lines(renderable, width: int) -> list[Text]:
-    options = console.options.update(width=max(1, width))
-    rendered = console.render_lines(renderable, options, pad=False)
-    lines: list[Text] = []
-    for rendered_line in rendered:
-        line = Text(no_wrap=True, overflow="crop")
-        for segment in rendered_line:
-            if segment.text:
-                line.append(segment.text, style=segment.style)
-        lines.append(line)
-    return lines
-
-
 def _markdown_to_text_lines(content: str, width: int) -> list[Text]:
-    return _rendered_text_lines(Markdown(flatten_headings(content)), width)
+    return rendered_text_lines(Markdown(flatten_headings(content)), width)
 
 
 def _history_visual_lines_and_anchors(history: list, width: int) -> tuple[list[Text], list[int]]:
@@ -139,7 +134,7 @@ def _history_visual_lines_and_anchors(history: list, width: int) -> tuple[list[T
                 else:
                     t.append("  ")
                 t.append(raw, style="bold")
-                lines.extend(_rendered_text_lines(t, width))
+                lines.extend(rendered_text_lines(t, width))
         elif role == "assistant":
             lines.append(Text("jarv:", style="bold green", no_wrap=True, overflow="crop"))
             lines.extend(_markdown_to_text_lines(body, width))
@@ -152,7 +147,7 @@ def _history_visual_lines_and_anchors(history: list, width: int) -> tuple[list[T
                 else:
                     t.append("  ")
                 t.append(raw, style="dim")
-                lines.extend(_rendered_text_lines(t, width))
+                lines.extend(rendered_text_lines(t, width))
         if len(lines) > start:
             anchors.append(start)
         lines.append(Text(""))

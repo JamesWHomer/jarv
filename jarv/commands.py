@@ -9,7 +9,7 @@ from rich.table import Table
 from rich.text import Text
 
 from . import __version__
-from .config import CONFIG_DIR, CONFIG_FILE, DEFAULT_CONFIG, load_config, save_config
+from .config import CONFIG_DIR, CONFIG_FILE, DEFAULT_CONFIG, load_config, save_config, validate_config
 from .display import console, flatten_headings, status_line
 from .history import (
     SESSIONS_DIR,
@@ -76,8 +76,11 @@ def cmd_set(args: list) -> None:
         )
     config = load_config()
     value = coerce_value(raw)
-    config[key] = value
-    save_config(config)
+    trial = dict(config)
+    trial[key] = value
+    if not validate_config(trial):
+        return
+    save_config(trial)
     display = _mask_config_value(key, value)
     console.print(f"[bold cyan]✓[/bold cyan] [bold cyan]{key}[/bold cyan] [dim]=[/dim] {display}")
 
@@ -92,12 +95,18 @@ def cmd_unset(args: list) -> None:
         console.print(f"[yellow]○[/yellow] [bold]{key}[/bold] [dim]is not set.[/dim]")
         return
     if key in DEFAULT_CONFIG:
-        config[key] = DEFAULT_CONFIG[key]
-        save_config(config)
+        trial = dict(config)
+        trial[key] = DEFAULT_CONFIG[key]
+        if not validate_config(trial):
+            return
+        save_config(trial)
         console.print(f"[bold cyan]↺[/bold cyan] [bold cyan]{key}[/bold cyan] [dim]reset to default →[/dim] [green]{repr(DEFAULT_CONFIG[key])}[/green]")
     else:
-        del config[key]
-        save_config(config)
+        trial = dict(config)
+        del trial[key]
+        if not validate_config(trial):
+            return
+        save_config(trial)
         console.print(f"[bold cyan]✓[/bold cyan] [bold cyan]{key}[/bold cyan] [dim]removed.[/dim]")
 
 
@@ -215,16 +224,16 @@ Run `jarv` with no prompt to start an interactive session. Type a prompt and pre
 1. Loads config from `{CONFIG_FILE}`.
 2. Detects the current terminal and resolves its active session (default: one session per terminal).
 3. Loads recent conversation history from that session's history file.
-4. Sends your query, recent history, the configured system prompt, and system info to the configured provider's API.
+4. Sends your query, recent history, the configured system prompt, and system info to the configured provider backend (OpenAI Responses, Anthropic Messages, Gemini, or an OpenAI-compatible API).
 5. Streams the assistant response in the terminal.
 6. When the model issues tool calls, jarv runs the matching handler and feeds results back into the model (for `run_command`, that means showing the command, running it, printing stdout/stderr/exit status, and returning output up to `max_tool_output_chars`).
 7. Saves the full session history. On future prompts, `max_history` limits only the recent history items sent back as model context.
 
 ## Tools and shell commands
 
-- The root model sees three tools: `run_command`, `spawn`, and `read_artifact`.
+- The root model sees four tools: `run_command`, `spawn`, `read_artifact`, and `ask_user`.
 - Spawned subagents also get a mandatory `finish` tool (to return output) and may get `spawn` when the parent sets `sterile: false`.
-- Subagent internal transcripts are discarded. Root history stores the parent `spawn`/`read_artifact` tool calls and their returned outputs.
+- Subagent internal transcripts are discarded. Root history stores the parent `spawn`/`read_artifact` tool calls and their returned outputs. Artifact longform content persists per session in `artifacts-<hash>.json`.
 - Shell commands run only when the model calls `run_command`.
 - On Windows, `run_command` uses PowerShell.
 - On other platforms, `run_command` uses the system shell.
@@ -243,7 +252,11 @@ Keys:
 - `base_url` - Custom API base URL. Overrides the provider's default endpoint.
 - `model` - Model name. Default: `{DEFAULT_CONFIG['model']}`.
 - `reasoning_effort` - Optional reasoning effort value. Empty disables this setting.
-- `max_history` - Number of recent stored history items included as model context. It does not delete saved history. Stored items include user messages, assistant messages, reasoning items, function calls, and function call outputs. Default: `{DEFAULT_CONFIG['max_history']}`.
+- `max_history` - Maximum stored history items included as model context (item cap before token trimming). It does not delete saved history. Stored items include user messages, assistant messages, reasoning items, function calls, and function call outputs. Default: `{DEFAULT_CONFIG['max_history']}`.
+- `context_budget_ratio` - Share of the context window used for input. Default: `{DEFAULT_CONFIG['context_budget_ratio']}`.
+- `context_compaction_threshold` - Fill ratio that triggers history compaction. Default: `{DEFAULT_CONFIG['context_compaction_threshold']}`.
+- `context_output_reserve_ratio` - Context window share reserved for model output. Default: `{DEFAULT_CONFIG['context_output_reserve_ratio']}`.
+- `context_window_fallback` - Context window when model metadata is unknown. Default: `{DEFAULT_CONFIG['context_window_fallback']}`.
 - `max_stdin_chars` - Maximum piped stdin characters attached to a one-shot prompt. Default: `{DEFAULT_CONFIG['max_stdin_chars']}`.
 - `max_tool_output_chars` - Maximum tool output characters returned to the model. Default: `{DEFAULT_CONFIG['max_tool_output_chars']}`.
 - `command_timeout` - Seconds before a shell command is killed. Default: `{DEFAULT_CONFIG['command_timeout']}`.

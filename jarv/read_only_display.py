@@ -18,6 +18,7 @@ from .display import (
     TITLE_STYLE,
     console,
     refresh_on_resize,
+    rendered_text_lines,
     terminal_size,
 )
 
@@ -82,19 +83,6 @@ def _with_optional_setup_nudge(body: RenderableType, *, include_setup_nudge: boo
     return Group(nudge, Text(""), body)
 
 
-def _rendered_text_lines(renderable: RenderableType, width: int) -> list[Text]:
-    options = console.options.update(width=max(1, width))
-    rendered = console.render_lines(renderable, options, pad=False)
-    lines: list[Text] = []
-    for rendered_line in rendered:
-        line = Text(no_wrap=True, overflow="crop")
-        for segment in rendered_line:
-            if segment.text:
-                line.append(segment.text, style=segment.style)
-        lines.append(line)
-    return lines
-
-
 def _is_close_key(key: str) -> bool:
     return key in ("ESC", "ENTER", "q", "Q")
 
@@ -132,7 +120,7 @@ def _show_overlay(
         width = max(1, width)
         cached = visual_cache.get(width)
         if cached is None:
-            cached = _rendered_text_lines(body, width) or [Text("  (empty)", style="dim")]
+            cached = rendered_text_lines(body, width) or [Text("  (empty)", style="dim")]
             visual_cache[width] = cached
         return cached
 

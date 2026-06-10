@@ -9,7 +9,7 @@ from rich.markup import escape
 from rich.text import Text
 
 from .cancellation import CancellationToken, TurnCancelled
-from .display import console, jarv_panel
+from .display import console, jarv_panel, live_display_depth
 
 SAFETY_LEVELS = ("all", "risky", "none")
 DEFAULT_SAFETY_LEVEL = "risky"
@@ -414,12 +414,20 @@ def _audit_gate(
     thread.start()
 
     auto_approve = (config or {}).get("auditor_auto_approve", True)
-    approved = _live_audit_poll(
-        body,
-        audit_state,
-        auto_approve=auto_approve,
-        cancellation_token=cancellation_token,
-    )
+    if live_display_depth() > 0:
+        approved = _audit_poll_without_live(
+            body,
+            audit_state,
+            auto_approve=auto_approve,
+            cancellation_token=cancellation_token,
+        )
+    else:
+        approved = _live_audit_poll(
+            body,
+            audit_state,
+            auto_approve=auto_approve,
+            cancellation_token=cancellation_token,
+        )
 
     if approved:
         return True, ""
@@ -434,6 +442,47 @@ def _audit_gate(
 # ---------------------------------------------------------------------------
 # Live panel + concurrent keyboard polling
 # ---------------------------------------------------------------------------
+
+def _audit_poll_without_live(
+    body,
+    audit_state: dict,
+    *,
+    auto_approve: bool = True,
+    cancellation_token: CancellationToken | None = None,
+) -> bool:
+    """Wait for the auditor and prompt without starting a nested Rich Live."""
+    console.print()
+    console.print(jarv_panel(body, title="safety", subtitle="confirm to run", padding=(1, 2)))
+    while not audit_state.get("done"):
+        if cancellation_token is not None:
+            cancellation_token.throw_if_cancelled()
+        if audit_state.get("cancelled"):
+            raise TurnCancelled
+        time.sleep(0.05)
+
+    if auto_approve and audit_state["allow"]:
+        console.print(f"[green]  ✓ auditor:[/green] [dim]{audit_state['reason']}[/dim]")
+        console.print("[green]  ✓ approved[/green]\n")
+        return True
+
+    if not audit_state["allow"]:
+        console.print(f"[yellow]  ⚠ auditor:[/yellow] [dim]{audit_state['reason']}[/dim]")
+    console.print(
+        "[bold]Allow this command?[/bold] [dim]\\[y/N][/dim] [bold cyan]›[/bold cyan] ",
+        end="",
+    )
+    try:
+        choice = console.input("").strip().lower()
+    except EOFError:
+        console.print("[dim]  denied.[/dim]")
+        return False
+    approved = choice in ("y", "yes")
+    if approved:
+        console.print("[green]  ✓ approved[/green]\n")
+    else:
+        console.print("[red]  ✗ denied[/red]\n")
+    return approved
+
 
 def _read_key():
     """Non-blocking single-character read.  Returns the char or None."""

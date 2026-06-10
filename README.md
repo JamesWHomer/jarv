@@ -11,14 +11,14 @@ jarv refactor the auth module           # complex tasks get split across subagen
 
 ## Install
 
-Requires **Python 3.10+** and an **OpenAI API key**.
+Requires **Python 3.10+** and an API key for your chosen provider (OpenAI, Anthropic, Gemini, OpenRouter, Groq, and more).
 
 ```bash
 pip install jarv
 jarv /setup
 ```
 
-The setup wizard will walk you through entering your API key and choosing a model. The key can also be set via the `OPENAI_API_KEY` environment variable or `jarv /set api_key ...`.
+The setup wizard walks you through choosing a provider, entering an API key, and picking a model. Keys can also be set via provider-specific environment variables or `jarv /set`.
 
 To upgrade:
 
@@ -92,13 +92,14 @@ jarv --timeout 120 --system "You are a poet" "write me a haiku"
 
 ## How it works
 
-Jarv wraps the OpenAI Responses API with a tool-calling agent loop. The model can call three tools:
+Jarv uses a multi-provider tool-calling agent loop (OpenAI Responses API, Anthropic Messages, Gemini, and OpenAI-compatible endpoints). The root model can call four tools:
 
 | Tool | Purpose |
 | --- | --- |
 | `run_command` | Execute a shell command and return stdout, stderr, and exit code |
 | `spawn` | Fan out work to parallel subagents, each with their own tool access |
 | `read_artifact` | Retrieve the full output of a completed subagent |
+| `ask_user` | Ask you a question and wait for a reply |
 
 On Windows, commands run through PowerShell. On other platforms, they run through the system shell.
 
@@ -128,7 +129,7 @@ When the model calls `spawn`, Jarv runs N child agents in parallel. Each child o
 - **Artifacts** — each child's output is stored as a named artifact. The parent (or siblings that declare a dependency) can fetch the full content.
 - **Recursive** — children can themselves spawn further children, up to `max_subagent_depth` levels deep (default 4). Children are sterile by default; the parent must explicitly allow further spawning.
 - **Transcript scope** — child-agent transcripts are discarded. Root history stores the parent `spawn`/`read_artifact` tool calls and returned outputs.
-- **Scoped per query** — the artifact store resets with each new top-level prompt.
+- **Session-scoped** — artifacts persist for the active session and are available on later prompts until you start a new session or archive.
 
 The terminal shows a live progress panel as children run, with a green checkmark or red cross as each finishes.
 
@@ -176,10 +177,17 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `api_key` | `""` | OpenAI API key. Falls back to `OPENAI_API_KEY` env var if empty. |
+| `provider` | `"openai"` | API provider (`openai`, `anthropic`, `gemini`, `openrouter`, etc.). |
+| `api_key` | `""` | Legacy single API key field (migrated to `api_keys`). |
+| `api_keys` | `{}` | Per-provider API keys. Falls back to provider env vars when empty. |
+| `base_url` | `""` | Custom API base URL. Overrides the provider default. |
 | `model` | `"gpt-5.4-mini"` | Model name passed to the API. |
 | `reasoning_effort` | `""` | Reasoning effort level. Leave empty to disable. |
-| `max_history` | `40` | Number of recent stored history items included as model context. Does not delete saved history. |
+| `max_history` | `40` | Max stored history items sent as model context (item cap before token trimming). Does not delete saved history. |
+| `context_budget_ratio` | `0.75` | Share of the context window used for input. |
+| `context_compaction_threshold` | `0.85` | Fill ratio that triggers history compaction. |
+| `context_output_reserve_ratio` | `0.15` | Context window share reserved for model output. |
+| `context_window_fallback` | `128000` | Context window when model metadata is unknown. |
 | `max_stdin_chars` | `200000` | Maximum piped stdin characters attached to a one-shot prompt. |
 | `max_tool_output_chars` | `20000` | Maximum tool output characters returned to the model. Longer output is returned with the middle omitted. |
 | `command_timeout` | `60` | Seconds before a shell command is killed. |

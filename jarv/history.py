@@ -171,7 +171,11 @@ class SessionContext:
     now: datetime
 
 
-def prepare_session_context(mark_message: bool = False) -> SessionContext:
+def prepare_session_context(
+    mark_message: bool = False,
+    *,
+    persist_metadata: bool = True,
+) -> SessionContext:
     """Resolve the active session for this terminal, creating it if needed."""
     now = utc_now()
     terminal_id, terminal_label = detect_terminal()
@@ -199,7 +203,7 @@ def prepare_session_context(mark_message: bool = False) -> SessionContext:
     if mark_message:
         meta["last_message_at"] = isoformat_utc(now)
 
-    if mark_message or session_existed:
+    if persist_metadata and (mark_message or session_existed):
         save_sessions(sessions_data)
 
     return SessionContext(

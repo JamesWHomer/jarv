@@ -105,6 +105,24 @@ def trim_items_to_budget(items: list[dict], model: str, budget: int) -> list[dic
     return _align_slice_to_user(kept)
 
 
+def _cap_items_by_count(items: list[dict], max_items: int) -> list[dict]:
+    if max_items <= 0 or len(items) <= max_items:
+        return items
+    return _align_slice_to_user(items[-max_items:])
+
+
+def _should_compact_history(
+    model: str,
+    config: dict,
+    instructions: str,
+    tools: list,
+    history: list,
+) -> bool:
+    threshold = _config_ratio(config, "context_compaction_threshold")
+    fill = estimated_context_fill_ratio(model, config, instructions, tools, history)
+    return fill is not None and fill >= threshold
+
+
 def build_input(
     history: list,
     *,
@@ -115,8 +133,27 @@ def build_input(
 ) -> list[dict]:
     """Convert stored history to Responses API input within the token budget."""
     tools = tools or []
+    source = history
+    if _should_compact_history(model, config, instructions, tools, history):
+        target_tokens = int(
+            history_token_budget(model, config, instructions, tools) * _COMPACTION_TARGET_RATIO
+        )
+        source = compact_history_view(
+            history,
+            model=model,
+            config=config,
+            instructions=instructions,
+            tools=tools,
+            target_tokens=target_tokens,
+        )
+    api_items = history_to_api_items(source)
+    try:
+        max_items = int(config.get("max_history", DEFAULT_CONFIG["max_history"]))
+    except (TypeError, ValueError):
+        max_items = int(DEFAULT_CONFIG["max_history"])
+    api_items = _cap_items_by_count(api_items, max_items)
     budget = history_token_budget(model, config, instructions, tools)
-    return trim_items_to_budget(history_to_api_items(history), model, budget)
+    return trim_items_to_budget(api_items, model, budget)
 
 
 def trim_turn_input(
@@ -134,7 +171,12 @@ def trim_turn_input(
         model,
         budget,
     )
-    return trimmed or ([input_items[-1]] if input_items else [])
+    if trimmed:
+        return trimmed
+    for item in reversed(input_items):
+        if isinstance(item, dict) and item.get("role") == "user":
+            return [item]
+    return []
 
 
 def _is_turn_start(item: dict) -> bool:
@@ -196,25 +238,52 @@ def compact_oldest_turns(
     config: dict,
     instructions: str,
     tools: list,
-    metadata: dict,
     target_tokens: int,
 ) -> bool:
-    """Replace the oldest complete turn with a compact summary until under budget."""
+    """Replace the oldest complete turn with a compact summary until under budget.
+
+    Mutates ``history`` in place. Callers should pass a copy when the original
+    stored transcript must be preserved.
+    """
     modified = False
     while estimate_history_tokens(model, history) > target_tokens:
         ranges = iter_turn_ranges(history)
         if len(ranges) <= 1:
             break
         start, end = ranges[0]
+        before_tokens = estimate_history_tokens(model, history)
         summary = summarize_turn_items(history[start:end])
         history[start:end] = [{
             "role": "user",
             "type": "compacted_summary",
             "content": summary,
-            **metadata,
         }]
         modified = True
+        if estimate_history_tokens(model, history) >= before_tokens:
+            break
     return modified
+
+
+def compact_history_view(
+    history: list,
+    *,
+    model: str,
+    config: dict,
+    instructions: str,
+    tools: list,
+    target_tokens: int,
+) -> list:
+    """Return a compacted copy of ``history`` for API input without mutating storage."""
+    view = list(history)
+    compact_oldest_turns(
+        view,
+        model=model,
+        config=config,
+        instructions=instructions,
+        tools=tools,
+        target_tokens=target_tokens,
+    )
+    return view
 
 
 def estimated_context_fill_ratio(
@@ -230,34 +299,6 @@ def estimated_context_fill_ratio(
     fixed = fixed_context_tokens(model, instructions, tools)
     history_tokens = estimate_history_tokens(model, history)
     return (fixed + history_tokens) / window
-
-
-def maybe_compact_history(
-    history: list,
-    *,
-    model: str,
-    config: dict,
-    instructions: str,
-    tools: list,
-    metadata: dict,
-) -> bool:
-    """Compact stored history when estimated context usage nears the window."""
-    threshold = _config_ratio(config, "context_compaction_threshold")
-    fill = estimated_context_fill_ratio(model, config, instructions, tools, history)
-    if fill is None or fill < threshold:
-        return False
-    target_tokens = int(
-        history_token_budget(model, config, instructions, tools) * _COMPACTION_TARGET_RATIO
-    )
-    return compact_oldest_turns(
-        history,
-        model=model,
-        config=config,
-        instructions=instructions,
-        tools=tools,
-        metadata=metadata,
-        target_tokens=target_tokens,
-    )
 
 
 def context_budget_status(

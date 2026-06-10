@@ -92,6 +92,7 @@ def estimate_context_breakdown(
 
 USAGE_VERSION = 1
 RECENT_REQUEST_LIMIT = 50
+GLOBAL_USAGE_RETENTION_DAYS = 90
 TOKENS_PER_MILLION = 1_000_000
 
 _usage_lock = Lock()
@@ -360,6 +361,46 @@ def _normalize_usage_data(data: dict) -> None:
                 _normalize_token_bucket(record)
 
 
+def _prune_global_usage_jsonl(
+    jsonl_path: Path,
+    *,
+    now: datetime | None = None,
+    warn: bool = True,
+) -> None:
+    if not jsonl_path.exists():
+        return
+    cutoff = (now or utc_now()) - timedelta(days=GLOBAL_USAGE_RETENTION_DAYS)
+    try:
+        lines = jsonl_path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as e:
+        if warn:
+            console.print(f"[yellow]Could not read usage data:[/yellow] {e}")
+        return
+
+    kept: list[str] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        created_at = parse_timestamp(str(payload.get("created_at") or ""))
+        if created_at is None or created_at >= cutoff:
+            kept.append(line)
+
+    try:
+        jsonl_path.write_text(
+            ("\n".join(kept) + "\n") if kept else "",
+            encoding="utf-8",
+        )
+    except OSError as e:
+        if warn:
+            console.print(f"[yellow]Could not save usage data:[/yellow] {e}")
+
+
 def _append_global_usage_record_unlocked(
     record: dict,
     path: Path | None = None,
@@ -371,6 +412,7 @@ def _append_global_usage_record_unlocked(
         with jsonl_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(dict(record), separators=(",", ":")))
             f.write("\n")
+        _prune_global_usage_jsonl(jsonl_path, warn=warn)
     except OSError as e:
         if warn:
             console.print(f"[yellow]Could not save usage data:[/yellow] {e}")

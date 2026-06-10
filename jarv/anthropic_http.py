@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
-import time
 from collections.abc import Iterator
 from typing import Any
 
 from .cancellation import CancellationToken
-from .http_transport import request_json
+from .http_transport import (
+    ProviderHTTPError,
+    iter_sse_json,
+    request_json,
+    send_with_retries,
+)
 from .unicode_safety import sanitize_json_value
 
 
@@ -17,7 +21,6 @@ ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_MAX_TOKENS = 8192
 DEFAULT_SUBAGENT_MAX_TOKENS = 16384
 _CACHE_CONTROL = {"type": "ephemeral"}
-_RETRYABLE_STATUS_CODES = {408, 409, 429, 500, 502, 503, 504, 529}
 _THINKING_BUDGETS = {
     "minimal": 1024,
     "low": 1024,
@@ -28,7 +31,7 @@ _THINKING_BUDGETS = {
 }
 
 
-class AnthropicHTTPError(Exception):
+class AnthropicHTTPError(ProviderHTTPError):
     """An error returned by Anthropic's HTTP API."""
 
     def __init__(
@@ -39,20 +42,13 @@ class AnthropicHTTPError(Exception):
         error_type: str | None = None,
         request_id: str | None = None,
     ) -> None:
-        self.status_code = status_code
-        self.error_type = error_type
-        self.request_id = request_id
-        details = []
-        if status_code is not None:
-            details.append(str(status_code))
-        if error_type:
-            details.append(error_type)
-        prefix = "Anthropic API error"
-        if details:
-            prefix += f" ({', '.join(details)})"
-        if request_id:
-            message = f"{message} [request_id={request_id}]"
-        super().__init__(f"{prefix}: {message}")
+        super().__init__(
+            "Anthropic",
+            message,
+            status_code=status_code,
+            error_type=error_type,
+            request_id=request_id,
+        )
 
 
 def create_client(config: dict, api_key: str):
@@ -330,57 +326,17 @@ def _response_error(response, data: dict | None = None) -> AnthropicHTTPError:
     )
 
 
-def _retry_delay(response, attempt: int) -> float:
-    retry_after = response.headers.get("retry-after")
-    if retry_after:
-        try:
-            return min(max(float(retry_after), 0.0), 30.0)
-        except ValueError:
-            pass
-    return min(0.5 * (2 ** attempt), 4.0)
-
-
-def _sleep(
-    delay: float,
-    cancellation_token: CancellationToken | None,
-) -> None:
-    deadline = time.monotonic() + delay
-    while True:
-        if cancellation_token is not None:
-            cancellation_token.throw_if_cancelled()
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return
-        time.sleep(min(remaining, 0.05))
-
-
-def _send_with_retries(
-    client,
-    payload: dict,
-    *,
-    stream: bool,
-    cancellation_token: CancellationToken | None,
-    max_retries: int,
-):
-    import httpx
-
-    for attempt in range(max_retries + 1):
-        if cancellation_token is not None:
-            cancellation_token.throw_if_cancelled()
-        request = client.build_request("POST", "/v1/messages", json=payload)
-        try:
-            response = client.send(request, stream=stream)
-        except httpx.TransportError:
-            if attempt >= max_retries:
-                raise
-            _sleep(min(0.5 * (2 ** attempt), 4.0), cancellation_token)
-            continue
-        if response.status_code not in _RETRYABLE_STATUS_CODES or attempt >= max_retries:
-            return response
-        delay = _retry_delay(response, attempt)
-        response.close()
-        _sleep(delay, cancellation_token)
-    raise RuntimeError("unreachable")
+def _provider_error(exc: ProviderHTTPError) -> AnthropicHTTPError:
+    message = str(exc)
+    prefix = "Anthropic API error"
+    if message.startswith(prefix):
+        message = message[len(prefix):].lstrip(": ")
+    return AnthropicHTTPError(
+        message,
+        status_code=exc.status_code,
+        error_type=exc.error_type,
+        request_id=exc.request_id,
+    )
 
 
 def create_message(
@@ -391,9 +347,11 @@ def create_message(
     max_retries: int = 2,
 ) -> dict:
     """Create one non-streaming Anthropic message."""
-    response = _send_with_retries(
+    response = send_with_retries(
         client,
-        payload,
+        "POST",
+        "/v1/messages",
+        json_body=payload,
         stream=False,
         cancellation_token=cancellation_token,
         max_retries=max_retries,
@@ -411,34 +369,10 @@ def create_message(
 
 def iter_sse(response) -> Iterator[tuple[str, dict]]:
     """Parse an Anthropic SSE response, including multiline data fields."""
-    event_name = ""
-    data_lines: list[str] = []
-    for line in response.iter_lines():
-        if line == "":
-            if data_lines:
-                raw = "\n".join(data_lines)
-                try:
-                    data = json.loads(raw)
-                except json.JSONDecodeError as exc:
-                    raise AnthropicHTTPError(f"invalid SSE JSON: {exc}") from exc
-                if isinstance(data, dict):
-                    yield event_name or str(data.get("type") or ""), data
-            event_name = ""
-            data_lines = []
-            continue
-        if line.startswith(":"):
-            continue
-        field, separator, value = line.partition(":")
-        if separator and value.startswith(" "):
-            value = value[1:]
-        if field == "event":
-            event_name = value
-        elif field == "data":
-            data_lines.append(value)
-    if data_lines:
-        data = json.loads("\n".join(data_lines))
-        if isinstance(data, dict):
-            yield event_name or str(data.get("type") or ""), data
+    try:
+        yield from iter_sse_json("Anthropic", response)
+    except ProviderHTTPError as exc:
+        raise _provider_error(exc) from exc
 
 
 def _normalized_usage(usage: dict | None) -> dict:
@@ -480,9 +414,11 @@ def stream_message(
     max_retries: int = 2,
 ) -> Iterator[dict]:
     """Yield normalized protocol events from an Anthropic SSE message."""
-    response = _send_with_retries(
+    response = send_with_retries(
         client,
-        payload,
+        "POST",
+        "/v1/messages",
+        json_body=payload,
         stream=True,
         cancellation_token=cancellation_token,
         max_retries=max_retries,

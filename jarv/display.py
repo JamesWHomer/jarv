@@ -9,8 +9,11 @@ from rich import box
 from rich.console import Console, RenderableType
 from rich.panel import Panel
 from rich.rule import Rule
+from rich.text import Text
 
 console = Console()
+
+_live_display_depth = threading.local()
 
 PANEL_BORDER_STYLE = "cyan"
 ACCENT_STYLE = "bold cyan"
@@ -66,6 +69,36 @@ def section_rule(label: str, step: int | None = None, total: int | None = None) 
     else:
         title_text = f"[{ACCENT_STYLE}]{label}[/{ACCENT_STYLE}]"
     return Rule(title=title_text, style="bright_black", align="left")
+
+
+def live_display_depth() -> int:
+    """Return how many nested Rich Live displays are active on this thread."""
+    return int(getattr(_live_display_depth, "depth", 0) or 0)
+
+
+@contextmanager
+def track_live_display():
+    """Increment live-display depth for the current thread."""
+    depth = live_display_depth()
+    _live_display_depth.depth = depth + 1
+    try:
+        yield
+    finally:
+        _live_display_depth.depth = depth
+
+
+def rendered_text_lines(renderable: RenderableType, width: int) -> list[Text]:
+    """Render a Rich object to wrapped Text lines at the given width."""
+    options = console.options.update(width=max(1, width))
+    rendered = console.render_lines(renderable, options, pad=False)
+    lines: list[Text] = []
+    for rendered_line in rendered:
+        line = Text(no_wrap=True, overflow="crop")
+        for segment in rendered_line:
+            if segment.text:
+                line.append(segment.text, style=segment.style)
+        lines.append(line)
+    return lines
 
 
 def status_line(prefix: str, message: str, prefix_style: str = "bold cyan", message_style: str = "") -> str:

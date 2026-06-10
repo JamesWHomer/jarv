@@ -100,8 +100,8 @@ class AgentInputTests(unittest.TestCase):
 
     def test_build_input_limits_context_without_mutating_history(self):
         history = [
-            {"role": "user", "content": "old " + ("x" * 800)},
-            {"role": "assistant", "content": "older answer " + ("y" * 800)},
+            {"role": "user", "content": "old " + ("x" * 650)},
+            {"role": "assistant", "content": "older answer " + ("y" * 650)},
             {"role": "user", "content": "new"},
             {"role": "assistant", "content": "newer answer"},
         ]
@@ -160,6 +160,50 @@ class AgentInputTests(unittest.TestCase):
             )),
             0,
         )
+
+    def test_run_agent_persists_full_history_when_compaction_triggers(self):
+        with TemporaryDirectory() as tmp:
+            history_file = Path(tmp) / "history.json"
+            existing = [
+                {"role": "user", "content": "one " + ("a" * 500)},
+                {"role": "assistant", "content": "two " + ("b" * 500)},
+                {"role": "user", "content": "three"},
+            ]
+            save_history(existing, history_file)
+            context = SessionContext(
+                session_id="session-id",
+                session_label="test session",
+                history_file=history_file,
+                now=datetime(2026, 5, 21, tzinfo=timezone.utc),
+            )
+            config = {
+                **DEFAULT_CONFIG,
+                "context_window_fallback": 400,
+                "context_compaction_threshold": 0.5,
+            }
+
+            def fake_stream_response(*_args, **_kwargs):
+                yield TextDelta("four")
+                yield StreamDone(response=None)
+
+            with (
+                patch("jarv.agent.prepare_session_context", return_value=context),
+                patch("jarv.agent.stream_response", side_effect=fake_stream_response),
+                patch("jarv.agent.sys.stdout", new=io.StringIO()),
+            ):
+                run_agent("new prompt", config, client=object())
+
+            saved = load_history(history_file)
+
+        self.assertEqual(len(saved), len(existing) + 2)
+        self.assertEqual([item["content"] for item in saved if "content" in item], [
+            "one " + ("a" * 500),
+            "two " + ("b" * 500),
+            "three",
+            "new prompt",
+            "four",
+        ])
+        self.assertFalse(any(item.get("type") == "compacted_summary" for item in saved))
 
     def test_run_agent_persists_full_history_even_when_context_limit_is_lower(self):
         with TemporaryDirectory() as tmp:
@@ -297,9 +341,19 @@ class AgentInputTests(unittest.TestCase):
         self.assertEqual(saved[5]["content"], "[Turn cancelled by user.]")
 
     def test_ask_user_ctrl_c_propagates_to_cancel_turn(self):
-        with patch("jarv.agent._read_user_input", side_effect=KeyboardInterrupt):
+        with (
+            patch("jarv.agent.sys.stdin") as stdin,
+            patch("jarv.agent.read_editable_line", side_effect=KeyboardInterrupt),
+        ):
+            stdin.isatty.return_value = True
             with self.assertRaises(KeyboardInterrupt):
                 _dispatch_ask_user({"question": "Continue?"})
+
+    def test_ask_user_returns_unavailable_when_stdin_not_tty(self):
+        with patch("jarv.agent.sys.stdin") as stdin:
+            stdin.isatty.return_value = False
+            result = _dispatch_ask_user({"question": "Continue?"})
+        self.assertEqual(result, "[non-interactive session; user unavailable]")
 
     def test_run_agent_passes_session_prompt_cache_key(self):
         with TemporaryDirectory() as tmp:

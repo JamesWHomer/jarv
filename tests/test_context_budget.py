@@ -4,10 +4,10 @@ from jarv.agent import to_response_input_item
 from jarv.config import DEFAULT_CONFIG
 from jarv.context_budget import (
     build_input,
+    compact_history_view,
     compact_oldest_turns,
     context_budget_status,
     estimate_history_tokens,
-    maybe_compact_history,
     summarize_turn_items,
     trim_items_to_budget,
     trim_turn_input,
@@ -60,8 +60,8 @@ class ContextBudgetTests(unittest.TestCase):
         instructions = "system prompt"
         tools = [{"type": "function", "name": "run_command"}]
         history = [
-            {"role": "user", "content": "old " + ("x" * 800)},
-            {"role": "assistant", "content": "old answer " + ("y" * 800)},
+            {"role": "user", "content": "old " + ("x" * 600)},
+            {"role": "assistant", "content": "old answer " + ("y" * 600)},
             {"role": "user", "content": "new"},
             {"role": "assistant", "content": "newer"},
         ]
@@ -156,13 +156,13 @@ class ContextBudgetTests(unittest.TestCase):
     def test_compact_oldest_turns_replaces_prefix_with_summary(self):
         config = self._tiny_config()
         model = "unknown-model"
-        metadata = {"session_id": "s1"}
         history = [
             {"role": "user", "content": "first"},
             {"role": "assistant", "content": "first answer"},
             {"role": "user", "content": "second"},
             {"role": "assistant", "content": "second answer"},
         ]
+        original = [dict(item) for item in history]
 
         modified = compact_oldest_turns(
             history,
@@ -170,44 +170,67 @@ class ContextBudgetTests(unittest.TestCase):
             config=config,
             instructions="",
             tools=[],
-            metadata=metadata,
             target_tokens=1,
         )
 
         self.assertTrue(modified)
         self.assertEqual(len(history), 3)
         self.assertEqual(history[0]["type"], "compacted_summary")
-        self.assertEqual(history[0]["session_id"], "s1")
         self.assertEqual(to_response_input_item(history[0]), {
             "role": "user",
             "content": history[0]["content"],
         })
 
-    def test_maybe_compact_history_triggers_near_budget(self):
+    def test_compact_history_view_does_not_mutate_stored_history(self):
+        config = self._tiny_config()
+        model = "unknown-model"
+        history = [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "first answer"},
+            {"role": "user", "content": "second"},
+            {"role": "assistant", "content": "second answer"},
+        ]
+        original = [dict(item) for item in history]
+
+        view = compact_history_view(
+            history,
+            model=model,
+            config=config,
+            instructions="",
+            tools=[],
+            target_tokens=1,
+        )
+
+        self.assertEqual(history, original)
+        self.assertEqual(len(view), 3)
+        self.assertEqual(view[0]["type"], "compacted_summary")
+
+    def test_build_input_compacts_without_mutating_history(self):
         config = {
             **self._tiny_config(),
             "context_compaction_threshold": 0.5,
         }
         model = "unknown-model"
-        metadata = {"session_id": "s1"}
         history = [
             {"role": "user", "content": "one " + ("a" * 500)},
             {"role": "assistant", "content": "two " + ("b" * 500)},
             {"role": "user", "content": "three"},
             {"role": "assistant", "content": "four"},
         ]
+        original = [dict(item) for item in history]
 
-        modified = maybe_compact_history(
+        api_items = build_input(
             history,
             model=model,
             config=config,
             instructions="instructions " + ("i" * 200),
             tools=[{"type": "function", "name": "run_command"}],
-            metadata=metadata,
         )
 
-        self.assertTrue(modified)
-        self.assertEqual(history[0]["type"], "compacted_summary")
+        self.assertEqual(history, original)
+        self.assertTrue(api_items[0]["content"].startswith("[Compacted earlier conversation]"))
+        self.assertEqual(api_items[-2]["content"], "three")
+        self.assertEqual(api_items[-1]["content"], "four")
 
     def test_resolve_context_window_prefers_metadata_then_fallback(self):
         self.assertEqual(resolve_context_window("gpt-5.4-mini", {}), 272_000)

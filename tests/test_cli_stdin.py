@@ -190,6 +190,65 @@ class CliStdinTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, 130)
 
+    def test_heads_up_mode_reloads_runtime_after_config_mutating_command(self):
+        config = {"provider": "openai", "model": "old-model"}
+        refreshed = {"provider": "openai", "model": "new-model"}
+        args = SimpleNamespace(
+            provider=None,
+            model=None,
+            effort=None,
+            timeout=None,
+            system=None,
+        )
+        calls = 0
+
+        def read_line(_prompt, initial=""):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return "/set model new-model"
+            raise KeyboardInterrupt
+
+        with (
+            patch("jarv.command_input.read_editable_line", side_effect=read_line),
+            patch.object(cli, "_run_slash_command", return_value=True) as run_slash,
+            patch.object(
+                cli,
+                "_reload_heads_up_runtime",
+                return_value=(refreshed, "new-client"),
+            ) as reload,
+        ):
+            cli.run_heads_up_mode(config, client="old-client", args=args)
+
+        run_slash.assert_called_once_with("/set", ["model", "new-model"])
+        reload.assert_called_once_with(config, "old-client", args)
+
+    def test_heads_up_mode_skips_reload_for_unknown_slash_command(self):
+        args = SimpleNamespace(
+            provider=None,
+            model=None,
+            effort=None,
+            timeout=None,
+            system=None,
+        )
+        calls = 0
+
+        def read_line(_prompt, initial=""):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return "/bogus"
+            raise KeyboardInterrupt
+
+        with (
+            patch("jarv.command_input.read_editable_line", side_effect=read_line),
+            patch.object(cli, "_run_slash_command", return_value=False),
+            patch.object(cli, "_reload_heads_up_runtime") as reload,
+        ):
+            cli.run_heads_up_mode({"model": "test"}, client=object(), args=args)
+
+        reload.assert_not_called()
+
     def test_heads_up_mode_restores_cancelled_prompt(self):
         initial_values = []
         calls = 0
