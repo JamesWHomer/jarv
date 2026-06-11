@@ -140,6 +140,36 @@ _SETTINGS_READ_ONLY_DISPLAY_CHOICES = (
 )
 
 
+def _settings_service_tier_choices(config: dict) -> tuple[tuple[str, str], ...]:
+    from .provider_catalog import service_tier_choices
+
+    provider = str(config.get("provider", "openai"))
+    return tuple((tier, tier) for tier in service_tier_choices(provider))
+
+
+def _settings_service_tier(config: dict) -> str:
+    from .provider_catalog import configured_service_tier
+
+    return configured_service_tier(config)
+
+
+def _settings_service_tier_description(config: dict) -> str:
+    provider = str(config.get("provider", "openai"))
+    if provider == "anthropic":
+        return "priority uses committed capacity, then falls back to standard"
+    if len(_settings_service_tier_choices(config)) == 1:
+        return "this provider uses standard processing"
+    return "standard cost, flex savings, or priority latency"
+
+
+def _settings_set_service_tier(config: dict, tier: str) -> None:
+    provider = str(config.get("provider", "openai"))
+    existing = config.get("service_tiers")
+    configured = dict(existing) if isinstance(existing, dict) else {}
+    configured[provider] = tier
+    config["service_tiers"] = configured
+
+
 def _clip_text(value: str, width: int) -> str:
     if width <= 0:
         return ""
@@ -194,6 +224,14 @@ def _settings_rows(config: dict) -> list[dict]:
             "kind": "setup",
             "step": "model",
             "desc": "pick from the provider presets or enter a model",
+        },
+        {
+            "section": "account",
+            "label": "Processing tier",
+            "key": "service_tier",
+            "kind": "choice",
+            "choices": _settings_service_tier_choices(config),
+            "desc": _settings_service_tier_description(config),
         },
         {
             "section": "account",
@@ -321,7 +359,11 @@ def _settings_value_text(row: dict, config: dict, *, selected: bool = False) -> 
 
     key = row["key"]
     kind = row["kind"]
-    value = config.get(key, DEFAULT_CONFIG.get(key, ""))
+    value = (
+        _settings_service_tier(config)
+        if key == "service_tier"
+        else config.get(key, DEFAULT_CONFIG.get(key, ""))
+    )
 
     if key == "system_prompt":
         prompt = str(value)
@@ -373,11 +415,19 @@ def _settings_apply_quick(row: dict, config: dict) -> tuple[dict, str] | None:
 
     if kind == "choice":
         choices = row["choices"]
-        current = config.get(key, DEFAULT_CONFIG.get(key, choices[0][0]))
+        current = (
+            _settings_service_tier(config)
+            if key == "service_tier"
+            else config.get(key, DEFAULT_CONFIG.get(key, choices[0][0]))
+        )
         idx = next((i for i, (value, _) in enumerate(choices) if value == current), -1)
-        config[key] = choices[(idx + 1) % len(choices)][0]
+        value = choices[(idx + 1) % len(choices)][0]
+        if key == "service_tier":
+            _settings_set_service_tier(config, value)
+        else:
+            config[key] = value
         save_config(config)
-        return config, f"saved {row['label']}: {_settings_choice_label(config[key], choices)}"
+        return config, f"saved {row['label']}: {_settings_choice_label(value, choices)}"
 
     return None
 
@@ -385,6 +435,8 @@ def _settings_apply_quick(row: dict, config: dict) -> tuple[dict, str] | None:
 def _settings_reset_value(row: dict, config: dict):
     if row["key"] == "model":
         return _settings_default_model(config)
+    if row["key"] == "service_tier":
+        return "standard"
     return DEFAULT_CONFIG[row["key"]]
 
 
@@ -404,6 +456,10 @@ def _settings_reset_row(row: dict, config: dict) -> tuple[dict, str]:
             save_config(config)
             return config, "cleared stored API key"
         return config, "no stored API key"
+    if key == "service_tier":
+        _settings_set_service_tier(config, "standard")
+        save_config(config)
+        return config, "reset Processing tier"
     if key not in DEFAULT_CONFIG:
         return config, f"{row['label']} has no default"
     config[key] = _settings_reset_value(row, config)
@@ -425,7 +481,10 @@ def _settings_reset_action_bar(
     else:
         current = _settings_value_text(row, config).plain
         default_config = dict(config)
-        default_config[key] = _settings_reset_value(row, config)
+        if key == "service_tier":
+            _settings_set_service_tier(default_config, "standard")
+        else:
+            default_config[key] = _settings_reset_value(row, config)
         default = _settings_value_text(row, default_config).plain
         prompt = f"Reset {row['label']}?"
         controls = "y reset   Esc cancel"

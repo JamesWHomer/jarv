@@ -82,6 +82,44 @@ PROVIDERS = {
 
 LOCAL_PROVIDERS = {"ollama", "lm_studio", "vllm"}
 
+SERVICE_TIERS = ("standard", "flex", "priority")
+PROVIDER_SERVICE_TIERS = {
+    "openai": SERVICE_TIERS,
+    "openrouter": SERVICE_TIERS,
+    "gemini": SERVICE_TIERS,
+    "anthropic": ("standard", "priority"),
+}
+
+
+def service_tier_choices(provider: str) -> tuple[str, ...]:
+    """Return Jarv service tiers supported by a provider."""
+    return PROVIDER_SERVICE_TIERS.get(provider, ("standard",))
+
+
+def configured_service_tier(config: dict, provider: str | None = None) -> str:
+    """Return the configured Jarv tier, falling back safely to standard."""
+    provider = provider or str(config.get("provider", "openai"))
+    configured = config.get("service_tiers")
+    tier = configured.get(provider) if isinstance(configured, dict) else None
+    if tier in service_tier_choices(provider):
+        return str(tier)
+    return "standard"
+
+
+def provider_service_tier(config: dict, provider: str | None = None) -> str | None:
+    """Translate Jarv's tier into the active provider's request value."""
+    provider = provider or str(config.get("provider", "openai"))
+    tier = configured_service_tier(config, provider)
+    if provider == "openai":
+        return "default" if tier == "standard" else tier
+    if provider == "openrouter":
+        return None if tier == "standard" else tier
+    if provider == "gemini":
+        return None if tier == "standard" else tier
+    if provider == "anthropic":
+        return "standard_only" if tier == "standard" else "auto"
+    return None
+
 KEY_PATTERNS: dict[str, str] = {
     "openai": r"^sk-.{20,}",
     "anthropic": r"^sk-ant-.{20,}",

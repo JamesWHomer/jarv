@@ -252,6 +252,7 @@ Keys:
 - `api_key` - API key. Can also be provided via provider-specific env vars (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.).
 - `base_url` - Custom API base URL. Overrides the provider's default endpoint.
 - `model` - Model name. Default: `{DEFAULT_CONFIG['model']}`.
+- `service_tiers` - Per-provider processing tier. Values are `standard`, `flex`, or `priority`; missing providers use `standard`.
 - `reasoning_effort` - Optional reasoning effort value. Empty disables this setting.
 - `max_history` - Maximum stored history items included as model context (item cap before token trimming). It does not delete saved history. Stored items include user messages, assistant messages, reasoning items, function calls, and function call outputs. Default: `{DEFAULT_CONFIG['max_history']}`.
 - `context_budget_ratio` - Share of the context window used for input. Default: `{DEFAULT_CONFIG['context_budget_ratio']}`.

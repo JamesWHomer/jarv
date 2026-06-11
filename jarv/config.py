@@ -22,6 +22,7 @@ DEFAULT_CONFIG = {
     "api_keys": {},
     "base_url": "",
     "model": "gpt-5.4-mini",
+    "service_tiers": {},
     "reasoning_effort": "",
     "max_history": 40,
     "context_budget_ratio": 0.75,
@@ -126,6 +127,8 @@ def save_config(config: dict) -> None:
 
 
 def validate_config(config: dict) -> bool:
+    from .provider_catalog import SERVICE_TIERS, service_tier_choices
+
     ok = True
     model = config.get("model")
     if not isinstance(model, str) or not model.strip():
@@ -135,6 +138,25 @@ def validate_config(config: dict) -> bool:
     effort = config.get("reasoning_effort", "")
     if effort is None:
         config["reasoning_effort"] = ""
+
+    service_tiers = config.get("service_tiers", {})
+    if not isinstance(service_tiers, dict):
+        _console().print("[red]Config 'service_tiers' must be an object.[/red]")
+        ok = False
+    else:
+        for provider, tier in service_tiers.items():
+            if tier not in SERVICE_TIERS:
+                choices = ", ".join(SERVICE_TIERS)
+                _console().print(
+                    f"[red]Config service tier for '{provider}' must be one of: {choices}.[/red]"
+                )
+                ok = False
+            elif tier not in service_tier_choices(str(provider)):
+                choices = ", ".join(service_tier_choices(str(provider)))
+                _console().print(
+                    f"[red]Provider '{provider}' supports service tiers: {choices}.[/red]"
+                )
+                ok = False
 
     for key in ("max_history", "max_stdin_chars", "max_tool_output_chars", "command_timeout"):
         try:

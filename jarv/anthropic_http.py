@@ -295,6 +295,11 @@ def build_payload(
         payload["tools"] = converted_tools
     if stream:
         payload["stream"] = True
+    from .provider_catalog import provider_service_tier
+
+    service_tier = provider_service_tier(config, "anthropic")
+    if service_tier:
+        payload["service_tier"] = service_tier
     _apply_reasoning(payload, model, reasoning)
     if config.get("anthropic_prompt_caching", True):
         _apply_prompt_caching(payload)

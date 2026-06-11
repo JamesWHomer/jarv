@@ -203,6 +203,11 @@ def build_payload(
         payload["tools"] = converted_tools
     if max_output_tokens is not None:
         payload.setdefault("generationConfig", {})["maxOutputTokens"] = max_output_tokens
+    from .provider_catalog import provider_service_tier
+
+    service_tier = provider_service_tier(config, "gemini")
+    if service_tier:
+        payload["service_tier"] = service_tier
     _apply_reasoning(config, payload, model, reasoning)
     return sanitize_json_value(payload)
 
@@ -295,6 +300,9 @@ def stream_content(
         if cancellation_token is not None else lambda: None
     )
     final: dict[str, Any] = {"candidates": [], "usageMetadata": {}}
+    served_tier = response.headers.get("x-gemini-service-tier")
+    if served_tier:
+        final["service_tier"] = served_tier
     reasoning_started = False
     try:
         for _event_name, chunk in iter_sse_json("Gemini", response):

@@ -91,6 +91,32 @@ class UsageRecordingTests(unittest.TestCase):
         self.assertEqual(usage["totals"]["output_tokens"], 3)
         self.assertNotIn("estimated", usage["last_request"])
 
+    def test_records_served_tier_without_using_standard_price_estimates(self):
+        with TemporaryDirectory() as tmp:
+            usage_path = Path(tmp) / "usage-test.json"
+            response = SimpleNamespace(
+                service_tier="priority",
+                usage=SimpleNamespace(
+                    input_tokens=12,
+                    output_tokens=3,
+                    total_tokens=15,
+                ),
+            )
+
+            record_response_usage(
+                usage_path,
+                "session-id",
+                "gpt-5.4-mini",
+                response=response,
+                source="root",
+                record_global=False,
+            )
+
+            usage = load_usage(usage_path, "session-id")
+
+        self.assertEqual(usage["last_request"]["service_tier"], "priority")
+        self.assertNotIn("estimated_cost_usd", usage["last_request"])
+
     def test_global_usage_records_are_appended_alongside_session_usage(self):
         with TemporaryDirectory() as tmp:
             usage_path = Path(tmp) / "usage-test.json"

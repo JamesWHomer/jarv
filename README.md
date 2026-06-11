@@ -182,6 +182,7 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 | `api_keys` | `{}` | Per-provider API keys. Falls back to provider env vars when empty. |
 | `base_url` | `""` | Custom API base URL. Overrides the provider default. |
 | `model` | `"gpt-5.4-mini"` | Model name passed to the API. |
+| `service_tiers` | `{}` | Per-provider processing tier: `standard`, `flex`, or `priority`. Missing providers use `standard`; unsupported tiers are not offered. |
 | `reasoning_effort` | `""` | Reasoning effort level. Leave empty to disable. |
 | `max_history` | `40` | Max stored history items sent as model context (item cap before token trimming). Does not delete saved history. |
 | `context_budget_ratio` | `0.75` | Share of the context window used for input. |
@@ -201,6 +202,8 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 | `read_only_command_display` | `"fullscreen"` | Display mode for `/help`, `/about`, `/usage`, and `/config`: temporary `fullscreen` view or permanent `print` output. |
 | `print_usage_after_agent` | `false` | Print a compact token usage line after each completed agent run. |
 | `system_prompt` | `"You are Jarv..."` | System instructions sent with each request. |
+
+Processing tier choices depend on the active provider. OpenAI, OpenRouter, and Gemini offer all three choices where the selected model supports them. Anthropic offers Standard and Priority; its Priority mode uses committed Priority capacity when available and otherwise falls back to Standard. Other providers remain on Standard.
 
 ## Local files
 

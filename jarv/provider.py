@@ -405,6 +405,7 @@ def _accumulate_tool_delta(accumulators: dict[int, dict], tc_delta) -> None:
 
 def _stream_responses_api(
     client, model, instructions, tools, input_items, reasoning=None, prompt_cache_key=None,
+    service_tier: str | None = None,
     cancellation_token: CancellationToken | None = None,
 ) -> Iterator:
     from .openai_http import (
@@ -420,6 +421,7 @@ def _stream_responses_api(
         input_items,
         reasoning=reasoning,
         prompt_cache_key=prompt_cache_key,
+        service_tier=service_tier,
     )
     reasoning_started = False
     response_id: str | None = None
@@ -504,6 +506,7 @@ def _stream_responses_api(
 
 def _stream_chat_completions(
     client, model, instructions, tools, input_items, reasoning=None,
+    service_tier: str | None = None,
     cancellation_token: CancellationToken | None = None,
 ) -> Iterator:
     from .openai_http import build_chat_payload, stream_chat
@@ -513,6 +516,7 @@ def _stream_chat_completions(
         sanitize_json_value(_to_chat_messages(instructions, input_items)),
         sanitize_json_value(_to_chat_tools(tools)) if tools else None,
         reasoning=reasoning,
+        service_tier=service_tier,
     )
     accumulators: dict[int, dict] = {}
     final_chunk: dict[str, Any] = {}
@@ -524,7 +528,7 @@ def _stream_chat_completions(
     ):
         if chunk.get("usage"):
             final_chunk["usage"] = chunk["usage"]
-        for key in ("id", "model", "created"):
+        for key in ("id", "model", "created", "service_tier"):
             if key in chunk:
                 final_chunk[key] = chunk[key]
         choices = chunk.get("choices")
@@ -683,16 +687,19 @@ def _stream_response_direct(
     cancellation_token: CancellationToken | None = None,
 ) -> Iterator:
     backend = get_backend(config)
+    from .provider_catalog import provider_service_tier
+
+    service_tier = provider_service_tier(config)
     try:
         if backend == "responses":
             yield from _stream_responses_api(
                 client, model, instructions, tools, input_items, reasoning, prompt_cache_key,
-                cancellation_token,
+                service_tier, cancellation_token,
             )
         elif backend == "openai_compat":
             yield from _stream_chat_completions(
                 client, model, instructions, tools, input_items, reasoning,
-                cancellation_token,
+                service_tier, cancellation_token,
             )
         elif backend == "anthropic":
             yield from _stream_anthropic(

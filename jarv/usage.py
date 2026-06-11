@@ -601,6 +601,8 @@ def token_prices_for_model(model: str | None) -> dict[str, float] | None:
 
 
 def estimate_token_cost_usd(record: dict, model: str | None) -> float | None:
+    if record.get("service_tier") in ("flex", "priority"):
+        return None
     prices = token_prices_for_model(model)
     if prices is None:
         return None
@@ -653,6 +655,14 @@ def record_response_usage(
             "source": source,
             **token_usage,
         }
+        raw_service_tier = _first_present(
+            _value(response, "service_tier"),
+            _value(_value(response, "usage"), "service_tier"),
+        )
+        if raw_service_tier in ("default", "standard", "standard_only"):
+            record["service_tier"] = "standard"
+        elif raw_service_tier in ("flex", "priority"):
+            record["service_tier"] = raw_service_tier
         if context_breakdown is not None and any(context_breakdown.get(k, 0) for k in _BREAKDOWN_KEYS):
             record["context_breakdown"] = {k: int(context_breakdown.get(k, 0)) for k in _BREAKDOWN_KEYS}
         estimated_cost = estimate_token_cost_usd(record, model)

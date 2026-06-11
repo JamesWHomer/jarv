@@ -45,6 +45,7 @@ def build_responses_payload(
     *,
     reasoning: dict | None = None,
     prompt_cache_key: str | None = None,
+    service_tier: str | None = None,
     stream: bool = True,
 ) -> dict:
     clean_input = []
@@ -67,6 +68,8 @@ def build_responses_payload(
         payload["reasoning"] = reasoning
     if prompt_cache_key:
         payload["prompt_cache_key"] = prompt_cache_key
+    if service_tier:
+        payload["service_tier"] = service_tier
     return sanitize_json_value(payload)
 
 
@@ -151,6 +154,7 @@ def build_chat_payload(
     max_tokens: int | None = None,
     max_completion_tokens: int | None = None,
     temperature: float | None = None,
+    service_tier: str | None = None,
 ) -> dict:
     payload: dict[str, Any] = {
         "model": model,
@@ -169,6 +173,8 @@ def build_chat_payload(
         payload["max_completion_tokens"] = max_completion_tokens
     if temperature is not None:
         payload["temperature"] = temperature
+    if service_tier:
+        payload["service_tier"] = service_tier
     return sanitize_json_value(payload)
 
 

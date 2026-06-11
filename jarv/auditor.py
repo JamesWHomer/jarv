@@ -340,6 +340,11 @@ def _openai_compat_kwargs(
         "model": model,
         "messages": messages,
     }
+    from .provider_catalog import provider_service_tier
+
+    service_tier = provider_service_tier(config)
+    if service_tier:
+        kwargs["service_tier"] = service_tier
     if _uses_max_completion_tokens(config, model, info):
         kwargs["max_completion_tokens"] = 300
     else:
