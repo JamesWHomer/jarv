@@ -28,6 +28,7 @@ from .provider import (
     responses_input_id,
     stream_response,
 )
+from .provider_catalog import configured_service_tier
 from .shell import execute_command, truncate_model_output
 from .usage import estimate_context_breakdown, record_response_usage
 
@@ -338,6 +339,8 @@ def run_subagent_loop(
                     config["model"],
                     final_response,
                     "subagent",
+                    provider=str(config.get("provider") or "openai"),
+                    requested_service_tier=configured_service_tier(config),
                     context_breakdown=context_breakdown,
                     output_text="\n".join(f"{item.name} {item.arguments}" for item in tool_calls),
                 )

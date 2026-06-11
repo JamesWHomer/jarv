@@ -63,8 +63,10 @@ from .usage import (
     format_int,
     load_usage,
     record_response_usage,
+    usage_cost_summary,
     usage_file_for,
 )
+from .provider_catalog import configured_service_tier
 
 # Responses API tool format (flat, no "function" wrapper key)
 TOOLS = [RUN_COMMAND_TOOL, SPAWN_TOOL, READ_ARTIFACT_TOOL, ASK_USER_TOOL]
@@ -210,10 +212,14 @@ def _format_agent_usage_line(usage: dict) -> Text | None:
     line.append(format_int(session_total), style="bold")
     line.append(" session", style="dim")
 
-    estimated_cost = totals.get("estimated_cost_usd")
-    if estimated_cost is not None:
-        line.append(" · est. ", style="dim")
-        line.append(format_cost(float(estimated_cost)), style="green")
+    cost = usage_cost_summary(totals)
+    known_cost_requests = cost["exact_requests"] + cost["estimated_requests"]
+    if known_cost_requests:
+        label = "cost " if cost["exact_requests"] and not cost["estimated_requests"] else "est. "
+        line.append(f" · {label}", style="dim")
+        line.append(format_cost(cost["total_usd"]), style="green")
+    if cost["unknown_requests"] or cost["contract_requests"]:
+        line.append(" · cost incomplete", style="yellow")
     if last_root.get("estimated"):
         line.append(" · usage estimated", style="yellow")
     return line
@@ -735,6 +741,8 @@ def run_agent(
                         config["model"],
                         final_response,
                         "root",
+                        provider=str(config.get("provider") or "openai"),
+                        requested_service_tier=configured_service_tier(config),
                         context_breakdown=_ctx_breakdown,
                         output_text=reply_text or "\n".join(
                             f"{item.name} {item.arguments}" for item in tool_calls

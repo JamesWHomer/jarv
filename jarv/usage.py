@@ -90,7 +90,7 @@ def estimate_context_breakdown(
     except Exception:
         return {k: 0 for k in _BREAKDOWN_KEYS}
 
-USAGE_VERSION = 1
+USAGE_VERSION = 2
 RECENT_REQUEST_LIMIT = 50
 GLOBAL_USAGE_RETENTION_DAYS = 90
 TOKENS_PER_MILLION = 1_000_000
@@ -124,7 +124,9 @@ def _empty_usage(session_id: str | None = None) -> dict:
             "request_count": 0,
         },
         "sources": {},
+        "providers": {},
         "models": {},
+        "tiers": {},
         "last_request": None,
         "last_root_request": None,
         "recent_requests": [],
@@ -257,6 +259,7 @@ def usage_from_response(response: Any) -> dict | None:
     uncached_input_tokens = None
     if input_tokens is not None:
         uncached_input_tokens = max(input_tokens - cached_input_tokens, 0)
+    cache_creation_input_tokens = _int_value(usage, "cache_creation_input_tokens") or 0
 
     output_tokens = _first_present(
         _int_value(usage, "output_tokens"),
@@ -275,7 +278,7 @@ def usage_from_response(response: Any) -> dict | None:
     if input_tokens is None and output_tokens is None and total_tokens is None:
         return None
 
-    return {
+    result = {
         "input_tokens": input_tokens or 0,
         "cached_input_tokens": cached_input_tokens or 0,
         "uncached_input_tokens": uncached_input_tokens or 0,
@@ -283,6 +286,9 @@ def usage_from_response(response: Any) -> dict | None:
         "reasoning_output_tokens": reasoning_output_tokens or 0,
         "total_tokens": total_tokens or 0,
     }
+    if cache_creation_input_tokens:
+        result["cache_creation_input_tokens"] = cache_creation_input_tokens
+    return result
 
 
 def estimated_usage_from_context(
@@ -324,6 +330,14 @@ def _add_tokens(bucket: dict, record: dict) -> None:
         bucket["estimated_cost_usd"] = float(bucket.get("estimated_cost_usd", 0.0)) + float(
             record.get("estimated_cost_usd", 0.0)
         )
+    if "provider_cost_usd" in record:
+        bucket["provider_cost_usd"] = float(bucket.get("provider_cost_usd", 0.0)) + float(
+            record.get("provider_cost_usd", 0.0)
+        )
+    status = _cost_status(record)
+    bucket[f"cost_{status}_request_count"] = (
+        int(bucket.get(f"cost_{status}_request_count", 0)) + 1
+    )
     bucket["request_count"] = int(bucket.get("request_count", 0)) + 1
 
 
@@ -340,25 +354,62 @@ def _normalize_token_bucket(bucket: dict, *, include_request_count: bool = True)
         bucket.setdefault("request_count", 0)
 
 
+def _cost_status(record: dict) -> str:
+    status = str(record.get("cost_status") or "")
+    if status in ("exact", "estimated", "unknown", "contract"):
+        return status
+    if "provider_cost_usd" in record:
+        return "exact"
+    if "estimated_cost_usd" in record:
+        return "estimated"
+    return "unknown"
+
+
+def _normalize_cost_bucket(bucket: dict, *, record: bool = False) -> None:
+    if record:
+        bucket.setdefault("cost_status", _cost_status(bucket))
+        return
+    request_count = int(bucket.get("request_count") or 0)
+    count_keys = (
+        "cost_exact_request_count",
+        "cost_estimated_request_count",
+        "cost_unknown_request_count",
+        "cost_contract_request_count",
+    )
+    if not any(key in bucket for key in count_keys) and request_count:
+        # Old aggregate files may contain a partial estimate with no way to
+        # identify which requests it covered. Keep the amount, but mark the
+        # historical request set as unknown rather than claiming precision.
+        bucket["cost_unknown_request_count"] = request_count
+    for key in count_keys:
+        bucket.setdefault(key, 0)
+
+
 def _normalize_usage_data(data: dict) -> None:
     totals = data.get("totals")
     if isinstance(totals, dict):
         _normalize_token_bucket(totals)
-    for section in ("sources", "models"):
+        _normalize_cost_bucket(totals)
+    for section in ("sources", "providers", "models", "tiers"):
         buckets = data.get(section)
         if isinstance(buckets, dict):
             for bucket in buckets.values():
                 if isinstance(bucket, dict):
                     _normalize_token_bucket(bucket)
+                    _normalize_cost_bucket(bucket)
+        else:
+            data[section] = {}
     for key in ("last_request", "last_root_request"):
         record = data.get(key)
         if isinstance(record, dict):
             _normalize_token_bucket(record)
+            _normalize_cost_bucket(record, record=True)
     recent = data.get("recent_requests")
     if isinstance(recent, list):
         for record in recent:
             if isinstance(record, dict):
                 _normalize_token_bucket(record)
+                _normalize_cost_bucket(record, record=True)
 
 
 def _prune_global_usage_jsonl(
@@ -449,6 +500,7 @@ def load_global_usage_records(
                     continue
                 if isinstance(record, dict):
                     _normalize_token_bucket(record, include_request_count=False)
+                    _normalize_cost_bucket(record, record=True)
                     valid_records.append(record)
         except (OSError, UnicodeDecodeError) as e:
             if warn:
@@ -473,10 +525,19 @@ def aggregate_usage_records(records: list[dict]) -> dict:
             continue
         _normalize_token_bucket(record, include_request_count=False)
         source = str(record.get("source") or "unknown")
+        provider = str(record.get("provider") or "unknown")
         model = str(record.get("model") or "unknown")
+        tier = str(
+            record.get("served_service_tier")
+            or record.get("requested_service_tier")
+            or record.get("service_tier")
+            or "standard"
+        )
         _add_tokens(aggregate.setdefault("totals", {}), record)
         _add_tokens(aggregate.setdefault("sources", {}).setdefault(source, {}), record)
+        _add_tokens(aggregate.setdefault("providers", {}).setdefault(provider, {}), record)
         _add_tokens(aggregate.setdefault("models", {}).setdefault(model, {}), record)
+        _add_tokens(aggregate.setdefault("tiers", {}).setdefault(tier, {}), record)
         aggregate["last_request"] = record
         if source == "root":
             aggregate["last_root_request"] = record
@@ -570,7 +631,29 @@ def resolve_context_window(model: str | None, config: dict | None = None) -> int
     return max(fallback, 1)
 
 
-def token_prices_for_model(model: str | None) -> dict[str, float] | None:
+def token_prices_for_model(
+    model: str | None,
+    provider: str | None = None,
+) -> dict[str, float] | None:
+    if provider == "openrouter" and model:
+        from .model_catalog import _read_cache
+
+        for catalog_model in _read_cache("openrouter"):
+            if catalog_model.id != model:
+                continue
+            pricing = catalog_model.metadata.get("pricing")
+            if not isinstance(pricing, dict):
+                break
+            try:
+                input_price = float(pricing["prompt"]) * TOKENS_PER_MILLION
+                output_price = float(pricing["completion"]) * TOKENS_PER_MILLION
+                cached_price = pricing.get("input_cache_read")
+                prices = {"input": input_price, "output": output_price}
+                if cached_price is not None:
+                    prices["cached_input"] = float(cached_price) * TOKENS_PER_MILLION
+                return prices
+            except (KeyError, TypeError, ValueError):
+                break
     info = _model_info(model)
     if info is None:
         return None
@@ -600,10 +683,58 @@ def token_prices_for_model(model: str | None) -> dict[str, float] | None:
     return prices
 
 
-def estimate_token_cost_usd(record: dict, model: str | None) -> float | None:
-    if record.get("service_tier") in ("flex", "priority"):
+def _normalized_tier(value: Any) -> str | None:
+    tier = str(value or "").strip().lower()
+    if tier in ("default", "standard", "standard_only"):
+        return "standard"
+    if tier in ("flex", "priority"):
+        return tier
+    return None
+
+
+def _effective_cost_tier(record: dict) -> str | None:
+    served = _normalized_tier(record.get("served_service_tier"))
+    if served is not None:
+        return served
+    requested = _normalized_tier(record.get("requested_service_tier"))
+    if requested in ("standard", "flex"):
+        return requested
+    if "requested_service_tier" not in record:
+        return _normalized_tier(record.get("service_tier"))
+    return None
+
+
+def _tier_price_multiplier(provider: str, model: str | None, tier: str) -> float | None:
+    if tier == "standard":
+        return 1.0
+    if provider == "openai":
+        if tier == "flex":
+            return 0.5
+        if tier == "priority":
+            return 2.5 if str(model or "").startswith("gpt-5.5") else 2.0
+    if provider == "gemini":
+        if tier == "flex":
+            return 0.5
+        if tier == "priority":
+            return 1.8
+    return None
+
+
+def estimate_token_cost_usd(
+    record: dict,
+    model: str | None,
+    provider: str | None = None,
+) -> float | None:
+    provider = str(provider or record.get("provider") or "")
+    tier = _effective_cost_tier(record) or "standard"
+    if provider == "anthropic" and tier == "priority":
         return None
-    prices = token_prices_for_model(model)
+    multiplier = _tier_price_multiplier(provider, model, tier)
+    if multiplier is None:
+        if tier != "standard":
+            return None
+        multiplier = 1.0
+    prices = token_prices_for_model(model, provider)
     if prices is None:
         return None
 
@@ -619,12 +750,51 @@ def estimate_token_cost_usd(record: dict, model: str | None) -> float | None:
     else:
         uncached_input_tokens = max(int(uncached_input_tokens or 0), 0)
     output_tokens = int(record.get("output_tokens") or 0)
+    if provider == "gemini":
+        output_tokens += int(record.get("reasoning_output_tokens") or 0)
 
-    return (
-        (uncached_input_tokens * prices["input"])
-        + (cached_input_tokens * (cached_input_price or 0.0))
-        + (output_tokens * prices["output"])
-    ) / TOKENS_PER_MILLION
+    cache_creation_tokens = int(record.get("cache_creation_input_tokens") or 0)
+    base_uncached_tokens = max(uncached_input_tokens - cache_creation_tokens, 0)
+    input_cost = base_uncached_tokens * prices["input"]
+    if cache_creation_tokens:
+        cache_creation_multiplier = 1.25 if provider == "anthropic" else 1.0
+        input_cost += cache_creation_tokens * prices["input"] * cache_creation_multiplier
+    cached_cost = cached_input_tokens * (cached_input_price or 0.0)
+    output_cost = output_tokens * prices["output"]
+
+    if provider == "gemini" and tier == "flex":
+        # Gemini Flex leaves cached-input pricing at the Standard rate.
+        input_cost *= multiplier
+        output_cost *= multiplier
+    else:
+        input_cost *= multiplier
+        cached_cost *= multiplier
+        output_cost *= multiplier
+
+    return (input_cost + cached_cost + output_cost) / TOKENS_PER_MILLION
+
+
+def usage_cost_summary(bucket: dict) -> dict:
+    exact = float(bucket.get("provider_cost_usd") or 0.0)
+    estimated = float(bucket.get("estimated_cost_usd") or 0.0)
+    exact_requests = int(bucket.get("cost_exact_request_count") or 0)
+    estimated_requests = int(bucket.get("cost_estimated_request_count") or 0)
+    unknown_requests = int(bucket.get("cost_unknown_request_count") or 0)
+    contract_requests = int(bucket.get("cost_contract_request_count") or 0)
+    if not any((exact_requests, estimated_requests, unknown_requests, contract_requests)):
+        if "provider_cost_usd" in bucket:
+            exact_requests = 1
+        elif "estimated_cost_usd" in bucket:
+            estimated_requests = 1
+    return {
+        "total_usd": exact + estimated,
+        "exact_usd": exact,
+        "estimated_usd": estimated,
+        "exact_requests": exact_requests,
+        "estimated_requests": estimated_requests,
+        "unknown_requests": unknown_requests,
+        "contract_requests": contract_requests,
+    }
 
 
 def record_response_usage(
@@ -636,6 +806,8 @@ def record_response_usage(
     context_breakdown: dict | None = None,
     output_text: str | None = None,
     *,
+    provider: str | None = None,
+    requested_service_tier: str | None = None,
     record_global: bool = True,
     global_usage_path: Path | None = None,
 ) -> None:
@@ -652,6 +824,7 @@ def record_response_usage(
             "created_at": isoformat_utc(utc_now()),
             "session_id": session_id,
             "model": model,
+            "provider": str(provider or "unknown"),
             "source": source,
             **token_usage,
         }
@@ -659,15 +832,33 @@ def record_response_usage(
             _value(response, "service_tier"),
             _value(_value(response, "usage"), "service_tier"),
         )
-        if raw_service_tier in ("default", "standard", "standard_only"):
-            record["service_tier"] = "standard"
-        elif raw_service_tier in ("flex", "priority"):
-            record["service_tier"] = raw_service_tier
+        served_tier = _normalized_tier(raw_service_tier)
+        requested_tier = _normalized_tier(requested_service_tier)
+        if requested_tier is not None:
+            record["requested_service_tier"] = requested_tier
+        if served_tier is not None:
+            record["served_service_tier"] = served_tier
+        effective_tier = served_tier or requested_tier
+        if effective_tier is not None:
+            record["service_tier"] = effective_tier
         if context_breakdown is not None and any(context_breakdown.get(k, 0) for k in _BREAKDOWN_KEYS):
             record["context_breakdown"] = {k: int(context_breakdown.get(k, 0)) for k in _BREAKDOWN_KEYS}
-        estimated_cost = estimate_token_cost_usd(record, model)
-        if estimated_cost is not None:
-            record["estimated_cost_usd"] = estimated_cost
+        provider_cost = _first_present(
+            _float_value(_value(response, "usage"), "cost"),
+            _float_value(response, "cost"),
+        )
+        if provider_cost is not None and provider_cost >= 0:
+            record["provider_cost_usd"] = provider_cost
+            record["cost_status"] = "exact"
+        else:
+            estimated_cost = estimate_token_cost_usd(record, model, provider)
+            if estimated_cost is not None:
+                record["estimated_cost_usd"] = estimated_cost
+                record["cost_status"] = "estimated"
+            elif str(provider or "") == "anthropic" and effective_tier == "priority":
+                record["cost_status"] = "contract"
+            else:
+                record["cost_status"] = "unknown"
 
         with _usage_lock:
             if usage_path is not None:
@@ -678,7 +869,19 @@ def record_response_usage(
 
                 _add_tokens(data.setdefault("totals", {}), record)
                 _add_tokens(data.setdefault("sources", {}).setdefault(source, {}), record)
+                _add_tokens(
+                    data.setdefault("providers", {}).setdefault(
+                        str(record.get("provider") or "unknown"), {}
+                    ),
+                    record,
+                )
                 _add_tokens(data.setdefault("models", {}).setdefault(model, {}), record)
+                tier_key = str(
+                    record.get("served_service_tier")
+                    or record.get("requested_service_tier")
+                    or "standard"
+                )
+                _add_tokens(data.setdefault("tiers", {}).setdefault(tier_key, {}), record)
 
                 data["last_request"] = record
                 if source == "root":

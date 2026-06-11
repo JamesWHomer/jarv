@@ -16,6 +16,7 @@ from typing import Any
 from .cancellation import CancellationToken, TurnCancelled
 from .display import console
 from .provider import resolve_api_key, PROVIDERS, LOCAL_PROVIDERS
+from .provider_catalog import configured_service_tier
 from .usage import estimate_context_breakdown, record_response_usage
 
 
@@ -231,6 +232,7 @@ def _call_openai_compat(
             response,
             messages,
             content,
+            config=config,
             global_usage_path=global_usage_path,
         )
         parsed = _parse_response(content)
@@ -259,6 +261,7 @@ def _call_openai_compat(
             retry_response,
             retry_messages,
             retry_content,
+            config=config,
             global_usage_path=global_usage_path,
         )
         return _parse_response(retry_content)
@@ -303,6 +306,7 @@ def _record_auditor_response(
     messages: list[dict[str, str]],
     output_text: str,
     *,
+    config: dict,
     global_usage_path: Path | None = None,
 ) -> None:
     if usage_path is None and global_usage_path is None:
@@ -324,6 +328,8 @@ def _record_auditor_response(
         model,
         response,
         "auditor",
+        provider=str(config.get("provider") or "openai"),
+        requested_service_tier=configured_service_tier(config),
         context_breakdown=context_breakdown,
         output_text=output_text,
         global_usage_path=global_usage_path,
@@ -404,6 +410,7 @@ def _call_anthropic(
             response,
             messages,
             content,
+            config=config,
             global_usage_path=global_usage_path,
         )
         parsed = _parse_response(content)
@@ -432,6 +439,7 @@ def _call_anthropic(
             retry_response,
             retry_messages,
             retry_content,
+            config=config,
             global_usage_path=global_usage_path,
         )
         return _parse_response(retry_content)
@@ -477,6 +485,7 @@ def _call_gemini(
             response,
             messages,
             content,
+            config=config,
             global_usage_path=global_usage_path,
         )
         parsed = _parse_response(content)
@@ -506,6 +515,7 @@ def _call_gemini(
             retry_response,
             retry_messages,
             retry_content,
+            config=config,
             global_usage_path=global_usage_path,
         )
         return _parse_response(retry_content)

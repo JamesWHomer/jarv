@@ -257,8 +257,7 @@ def generate_content(
     cancellation_token: CancellationToken | None = None,
     max_retries: int = 2,
 ) -> dict:
-    data = request_json(
-        "Gemini",
+    response = send_with_retries(
         client,
         "POST",
         _path(model, ":generateContent"),
@@ -266,7 +265,18 @@ def generate_content(
         cancellation_token=cancellation_token,
         max_retries=max_retries,
     )
-    return normalize_response(data)
+    try:
+        if response.status_code >= 400:
+            raise response_error("Gemini", response)
+        data = response.json()
+        if not isinstance(data, dict):
+            raise ProviderHTTPError("Gemini", "response was not a JSON object")
+        served_tier = response.headers.get("x-gemini-service-tier")
+        if served_tier:
+            data["service_tier"] = served_tier
+        return normalize_response(data)
+    finally:
+        response.close()
 
 
 def stream_content(

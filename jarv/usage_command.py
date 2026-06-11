@@ -11,13 +11,13 @@ from .history import load_history, prepare_session_context
 from .read_only_display import show_read_only_command
 from .usage import (
     aggregate_usage_records,
-    estimate_token_cost_usd,
     format_cost,
     format_int,
     global_usage_file,
     known_context_window,
     load_global_usage_records,
     load_usage,
+    usage_cost_summary,
     usage_file_for,
 )
 
@@ -148,23 +148,31 @@ def _context_usage_renderable(last_root: dict | None) -> Text:
     return line
 
 
-def _estimated_total_cost(usage: dict) -> float | None:
-    models = usage.get("models") if isinstance(usage.get("models"), dict) else {}
-    total = 0.0
-    saw_model = False
-    for model, bucket in models.items():
-        if not isinstance(bucket, dict):
-            continue
-        if int(bucket.get("request_count") or 0) <= 0:
-            continue
-        saw_model = True
-        estimate = estimate_token_cost_usd(bucket, str(model))
-        if estimate is None:
-            return None
-        total += estimate
-    if saw_model:
-        return total
-    return None
+def _cost_text(bucket: dict) -> Text:
+    summary = usage_cost_summary(bucket)
+    known_requests = summary["exact_requests"] + summary["estimated_requests"]
+    text = Text()
+    if known_requests:
+        text.append(format_cost(summary["total_usd"]), style="bold green")
+        if summary["exact_requests"] and summary["estimated_requests"]:
+            text.append(" mixed", style="dim")
+        elif summary["exact_requests"]:
+            text.append(" exact", style="dim")
+        else:
+            text.append(" estimated", style="dim")
+    else:
+        text.append("Unknown", style="yellow")
+    if summary["unknown_requests"]:
+        text.append(
+            f" + {_plural(summary['unknown_requests'], 'unknown request')}",
+            style="yellow",
+        )
+    if summary["contract_requests"]:
+        text.append(
+            f" + {_plural(summary['contract_requests'], 'contract-priced request')}",
+            style="yellow",
+        )
+    return text
 
 
 def _parse_since_value(value: str) -> timedelta | None:
@@ -219,7 +227,6 @@ def _token_totals_table(usage: dict, *, model: str | None = None, exchanges: int
     totals = usage.get("totals") if isinstance(usage.get("totals"), dict) else {}
     request_count = int(totals.get("request_count") or 0)
     reasoning_tokens = int(totals.get("reasoning_output_tokens") or 0)
-    estimated_cost = _estimated_total_cost(usage)
 
     token_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
     token_table.add_column("Field", style="dim", no_wrap=True)
@@ -236,7 +243,7 @@ def _token_totals_table(usage: dict, *, model: str | None = None, exchanges: int
     if reasoning_tokens:
         token_table.add_row("Reasoning output", Text(format_int(reasoning_tokens), style="green"))
     token_table.add_row("Total tokens", Text(format_int(totals.get("total_tokens")), style="bold"))
-    token_table.add_row("Estimated cost", Text(format_cost(estimated_cost), style="bold green"))
+    token_table.add_row("Tracked cost", _cost_text(totals))
     return token_table
 
 
@@ -245,8 +252,7 @@ def _breakdown_table(buckets: dict, *, kind: str) -> Table:
     table.add_column(kind, no_wrap=True)
     table.add_column("Requests", justify="right", no_wrap=True)
     table.add_column("Tokens", justify="right", no_wrap=True)
-    if kind == "Model":
-        table.add_column("Est. cost", justify="right", no_wrap=True)
+    table.add_column("Cost", justify="right", no_wrap=True)
 
     rows = sorted(
         ((name, bucket) for name, bucket in buckets.items() if isinstance(bucket, dict)),
@@ -259,8 +265,7 @@ def _breakdown_table(buckets: dict, *, kind: str) -> Table:
             Text(format_int(bucket.get("request_count"))),
             Text(format_int(bucket.get("total_tokens")), style="bold"),
         ]
-        if kind == "Model":
-            cells.append(Text(format_cost(estimate_token_cost_usd(bucket, str(name)))))
+        cells.append(_cost_text(bucket))
         table.add_row(*cells)
     return table
 
@@ -306,6 +311,22 @@ def _cmd_global_usage(since: timedelta | None, window_label: str) -> None:
             section_rule("by source"),
             Text(""),
             _breakdown_table(sources, kind="Source"),
+        ]
+    providers = usage.get("providers") if isinstance(usage.get("providers"), dict) else {}
+    if providers:
+        panel_parts += [
+            Text(""),
+            section_rule("by provider"),
+            Text(""),
+            _breakdown_table(providers, kind="Provider"),
+        ]
+    tiers = usage.get("tiers") if isinstance(usage.get("tiers"), dict) else {}
+    if tiers:
+        panel_parts += [
+            Text(""),
+            section_rule("by processing tier"),
+            Text(""),
+            _breakdown_table(tiers, kind="Tier"),
         ]
     models = usage.get("models") if isinstance(usage.get("models"), dict) else {}
     if models:
