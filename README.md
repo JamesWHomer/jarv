@@ -156,7 +156,7 @@ The terminal shows a live progress panel as children run, with a green checkmark
 | `/usage` | Show token usage, cost, and context breakdown for the current session |
 | `/usage day` / `/usage week` / `/usage month` | Show system-wide usage for the last 24h, 7d, or 30d |
 | `/usage --all [--since 24h]` | Show system-wide usage across Jarv sessions |
-| `/update` | Update Jarv to the latest version |
+| `/update` | Update Jarv to the latest version using pip, pipx, or uv |
 
 All commands work both as `jarv /command` (one-shot) and inside heads-up mode. Read-only commands (`/help`, `/about`, `/usage`, and `/config`) use a temporary display by default in interactive terminals; change `read_only_command_display` in `/settings` to print them permanently instead.
 

@@ -2,6 +2,8 @@ import json
 import time
 import urllib.request
 
+from packaging.version import InvalidVersion, Version
+
 from . import __version__
 from .config import CONFIG_DIR
 from .display import console
@@ -10,27 +12,19 @@ PYPI_VERSION_URL = "https://pypi.org/pypi/jarv/json"
 UPDATE_FLAG_FILE = CONFIG_DIR / "update_available.txt"
 LAST_CHECK_FILE = CONFIG_DIR / "last_update_check.txt"
 UPDATE_CHECK_INTERVAL_HOURS = 24
+UPDATE_CHECK_TIMEOUT_SECONDS = 5
 
 
 def _fetch_latest_pypi_release() -> tuple[str, str] | None:
     try:
         req = urllib.request.Request(PYPI_VERSION_URL, headers={"User-Agent": "jarv-updater"})
-        with urllib.request.urlopen(req, timeout=3) as resp:
+        with urllib.request.urlopen(req, timeout=UPDATE_CHECK_TIMEOUT_SECONDS) as resp:
             data = json.loads(resp.read())
-        version = data["info"]["version"]
-        artifacts = data.get("urls", [])
-        wheel = next(
-            (item["url"] for item in artifacts if item.get("packagetype") == "bdist_wheel"),
-            None,
-        )
-        source = next(
-            (item["url"] for item in artifacts if item.get("packagetype") == "sdist"),
-            None,
-        )
-        artifact_url = wheel or source
-        if not artifact_url:
+        version = str(data["info"]["version"])
+        Version(version)
+        if not data.get("urls"):
             return None
-        return version, artifact_url
+        return version, f"jarv=={version}"
     except Exception:
         return None
 
@@ -38,6 +32,13 @@ def _fetch_latest_pypi_release() -> tuple[str, str] | None:
 def _fetch_latest_pypi_version() -> str | None:
     release = _fetch_latest_pypi_release()
     return release[0] if release else None
+
+
+def _is_newer_version(candidate: str, current: str) -> bool:
+    try:
+        return Version(candidate) > Version(current)
+    except InvalidVersion:
+        return False
 
 
 def _should_check_now() -> bool:
@@ -52,21 +53,23 @@ def _should_check_now() -> bool:
 
 
 def _record_check_time() -> None:
-    CONFIG_DIR.mkdir(exist_ok=True)
-    LAST_CHECK_FILE.write_text(str(time.time()))
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    LAST_CHECK_FILE.write_text(str(time.time()), encoding="utf-8")
 
 
 def _check_update_background() -> None:
     """Check PyPI for a newer version and write a flag file if one is available."""
     if not _should_check_now():
         return
-    _record_check_time()
     latest = _fetch_latest_pypi_version()
     if not latest:
         return
-    if latest != __version__:
-        CONFIG_DIR.mkdir(exist_ok=True)
-        UPDATE_FLAG_FILE.write_text(latest)
+    _record_check_time()
+    if _is_newer_version(latest, __version__):
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        UPDATE_FLAG_FILE.write_text(latest, encoding="utf-8")
+    else:
+        UPDATE_FLAG_FILE.unlink(missing_ok=True)
 
 
 def maybe_print_update_available() -> None:
@@ -74,9 +77,9 @@ def maybe_print_update_available() -> None:
     if not UPDATE_FLAG_FILE.exists():
         return
     try:
-        latest = UPDATE_FLAG_FILE.read_text().strip()
+        latest = UPDATE_FLAG_FILE.read_text(encoding="utf-8").strip()
         UPDATE_FLAG_FILE.unlink(missing_ok=True)
-        if latest and latest != __version__:
+        if latest and _is_newer_version(latest, __version__):
             console.print(
                 f"[yellow]Update available![/yellow] [dim]v{__version__} -> v{latest}[/dim]  "
                 "Run [bold]jarv /update[/bold] to install."

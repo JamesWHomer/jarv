@@ -119,6 +119,16 @@ class CliStdinTests(unittest.TestCase):
         run_slash.assert_called_once_with("/history", [])
         self.assertEqual(stdin.tell(), 0)
 
+    def test_main_returns_update_failure_exit_code(self):
+        with (
+            patch.object(sys, "argv", ["jarv", "/update"]),
+            patch("jarv.commands.cmd_update", return_value=1),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            cli.main()
+
+        self.assertEqual(raised.exception.code, 1)
+
     def test_main_does_not_prompt_for_bare_command_alias_when_stdin_is_piped(self):
         config = {
             "provider": "openai",

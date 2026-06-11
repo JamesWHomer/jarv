@@ -310,6 +310,13 @@ def main() -> None:
     # Slash commands — flags are silently ignored for these
     if query_parts and query_parts[0].startswith("/"):
         command = query_parts[0].lower()
+        if command == "/update":
+            from .commands import cmd_update
+
+            status = cmd_update()
+            if status:
+                raise SystemExit(status)
+            return
         if not _run_slash_command(command, query_parts[1:]):
             console.print(f"[red]Unknown command:[/red] {command}")
             console.print("[dim]Run [bold]jarv /help[/bold] for a list of commands.[/dim]")

@@ -1,4 +1,7 @@
+import importlib.metadata
+import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -34,6 +37,7 @@ from .update_check import (
     UPDATE_CHECK_INTERVAL_HOURS,
     UPDATE_FLAG_FILE,
     _fetch_latest_pypi_release,
+    _is_newer_version,
 )
 from .usage_command import cmd_usage
 
@@ -214,7 +218,7 @@ def _about_body() -> Markdown:
 - `jarv /archive` - Archive this terminal's session history and start a fresh one on the next message.
 - `jarv /sessions` / `jarv /session` - List sessions by recency. In an interactive terminal you can scroll through all of them; when stdout is not a TTY (e.g. piped), only the 5 most recent are listed.
 - `jarv /sessions <id>` - Bind this terminal to a specific session id (prefix match).
-- `jarv /update` - Check PyPI for the latest version and install it with pip.
+- `jarv /update` - Check PyPI for the latest version and update the active pip, pipx, or uv installation.
 
 ## Heads-up mode
 
@@ -269,7 +273,7 @@ Keys:
 - `system_prompt` - Instructions sent to the model before each request.
 - `max_subagent_depth` - Maximum recursion depth for `spawn` (root is 0). Default: `{DEFAULT_CONFIG['max_subagent_depth']}`.
 - `subagent_thread_pool_max_workers` - Max parallel children in one `spawn` batch. Default: `{DEFAULT_CONFIG['subagent_thread_pool_max_workers']}`.
-- `check_updates` - When `true`, a one-shot `jarv <question>` run fires a non-blocking background check against GitHub. If a new version is found it is flagged locally and shown at the start of the next run. Default: `true`. Set to `false` to disable entirely. Heads-up mode (`jarv` with no args) and slash commands do not run this check.
+- `check_updates` - When `true`, a one-shot `jarv <question>` run fires a non-blocking background check against PyPI. If a new version is found it is flagged locally and shown at the start of the next run. Default: `true`. Set to `false` to disable entirely. Heads-up mode (`jarv` with no args) and slash commands do not run this check.
 - `read_only_command_display` - How `/help`, `/about`, `/usage`, and `/config` are displayed in an interactive terminal. `fullscreen` uses a temporary alternate-screen view, compact when content fits and scrollable when it does not. `print` preserves permanent terminal output. Default: `fullscreen`.
 - `print_usage_after_agent` - When `true`, print a compact token usage line after each completed agent run. Default: `false`.
 - `/usage` uses bundled metadata for known models. System-wide views read future usage from `{CONFIG_DIR / "usage.json"}`.
@@ -290,7 +294,7 @@ Each terminal is bound to exactly one session at a time. By default a fresh term
 
 ## Updates
 
-- `jarv /update` checks PyPI for the latest version and installs it with pip.
+- `jarv /update` checks PyPI for the latest version and updates the active pip, pipx, or uv installation. Editable source installs are left untouched.
 - A one-shot `jarv <question>` (arguments on the command line, not heads-up mode) fires a fully non-blocking background check when `check_updates` is true. If an update is found it is saved locally; the next invocation shows the notification instantly with no network wait.
 - The background check is throttled to at most once every {UPDATE_CHECK_INTERVAL_HOURS} hours.
 - Set `check_updates` to `false` (`jarv /set check_updates false`) to disable the background check entirely.
@@ -325,89 +329,165 @@ def _is_pipx_env() -> bool:
     """Detect if jarv is running inside a pipx-managed virtualenv."""
     return any(part.lower() == "pipx" for part in Path(sys.executable).parts)
 
-def _run_pip_upgrade(package_spec: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--upgrade", package_spec],
-        capture_output=True, text=True,
+
+def _is_uv_tool_env() -> bool:
+    """Detect the standard uv tool environment path."""
+    parts = [part.lower() for part in Path(sys.executable).parts]
+    return any(parts[index:index + 2] == ["uv", "tools"] for index in range(len(parts) - 1))
+
+
+def _installation_manager() -> str:
+    if _is_pipx_env():
+        return "pipx"
+    if _is_uv_tool_env():
+        return "uv"
+    return "pip"
+
+
+def _is_editable_install() -> bool:
+    try:
+        direct_url = importlib.metadata.distribution("jarv").read_text("direct_url.json")
+        if not direct_url:
+            return False
+        metadata = json.loads(direct_url)
+        return bool(metadata.get("dir_info", {}).get("editable"))
+    except Exception:
+        return False
+
+
+UPDATE_INSTALL_TIMEOUT_SECONDS = 180
+
+
+def _run_update_command(command: list[str]) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=UPDATE_INSTALL_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(command, 127, "", f"Command not found: {command[0]}")
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        message = f"Update command timed out after {UPDATE_INSTALL_TIMEOUT_SECONDS} seconds."
+        return subprocess.CompletedProcess(command, 124, stdout, "\n".join(filter(None, [stderr, message])))
+
+
+def _run_update_install(manager: str, package_spec: str) -> subprocess.CompletedProcess:
+    if manager == "pipx":
+        return _run_update_command(["pipx", "install", "--force", package_spec])
+    if manager == "uv":
+        return _run_update_command(["uv", "tool", "install", "--force", package_spec])
+    return _run_update_command(
+        [sys.executable, "-m", "pip", "install", "--upgrade", package_spec]
     )
 
 def _is_externally_managed_error(result: subprocess.CompletedProcess) -> bool:
-    return result.returncode != 0 and "externally-managed-environment" in (result.stderr or "")
+    output = "\n".join(filter(None, [result.stdout or "", result.stderr or ""])).lower()
+    return result.returncode != 0 and "externally-managed-environment" in output
+
 
 def _installed_version() -> str | None:
-    result = subprocess.run(
+    result = _run_update_command(
         [
             sys.executable,
             "-c",
             "import importlib.metadata as m; print(m.version('jarv'))",
-        ],
-        capture_output=True,
-        text=True,
+        ]
     )
     if result.returncode != 0:
         return None
     return result.stdout.strip() or None
 
-def _pipx_installed_version() -> str | None:
-    result = subprocess.run(
-        ["pipx", "runpip", "jarv", "show", "jarv"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        return None
-    for line in result.stdout.splitlines():
-        if line.startswith("Version:"):
-            return line.partition(":")[2].strip() or None
+
+def _tool_installed_version(manager: str) -> str | None:
+    if manager == "pipx":
+        result = _run_update_command(["pipx", "runpip", "jarv", "show", "jarv"])
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                if line.startswith("Version:"):
+                    return line.partition(":")[2].strip() or None
+    elif manager == "uv":
+        result = _run_update_command(["uv", "tool", "list"])
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                fields = line.split()
+                if len(fields) >= 2 and fields[0].lower() == "jarv":
+                    return fields[1].removeprefix("v") or None
+    return _installed_version()
+
+
+def _fallback_tool_manager() -> str | None:
+    if shutil.which("uv"):
+        return "uv"
+    if shutil.which("pipx"):
+        return "pipx"
     return None
 
-def cmd_update() -> None:
+
+def cmd_update() -> int:
     console.print("[dim]⟳ Checking for updates…[/dim]")
     release = _fetch_latest_pypi_release()
     if release is None:
         console.print("[bold red]✗[/bold red] [red]Could not reach PyPI.[/red]")
-        return
-    latest, artifact_url = release
-    if latest == __version__:
-        console.print(f"[bold green]✓[/bold green] [green]Already up to date.[/green] [dim](v{__version__})[/dim]")
-        return
+        return 1
+    latest, package_spec = release
+    if not _is_newer_version(latest, __version__):
+        detail = f"v{__version__}"
+        if latest != __version__:
+            detail += f", PyPI v{latest}"
+        console.print(f"[bold green]✓[/bold green] [green]Already up to date.[/green] [dim]({detail})[/dim]")
+        return 0
+    if _is_editable_install():
+        console.print("[bold yellow]⚠[/bold yellow] [yellow]Editable install detected; automatic update skipped.[/yellow]")
+        console.print("[dim]Update the source checkout, then reinstall it with your development workflow.[/dim]")
+        return 1
     console.print(f"[bold cyan]↓[/bold cyan] Update found [dim](v{__version__} → v{latest})[/dim]. Installing…")
 
-    install_target = "pipx environment" if _is_pipx_env() else "active environment"
+    manager = _installation_manager()
+    install_target = {
+        "pip": "active Python environment",
+        "pipx": "pipx tool environment",
+        "uv": "uv tool environment",
+    }[manager]
     with console.status(f"[dim]Installing release into {install_target}…[/dim]", spinner="dots"):
-        result = _run_pip_upgrade(artifact_url)
-    installed_version = _installed_version
-    if _is_externally_managed_error(result):
-        console.print("[dim]System Python detected — retrying with pipx…[/dim]")
-        pipx_available = subprocess.run(
-            ["pipx", "--version"], capture_output=True, text=True,
-        ).returncode == 0
-        if pipx_available:
-            with console.status("[dim]Installing release with pipx…[/dim]", spinner="dots"):
-                result = subprocess.run(
-                    ["pipx", "install", "--force", artifact_url],
-                    capture_output=True, text=True,
-                )
-            installed_version = _pipx_installed_version
+        result = _run_update_install(manager, package_spec)
+    if manager == "pip" and _is_externally_managed_error(result):
+        fallback = _fallback_tool_manager()
+        if fallback:
+            console.print(f"[dim]System Python detected — retrying with {fallback}…[/dim]")
+            with console.status(f"[dim]Installing release with {fallback}…[/dim]", spinner="dots"):
+                result = _run_update_install(fallback, package_spec)
+            manager = fallback
         else:
             console.print("[bold red]✗[/bold red] [red]Update failed:[/red] pip is blocked by your system Python (PEP 668).")
-            console.print("[dim]Install pipx and reinstall jarv with it:[/dim]")
-            console.print("  [bold]brew install pipx && pipx install jarv[/bold]")
-            return
+            console.print("[dim]Install uv or pipx, then reinstall Jarv as an isolated tool.[/dim]")
+            console.print(f"  [bold]uv tool install {package_spec}[/bold]")
+            return 1
 
-    installed = installed_version() if result.returncode == 0 else None
+    installed = (
+        _installed_version() if manager == "pip" else _tool_installed_version(manager)
+    ) if result.returncode == 0 else None
     if result.returncode == 0:
         if installed == latest:
             UPDATE_FLAG_FILE.unlink(missing_ok=True)
             console.print("[bold green]✓[/bold green] [green]Updated successfully.[/green] [dim]Run jarv again to use the new version.[/dim]")
-            return
+            return 0
 
     console.print("[bold red]✗[/bold red] [red]Update failed:[/red]")
-    output = "\n".join(filter(None, [result.stdout.strip(), result.stderr.strip()]))
+    output = "\n".join(
+        filter(None, [(result.stdout or "").strip(), (result.stderr or "").strip()])
+    )
     if result.returncode == 0:
-        output = f"Expected jarv {latest}, but the active installation is {installed or 'unknown'}."
+        output = (
+            f"Expected jarv {latest}, but this process still sees {installed or 'an unknown version'}. "
+            f"The {manager} installation may not own the jarv command on PATH."
+        )
     if output:
         console.print(output, style="dim")
+    return 1
 
 
 def cmd_new() -> None:
