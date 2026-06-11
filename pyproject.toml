@@ -1,10 +1,10 @@
-﻿[build-system]
+[build-system]
 requires = ["setuptools>=42"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "jarv"
-version = "0.23.0"
+version = "0.23.1"
 description = "A multi-provider AI-powered CLI agent"
 readme = "README.md"
 requires-python = ">=3.10"
