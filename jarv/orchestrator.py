@@ -108,7 +108,10 @@ ASK_USER_TOOL = {
     "parameters": {
         "type": "object",
         "properties": {
-            "question": {"type": "string", "description": "The question to present to the user."},
+            "question": {
+                "type": "string",
+                "description": "The Markdown-formatted question to present to the user.",
+            },
         },
         "required": ["question"],
     },

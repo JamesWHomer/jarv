@@ -334,7 +334,14 @@ def _dispatch_ask_user(args: dict) -> str:
     if not sys.stdin.isatty():
         return "[non-interactive session; user unavailable]"
     console.print()
-    console.print(Panel(question, border_style="cyan", box=box.ROUNDED, padding=(0, 1)))
+    console.print(
+        Panel(
+            Markdown(flatten_headings(question)),
+            border_style="cyan",
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+    )
     try:
         answer = read_editable_line("\x1b[1;36m>\x1b[0m ").strip()
     except KeyboardInterrupt:

@@ -355,6 +355,38 @@ class AgentInputTests(unittest.TestCase):
             result = _dispatch_ask_user({"question": "Continue?"})
         self.assertEqual(result, "[non-interactive session; user unavailable]")
 
+    def test_ask_user_renders_question_as_markdown(self):
+        console_output = io.StringIO()
+        question = (
+            "**Version bump:** `v0.23.0` -> `v0.23.1`\n\n"
+            "```text\n"
+            "Changes since v0.23.0\n"
+            "```"
+        )
+        with (
+            patch("jarv.agent.sys.stdin") as stdin,
+            patch("jarv.agent.read_editable_line", return_value="yes"),
+            patch(
+                "jarv.agent.console",
+                new=Console(
+                    file=console_output,
+                    force_terminal=False,
+                    color_system=None,
+                    width=100,
+                ),
+            ),
+        ):
+            stdin.isatty.return_value = True
+            result = _dispatch_ask_user({"question": question})
+
+        rendered = console_output.getvalue()
+        self.assertEqual(result, "yes")
+        self.assertIn("Version bump:", rendered)
+        self.assertIn("v0.23.0", rendered)
+        self.assertIn("Changes since v0.23.0", rendered)
+        self.assertNotIn("**Version bump:**", rendered)
+        self.assertNotIn("```", rendered)
+
     def test_run_agent_passes_session_prompt_cache_key(self):
         with TemporaryDirectory() as tmp:
             history_file = Path(tmp) / "history.json"
