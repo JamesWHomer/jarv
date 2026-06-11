@@ -152,14 +152,16 @@ def _cost_text(bucket: dict) -> Text:
     summary = usage_cost_summary(bucket)
     known_requests = summary["exact_requests"] + summary["estimated_requests"]
     text = Text()
-    if known_requests:
+    if known_requests or summary["has_tracked_cost"]:
         text.append(format_cost(summary["total_usd"]), style="bold green")
         if summary["exact_requests"] and summary["estimated_requests"]:
             text.append(" mixed", style="dim")
         elif summary["exact_requests"]:
             text.append(" exact", style="dim")
-        else:
+        elif summary["estimated_requests"]:
             text.append(" estimated", style="dim")
+        else:
+            text.append(" partial", style="dim")
     else:
         text.append("Unknown", style="yellow")
     if summary["unknown_requests"]:
@@ -294,6 +296,18 @@ def _cmd_global_usage(since: timedelta | None, window_label: str) -> None:
     if last_request:
         last_model = str(last_request.get("model") or "unknown")
         overview.add_row("Last model", Text(last_model, style="bold magenta"))
+        overview.add_row(
+            "Last provider",
+            Text(str(last_request.get("provider") or "unknown"), style="bold cyan"),
+        )
+        requested_tier = str(last_request.get("requested_service_tier") or "standard")
+        served_tier = str(last_request.get("served_service_tier") or "")
+        tier_label = (
+            f"{requested_tier} -> {served_tier}"
+            if served_tier and served_tier != requested_tier
+            else served_tier or requested_tier
+        )
+        overview.add_row("Last tier", Text(tier_label, style="bold"))
 
     panel_parts: list = [
         section_rule("system-wide overview"),
@@ -374,6 +388,19 @@ def cmd_usage(args: list[str] | None = None) -> None:
     context_table.add_column("Field", style="dim", no_wrap=True)
     context_table.add_column("Value", no_wrap=False)
     context_table.add_row("Latest root model", Text(root_model, style="bold magenta"))
+    if last_root:
+        context_table.add_row(
+            "Latest provider",
+            Text(str(last_root.get("provider") or "unknown"), style="bold cyan"),
+        )
+        requested_tier = str(last_root.get("requested_service_tier") or "standard")
+        served_tier = str(last_root.get("served_service_tier") or "")
+        tier_label = (
+            f"{requested_tier} -> {served_tier}"
+            if served_tier and served_tier != requested_tier
+            else served_tier or requested_tier
+        )
+        context_table.add_row("Processing tier", Text(tier_label, style="bold"))
     context_table.add_row("Context usage", _context_usage_renderable(last_root))
 
     token_table = _token_totals_table(usage, model=model, exchanges=exchanges)

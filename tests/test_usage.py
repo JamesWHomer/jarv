@@ -12,6 +12,7 @@ from jarv.usage import (
     load_global_usage_records,
     load_usage,
     record_response_usage,
+    usage_cost_summary,
 )
 
 
@@ -109,13 +110,177 @@ class UsageRecordingTests(unittest.TestCase):
                 "gpt-5.4-mini",
                 response=response,
                 source="root",
+                provider="openai",
+                requested_service_tier="priority",
                 record_global=False,
             )
 
             usage = load_usage(usage_path, "session-id")
 
-        self.assertEqual(usage["last_request"]["service_tier"], "priority")
-        self.assertNotIn("estimated_cost_usd", usage["last_request"])
+        self.assertEqual(usage["last_request"]["requested_service_tier"], "priority")
+        self.assertEqual(usage["last_request"]["served_service_tier"], "priority")
+        self.assertEqual(usage["last_request"]["cost_status"], "estimated")
+
+    def test_openai_tier_prices_are_applied_per_request(self):
+        record = {
+            "provider": "openai",
+            "input_tokens": 1_000_000,
+            "cached_input_tokens": 0,
+            "uncached_input_tokens": 1_000_000,
+            "output_tokens": 1_000_000,
+        }
+        self.assertAlmostEqual(
+            estimate_token_cost_usd(
+                {**record, "served_service_tier": "standard"},
+                "gpt-5.4-mini",
+            ),
+            5.25,
+        )
+        self.assertAlmostEqual(
+            estimate_token_cost_usd(
+                {**record, "served_service_tier": "flex"},
+                "gpt-5.4-mini",
+            ),
+            2.625,
+        )
+        self.assertAlmostEqual(
+            estimate_token_cost_usd(
+                {**record, "served_service_tier": "priority"},
+                "gpt-5.4-mini",
+            ),
+            10.5,
+        )
+
+    def test_mixed_tiers_sum_stored_request_costs(self):
+        records = [
+            {
+                "model": "gpt-5.4-mini",
+                "provider": "openai",
+                "source": "root",
+                "served_service_tier": "flex",
+                "input_tokens": 1_000_000,
+                "cached_input_tokens": 0,
+                "uncached_input_tokens": 1_000_000,
+                "output_tokens": 1_000_000,
+                "total_tokens": 2_000_000,
+                "estimated_cost_usd": 2.625,
+                "cost_status": "estimated",
+            },
+            {
+                "model": "gpt-5.4-mini",
+                "provider": "openai",
+                "source": "root",
+                "served_service_tier": "priority",
+                "input_tokens": 1_000_000,
+                "cached_input_tokens": 0,
+                "uncached_input_tokens": 1_000_000,
+                "output_tokens": 1_000_000,
+                "total_tokens": 2_000_000,
+                "estimated_cost_usd": 10.5,
+                "cost_status": "estimated",
+            },
+        ]
+
+        aggregate = aggregate_usage_records(records)
+        cost = usage_cost_summary(aggregate["totals"])
+
+        self.assertAlmostEqual(cost["total_usd"], 13.125)
+        self.assertEqual(cost["estimated_requests"], 2)
+        self.assertAlmostEqual(
+            usage_cost_summary(aggregate["tiers"]["flex"])["total_usd"],
+            2.625,
+        )
+        self.assertAlmostEqual(
+            usage_cost_summary(aggregate["tiers"]["priority"])["total_usd"],
+            10.5,
+        )
+
+    def test_openrouter_provider_reported_cost_wins(self):
+        with TemporaryDirectory() as tmp:
+            usage_path = Path(tmp) / "usage-test.json"
+            response = {
+                "service_tier": "priority",
+                "usage": {
+                    "prompt_tokens": 1_000_000,
+                    "completion_tokens": 1_000_000,
+                    "total_tokens": 2_000_000,
+                    "cost": 7.125,
+                },
+            }
+
+            record_response_usage(
+                usage_path,
+                "session-id",
+                "vendor/model",
+                response=response,
+                source="root",
+                provider="openrouter",
+                requested_service_tier="priority",
+                record_global=False,
+            )
+            usage = load_usage(usage_path, "session-id")
+
+        self.assertEqual(usage["last_request"]["cost_status"], "exact")
+        self.assertEqual(usage["last_request"]["provider_cost_usd"], 7.125)
+        self.assertEqual(usage["totals"]["cost_exact_request_count"], 1)
+
+    def test_unreported_priority_downgrade_is_not_guessed(self):
+        record = {
+            "provider": "openai",
+            "requested_service_tier": "priority",
+            "input_tokens": 1_000_000,
+            "cached_input_tokens": 0,
+            "uncached_input_tokens": 1_000_000,
+            "output_tokens": 1_000_000,
+        }
+        self.assertIsNone(estimate_token_cost_usd(record, "gpt-5.4-mini"))
+        self.assertAlmostEqual(
+            estimate_token_cost_usd(
+                {**record, "served_service_tier": "standard"},
+                "gpt-5.4-mini",
+            ),
+            5.25,
+        )
+
+    def test_anthropic_priority_is_contract_priced(self):
+        with TemporaryDirectory() as tmp:
+            usage_path = Path(tmp) / "usage-test.json"
+            response = {
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "service_tier": "priority",
+                },
+            }
+            record_response_usage(
+                usage_path,
+                "session-id",
+                "claude-sonnet-4-6",
+                response=response,
+                source="root",
+                provider="anthropic",
+                requested_service_tier="priority",
+                record_global=False,
+            )
+            usage = load_usage(usage_path, "session-id")
+
+        self.assertEqual(usage["last_request"]["cost_status"], "contract")
+        self.assertEqual(usage["totals"]["cost_contract_request_count"], 1)
+
+    def test_gemini_flex_keeps_cached_input_at_standard_rate(self):
+        cost = estimate_token_cost_usd(
+            {
+                "provider": "gemini",
+                "served_service_tier": "flex",
+                "input_tokens": 1_000_000,
+                "cached_input_tokens": 500_000,
+                "uncached_input_tokens": 500_000,
+                "output_tokens": 1_000_000,
+                "reasoning_output_tokens": 100_000,
+            },
+            "gemini-3-flash-preview",
+        )
+        self.assertAlmostEqual(cost, 1.8)
 
     def test_global_usage_records_are_appended_alongside_session_usage(self):
         with TemporaryDirectory() as tmp:

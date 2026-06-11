@@ -214,7 +214,7 @@ def _format_agent_usage_line(usage: dict) -> Text | None:
 
     cost = usage_cost_summary(totals)
     known_cost_requests = cost["exact_requests"] + cost["estimated_requests"]
-    if known_cost_requests:
+    if known_cost_requests or cost["has_tracked_cost"]:
         label = "cost " if cost["exact_requests"] and not cost["estimated_requests"] else "est. "
         line.append(f" · {label}", style="dim")
         line.append(format_cost(cost["total_usd"]), style="green")

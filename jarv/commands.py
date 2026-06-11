@@ -276,7 +276,7 @@ Keys:
 - `check_updates` - When `true`, a one-shot `jarv <question>` run fires a non-blocking background check against PyPI. If a new version is found it is flagged locally and shown at the start of the next run. Default: `true`. Set to `false` to disable entirely. Heads-up mode (`jarv` with no args) and slash commands do not run this check.
 - `read_only_command_display` - How `/help`, `/about`, `/usage`, and `/config` are displayed in an interactive terminal. `fullscreen` uses a temporary alternate-screen view, compact when content fits and scrollable when it does not. `print` preserves permanent terminal output. Default: `fullscreen`.
 - `print_usage_after_agent` - When `true`, print a compact token usage line after each completed agent run. Default: `false`.
-- `/usage` uses bundled metadata for known models. System-wide views read future usage from `{CONFIG_DIR / "usage.json"}`.
+- `/usage` stores request-level provider and processing-tier cost provenance. Provider-reported cost is preferred; supported public-rate calculations are marked estimated, while unknown and contract-priced requests remain explicit. System-wide views read future usage from `{CONFIG_DIR / "usage.json"}`.
 
 If the config file does not exist, jarv creates it and exits so you can add an API key.
 If the config file is invalid JSON, jarv backs it up and creates a fresh default config.

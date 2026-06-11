@@ -726,7 +726,11 @@ def estimate_token_cost_usd(
     provider: str | None = None,
 ) -> float | None:
     provider = str(provider or record.get("provider") or "")
-    tier = _effective_cost_tier(record) or "standard"
+    tier = _effective_cost_tier(record)
+    if tier is None:
+        if _normalized_tier(record.get("requested_service_tier")) in ("flex", "priority"):
+            return None
+        tier = "standard"
     if provider == "anthropic" and tier == "priority":
         return None
     multiplier = _tier_price_multiplier(provider, model, tier)
@@ -788,6 +792,7 @@ def usage_cost_summary(bucket: dict) -> dict:
             estimated_requests = 1
     return {
         "total_usd": exact + estimated,
+        "has_tracked_cost": "provider_cost_usd" in bucket or "estimated_cost_usd" in bucket,
         "exact_usd": exact,
         "estimated_usd": estimated,
         "exact_requests": exact_requests,

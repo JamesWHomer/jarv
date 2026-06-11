@@ -224,7 +224,7 @@ All state is stored in `~/.jarv/` (on Windows, `%USERPROFILE%\.jarv\`):
 
 `max_history` counts stored items, not exchanges or tokens. User messages, assistant messages, reasoning items, function calls, and function call outputs each count as one item.
 
-System-wide usage tracking starts from the version that records `~/.jarv/usage.json`; older session totals are not backfilled into time-window reports.
+System-wide usage tracking starts from the version that records `~/.jarv/usage.json`; older session totals are not backfilled into time-window reports. Cost tracking is request-based and grouped by provider and processing tier. Provider-reported cost is used when available (including OpenRouter); otherwise Jarv labels supported public-rate calculations as estimates. Unknown and contract-priced requests are shown separately instead of being priced as Standard.
 
 ## Dependencies
 

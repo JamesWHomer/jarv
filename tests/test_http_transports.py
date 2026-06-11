@@ -4,6 +4,7 @@ import httpx
 
 from jarv.gemini_http import (
     build_payload as build_gemini_payload,
+    generate_content,
     normalize_response as normalize_gemini_response,
     stream_content,
     to_contents,
@@ -168,6 +169,32 @@ def test_gemini_normalization_excludes_thought_text_from_output():
         }]
     })
     assert response["output_text"] == "visible"
+
+
+def test_gemini_non_streaming_response_preserves_served_tier_header():
+    def handler(_request):
+        return httpx.Response(
+            200,
+            headers={"x-gemini-service-tier": "priority"},
+            json={
+                "candidates": [{"content": {"parts": [{"text": "visible"}]}}],
+                "usageMetadata": {
+                    "promptTokenCount": 2,
+                    "candidatesTokenCount": 1,
+                },
+            },
+        )
+
+    client = httpx.Client(
+        base_url="https://generativelanguage.test/v1beta",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        response = generate_content(client, "gemini-test", {})
+    finally:
+        client.close()
+
+    assert response["service_tier"] == "priority"
 
 
 def test_gemini_pro_maps_unsupported_efforts_to_valid_thinking_levels():
