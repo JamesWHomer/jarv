@@ -382,6 +382,12 @@ def _settings_apply_quick(row: dict, config: dict) -> tuple[dict, str] | None:
     return None
 
 
+def _settings_reset_value(row: dict, config: dict):
+    if row["key"] == "model":
+        return _settings_default_model(config)
+    return DEFAULT_CONFIG[row["key"]]
+
+
 def _settings_reset_row(row: dict, config: dict) -> tuple[dict, str]:
     key = row["key"]
     if key == "api_key":
@@ -400,7 +406,7 @@ def _settings_reset_row(row: dict, config: dict) -> tuple[dict, str]:
         return config, "no stored API key"
     if key not in DEFAULT_CONFIG:
         return config, f"{row['label']} has no default"
-    config[key] = DEFAULT_CONFIG[key]
+    config[key] = _settings_reset_value(row, config)
     save_config(config)
     return config, f"reset {row['label']}"
 
@@ -419,7 +425,7 @@ def _settings_reset_action_bar(
     else:
         current = _settings_value_text(row, config).plain
         default_config = dict(config)
-        default_config[key] = DEFAULT_CONFIG[key]
+        default_config[key] = _settings_reset_value(row, config)
         default = _settings_value_text(row, default_config).plain
         prompt = f"Reset {row['label']}?"
         controls = "y reset   Esc cancel"

@@ -7,6 +7,7 @@ import pytest
 
 from jarv import model_catalog, settings_command
 from jarv.anthropic_http import list_models as list_anthropic_models
+from jarv.config import DEFAULT_CONFIG
 from jarv.gemini_http import list_models as list_gemini_models
 from jarv.model_catalog import CatalogModel, get_default_model, recommend_models
 
@@ -283,6 +284,45 @@ def test_provider_commit_uses_cached_models_without_refresh(monkeypatch):
     assert done is True
     assert config["provider"] == "anthropic"
     assert config["model"] == "claude-sonnet-4-6"
+
+
+def test_model_reset_uses_active_provider_default(monkeypatch):
+    provider_choices = {
+        "openai": [("gpt-5.4-mini", "Balanced")],
+        "anthropic": [("claude-sonnet-4-6", "Balanced")],
+    }
+    saved = []
+
+    monkeypatch.setattr(
+        model_catalog,
+        "get_cached_model_choices",
+        lambda config: provider_choices[config["provider"]],
+    )
+    monkeypatch.setattr(
+        settings_command,
+        "save_config",
+        lambda config: saved.append(dict(config)),
+    )
+
+    config = {
+        **DEFAULT_CONFIG,
+        "provider": "anthropic",
+        "model": "custom-claude-model",
+    }
+    row = next(
+        row for row in settings_command._settings_rows(config)
+        if row["key"] == "model"
+    )
+
+    action_bar = settings_command._settings_reset_action_bar(row, config, 100)
+    assert "custom-claude-model \u2192 claude-sonnet-4-6" in action_bar.plain
+
+    updated, message, style = settings_command._settings_finish_reset(row, config, "y")
+
+    assert updated["model"] == "claude-sonnet-4-6"
+    assert message == "reset Model"
+    assert style == "cyan"
+    assert saved[-1]["model"] == "claude-sonnet-4-6"
 
 
 def test_single_column_model_descriptions_align_with_settings_description_column():
