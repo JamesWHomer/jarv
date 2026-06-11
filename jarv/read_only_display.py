@@ -98,6 +98,8 @@ def _show_overlay(
     title: str,
     subtitle: str | None,
     prefer_compact: bool,
+    max_width: int | None,
+    close_hint: str,
 ) -> None:
     """Render a read-only command view in the alternate screen buffer.
 
@@ -131,13 +133,14 @@ def _show_overlay(
     def _is_compact(term_w: int, term_h: int) -> bool:
         if not prefer_compact:
             return False
-        inner_width = max(1, term_w - 4)
+        panel_width = min(term_w, max_width) if max_width else term_w
+        inner_width = max(1, panel_width - 4)
         return len(_lines(inner_width)) + _COMPACT_CHROME_ROWS <= term_h
 
     def _render() -> Panel:
         nonlocal offset
         term_w, term_h = terminal_size(console=console)
-        panel_width = max(1, term_w)
+        panel_width = max(1, min(term_w, max_width) if max_width else term_w)
         inner_width = max(1, panel_width - 4)
         lines = _lines(inner_width)
         total = len(lines)
@@ -146,7 +149,7 @@ def _show_overlay(
             offset = 0
             parts: list[Text] = list(lines)
             parts.append(Text(""))
-            parts.append(Text("q/Esc/Enter close", style="dim italic", no_wrap=True, overflow="crop"))
+            parts.append(Text(close_hint, style="dim italic", no_wrap=True, overflow="crop"))
             return _command_panel(
                 Group(*parts),
                 title=title,
@@ -171,7 +174,7 @@ def _show_overlay(
             parts.append(Text(""))
             parts.append(
                 Text(
-                    f"Up/Down scroll   PgUp/PgDn   Home/End   q/Esc/Enter close   .   {position}",
+                    f"Up/Down scroll   PgUp/PgDn   Home/End   {close_hint}   .   {position}",
                     style="dim italic",
                     no_wrap=True,
                     overflow="crop",
@@ -214,7 +217,8 @@ def _show_overlay(
             except KeyboardInterrupt:
                 break
             term_w, term_h = terminal_size(console=console)
-            total = len(_lines(max(1, term_w - 4)))
+            panel_width = min(term_w, max_width) if max_width else term_w
+            total = len(_lines(max(1, panel_width - 4)))
             body_rows = _body_rows(term_h)
             page = max(1, body_rows - 1)
             max_off = max(0, total - body_rows)
@@ -242,13 +246,15 @@ def show_read_only_command(
     config: dict | None = None,
     mode: str | None = None,
     include_setup_nudge: bool = True,
+    max_width: int | None = None,
+    close_hint: str = "q/Esc/Enter close",
 ) -> None:
     """Display read-only command output permanently or in a temporary view."""
     body = _with_optional_setup_nudge(body, include_setup_nudge=include_setup_nudge)
     selected_mode = mode if mode in READ_ONLY_COMMAND_DISPLAY_CHOICES else _config_display_mode(config)
 
     if selected_mode == "print" or not _interactive_terminal():
-        console.print(_command_panel(body, title=title, subtitle=subtitle))
+        console.print(_command_panel(body, title=title, subtitle=subtitle, width=max_width))
         return
 
     # Interactive views always render in the alternate screen buffer. "inline"
@@ -259,4 +265,6 @@ def show_read_only_command(
         title=title,
         subtitle=subtitle,
         prefer_compact=selected_mode != "fullscreen",
+        max_width=max_width,
+        close_hint=close_hint,
     )

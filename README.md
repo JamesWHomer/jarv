@@ -198,7 +198,7 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 | `max_subagent_depth` | `4` | Maximum nesting depth for spawned subagents. |
 | `subagent_thread_pool_max_workers` | `8` | Max parallel subagents per `spawn` call. |
 | `check_updates` | `true` | Background update check on startup (non-blocking, throttled to once per 24h). |
-| `read_only_command_display` | `"auto"` | Display mode for `/help`, `/about`, `/usage`, and `/config`: `auto`, `print`, `inline`, or `fullscreen`. |
+| `read_only_command_display` | `"fullscreen"` | Display mode for `/help`, `/about`, `/usage`, and `/config`: temporary `fullscreen` view or permanent `print` output. |
 | `print_usage_after_agent` | `false` | Print a compact token usage line after each completed agent run. |
 | `system_prompt` | `"You are Jarv..."` | System instructions sent with each request. |
 

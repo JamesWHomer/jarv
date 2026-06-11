@@ -13,7 +13,8 @@ DEFAULT_SYSTEM_PROMPT = (
     "run `jarv /help` before answering. Do not invent unsupported commands."
 )
 
-READ_ONLY_COMMAND_DISPLAY_CHOICES = ("auto", "print", "inline", "fullscreen")
+READ_ONLY_COMMAND_DISPLAY_CHOICES = ("fullscreen", "print")
+LEGACY_READ_ONLY_COMMAND_DISPLAY_CHOICES = ("auto", "inline")
 
 DEFAULT_CONFIG = {
     "provider": "openai",
@@ -38,7 +39,7 @@ DEFAULT_CONFIG = {
     "max_subagent_depth": 4,
     "subagent_thread_pool_max_workers": 8,
     "check_updates": True,
-    "read_only_command_display": "auto",
+    "read_only_command_display": "fullscreen",
     "print_usage_after_agent": False,
 }
 
@@ -77,6 +78,10 @@ def load_config() -> dict:
         if k not in config:
             config[k] = v
             changed = True
+
+    if config.get("read_only_command_display") in LEGACY_READ_ONLY_COMMAND_DISPLAY_CHOICES:
+        config["read_only_command_display"] = "fullscreen"
+        changed = True
 
     # Migrate legacy flat api_key → per-provider api_keys
     if config.get("api_key") and not config.get("api_keys"):
@@ -146,7 +151,7 @@ def validate_config(config: dict) -> bool:
         _console().print(f"[red]Config 'command_safety' must be one of: all, risky, none.[/red]")
         ok = False
 
-    display_mode = config.get("read_only_command_display", "auto")
+    display_mode = config.get("read_only_command_display", DEFAULT_CONFIG["read_only_command_display"])
     if display_mode not in READ_ONLY_COMMAND_DISPLAY_CHOICES:
         choices = ", ".join(READ_ONLY_COMMAND_DISPLAY_CHOICES)
         _console().print(f"[red]Config 'read_only_command_display' must be one of: {choices}.[/red]")

@@ -115,6 +115,20 @@ def test_print_mode_bypasses_live(monkeypatch):
     assert "printed" in output.getvalue()
 
 
+def test_print_mode_respects_max_width(monkeypatch):
+    output = _install_display_harness(monkeypatch, width=120)
+
+    read_only_display.show_read_only_command(
+        Text("narrow"),
+        title="test",
+        config={"read_only_command_display": "print"},
+        include_setup_nudge=False,
+        max_width=40,
+    )
+
+    assert max(len(line) for line in output.getvalue().splitlines()) == 40
+
+
 def test_non_tty_prints_even_when_inline_requested(monkeypatch):
     output = _install_display_harness(monkeypatch, force_terminal=True)
     monkeypatch.setattr(read_only_display.sys, "stdin", NonTtyStdin())
@@ -143,6 +157,23 @@ def test_inline_view_closes_on_expected_keys(monkeypatch, key):
 
     assert FakeLive.instances[-1].kwargs["screen"] is True
     assert FakeLive.instances[-1].refresh_count == 1
+
+
+def test_inline_view_uses_max_width_and_custom_close_hint(monkeypatch):
+    _install_display_harness(monkeypatch, width=120, height=20)
+
+    read_only_display.show_read_only_command(
+        Text("close me"),
+        title="test",
+        config={"read_only_command_display": "inline"},
+        include_setup_nudge=False,
+        max_width=60,
+        close_hint="q / Esc / Enter  Close",
+    )
+
+    panel = FakeLive.instances[-1].renderable
+    assert panel.width == 60
+    assert "q / Esc / Enter  Close" in panel.renderable.renderables[-1].plain
 
 
 @pytest.mark.parametrize("key", ["q", "ESC", "ENTER", "KeyboardInterrupt"])

@@ -129,9 +129,9 @@ _SETTINGS_REASONING_CHOICES = (
     ("xhigh", "xhigh"),
 )
 
-_SETTINGS_READ_ONLY_DISPLAY_CHOICES = tuple(
-    (value, "inline popup" if value == "inline" else "fullscreen view" if value == "fullscreen" else value)
-    for value in READ_ONLY_COMMAND_DISPLAY_CHOICES
+_SETTINGS_READ_ONLY_DISPLAY_CHOICES = (
+    ("fullscreen", "fullscreen"),
+    ("print", "print"),
 )
 
 
@@ -212,7 +212,7 @@ def _settings_rows(config: dict) -> list[dict]:
             "key": "read_only_command_display",
             "kind": "choice",
             "choices": _SETTINGS_READ_ONLY_DISPLAY_CHOICES,
-            "desc": "auto, print, inline popup, or fullscreen view",
+            "desc": "fullscreen temporary view or permanent print output",
         },
         {
             "section": "display",

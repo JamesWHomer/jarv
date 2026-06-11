@@ -111,72 +111,71 @@ def cmd_unset(args: list) -> None:
 
 
 def _help_body() -> Group:
-    def literal_command(value: str) -> Text:
-        return Text(value, style="bold cyan", no_wrap=True)
+    help_table = Table(box=None, show_header=True, padding=(0, 2), pad_edge=False, width=91)
+    help_table.add_column("COMMAND / FLAG", header_style="bold", no_wrap=True, width=37)
+    help_table.add_column("DESCRIPTION", header_style="bold", style="white", width=52)
 
-    usage_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
-    usage_table.add_column(style="bold cyan", no_wrap=True)
-    usage_table.add_column(style="white")
-    usage_table.add_row("jarv", "Start heads-up mode for repeated prompts")
-    usage_table.add_row("jarv <prompt>", "Ask once, then exit")
-    usage_table.add_row("command | jarv <instruction>", "Attach piped stdin to a one-shot prompt")
-    usage_table.add_row("git diff | jarv review this", "Review a patch from stdin")
-    usage_table.add_row("jarv help", "Show this help")
+    divider = Text("\u2500" * 36, style="dim")
+    description_divider = Text("\u2500" * 50, style="dim")
+    help_table.add_row(divider, description_divider)
 
-    flag_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
-    flag_table.add_column(style="bold yellow", no_wrap=True)
-    flag_table.add_column(style="white")
-    flag_table.add_row("--provider PROVIDER", "Override the provider for this run")
-    flag_table.add_row("-m, --model MODEL", "Override the model for this run")
-    flag_table.add_row("-e, --effort EFFORT", "Override reasoning effort")
-    flag_table.add_row("--timeout SECONDS", "Override shell command timeout")
-    flag_table.add_row("-s, --system PROMPT", "Override the system prompt")
-    flag_table.add_row("--new", "Start this run with a fresh session")
-    flag_table.add_row("--incognito", "Do not load or save session history")
-    flag_table.add_row("--version", "Print the version and exit")
+    groups = [
+        [
+            ("jarv", "Start heads-up mode", "bold cyan"),
+            ("jarv <prompt>", "Ask once, then exit", "bold cyan"),
+            ("command | jarv <instruction>", "Attach piped input to a one-shot prompt", "bold cyan"),
+            ("git diff | jarv review this", "Review a patch from stdin", "bold cyan"),
+        ],
+        [
+            ("--provider <provider>", "Override the provider", "bold yellow"),
+            ("-m, --model <model>", "Override the model", "bold yellow"),
+            ("-e, --effort <effort>", "Override reasoning effort", "bold yellow"),
+            ("--timeout <seconds>", "Override shell command timeout", "bold yellow"),
+            ("-s, --system <prompt>", "Override the system prompt", "bold yellow"),
+            ("--new", "Start with a fresh session", "bold yellow"),
+            ("--incognito", "Do not load or save session history", "bold yellow"),
+            ("--version", "Print the version and exit", "bold yellow"),
+        ],
+        [
+            ("/new", "Start a fresh session", "bold cyan"),
+            ("/history", "Show recent conversation history", "bold cyan"),
+            ("/undo [n]", "Unsend the last n exchanges", "bold cyan"),
+            ("/redo [n]", "Restore undone exchanges", "bold cyan"),
+            ("/sessions", "List sessions", "bold cyan"),
+            ("/sessions <id>", "Load a session by ID prefix", "bold cyan"),
+            ("/archive", "Archive this session and start fresh", "bold cyan"),
+        ],
+        [
+            ("/settings", "Open common controls", "bold cyan"),
+            ("/config", "Show raw configuration values", "bold cyan"),
+            ("/set <key> <value>", "Set a configuration value", "bold cyan"),
+            ("/unset <key>", "Reset or remove a configuration value", "bold cyan"),
+            ("/setup [step]", "Run setup or jump to a step", "bold cyan"),
+        ],
+        [
+            ("/usage [period]", "Show token usage", "bold cyan"),
+            ("/update", "Update jarv", "bold cyan"),
+            ("/help", "Show this help", "bold cyan"),
+            ("/about", "Show detailed reference information", "bold cyan"),
+            ("exit, quit, /exit, /quit", "Leave heads-up mode", "bold cyan"),
+        ],
+    ]
+    for group_index, rows in enumerate(groups):
+        if group_index:
+            help_table.add_row("", "")
+        for command, description, style in rows:
+            help_table.add_row(Text(command, style=style, no_wrap=True), description)
 
-    cmd_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
-    cmd_table.add_column(style="dim", no_wrap=True)
-    cmd_table.add_column(style="bold cyan", no_wrap=True)
-    cmd_table.add_column(style="white")
-    cmd_table.add_row("chat", literal_command("/new"), "Start a fresh session on the next message")
-    cmd_table.add_row("chat", literal_command("/history"), "Show recent conversation history")
-    cmd_table.add_row("chat", literal_command("/undo [n]"), "Unsend the last n exchanges")
-    cmd_table.add_row("chat", literal_command("/redo [n]"), "Restore undone exchanges")
-    cmd_table.add_row("sessions", literal_command("/sessions, /session"), "List sessions")
-    cmd_table.add_row("sessions", literal_command("/sessions <id>"), "Load a session by id prefix")
-    cmd_table.add_row("sessions", literal_command("/archive"), "Archive this session and start fresh")
-    cmd_table.add_row("settings", literal_command("/settings"), "Open common controls")
-    cmd_table.add_row("settings", literal_command("/config"), "Show raw config values")
-    cmd_table.add_row("settings", literal_command("/set <key> <value>"), "Set a raw config value")
-    cmd_table.add_row("settings", literal_command("/unset <key>"), "Reset or remove a raw config value")
-    cmd_table.add_row("settings", literal_command("/setup [provider|key|model|safety|base_url]"), "Run setup or jump to a step")
-    cmd_table.add_row("usage", literal_command("/usage [day|week|month|--all [--since 24h]]"), "Show token usage")
-    cmd_table.add_row("updates", literal_command("/update"), "Update jarv")
-    cmd_table.add_row("info", literal_command("/help"), "Show this help")
-    cmd_table.add_row("info", literal_command("/about"), "Show detailed reference info")
-    cmd_table.add_row("heads-up", literal_command("exit, quit, /exit, /quit"), "Leave heads-up mode")
-
-    more = Text.assemble(
-        ("Use ", "white"),
+    footer = Text.assemble(
+        ("Common controls: ", "white"),
         ("/settings", "bold cyan"),
-        (" for common controls and ", "white"),
+        ("    Raw configuration: ", "white"),
         ("/config", "bold cyan"),
-        (" for raw values. Use ", "white"),
+        ("    Full reference: ", "white"),
         ("/about", "bold cyan"),
-        (" for detailed reference info, internals, and longer examples. README/GitHub: ", "white"),
-        ("https://github.com/JamesWHomer/jarv", "bold cyan"),
     )
 
-    return Group(
-        usage_table,
-        Text(""),
-        flag_table,
-        Text(""),
-        cmd_table,
-        Text(""),
-        more,
-    )
+    return Group(help_table, Text(""), footer)
 
 
 def print_help(*, mode: str | None = None, include_setup_nudge: bool = True) -> None:
@@ -185,6 +184,8 @@ def print_help(*, mode: str | None = None, include_setup_nudge: bool = True) -> 
         title="help",
         mode=mode,
         include_setup_nudge=include_setup_nudge,
+        max_width=95,
+        close_hint="q / Esc / Enter  Close",
     )
 
 
@@ -208,7 +209,7 @@ def _about_body() -> Markdown:
 - `jarv /undo [n]` - Unsend the last n exchanges (default 1). The removed exchange is pushed onto a redo stack.
 - `jarv /redo [n]` - Restore the last n undone exchanges (default 1). Sending a new message clears the redo stack.
 - `jarv /settings` - Open an interactive settings menu for provider/model, command review, audit, runtime, and updates.
-- `jarv /settings` also controls how read-only commands display: `auto`, `print`, `inline`, or `fullscreen`.
+- `jarv /settings` also controls how read-only commands display: `fullscreen` or `print`.
 - `jarv /new` - Start a fresh session on the next message.
 - `jarv /archive` - Archive this terminal's session history and start a fresh one on the next message.
 - `jarv /sessions` / `jarv /session` - List sessions by recency. In an interactive terminal you can scroll through all of them; when stdout is not a TTY (e.g. piped), only the 5 most recent are listed.
@@ -268,7 +269,7 @@ Keys:
 - `max_subagent_depth` - Maximum recursion depth for `spawn` (root is 0). Default: `{DEFAULT_CONFIG['max_subagent_depth']}`.
 - `subagent_thread_pool_max_workers` - Max parallel children in one `spawn` batch. Default: `{DEFAULT_CONFIG['subagent_thread_pool_max_workers']}`.
 - `check_updates` - When `true`, a one-shot `jarv <question>` run fires a non-blocking background check against GitHub. If a new version is found it is flagged locally and shown at the start of the next run. Default: `true`. Set to `false` to disable entirely. Heads-up mode (`jarv` with no args) and slash commands do not run this check.
-- `read_only_command_display` - How `/help`, `/about`, `/usage`, and `/config` are displayed in an interactive terminal. `auto` chooses inline for short output and fullscreen for longer output. `print` preserves permanent terminal output. `inline` and `fullscreen` force those temporary views. Default: `auto`.
+- `read_only_command_display` - How `/help`, `/about`, `/usage`, and `/config` are displayed in an interactive terminal. `fullscreen` uses a temporary alternate-screen view, compact when content fits and scrollable when it does not. `print` preserves permanent terminal output. Default: `fullscreen`.
 - `print_usage_after_agent` - When `true`, print a compact token usage line after each completed agent run. Default: `false`.
 - `/usage` uses bundled metadata for known models. System-wide views read future usage from `{CONFIG_DIR / "usage.json"}`.
 

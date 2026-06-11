@@ -83,27 +83,53 @@ def test_help_is_compact_and_task_focused():
         "jarv <prompt>",
         "command | jarv <instruction>",
         "git diff | jarv review this",
-        "jarv help",
-        "--provider PROVIDER",
-        "-m, --model MODEL",
-        "-e, --effort EFFORT",
-        "--timeout SECONDS",
-        "-s, --system PROMPT",
+        "--provider <provider>",
+        "-m, --model <model>",
+        "-e, --effort <effort>",
+        "--timeout <seconds>",
+        "-s, --system <prompt>",
         "--new",
         "--incognito",
         "--version",
-        "/sessions, /session",
-        "/setup [provider|key|model|safety|base_url]",
-        "/usage [day|week|month|--all [--since 24h]]",
+        "/sessions",
+        "/setup [step]",
+        "/usage [period]",
         "exit, quit, /exit, /quit",
         "/settings",
         "/config",
         "/about",
-        "https://github.com/JamesWHomer/jarv",
+        "Common controls:",
+        "Raw configuration:",
+        "Full reference:",
     ]
 
     for item in expected:
         assert item in help_text
+
+
+def test_help_uses_one_aligned_command_and_description_table():
+    help_lines = _render_help_text().splitlines()
+    expected_rows = {
+        "jarv": "Start heads-up mode",
+        "--provider <provider>": "Override the provider",
+        "/new": "Start a fresh session",
+        "/sessions": "List sessions",
+        "/setup [step]": "Run setup or jump to a step",
+        "exit, quit, /exit, /quit": "Leave heads-up mode",
+    }
+
+    description_columns = set()
+    for command, description in expected_rows.items():
+        line = next(line for line in help_lines if command in line and description in line)
+        description_columns.add(line.index(description))
+
+    assert len(description_columns) == 1
+    assert "COMMAND / FLAG" in help_lines[0]
+    assert "DESCRIPTION" in help_lines[0]
+    assert "\u2500" * 20 in help_lines[1]
+    assert sum(not line.strip() for line in help_lines) >= 5
+    assert not any(line.lstrip().startswith("chat ") for line in help_lines)
+    assert not any(line.lstrip().startswith("sessions ") for line in help_lines)
 
 
 def test_read_only_bodies_do_not_repeat_panel_titles(monkeypatch):
