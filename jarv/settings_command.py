@@ -1,7 +1,6 @@
 """Interactive settings command."""
 
 import sys
-import textwrap
 import threading
 from collections.abc import Callable
 
@@ -22,6 +21,12 @@ from .config import (
     save_config,
 )
 from .display import console, jarv_panel, refresh_on_resize, section_rule, terminal_size
+from .text_editor import (
+    apply_text_editor_key,
+    initialize_text_editor,
+    render_single_line,
+    render_visual_lines,
+)
 
 
 class _ModelCatalogRefresher:
@@ -400,12 +405,48 @@ def _settings_reset_row(row: dict, config: dict) -> tuple[dict, str]:
     return config, f"reset {row['label']}"
 
 
-def _settings_reset_confirmation(row: dict) -> str:
-    if row["key"] == "api_key":
-        action = "Clear stored API key?"
+def _settings_reset_action_bar(
+    row: dict,
+    config: dict,
+    inner_width: int,
+) -> Text:
+    key = row["key"]
+    if key == "api_key":
+        prompt = "Clear stored API key?"
+        controls = "y clear   Esc cancel"
+        current = default = ""
+        left = prompt
     else:
-        action = f"Reset {row['label']} to default?"
-    return f"{action}  y confirm \u00b7 any other key cancel"
+        current = _settings_value_text(row, config).plain
+        default_config = dict(config)
+        default_config[key] = DEFAULT_CONFIG[key]
+        default = _settings_value_text(row, default_config).plain
+        prompt = f"Reset {row['label']}?"
+        controls = "y reset   Esc cancel"
+        left = f"{prompt}   {current} \u2192 {default}"
+
+    gap = max(3, inner_width - len(left) - len(controls))
+    clipped = False
+    if len(left) + gap + len(controls) > inner_width:
+        available = max(1, inner_width - len(controls) - 3)
+        left = _clip_text(left, available)
+        gap = max(1, inner_width - len(left) - len(controls))
+        clipped = True
+
+    line = Text(no_wrap=True, overflow="crop")
+    if clipped or key == "api_key":
+        line.append(left, style="bold yellow")
+    else:
+        line.append(prompt, style="bold yellow")
+        line.append("   ")
+        line.append(current, style="green")
+        line.append(" \u2192 ", style="dim")
+        line.append(default, style="cyan")
+    line.append(" " * gap)
+    line.append(controls.split("   ", 1)[0], style="bold red")
+    line.append("   ")
+    line.append(controls.split("   ", 1)[1], style="dim")
+    return line
 
 
 def _settings_finish_reset(
@@ -765,7 +806,9 @@ def _settings_begin_edit(row: dict, config: dict) -> dict:
 
         provider = config.get("provider", "openai")
         readonly = provider in LOCAL_PROVIDERS
-        return {"row": row, "buffer": "", "secret": True, "readonly": readonly, "error": ""}
+        edit = {"row": row, "secret": True, "readonly": readonly, "error": ""}
+        initialize_text_editor(edit, "")
+        return edit
 
     edit = {
         "row": row,
@@ -774,12 +817,9 @@ def _settings_begin_edit(row: dict, config: dict) -> dict:
         "readonly": False,
         "error": "",
     }
-    if row.get("multiline"):
-        edit.update(
-            cursor=len(buffer),
-            original=buffer,
-            discard_armed=False,
-        )
+    if row["kind"] in ("int", "text"):
+        initialize_text_editor(edit, buffer, multiline=bool(row.get("multiline")))
+        edit["discard_armed"] = False
     if key == "provider":
         edit["selected_provider"] = config.get("provider", "openai")
     elif key == "model":
@@ -808,63 +848,11 @@ def _settings_multiline_visual_lines(
     edit: dict,
     inner_width: int,
 ) -> tuple[list[Text], int]:
-    value = edit["buffer"]
-    cursor = max(0, min(int(edit.get("cursor", len(value))), len(value)))
-    content_width = max(1, inner_width - 4)
-    visual_lines: list[Text] = []
-    rows = _settings_multiline_rows(value, content_width)
-    cursor_visual_idx = _settings_multiline_cursor_row_index(rows, cursor)
-
-    for idx, (row_start, row_end) in enumerate(rows):
-        segment = value[row_start:row_end]
-        line = Text("  ")
-        if idx == cursor_visual_idx:
-            local_cursor = cursor - row_start
-            line.append(segment[:local_cursor], style="green")
-            if local_cursor < len(segment):
-                line.append(segment[local_cursor], style="reverse")
-                line.append(segment[local_cursor + 1 :], style="green")
-            else:
-                line.append(" ", style="reverse")
-        else:
-            line.append(segment, style="green")
-        visual_lines.append(line)
-
-    return visual_lines, cursor_visual_idx
-
-
-def _settings_multiline_rows(value: str, content_width: int) -> list[tuple[int, int]]:
-    rows: list[tuple[int, int]] = []
-    absolute_start = 0
-    logical_lines = value.split("\n")
-
-    for logical_idx, logical_line in enumerate(logical_lines):
-        line_length = len(logical_line)
-        segment_starts = list(range(0, max(1, line_length), content_width))
-        if line_length and line_length % content_width == 0:
-            segment_starts.append(line_length)
-
-        for segment_start in segment_starts:
-            row_start = absolute_start + segment_start
-            row_end = min(row_start + content_width, absolute_start + line_length)
-            rows.append((row_start, row_end))
-
-        if logical_idx < len(logical_lines) - 1:
-            absolute_start += line_length + 1
-
-    return rows
-
-
-def _settings_multiline_cursor_row_index(
-    rows: list[tuple[int, int]],
-    cursor: int,
-) -> int:
-    matches = [
-        idx
-        for idx, (row_start, row_end) in enumerate(rows)
-        if row_start <= cursor <= row_end
-    ]
-    return matches[-1] if matches else max(0, len(rows) - 1)
+    return render_visual_lines(
+        edit,
+        max(1, inner_width - 4),
+        indent="  ",
+    )
 
 
 def _settings_multiline_editor_lines(
@@ -908,27 +896,6 @@ def _settings_multiline_editor_lines(
     return (lines + tail)[:max_lines]
 
 
-def _settings_multiline_move_vertical(
-    edit: dict,
-    direction: int,
-    *,
-    content_width: int,
-    count: int = 1,
-) -> None:
-    value = edit["buffer"]
-    cursor = max(0, min(int(edit.get("cursor", len(value))), len(value)))
-    rows = _settings_multiline_rows(value, max(1, content_width))
-    current_idx = _settings_multiline_cursor_row_index(rows, cursor)
-    current_start, _current_end = rows[current_idx]
-    preferred_column = edit.get("preferred_visual_column")
-    if preferred_column is None:
-        preferred_column = cursor - current_start
-    target_idx = max(0, min(len(rows) - 1, current_idx + direction * max(1, count)))
-    target_start, target_end = rows[target_idx]
-    edit["cursor"] = min(target_start + int(preferred_column), target_end)
-    edit["preferred_visual_column"] = preferred_column
-
-
 def _settings_multiline_apply_key(
     edit: dict,
     key: str,
@@ -936,60 +903,16 @@ def _settings_multiline_apply_key(
     *,
     inner_width: int = 80,
 ) -> bool:
-    value = edit["buffer"]
-    cursor = max(0, min(int(edit.get("cursor", len(value))), len(value)))
-    changed = False
-
-    if key == "LEFT":
-        edit["cursor"] = max(0, cursor - repeat_count)
-        edit["preferred_visual_column"] = None
-    elif key == "RIGHT":
-        edit["cursor"] = min(len(value), cursor + repeat_count)
-        edit["preferred_visual_column"] = None
-    elif key == "HOME":
-        rows = _settings_multiline_rows(value, max(1, inner_width - 4))
-        row_idx = _settings_multiline_cursor_row_index(rows, cursor)
-        edit["cursor"] = rows[row_idx][0]
-        edit["preferred_visual_column"] = None
-    elif key == "END":
-        rows = _settings_multiline_rows(value, max(1, inner_width - 4))
-        row_idx = _settings_multiline_cursor_row_index(rows, cursor)
-        edit["cursor"] = rows[row_idx][1]
-        edit["preferred_visual_column"] = None
-    elif key == "UP":
-        _settings_multiline_move_vertical(
-            edit,
-            -1,
-            content_width=max(1, inner_width - 4),
-            count=repeat_count,
-        )
-    elif key == "DOWN":
-        _settings_multiline_move_vertical(
-            edit,
-            1,
-            content_width=max(1, inner_width - 4),
-            count=repeat_count,
-        )
-    elif key == "BACKSPACE" and cursor:
-        edit["buffer"] = value[: cursor - 1] + value[cursor:]
-        edit["cursor"] = cursor - 1
-        changed = True
-    elif key == "DELETE" and cursor < len(value):
-        edit["buffer"] = value[:cursor] + value[cursor + 1 :]
-        changed = True
-    elif key == "ENTER":
-        edit["buffer"] = value[:cursor] + "\n" + value[cursor:]
-        edit["cursor"] = cursor + 1
-        changed = True
-    elif isinstance(key, str) and len(key) == 1 and key.isprintable():
-        edit["buffer"] = value[:cursor] + key + value[cursor:]
-        edit["cursor"] = cursor + 1
-        changed = True
-
+    changed = apply_text_editor_key(
+        edit,
+        key,
+        repeat_count,
+        content_width=max(1, inner_width - 4),
+        allow_newlines=True,
+    )
     if changed:
         edit["discard_armed"] = False
         edit["error"] = ""
-        edit["preferred_visual_column"] = None
     return changed
 
 
@@ -1020,7 +943,7 @@ def _settings_editor_lines(
     tail: list[Text] = []
 
     if key == "provider":
-        intro.append(Text(_clip_text("  Up/Down choose   Enter save   Esc cancel", inner_width), style="dim"))
+        intro.append(Text(_clip_text("  Up/Down choose", inner_width), style="dim"))
         choice_items = []
         prompt = ""
     elif key == "model":
@@ -1061,50 +984,34 @@ def _settings_editor_lines(
         prompt = "API key"
     elif row["kind"] == "int":
         choice_items = []
-        prompt = "Positive integer"
+        prompt = "Value"
     else:
         empty_label = row.get("empty", "empty")
         intro.append(Text(_clip_text(f"  type clear for {empty_label}", inner_width), style="dim"))
         choice_items = []
         prompt = row["label"]
 
-    display = edit["buffer"]
-    if edit.get("secret") and display.lower() != "clear":
-        display = "*" * len(display)
-
     if key == "provider":
         pass
-    elif row.get("multiline"):
-        body = f"  {prompt}: {display}_"
-        wrapped = textwrap.wrap(
-            body,
-            width=max(20, inner_width),
-            replace_whitespace=False,
-            drop_whitespace=False,
-            break_long_words=True,
-            break_on_hyphens=False,
-        ) or [f"  {prompt}: _"]
-        for idx, chunk in enumerate(wrapped):
-            line = Text(no_wrap=True, overflow="crop")
-            if idx == 0 and chunk.startswith(f"  {prompt}: "):
-                prefix = f"  {prompt}: "
-                line.append(prefix, style="bold")
-                line.append(chunk[len(prefix):], style="green" if display else "dim")
-            else:
-                line.append(chunk, style="green" if display else "dim")
-            tail.append(line)
     else:
         line = Text(no_wrap=True, overflow="crop")
         line.append(_clip_text(f"  {prompt}: ", inner_width), style="bold")
-        remaining = max(1, inner_width - len(line.plain) - 1)
-        line.append(_clip_text(display, remaining), style="green" if display else "dim")
-        line.append("_", style="bold cyan")
+        remaining = max(1, inner_width - len(line.plain))
+        masked = bool(
+            edit.get("secret")
+            and str(edit["buffer"]).lower() != "clear"
+        )
+        line.append_text(
+            render_single_line(
+                edit,
+                remaining,
+                masked=masked,
+            )
+        )
         tail.append(line)
 
     if edit.get("error"):
         tail.append(Text(_clip_text(f"  {edit['error']}", inner_width), style="red"))
-    if key != "provider":
-        tail.append(Text(_clip_text("  Enter save   Esc cancel   Backspace edit", inner_width), style="dim italic"))
 
     fixed_count = len(intro) + len(tail)
     if max_lines is not None and fixed_count > max_lines:
@@ -1130,6 +1037,17 @@ def _settings_editor_lines(
         )
 
     return intro + choices + tail
+
+
+def _settings_desired_editor_height(
+    edit: dict,
+    config: dict,
+    inner_width: int,
+    terminal_height: int,
+) -> int:
+    content_height = len(_settings_editor_lines(edit, config, inner_width))
+    minimum = 7 if edit["row"].get("multiline") else 3
+    return max(minimum, min(content_height + 2, terminal_height))
 
 
 def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, bool]:
@@ -1296,8 +1214,6 @@ def _settings_interactive(config: dict) -> None:
             target_edit["catalog_input_dirty"] = False
 
     def _footer() -> str:
-        if pending_reset is not None:
-            return "y confirm   any other key cancel"
         return "\u2191\u2193 select   Enter edit/toggle   r reset   q exit"
 
     def _append_bottom_footer(parts: list, height: int, footer: Text) -> None:
@@ -1414,15 +1330,23 @@ def _settings_interactive(config: dict) -> None:
             parts.append(Text(_clip_text(f"  {msg}", inner_width), style=style, no_wrap=True, overflow="crop"))
 
         if show_footer:
-            _append_bottom_footer(
-                parts,
-                height,
-                Text(
+            if pending_reset is not None:
+                footer = _settings_reset_action_bar(
+                    rows[pending_reset],
+                    config,
+                    inner_width,
+                )
+            else:
+                footer = Text(
                     _clip_text(_footer(), inner_width),
                     style="dim italic",
                     no_wrap=True,
                     overflow="crop",
-                ),
+                )
+            _append_bottom_footer(
+                parts,
+                height,
+                footer,
             )
 
         audit_state = "auditor on" if config.get("audit", True) else "auditor off"
@@ -1470,10 +1394,14 @@ def _settings_interactive(config: dict) -> None:
             return _render_settings_panel(term_h)
 
         inner_width = max(1, max(1, term_w) - 4)
-        desired_editor_height = len(_settings_editor_lines(edit, config, inner_width)) + 2
-        desired_editor_height = max(7, min(desired_editor_height, term_h))
+        desired_editor_height = _settings_desired_editor_height(
+            edit,
+            config,
+            inner_width,
+            term_h,
+        )
         settings_min_height = 8
-        editor_min_height = 9
+        editor_min_height = 7 if edit["row"].get("multiline") else 3
 
         if term_h >= desired_editor_height + settings_min_height:
             editor_height = desired_editor_height
@@ -1564,15 +1492,15 @@ def _settings_interactive(config: dict) -> None:
                         flash = None
                 elif edit["row"]["key"] == "provider":
                     edit["error"] = ""
-                elif key == "BACKSPACE":
-                    if edit["buffer"]:
-                        edit["buffer"] = edit["buffer"][:-1]
-                    if edit["row"]["key"] == "model":
-                        edit["catalog_input_dirty"] = True
-                    edit["error"] = ""
-                elif isinstance(key, str) and len(key) == 1 and key.isprintable():
-                    edit["buffer"] += key
-                    if edit["row"]["key"] == "model":
+                else:
+                    changed = apply_text_editor_key(
+                        edit,
+                        key,
+                        repeat_count,
+                        content_width=1,
+                        allow_newlines=False,
+                    )
+                    if changed and edit["row"]["key"] == "model":
                         edit["catalog_input_dirty"] = True
                     edit["error"] = ""
                 continue
@@ -1582,7 +1510,7 @@ def _settings_interactive(config: dict) -> None:
                 config, message, style = _settings_finish_reset(row, config, key)
                 rows = _settings_rows(config)
                 pending_reset = None
-                flash = (message, style)
+                flash = (message, style) if key in ("y", "Y") else None
                 continue
 
             if key == "ESC":
@@ -1617,7 +1545,7 @@ def _settings_interactive(config: dict) -> None:
                 flash = (message, "green")
             elif key == "r":
                 pending_reset = selected
-                flash = (_settings_reset_confirmation(rows[selected]), "bold yellow")
+                flash = None
 
     catalog_refresher.close()
     console.print("[dim]\u25cb Settings closed.[/dim]")

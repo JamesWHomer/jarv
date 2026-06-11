@@ -131,6 +131,85 @@ def test_system_prompt_cursor_uses_reverse_space_at_end_of_line():
     assert "reverse" in str(lines[0].spans[-1].style)
 
 
+def test_compact_text_setting_reuses_cursor_aware_editor():
+    config = {**DEFAULT_CONFIG, "base_url": "https://example.test"}
+    row = next(
+        row for row in settings_command._settings_rows(config)
+        if row["key"] == "base_url"
+    )
+    edit = settings_command._settings_begin_edit(row, config)
+
+    assert edit["cursor"] == len(config["base_url"])
+    settings_command.apply_text_editor_key(edit, "HOME")
+    settings_command.apply_text_editor_key(edit, "X")
+
+    assert edit["buffer"] == "Xhttps://example.test"
+
+
+def test_compact_integer_editor_uses_one_value_row_and_minimal_height():
+    config = dict(DEFAULT_CONFIG)
+    row = next(
+        row for row in settings_command._settings_rows(config)
+        if row["key"] == "max_stdin_chars"
+    )
+    edit = settings_command._settings_begin_edit(row, config)
+
+    lines = settings_command._settings_editor_lines(edit, config, 80)
+
+    assert len(lines) == 1
+    assert lines[0].plain.startswith("  Value: 200000")
+    assert "Enter save" not in lines[0].plain
+    assert settings_command._settings_desired_editor_height(
+        edit,
+        config,
+        80,
+        24,
+    ) == 3
+
+
+def test_compact_integer_validation_adds_one_editor_row():
+    config = dict(DEFAULT_CONFIG)
+    row = next(
+        row for row in settings_command._settings_rows(config)
+        if row["key"] == "max_stdin_chars"
+    )
+    edit = settings_command._settings_begin_edit(row, config)
+    edit["buffer"] = "abc"
+    edit["cursor"] = 3
+    edit["error"] = "Enter a positive integer."
+
+    lines = settings_command._settings_editor_lines(edit, config, 80)
+
+    assert len(lines) == 2
+    assert lines[1].plain == "  Enter a positive integer."
+    assert settings_command._settings_desired_editor_height(
+        edit,
+        config,
+        80,
+        24,
+    ) == 4
+
+
+def test_api_key_compact_editor_masks_value_but_not_clear():
+    config = dict(DEFAULT_CONFIG)
+    row = next(
+        row for row in settings_command._settings_rows(config)
+        if row["key"] == "api_key"
+    )
+    edit = settings_command._settings_begin_edit(row, config)
+    edit["buffer"] = "secret"
+    edit["cursor"] = len(edit["buffer"])
+
+    masked = settings_command._settings_editor_lines(edit, config, 80)
+    assert "secret" not in "\n".join(line.plain for line in masked)
+    assert "******" in "\n".join(line.plain for line in masked)
+
+    edit["buffer"] = "clear"
+    edit["cursor"] = len(edit["buffer"])
+    clear = settings_command._settings_editor_lines(edit, config, 80)
+    assert "clear" in "\n".join(line.plain for line in clear)
+
+
 def test_read_key_maps_windows_ctrl_s(monkeypatch):
     class FakeMsvcrt:
         @staticmethod
@@ -149,9 +228,13 @@ def test_reset_requires_explicit_confirmation(monkeypatch):
     saved = []
     monkeypatch.setattr(settings_command, "save_config", lambda value: saved.append(dict(value)))
 
-    prompt = settings_command._settings_reset_confirmation(row)
+    action_bar = settings_command._settings_reset_action_bar(row, config, 100)
 
-    assert prompt == "Reset System prompt to default?  y confirm \u00b7 any other key cancel"
+    assert action_bar.plain.startswith(
+        "Reset System prompt?   custom \u00b7 16 chars \u2192 default"
+    )
+    assert action_bar.plain.endswith("y reset   Esc cancel")
+    assert len(action_bar.plain) == 100
     assert config["system_prompt"] == "Keep this prompt"
     assert saved == []
 
@@ -179,14 +262,15 @@ def test_reset_confirmation_cancels_on_other_keys(monkeypatch):
         assert saved == []
 
 
-def test_api_key_reset_confirmation_uses_clear_language():
+def test_api_key_reset_action_uses_clear_language():
     config = dict(DEFAULT_CONFIG)
     row = next(
         row for row in settings_command._settings_rows(config)
         if row["key"] == "api_key"
     )
 
-    assert (
-        settings_command._settings_reset_confirmation(row)
-        == "Clear stored API key?  y confirm \u00b7 any other key cancel"
-    )
+    action_bar = settings_command._settings_reset_action_bar(row, config, 80)
+
+    assert action_bar.plain.startswith("Clear stored API key?")
+    assert action_bar.plain.endswith("y clear   Esc cancel")
+    assert len(action_bar.plain) == 80
