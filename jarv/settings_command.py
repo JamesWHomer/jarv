@@ -802,8 +802,11 @@ def _settings_multiline_visual_lines(
         if idx == cursor_visual_idx:
             local_cursor = cursor - row_start
             line.append(segment[:local_cursor], style="green")
-            line.append("_", style="bold cyan")
-            line.append(segment[local_cursor:], style="green")
+            if local_cursor < len(segment):
+                line.append(segment[local_cursor], style="reverse")
+                line.append(segment[local_cursor + 1 :], style="green")
+            else:
+                line.append(" ", style="reverse")
         else:
             line.append(segment, style="green")
         visual_lines.append(line)

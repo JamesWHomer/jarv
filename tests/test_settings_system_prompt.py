@@ -104,15 +104,31 @@ def test_system_prompt_controls_are_pinned_to_editor_bottom():
     assert any(not line.plain for line in lines[3:-1])
 
 
-def test_system_prompt_cursor_renders_once_at_wrap_boundary():
+def test_system_prompt_cursor_uses_reverse_video_at_wrap_boundary():
     config = {**DEFAULT_CONFIG, "system_prompt": "abcdefgh"}
     edit = settings_command._settings_begin_edit(_system_prompt_row(config), config)
     edit["cursor"] = 4
 
     lines, cursor_line = settings_command._settings_multiline_visual_lines(edit, 8)
 
-    assert sum(line.plain.count("_") for line in lines) == 1
     assert cursor_line == 1
+    assert lines[1].plain == "  efgh"
+    assert sum(
+        "reverse" in str(span.style)
+        for line in lines
+        for span in line.spans
+    ) == 1
+
+
+def test_system_prompt_cursor_uses_reverse_space_at_end_of_line():
+    config = {**DEFAULT_CONFIG, "system_prompt": "abc"}
+    edit = settings_command._settings_begin_edit(_system_prompt_row(config), config)
+
+    lines, cursor_line = settings_command._settings_multiline_visual_lines(edit, 20)
+
+    assert cursor_line == 0
+    assert lines[0].plain == "  abc "
+    assert "reverse" in str(lines[0].spans[-1].style)
 
 
 def test_read_key_maps_windows_ctrl_s(monkeypatch):
