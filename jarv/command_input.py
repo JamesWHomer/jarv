@@ -154,7 +154,7 @@ def _read_key(text_mode: bool = False) -> str:
     """Read a single keypress and return a normalised token.
 
     Returns one of: UP, DOWN, LEFT, RIGHT, HOME, END, PAGEUP, PAGEDOWN,
-    ENTER, ESC, TAB, CTRL_F, BACKSPACE, DELETE, or the raw character. Raises KeyboardInterrupt on
+    ENTER, ESC, TAB, CTRL_F, CTRL_S, BACKSPACE, DELETE, or the raw character. Raises KeyboardInterrupt on
     Ctrl-C.  When ``text_mode`` is True, the convenience q/Q → ESC mapping is
     disabled so a search query can include those letters.
     """
@@ -181,6 +181,8 @@ def _read_key(text_mode: bool = False) -> str:
             return "ESC"
         if ch == "\x06":
             return "CTRL_F"
+        if ch == "\x13":
+            return "CTRL_S"
         if ch in ("\x08", "\x7f"):
             return "BACKSPACE"
         if ch == "\x03":
@@ -220,6 +222,8 @@ def _read_key(text_mode: bool = False) -> str:
                 return "ESC"
             if ch == "\x06":
                 return "CTRL_F"
+            if ch == "\x13":
+                return "CTRL_S"
             if ch in ("\x7f", "\x08"):
                 return "BACKSPACE"
             if ch == "\x03":

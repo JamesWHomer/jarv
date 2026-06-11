@@ -12,7 +12,13 @@ from rich.panel import Panel
 from rich.text import Text
 
 from .command_input import _read_key_with_repeats, mouse_capture
-from .config import CONFIG_FILE, DEFAULT_CONFIG, READ_ONLY_COMMAND_DISPLAY_CHOICES, is_setup_complete
+from .config import (
+    CONFIG_FILE,
+    DEFAULT_CONFIG,
+    LEGACY_READ_ONLY_COMMAND_DISPLAY_CHOICES,
+    READ_ONLY_COMMAND_DISPLAY_CHOICES,
+    is_setup_complete,
+)
 from .display import (
     PANEL_BORDER_STYLE,
     TITLE_STYLE,
@@ -35,6 +41,8 @@ def _config_display_mode(config: dict | None = None) -> str:
         except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             value = None
 
+    if value in LEGACY_READ_ONLY_COMMAND_DISPLAY_CHOICES:
+        return "fullscreen"
     if value in READ_ONLY_COMMAND_DISPLAY_CHOICES:
         return str(value)
     return str(DEFAULT_CONFIG["read_only_command_display"])
@@ -97,7 +105,6 @@ def _show_overlay(
     *,
     title: str,
     subtitle: str | None,
-    prefer_compact: bool,
     max_width: int | None,
     close_hint: str,
 ) -> None:
@@ -111,9 +118,8 @@ def _show_overlay(
     after the emulator reflows scrollback, and ghosts that scroll out of the
     viewport can't be erased at all).
 
-    When ``prefer_compact`` is set and the content fits, the panel is sized to
-    its content (the lightweight "inline" look). Otherwise it fills the screen
-    and becomes scrollable.
+    When the content fits, the panel is sized to its content. Otherwise it
+    fills the screen and becomes scrollable.
     """
     offset = 0
     visual_cache: dict[int, list[Text]] = {}
@@ -131,8 +137,6 @@ def _show_overlay(
         return max(1, term_h - 2 - (2 if show_footer else 0))
 
     def _is_compact(term_w: int, term_h: int) -> bool:
-        if not prefer_compact:
-            return False
         panel_width = min(term_w, max_width) if max_width else term_w
         inner_width = max(1, panel_width - 4)
         return len(_lines(inner_width)) + _COMPACT_CHROME_ROWS <= term_h
@@ -257,14 +261,12 @@ def show_read_only_command(
         console.print(_command_panel(body, title=title, subtitle=subtitle, width=max_width))
         return
 
-    # Interactive views always render in the alternate screen buffer. "inline"
-    # and "auto" use the compact (content-sized) overlay when it fits; full-
-    # screen forces the scrollable full-height panel.
+    # Fullscreen uses the alternate screen buffer. Short content keeps a
+    # compact panel; longer content fills the screen and becomes scrollable.
     _show_overlay(
         body,
         title=title,
         subtitle=subtitle,
-        prefer_compact=selected_mode != "fullscreen",
         max_width=max_width,
         close_hint=close_hint,
     )

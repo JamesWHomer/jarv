@@ -73,13 +73,13 @@ def _install_display_harness(monkeypatch, *, width=80, height=24, key="ENTER", f
     return output
 
 
-def test_auto_uses_overlay_for_short_output(monkeypatch):
+def test_fullscreen_uses_compact_overlay_for_short_output(monkeypatch):
     _install_display_harness(monkeypatch, height=20)
 
     read_only_display.show_read_only_command(
         Text("short"),
         title="test",
-        config={"read_only_command_display": "auto"},
+        config={"read_only_command_display": "fullscreen"},
         include_setup_nudge=False,
     )
 
@@ -87,14 +87,14 @@ def test_auto_uses_overlay_for_short_output(monkeypatch):
     assert FakeLive.instances[-1].kwargs["screen"] is True
 
 
-def test_auto_uses_fullscreen_for_long_output(monkeypatch):
+def test_fullscreen_uses_scrollable_view_for_long_output(monkeypatch):
     _install_display_harness(monkeypatch, height=8)
     body = Text("\n".join(f"line {i}" for i in range(40)))
 
     read_only_display.show_read_only_command(
         body,
         title="test",
-        config={"read_only_command_display": "auto"},
+        config={"read_only_command_display": "fullscreen"},
         include_setup_nudge=False,
     )
 
@@ -129,14 +129,14 @@ def test_print_mode_respects_max_width(monkeypatch):
     assert max(len(line) for line in output.getvalue().splitlines()) == 40
 
 
-def test_non_tty_prints_even_when_inline_requested(monkeypatch):
+def test_non_tty_prints_even_when_fullscreen_requested(monkeypatch):
     output = _install_display_harness(monkeypatch, force_terminal=True)
     monkeypatch.setattr(read_only_display.sys, "stdin", NonTtyStdin())
 
     read_only_display.show_read_only_command(
         Text("non tty"),
         title="test",
-        config={"read_only_command_display": "inline"},
+        config={"read_only_command_display": "fullscreen"},
         include_setup_nudge=False,
     )
 
@@ -144,28 +144,13 @@ def test_non_tty_prints_even_when_inline_requested(monkeypatch):
     assert "non tty" in output.getvalue()
 
 
-@pytest.mark.parametrize("key", ["q", "ESC", "ENTER", "KeyboardInterrupt"])
-def test_inline_view_closes_on_expected_keys(monkeypatch, key):
-    _install_display_harness(monkeypatch, key=key)
-
-    read_only_display.show_read_only_command(
-        Text("close me"),
-        title="test",
-        config={"read_only_command_display": "inline"},
-        include_setup_nudge=False,
-    )
-
-    assert FakeLive.instances[-1].kwargs["screen"] is True
-    assert FakeLive.instances[-1].refresh_count == 1
-
-
-def test_inline_view_uses_max_width_and_custom_close_hint(monkeypatch):
+def test_fullscreen_view_uses_max_width_and_custom_close_hint(monkeypatch):
     _install_display_harness(monkeypatch, width=120, height=20)
 
     read_only_display.show_read_only_command(
         Text("close me"),
         title="test",
-        config={"read_only_command_display": "inline"},
+        config={"read_only_command_display": "fullscreen"},
         include_setup_nudge=False,
         max_width=60,
         close_hint="q / Esc / Enter  Close",

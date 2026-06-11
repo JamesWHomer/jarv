@@ -3,10 +3,11 @@ from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from rich.console import Console
 
-from jarv import commands, settings_command, usage_command
-from jarv.config import DEFAULT_CONFIG, validate_config
+from jarv import commands, config as config_module, history, settings_command, usage_command
+from jarv.config import DEFAULT_CONFIG, READ_ONLY_COMMAND_DISPLAY_CHOICES, validate_config
 
 
 def _render_help_text() -> str:
@@ -23,10 +24,25 @@ def _render_read_only_text(body) -> str:
     return output.getvalue()
 
 
-def test_read_only_command_display_default_is_auto():
-    assert DEFAULT_CONFIG["read_only_command_display"] == "auto"
+def test_read_only_command_display_default_is_fullscreen():
+    assert READ_ONLY_COMMAND_DISPLAY_CHOICES == ("fullscreen", "print")
+    assert DEFAULT_CONFIG["read_only_command_display"] == "fullscreen"
     assert DEFAULT_CONFIG["print_usage_after_agent"] is False
     assert validate_config(dict(DEFAULT_CONFIG))
+
+
+@pytest.mark.parametrize("legacy_mode", ["auto", "inline"])
+def test_load_config_migrates_legacy_read_only_display_modes(monkeypatch, tmp_path, legacy_mode):
+    config_file = tmp_path / "config.json"
+    config_file.write_text(f'{{"read_only_command_display": "{legacy_mode}"}}', encoding="utf-8")
+    monkeypatch.setattr(config_module, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_module, "CONFIG_FILE", config_file)
+    monkeypatch.setattr(history, "migrate_flat_session_files", lambda: None)
+
+    loaded = config_module.load_config()
+
+    assert loaded["read_only_command_display"] == "fullscreen"
+    assert '"read_only_command_display": "fullscreen"' in config_file.read_text(encoding="utf-8")
 
 
 def test_validate_config_rejects_invalid_read_only_command_display():
@@ -40,7 +56,7 @@ def test_settings_exposes_read_only_command_display(monkeypatch):
     row = next(row for row in settings_command._settings_rows(config) if row["key"] == "read_only_command_display")
 
     assert row["section"] == "display"
-    assert settings_command._settings_value_text(row, config).plain == "auto"
+    assert settings_command._settings_value_text(row, config).plain == "fullscreen"
 
     monkeypatch.setattr(settings_command, "save_config", lambda _config: None)
     updated, message = settings_command._settings_apply_quick(row, config)
@@ -73,7 +89,7 @@ def test_help_about_and_config_use_shared_renderer(monkeypatch):
     commands.cmd_config()
 
     assert [call["title"] for call in calls] == ["help", "about", "config"]
-    assert calls[2]["config"]["read_only_command_display"] == "auto"
+    assert calls[2]["config"]["read_only_command_display"] == "fullscreen"
 
 
 def test_help_is_compact_and_task_focused():
