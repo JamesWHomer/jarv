@@ -400,6 +400,25 @@ def _settings_reset_row(row: dict, config: dict) -> tuple[dict, str]:
     return config, f"reset {row['label']}"
 
 
+def _settings_reset_confirmation(row: dict) -> str:
+    if row["key"] == "api_key":
+        action = "Clear stored API key?"
+    else:
+        action = f"Reset {row['label']} to default?"
+    return f"{action}  y confirm \u00b7 any other key cancel"
+
+
+def _settings_finish_reset(
+    row: dict,
+    config: dict,
+    key: str,
+) -> tuple[dict, str, str]:
+    if key in ("y", "Y"):
+        config, message = _settings_reset_row(row, config)
+        return config, message, "cyan"
+    return config, f"{row['label']} reset cancelled", "dim"
+
+
 def _settings_provider_choices() -> list[tuple[str, str, str]]:
     from .provider_catalog import PROVIDER_CHOICES
 
@@ -1234,6 +1253,7 @@ def _settings_interactive(config: dict) -> None:
     scroll_start = 0
     flash: tuple[str, str] | None = None
     edit: dict | None = None
+    pending_reset: int | None = None
     catalog_refresher = _ModelCatalogRefresher()
     live_holder: list[Live] = []
 
@@ -1276,6 +1296,8 @@ def _settings_interactive(config: dict) -> None:
             target_edit["catalog_input_dirty"] = False
 
     def _footer() -> str:
+        if pending_reset is not None:
+            return "y confirm   any other key cancel"
         return "\u2191\u2193 select   Enter edit/toggle   r reset   q exit"
 
     def _append_bottom_footer(parts: list, height: int, footer: Text) -> None:
@@ -1555,6 +1577,14 @@ def _settings_interactive(config: dict) -> None:
                     edit["error"] = ""
                 continue
 
+            if pending_reset is not None:
+                row = rows[pending_reset]
+                config, message, style = _settings_finish_reset(row, config, key)
+                rows = _settings_rows(config)
+                pending_reset = None
+                flash = (message, style)
+                continue
+
             if key == "ESC":
                 break
             if key in ("UP", "k"):
@@ -1586,9 +1616,8 @@ def _settings_interactive(config: dict) -> None:
                 rows = _settings_rows(config)
                 flash = (message, "green")
             elif key == "r":
-                config, message = _settings_reset_row(rows[selected], config)
-                rows = _settings_rows(config)
-                flash = (message, "cyan")
+                pending_reset = selected
+                flash = (_settings_reset_confirmation(rows[selected]), "bold yellow")
 
     catalog_refresher.close()
     console.print("[dim]\u25cb Settings closed.[/dim]")

@@ -141,3 +141,52 @@ def test_read_key_maps_windows_ctrl_s(monkeypatch):
     monkeypatch.setitem(command_input.sys.modules, "msvcrt", FakeMsvcrt)
 
     assert command_input._read_key(text_mode=True) == "CTRL_S"
+
+
+def test_reset_requires_explicit_confirmation(monkeypatch):
+    config = {**DEFAULT_CONFIG, "system_prompt": "Keep this prompt"}
+    row = _system_prompt_row(config)
+    saved = []
+    monkeypatch.setattr(settings_command, "save_config", lambda value: saved.append(dict(value)))
+
+    prompt = settings_command._settings_reset_confirmation(row)
+
+    assert prompt == "Reset System prompt to default?  y confirm \u00b7 any other key cancel"
+    assert config["system_prompt"] == "Keep this prompt"
+    assert saved == []
+
+    updated, message, style = settings_command._settings_finish_reset(row, config, "y")
+
+    assert updated["system_prompt"] == DEFAULT_CONFIG["system_prompt"]
+    assert message == "reset System prompt"
+    assert style == "cyan"
+    assert saved[-1]["system_prompt"] == DEFAULT_CONFIG["system_prompt"]
+
+
+def test_reset_confirmation_cancels_on_other_keys(monkeypatch):
+    row = _system_prompt_row(DEFAULT_CONFIG)
+
+    for key in ("r", "ESC", "DOWN"):
+        config = {**DEFAULT_CONFIG, "system_prompt": "Keep this prompt"}
+        saved = []
+        monkeypatch.setattr(settings_command, "save_config", lambda value: saved.append(dict(value)))
+
+        updated, message, style = settings_command._settings_finish_reset(row, config, key)
+
+        assert updated["system_prompt"] == "Keep this prompt"
+        assert message == "System prompt reset cancelled"
+        assert style == "dim"
+        assert saved == []
+
+
+def test_api_key_reset_confirmation_uses_clear_language():
+    config = dict(DEFAULT_CONFIG)
+    row = next(
+        row for row in settings_command._settings_rows(config)
+        if row["key"] == "api_key"
+    )
+
+    assert (
+        settings_command._settings_reset_confirmation(row)
+        == "Clear stored API key?  y confirm \u00b7 any other key cancel"
+    )
