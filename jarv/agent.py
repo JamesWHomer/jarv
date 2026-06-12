@@ -8,7 +8,9 @@ from dataclasses import dataclass
 
 from rich import box
 from rich.console import Group
+from rich.control import Control, ControlType
 from rich.live import Live
+from rich.live_render import LiveRender
 from rich.markdown import Markdown
 from rich.markup import escape
 from rich.panel import Panel
@@ -73,6 +75,7 @@ TOOLS = [RUN_COMMAND_TOOL, SPAWN_TOOL, READ_ARTIFACT_TOOL, ASK_USER_TOOL]
 
 
 _THINKING_FRAMES = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"]
+STREAM_PREVIEW_REFRESH_INTERVAL = 1 / 12
 
 
 @dataclass(frozen=True)
@@ -159,6 +162,101 @@ class TailMarkdown:
         for line in lines:
             yield from line
             yield Segment.line()
+
+
+class InPlaceLiveRender(LiveRender):
+    """Overwrite live rows in place instead of blanking the entire block first."""
+
+    _erase_to_end = Control((ControlType.ERASE_IN_LINE, 0)).segment
+
+    def position_cursor(self) -> Control:
+        if self._shape is None:
+            return Control()
+        _, height = self._shape
+        return Control(
+            ControlType.CARRIAGE_RETURN,
+            *((ControlType.CURSOR_UP, 1),) * max(0, height - 1),
+        )
+
+    def __rich_console__(self, console, options):
+        previous_height = self._shape[1] if self._shape is not None else 0
+        rendered = list(super().__rich_console__(console, options))
+        current_width, current_height = self._shape or (0, 0)
+
+        for segment in rendered:
+            if segment.text == "\n" and not segment.control:
+                yield self._erase_to_end
+            yield segment
+        if current_height:
+            yield self._erase_to_end
+
+        stable_height = max(previous_height, current_height)
+        for _ in range(stable_height - current_height):
+            yield Segment.line()
+            yield self._erase_to_end
+        self._shape = (current_width, stable_height)
+
+
+class InPlaceLive(Live):
+    """Rich Live variant that avoids a visible clear-then-redraw flash."""
+
+    def __init__(self, renderable=None, **kwargs):
+        super().__init__(renderable, **kwargs)
+        self._live_render = InPlaceLiveRender(
+            self.get_renderable(),
+            vertical_overflow=self.vertical_overflow,
+        )
+
+
+class StreamingMarkdownPreview:
+    """Coalesce text deltas into bounded, manually refreshed preview frames."""
+
+    def __init__(
+        self,
+        live: Live,
+        max_lines: int,
+        *,
+        refresh_interval: float = STREAM_PREVIEW_REFRESH_INTERVAL,
+        clock=time.perf_counter,
+    ):
+        self._live = live
+        self._max_lines = max_lines
+        self._refresh_interval = max(0.0, refresh_interval)
+        self._clock = clock
+        self._chunks: list[str] = []
+        self._last_refresh_at: float | None = None
+        self._dirty = False
+
+    @property
+    def text(self) -> str:
+        return "".join(self._chunks)
+
+    def append(self, delta: str) -> None:
+        self._chunks.append(delta)
+        self._dirty = True
+        now = self._clock()
+        if (
+            self._last_refresh_at is None
+            or now - self._last_refresh_at >= self._refresh_interval
+        ):
+            self._render(now, refresh=True)
+
+    def replace(self, text: str) -> None:
+        self._chunks = [text]
+        self._dirty = True
+
+    def flush(self, *, refresh: bool = True) -> None:
+        if self._dirty:
+            self._render(self._clock(), refresh=refresh)
+
+    def _render(self, now: float, *, refresh: bool) -> None:
+        source = flatten_headings(self.text)
+        self._live.update(
+            TailMarkdown(source, self._max_lines),
+            refresh=refresh,
+        )
+        self._last_refresh_at = now
+        self._dirty = False
 
 
 def thought_complete_indicator(text: str) -> Text:
@@ -660,6 +758,7 @@ def run_agent(
             reasoning_items = []
             saw_reasoning = False
             got_text = False
+            stream_preview: StreamingMarkdownPreview | None = None
 
             if spinner_live is None:
                 thought_started = time.perf_counter()
@@ -700,23 +799,22 @@ def run_agent(
                                 )
                                 _, term_h = terminal_size(console=console)
                                 stream_max_lines = term_h - 2
-                                stream_live = Live(
+                                stream_live = InPlaceLive(
                                     TailMarkdown("", stream_max_lines),
-                                    refresh_per_second=12,
                                     console=console,
-                                    auto_refresh=True,
+                                    auto_refresh=False,
                                     transient=True,
                                     vertical_overflow="crop",
                                 )
                                 stream_live.start()
-                        reply_text += event.delta
-                        if stream_live is not None:
-                            stream_live.update(
-                                TailMarkdown(
-                                    flatten_headings(reply_text),
+                                stream_preview = StreamingMarkdownPreview(
+                                    stream_live,
                                     stream_max_lines,
                                 )
-                            )
+                        if stream_preview is not None:
+                            stream_preview.append(event.delta)
+                        else:
+                            reply_text += event.delta
                     elif isinstance(event, ToolCallDone):
                         tool_calls.append(event)
                     elif isinstance(event, ReasoningStarted):
@@ -730,10 +828,14 @@ def run_agent(
                             wait_indicator.has_reasoning = True
                     elif isinstance(event, StreamDone):
                         final_response = event.response
+                if stream_preview is not None:
+                    reply_text = stream_preview.text
                 final_text = response_output_text(final_response)
                 if final_text and len(final_text) >= len(reply_text):
                     reply_text = final_text
                     got_text = True
+                    if stream_preview is not None:
+                        stream_preview.replace(final_text)
                 if not incognito:
                     record_response_usage(
                         usage_path,
@@ -749,6 +851,9 @@ def run_agent(
                         ),
                     )
             finally:
+                if stream_preview is not None:
+                    reply_text = stream_preview.text
+                    stream_preview.flush(refresh=False)
                 if spinner_live is not None:
                     spinner_live.stop()
                     spinner_live = None
