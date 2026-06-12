@@ -14,6 +14,7 @@ from jarv.provider import (
     StreamDone,
     TextDelta,
     ToolCallDone,
+    ToolCallStarted,
     _stream_anthropic,
     get_backend,
 )
@@ -248,14 +249,16 @@ def test_stream_emits_thinking_text_tool_and_normalized_usage():
     }]
     assert isinstance(normalized[2], TextDelta)
     assert normalized[2].delta == "Running"
-    assert isinstance(normalized[3], ToolCallDone)
-    assert normalized[3].arguments == '{"command":"git status"}'
-    assert isinstance(normalized[4], StreamDone)
-    assert normalized[4].response["output_text"] == "Running"
-    assert normalized[4].response["usage"]["input_tokens"] == 20
-    assert normalized[4].response["usage"]["cached_input_tokens"] == 7
-    assert normalized[4].response["usage"]["uncached_input_tokens"] == 13
-    assert normalized[4].response["usage"]["total_tokens"] == 32
+    assert isinstance(normalized[3], ToolCallStarted)
+    assert normalized[3].name == "run_command"
+    assert isinstance(normalized[4], ToolCallDone)
+    assert normalized[4].arguments == '{"command":"git status"}'
+    assert isinstance(normalized[5], StreamDone)
+    assert normalized[5].response["output_text"] == "Running"
+    assert normalized[5].response["usage"]["input_tokens"] == 20
+    assert normalized[5].response["usage"]["cached_input_tokens"] == 7
+    assert normalized[5].response["usage"]["uncached_input_tokens"] == 13
+    assert normalized[5].response["usage"]["total_tokens"] == 32
 
 
 def test_non_streaming_request_retries_retryable_status(monkeypatch):

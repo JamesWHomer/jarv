@@ -470,6 +470,12 @@ def stream_message(
                 blocks[index] = block
                 if block.get("type") in ("thinking", "redacted_thinking"):
                     yield {"type": "reasoning_started", "id": f"thinking_{index}"}
+                elif block.get("type") == "tool_use":
+                    yield {
+                        "type": "tool_call_started",
+                        "id": str(block.get("id") or ""),
+                        "name": str(block.get("name") or ""),
+                    }
                 continue
             if event_type == "content_block_delta":
                 index = int(event.get("index") or 0)

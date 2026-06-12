@@ -25,6 +25,13 @@ class TextDelta:
 
 
 @dataclass
+class ToolCallStarted:
+    id: str
+    call_id: str
+    name: str
+
+
+@dataclass
 class ToolCallDone:
     id: str
     call_id: str
@@ -425,6 +432,7 @@ def _stream_responses_api(
     )
     reasoning_started = False
     response_id: str | None = None
+    started_tool_call_ids: set[str] = set()
     yielded_tool_call_ids: set[str] = set()
     yielded_reasoning_ids: set[str] = set()
     try:
@@ -445,15 +453,46 @@ def _stream_responses_api(
                 yield ReasoningStarted(id=str(item.get("id") or ""))
             if event_type == "response.output_text.delta":
                 yield TextDelta(str(event.get("delta") or ""))
+            elif event_type == "response.output_item.added":
+                item = event.get("item") if isinstance(event.get("item"), dict) else {}
+                if item.get("type") == "function_call":
+                    item_id = str(item.get("id") or "")
+                    call_id = str(item.get("call_id") or item_id)
+                    started_tool_call_ids.update(value for value in (item_id, call_id) if value)
+                    yield ToolCallStarted(
+                        id=item_id,
+                        call_id=call_id,
+                        name=str(item.get("name") or ""),
+                    )
+            elif event_type == "response.function_call_arguments.delta":
+                item_id = str(event.get("item_id") or "")
+                if item_id and item_id not in started_tool_call_ids:
+                    started_tool_call_ids.add(item_id)
+                    yield ToolCallStarted(
+                        id=item_id,
+                        call_id=item_id,
+                        name="",
+                    )
             elif event_type == "response.output_item.done":
                 item = event.get("item") if isinstance(event.get("item"), dict) else {}
                 if item.get("type") == "function_call":
+                    item_id = str(item.get("id") or "")
+                    call_id = str(item.get("call_id") or "")
+                    if not any(
+                        value and value in started_tool_call_ids
+                        for value in (item_id, call_id)
+                    ):
+                        yield ToolCallStarted(
+                            id=item_id,
+                            call_id=call_id,
+                            name=str(item.get("name") or ""),
+                        )
                     yielded_tool_call_ids.update(
-                        {str(item.get("id") or ""), str(item.get("call_id") or "")}
+                        {item_id, call_id}
                     )
                     yield ToolCallDone(
-                        id=str(item.get("id") or ""),
-                        call_id=str(item.get("call_id") or ""),
+                        id=item_id,
+                        call_id=call_id,
                         name=str(item.get("name") or ""),
                         arguments=str(item.get("arguments") or "{}"),
                     )
@@ -519,6 +558,7 @@ def _stream_chat_completions(
         service_tier=service_tier,
     )
     accumulators: dict[int, dict] = {}
+    started_tool_indices: set[int] = set()
     final_chunk: dict[str, Any] = {}
     reasoning_started = False
     for chunk in stream_chat(
@@ -559,6 +599,14 @@ def _stream_chat_completions(
                 if isinstance(function, dict):
                     acc["name"] += str(function.get("name") or "")
                     acc["arguments"] += str(function.get("arguments") or "")
+                if idx not in started_tool_indices:
+                    started_tool_indices.add(idx)
+                    call_id = acc["id"] or f"chat_tool_{idx}"
+                    yield ToolCallStarted(
+                        id=call_id,
+                        call_id=call_id,
+                        name=acc["name"],
+                    )
         if choice.get("finish_reason"):
             yield from _flush_tool_calls(accumulators)
 
@@ -604,6 +652,13 @@ def _stream_anthropic(
                 id=str(event.get("id") or ""),
                 summary=[],
                 provider_content=event.get("provider_content"),
+            )
+        elif event_type == "tool_call_started":
+            call_id = str(event.get("id") or "")
+            yield ToolCallStarted(
+                id=call_id,
+                call_id=call_id,
+                name=str(event.get("name") or ""),
             )
         elif event_type == "tool_call":
             call_id = str(event.get("id") or f"call_{uuid.uuid4().hex[:12]}")
@@ -659,6 +714,11 @@ def _stream_gemini(
             )
         elif event_type == "tool_call":
             call_id = str(event.get("id") or f"call_{uuid.uuid4().hex[:12]}")
+            yield ToolCallStarted(
+                id=call_id,
+                call_id=call_id,
+                name=str(event.get("name") or ""),
+            )
             yield ToolCallDone(
                 id=call_id,
                 call_id=call_id,

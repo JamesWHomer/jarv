@@ -13,13 +13,14 @@ from jarv.agent import (
     _format_agent_usage_line,
     response_start_status,
     response_wait_label,
+    tool_call_start_status,
     run_agent,
     to_response_input_item,
 )
 from jarv.config import DEFAULT_CONFIG
 from jarv.history import SessionContext, load_history, save_history
 from jarv.history import redo_file_for
-from jarv.provider import StreamDone, TextDelta, ToolCallDone
+from jarv.provider import StreamDone, TextDelta, ToolCallDone, ToolCallStarted
 
 
 class AgentInputTests(unittest.TestCase):
@@ -28,6 +29,24 @@ class AgentInputTests(unittest.TestCase):
 
     def test_response_wait_label_uses_thinking_with_reasoning(self):
         self.assertEqual(response_wait_label(has_reasoning=True), "Thinking")
+
+    def test_response_wait_label_prefers_active_tool_call(self):
+        self.assertEqual(
+            response_wait_label(
+                has_reasoning=True,
+                tool_names=("run_command",),
+            ),
+            "Writing tool call: run_command",
+        )
+
+    def test_response_wait_label_counts_multiple_tool_calls(self):
+        self.assertEqual(
+            response_wait_label(
+                has_reasoning=False,
+                tool_names=("run_command", "spawn"),
+            ),
+            "Writing 2 tool calls",
+        )
 
     def test_response_start_status_uses_reasoning_label_for_reasoning_events(self):
         self.assertEqual(
@@ -39,6 +58,12 @@ class AgentInputTests(unittest.TestCase):
         self.assertEqual(
             response_start_status(1.0, has_reasoning=False),
             "Started responding in 1.0 second.",
+        )
+
+    def test_tool_call_start_status_names_single_tool(self):
+        self.assertEqual(
+            tool_call_start_status(2.04, ("run_command",)),
+            "Prepared run_command in 2.0 seconds.",
         )
 
     def test_function_call_id_is_shortened_for_responses_input(self):
@@ -461,6 +486,73 @@ class AgentInputTests(unittest.TestCase):
         self.assertEqual(events[0], "live_start")
         self.assertLess(events.index("live_start"), events.index("create_client"))
         self.assertLess(events.index("create_client"), events.index("stream_response"))
+
+    def test_run_agent_refreshes_wait_indicator_when_tool_call_starts(self):
+        with TemporaryDirectory() as tmp:
+            history_file = Path(tmp) / "history.json"
+            context = SessionContext(
+                session_id="session-id",
+                session_label="test session",
+                history_file=history_file,
+                now=datetime(2026, 5, 21, tzinfo=timezone.utc),
+            )
+            rendered_labels = []
+
+            class FakeLive:
+                def __init__(self, renderable, *_args, **_kwargs):
+                    self.renderable = renderable
+
+                def start(self):
+                    pass
+
+                def stop(self):
+                    pass
+
+                def update(self, renderable, *, refresh=False):
+                    self.renderable = renderable
+                    if refresh:
+                        rendered_labels.append(
+                            response_wait_label(
+                                renderable.has_reasoning,
+                                tuple(renderable._tool_names.values()),
+                            )
+                        )
+
+            class TtyStringIO(io.StringIO):
+                def isatty(self):
+                    return True
+
+            stream_count = 0
+
+            def fake_stream_response(*_args, **_kwargs):
+                nonlocal stream_count
+                stream_count += 1
+                if stream_count == 1:
+                    yield ToolCallStarted(
+                        id="fc_1",
+                        call_id="call_1",
+                        name="run_command",
+                    )
+                    yield ToolCallDone(
+                        id="fc_1",
+                        call_id="call_1",
+                        name="run_command",
+                        arguments='{"command":"echo ok"}',
+                    )
+                else:
+                    yield TextDelta("done")
+                yield StreamDone(response=None)
+
+            with (
+                patch("jarv.agent.prepare_session_context", return_value=context),
+                patch("jarv.agent.stream_response", side_effect=fake_stream_response),
+                patch("jarv.agent._dispatch_run_command_with_ui", return_value="ok"),
+                patch("jarv.agent.sys.stdout", new=TtyStringIO()),
+                patch("jarv.agent.Live", FakeLive),
+            ):
+                run_agent("run it", DEFAULT_CONFIG, client=object(), incognito=True)
+
+        self.assertIn("Writing tool call: run_command", rendered_labels)
 
     def test_run_agent_persists_text_recovered_from_final_response(self):
         with TemporaryDirectory() as tmp:

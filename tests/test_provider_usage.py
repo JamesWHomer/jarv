@@ -10,6 +10,7 @@ from jarv.provider import (
     StreamDone,
     TextDelta,
     ToolCallDone,
+    ToolCallStarted,
     _stream_chat_completions,
     _stream_gemini,
     _stream_responses_api,
@@ -47,6 +48,16 @@ class ProviderUsageTests(unittest.TestCase):
             yield {
                 "type": "response.output_item.added",
                 "item": {"type": "reasoning", "id": "rs_1"},
+            }
+            yield {
+                "type": "response.output_item.added",
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": "run",
+                    "arguments": "",
+                },
             }
             yield {"type": "response.output_text.delta", "delta": "hi"}
             yield {
@@ -89,10 +100,12 @@ class ProviderUsageTests(unittest.TestCase):
 
         self.assertEqual(captured["payload"]["prompt_cache_key"], "jarv:session")
         self.assertIsInstance(events[0], ReasoningStarted)
-        self.assertIsInstance(events[1], TextDelta)
-        self.assertIsInstance(events[2], ToolCallDone)
-        self.assertIsInstance(events[3], ReasoningDone)
-        self.assertIsInstance(events[4], StreamDone)
+        self.assertIsInstance(events[1], ToolCallStarted)
+        self.assertEqual(events[1].name, "run")
+        self.assertIsInstance(events[2], TextDelta)
+        self.assertIsInstance(events[3], ToolCallDone)
+        self.assertIsInstance(events[4], ReasoningDone)
+        self.assertIsInstance(events[5], StreamDone)
 
     def test_responses_stream_recovers_after_disconnect(self):
         def broken(_client, _payload, **_kwargs):
@@ -145,7 +158,8 @@ class ProviderUsageTests(unittest.TestCase):
             ))
         self.assertIsInstance(events[0], ReasoningStarted)
         self.assertIsInstance(events[1], TextDelta)
-        self.assertIsInstance(events[2], ToolCallDone)
+        self.assertIsInstance(events[2], ToolCallStarted)
+        self.assertIsInstance(events[3], ToolCallDone)
         self.assertEqual(events[-1].response["usage"]["prompt_tokens"], 5)
 
     def test_gemini_stream_preserves_thought_and_tool_signatures(self):
@@ -173,8 +187,10 @@ class ProviderUsageTests(unittest.TestCase):
                 object(), {"provider": "gemini"}, "model", "system", [], []
             ))
         reasoning = next(event for event in events if isinstance(event, ReasoningDone))
+        tool_start = next(event for event in events if isinstance(event, ToolCallStarted))
         tool = next(event for event in events if isinstance(event, ToolCallDone))
         self.assertTrue(reasoning.provider_content[0]["thought"])
+        self.assertEqual(tool_start.name, "run")
         self.assertEqual(tool.provider_content[0]["thoughtSignature"], "signed")
 
     def test_windows_stream_bridge_observes_cancellation_promptly(self):
