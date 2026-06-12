@@ -216,6 +216,95 @@ def test_usage_empty_state_uses_shared_renderer(monkeypatch):
     assert calls[0]["subtitle"] == "usage.json"
 
 
+def test_usage_breakdown_is_reconciled_to_recorded_input_tokens():
+    breakdown = {
+        "system": 129,
+        "tools": 483,
+        "history": 4_289,
+        "tool_io": 315,
+        "reasoning": 0,
+    }
+
+    reconciled = usage_command._reconcile_breakdown(breakdown, 5_065)
+
+    assert sum(reconciled.values()) == 5_065
+    assert reconciled == {
+        "system": 125,
+        "tools": 469,
+        "history": 4_165,
+        "tool_io": 306,
+        "reasoning": 0,
+    }
+
+
+def test_usage_context_line_has_no_leading_padding_and_shows_remaining(monkeypatch):
+    monkeypatch.setattr(usage_command, "known_context_window", lambda _model: 1_050_000)
+
+    line = usage_command._context_usage_renderable(
+        {"model": "test-model", "input_tokens": 17_316}
+    ).plain
+
+    assert line.startswith("1.6% full")
+    assert "(17,316 / 1,050,000)" in line
+    assert line.endswith("1,032,684 remaining")
+
+
+def test_session_usage_uses_current_and_exchange_labels(monkeypatch):
+    calls = []
+    usage = {
+        "totals": {
+            "request_count": 1,
+            "input_tokens": 100,
+            "cached_input_tokens": 25,
+            "uncached_input_tokens": 75,
+            "output_tokens": 10,
+            "total_tokens": 110,
+        },
+        "last_request": {
+            "model": "subagent-model",
+            "input_tokens": 20,
+            "cached_input_tokens": 0,
+            "output_tokens": 5,
+        },
+        "last_root_request": {
+            "model": "root-model",
+            "provider": "openai",
+            "input_tokens": 100,
+            "context_breakdown": {
+                "system": 10,
+                "tools": 20,
+                "history": 70,
+                "tool_io": 0,
+                "reasoning": 0,
+            },
+        },
+    }
+    monkeypatch.setattr(
+        usage_command,
+        "show_read_only_command",
+        lambda body, **kwargs: calls.append((body, kwargs)),
+    )
+    monkeypatch.setattr(
+        usage_command,
+        "prepare_session_context",
+        lambda: SimpleNamespace(history_file=Path("history.json"), session_id="session-id"),
+    )
+    monkeypatch.setattr(usage_command, "usage_file_for", lambda _history_file: Path("usage.json"))
+    monkeypatch.setattr(usage_command, "load_usage", lambda _usage_path, _session_id: usage)
+    monkeypatch.setattr(usage_command, "load_history", lambda _history_file: [{"role": "user"}])
+    monkeypatch.setattr(usage_command, "known_context_window", lambda _model: 1_000)
+
+    usage_command.cmd_usage()
+
+    rendered = _render_read_only_text(calls[0][0])
+    assert "Current model" in rendered
+    assert "Current provider" in rendered
+    assert "Exchanges" in rendered
+    assert "1 exchange" in rendered
+    assert "Last model" not in rendered
+    assert "estimated allocation" in rendered
+
+
 def test_usage_all_since_uses_global_renderer(monkeypatch):
     calls = []
     captured = {}

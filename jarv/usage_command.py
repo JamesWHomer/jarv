@@ -102,9 +102,33 @@ def _breakdown_bar(breakdown: dict, width: int = 48) -> Text:
     return bar
 
 
-def _breakdown_section(breakdown: dict) -> Group:
-    total = sum(int(breakdown.get(k, 0)) for k in _BREAKDOWN_KEYS)
-    bar = _breakdown_bar(breakdown)
+def _reconcile_breakdown(breakdown: dict, target_total: int) -> dict[str, int]:
+    """Scale estimated categories so their integer sum matches recorded input."""
+    estimates = {key: max(int(breakdown.get(key, 0)), 0) for key in _BREAKDOWN_KEYS}
+    estimated_total = sum(estimates.values())
+    if estimated_total <= 0 or target_total <= 0:
+        return estimates
+
+    scaled = {
+        key: (estimates[key] * target_total) / estimated_total
+        for key in _BREAKDOWN_KEYS
+    }
+    reconciled = {key: int(value) for key, value in scaled.items()}
+    remainder = target_total - sum(reconciled.values())
+    ranked = sorted(
+        _BREAKDOWN_KEYS,
+        key=lambda key: scaled[key] - reconciled[key],
+        reverse=True,
+    )
+    for key in ranked[:remainder]:
+        reconciled[key] += 1
+    return reconciled
+
+
+def _breakdown_section(breakdown: dict, *, input_tokens: int) -> Group:
+    reconciled = _reconcile_breakdown(breakdown, input_tokens)
+    total = sum(reconciled.values())
+    bar = _breakdown_bar(reconciled)
 
     bd_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
     bd_table.add_column(no_wrap=True, width=1)
@@ -113,7 +137,7 @@ def _breakdown_section(breakdown: dict) -> Group:
     bd_table.add_column(justify="right", style="dim", no_wrap=True, width=5)
 
     for key in _BREAKDOWN_KEYS:
-        count = int(breakdown.get(key, 0))
+        count = reconciled[key]
         pct = f"{round(count / total * 100)}%" if total > 0 else "—"
         bd_table.add_row(
             Text("●", style=_BREAKDOWN_COLORS[key]),
@@ -138,13 +162,15 @@ def _context_usage_renderable(last_root: dict | None) -> Text:
     if context_window is None:
         return Text("Unknown for this model", style="dim")
     percent = (input_tokens / context_window) * 100
+    remaining = max(context_window - input_tokens, 0)
     color = _fill_color(percent)
     line = Text()
-    line.append(f"{percent:5.1f}% full", style=f"bold {color}")
+    line.append(f"{percent:.1f}% full", style=f"bold {color}")
     line.append("  ")
     line.append_text(_smooth_bar(percent, width=32, color=color))
     line.append("  ")
     line.append(f"({format_int(input_tokens)} / {format_int(context_window)})", style="dim")
+    line.append(f" · {format_int(remaining)} remaining", style="dim")
     return line
 
 
@@ -225,7 +251,7 @@ def _parse_global_usage_args(args: list[str] | None) -> tuple[bool, timedelta | 
     return False, None, "", "Usage: jarv /usage [--all [--since 24h|7d|30d] | day|week|month]"
 
 
-def _token_totals_table(usage: dict, *, model: str | None = None, exchanges: int | None = None) -> Table:
+def _token_totals_table(usage: dict, *, exchanges: int | None = None) -> Table:
     totals = usage.get("totals") if isinstance(usage.get("totals"), dict) else {}
     request_count = int(totals.get("request_count") or 0)
     reasoning_tokens = int(totals.get("reasoning_output_tokens") or 0)
@@ -233,10 +259,8 @@ def _token_totals_table(usage: dict, *, model: str | None = None, exchanges: int
     token_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
     token_table.add_column("Field", style="dim", no_wrap=True)
     token_table.add_column("Value", no_wrap=False)
-    if model is not None:
-        token_table.add_row("Last model", Text(model, style="bold magenta"))
     if exchanges is not None:
-        token_table.add_row("Messages", Text(_plural(exchanges, "exchange")))
+        token_table.add_row("Exchanges", Text(_plural(exchanges, "exchange")))
     token_table.add_row("Requests", Text(_plural(request_count, "request")))
     token_table.add_row("Input tokens", Text(format_int(totals.get("input_tokens"))))
     token_table.add_row("Cached input", Text(format_int(totals.get("cached_input_tokens")), style="cyan"))
@@ -380,17 +404,15 @@ def cmd_usage(args: list[str] | None = None) -> None:
     exchanges = sum(1 for item in history if isinstance(item, dict) and item.get("role") == "user")
     last_request = usage.get("last_request") if isinstance(usage.get("last_request"), dict) else None
     last_root = usage.get("last_root_request") if isinstance(usage.get("last_root_request"), dict) else None
-    model = str((last_request or {}).get("model") or "unknown")
-
     root_model = str((last_root or {}).get("model") or "unknown")
 
     context_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
     context_table.add_column("Field", style="dim", no_wrap=True)
     context_table.add_column("Value", no_wrap=False)
-    context_table.add_row("Latest root model", Text(root_model, style="bold magenta"))
+    context_table.add_row("Current model", Text(root_model, style="bold magenta"))
     if last_root:
         context_table.add_row(
-            "Latest provider",
+            "Current provider",
             Text(str(last_root.get("provider") or "unknown"), style="bold cyan"),
         )
         requested_tier = str(last_root.get("requested_service_tier") or "standard")
@@ -403,7 +425,7 @@ def cmd_usage(args: list[str] | None = None) -> None:
         context_table.add_row("Processing tier", Text(tier_label, style="bold"))
     context_table.add_row("Context usage", _context_usage_renderable(last_root))
 
-    token_table = _token_totals_table(usage, model=model, exchanges=exchanges)
+    token_table = _token_totals_table(usage, exchanges=exchanges)
     if last_request is not None:
         last_line = Text()
         last_line.append(format_int(last_request.get("input_tokens")), style="bold")
@@ -425,9 +447,12 @@ def cmd_usage(args: list[str] | None = None) -> None:
     if isinstance(breakdown, dict) and any(breakdown.get(k, 0) for k in _BREAKDOWN_KEYS):
         panel_parts += [
             Text(""),
-            section_rule("context breakdown [dim](estimated)[/dim]"),
+            section_rule("context breakdown [dim](estimated allocation)[/dim]"),
             Text(""),
-            _breakdown_section(breakdown),
+            _breakdown_section(
+                breakdown,
+                input_tokens=int((last_root or {}).get("input_tokens") or 0),
+            ),
         ]
     panel_parts += [
         Text(""),
