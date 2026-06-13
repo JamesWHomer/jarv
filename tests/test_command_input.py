@@ -144,8 +144,10 @@ def test_render_editable_line_keeps_long_input_on_one_terminal_row():
         columns=16,
     )
 
-    rendered = "".join(output)
-    assert rendered == "\r\x1b[2K\x1b[1;36mjarv>\x1b[0m rstuvwxyz"
+    assert output == [
+        "\x1b[?25l\r\x1b[2K\x1b[1;36mjarv>\x1b[0m rstuvwxyz\x1b[?25h"
+    ]
+    rendered = output[0]
     assert "abcdefghijklmnopqr" not in rendered
 
 
@@ -160,7 +162,21 @@ def test_render_editable_line_accounts_for_wide_unicode_characters():
         columns=11,
     )
 
-    assert "".join(output) == "\r\x1b[2Kjarv> 界cd"
+    assert output == ["\x1b[?25l\r\x1b[2Kjarv> 界cd\x1b[?25h"]
+
+
+def test_render_editable_line_restores_cursor_after_positioning():
+    output = []
+
+    command_input._render_editable_line(
+        "jarv> ",
+        "hello",
+        2,
+        write=output.append,
+        columns=20,
+    )
+
+    assert output == ["\x1b[?25l\r\x1b[2Kjarv> hello\x1b[3D\x1b[?25h"]
 
 
 def test_read_editable_line_batches_queued_paste_before_redrawing():
@@ -175,7 +191,9 @@ def test_read_editable_line_batches_queued_paste_before_redrawing():
     )
 
     assert result == "a long pasted prompt"
-    assert output.count("\r\x1b[2K") == 2
+    repaints = [item for item in output if item.startswith(command_input.CURSOR_HIDE)]
+    assert len(repaints) == 2
+    assert all(item.endswith(command_input.CURSOR_SHOW) for item in repaints)
     assert output[-1] == "\n"
 
 

@@ -12,6 +12,8 @@ from rich.cells import cell_len, get_character_cell_size
 
 MOUSE_CAPTURE_ENABLE = "\x1b[?1000h\x1b[?1006h"
 MOUSE_CAPTURE_DISABLE = "\x1b[?1006l\x1b[?1000l"
+CURSOR_HIDE = "\x1b[?25l"
+CURSOR_SHOW = "\x1b[?25h"
 _PENDING_KEYS: deque[str] = deque()
 _REPEATABLE_NAV_KEYS = frozenset({"UP", "DOWN", "LEFT", "RIGHT", "PAGEUP", "PAGEDOWN"})
 _POSIX_INPUT_POLL_INTERVAL = 0.1
@@ -269,12 +271,12 @@ def _render_editable_line(
         visible_width += width
     visible = text[start:end]
 
-    write("\r\x1b[2K")
-    write(prompt)
-    write(visible)
+    repaint = [CURSOR_HIDE, "\r\x1b[2K", prompt, visible]
     trailing = visible_width - cursor_column
     if trailing:
-        write(f"\x1b[{trailing}D")
+        repaint.append(f"\x1b[{trailing}D")
+    repaint.append(CURSOR_SHOW)
+    write("".join(repaint))
     sys.stdout.flush()
 
 
