@@ -22,11 +22,11 @@ from .unicode_safety import sanitize_json_value
 
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta"
 _THINKING_BUDGETS = {
-    "minimal": 512,
+    "minimal": 1024,
     "low": 1024,
-    "medium": 4096,
-    "high": 8192,
-    "xhigh": 16384,
+    "medium": 8192,
+    "high": 24576,
+    "xhigh": 24576,
     "max": 24576,
 }
 
@@ -171,15 +171,25 @@ def to_tools(tools: list[dict]) -> list[dict]:
 
 
 def _apply_reasoning(config: dict, payload: dict, model: str, reasoning: dict | None) -> None:
+    from .reasoning import require_reasoning_effort
+
     effort = str((reasoning or {}).get("effort") or "").lower()
-    if not effort or effort == "none":
+    if not effort:
         return
+    probe = dict(config)
+    probe["provider"] = "gemini"
+    probe["model"] = model
+    effort = require_reasoning_effort(probe, effort)
+    if effort == "none":
+        payload.setdefault("generationConfig", {})["thinkingConfig"] = {
+            "includeThoughts": False,
+            "thinkingBudget": 0,
+        }
+        return
+
     thinking: dict[str, Any] = {"includeThoughts": True}
     if model.lower().startswith("gemini-3"):
-        if "pro" in model.lower():
-            thinking["thinkingLevel"] = "low" if effort in ("minimal", "low") else "high"
-        else:
-            thinking["thinkingLevel"] = "high" if effort in ("xhigh", "max") else effort
+        thinking["thinkingLevel"] = effort
     else:
         thinking["thinkingBudget"] = _THINKING_BUDGETS.get(effort, -1)
     payload.setdefault("generationConfig", {})["thinkingConfig"] = thinking

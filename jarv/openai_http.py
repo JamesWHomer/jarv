@@ -155,6 +155,7 @@ def build_chat_payload(
     max_completion_tokens: int | None = None,
     temperature: float | None = None,
     service_tier: str | None = None,
+    provider_name: str | None = None,
 ) -> dict:
     payload: dict[str, Any] = {
         "model": model,
@@ -166,7 +167,11 @@ def build_chat_payload(
     if tools:
         payload["tools"] = tools
     if reasoning and reasoning.get("effort"):
-        payload["reasoning_effort"] = reasoning["effort"]
+        if provider_name == "openrouter":
+            payload["reasoning"] = {"effort": reasoning["effort"]}
+            payload["provider"] = {"require_parameters": True}
+        else:
+            payload["reasoning_effort"] = reasoning["effort"]
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
     if max_completion_tokens is not None:

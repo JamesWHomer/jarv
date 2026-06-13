@@ -126,15 +126,6 @@ _SETTINGS_SAFETY_CHOICES = (
     ("none", "no prompts"),
 )
 
-_SETTINGS_REASONING_CHOICES = (
-    ("", "off"),
-    ("minimal", "minimal"),
-    ("low", "low"),
-    ("medium", "medium"),
-    ("high", "high"),
-    ("xhigh", "xhigh"),
-)
-
 _SETTINGS_READ_ONLY_DISPLAY_CHOICES = (
     ("fullscreen", "fullscreen"),
     ("print", "print"),
@@ -201,6 +192,8 @@ def _settings_has_api_key(config: dict) -> tuple[bool, str]:
 
 
 def _settings_rows(config: dict) -> list[dict]:
+    from .reasoning import reasoning_effort_choices, reasoning_effort_description
+
     return [
         {
             "section": "account",
@@ -300,8 +293,8 @@ def _settings_rows(config: dict) -> list[dict]:
             "label": "Reasoning effort",
             "key": "reasoning_effort",
             "kind": "choice",
-            "choices": _SETTINGS_REASONING_CHOICES,
-            "desc": "optional effort hint",
+            "choices": reasoning_effort_choices(config),
+            "desc": reasoning_effort_description(config),
         },
         {
             "section": "runtime",
@@ -421,8 +414,15 @@ def _settings_apply_quick(row: dict, config: dict) -> tuple[dict, str] | None:
             if key == "service_tier"
             else config.get(key, DEFAULT_CONFIG.get(key, choices[0][0]))
         )
-        idx = next((i for i, (value, _) in enumerate(choices) if value == current), -1)
-        value = choices[(idx + 1) % len(choices)][0]
+        idx = next(
+            (i for i, (value, _) in enumerate(choices) if value == current),
+            None,
+        )
+        value = (
+            choices[0][0]
+            if idx is None
+            else choices[(idx + 1) % len(choices)][0]
+        )
         if key == "service_tier":
             _settings_set_service_tier(config, value)
         else:
@@ -1501,6 +1501,8 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
         return config, f"{row['label']} unchanged", "dim", True
 
     if key == "provider":
+        from .reasoning import reconcile_reasoning_effort
+
         selected_provider = edit.get("selected_provider")
         if not selected_provider:
             return config, f"{row['label']} unchanged", "dim", True
@@ -1522,10 +1524,13 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
             )
         ):
             config["model"] = _settings_default_model_for_provider(provider, config=config)
+        reset_effort = reconcile_reasoning_effort(config)
         save_config(config)
         message = f"saved Provider: {_settings_value_text(row, config).plain}"
         if config.get("model") != old_model:
             message += f" (model: {config.get('model')})"
+        if reset_effort is not None:
+            message += " (reasoning effort reset to default)"
         return config, message, "green", True
 
     if key == "api_key":
@@ -1545,6 +1550,8 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
         return config, "saved API key", "green", True
 
     if key == "model":
+        from .reasoning import reconcile_reasoning_effort
+
         warning_model = str(edit.get("model_validation_warning") or "")
         if warning_model:
             actions = edit.get("model_warning_actions") or []
@@ -1568,8 +1575,12 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
             edit.pop("model_warning_actions", None)
             edit.pop("model_warning_selection", None)
             config["model"] = model
+            reset_effort = reconcile_reasoning_effort(config)
             save_config(config)
-            return config, f"saved Model: {model}", "yellow", True
+            message = f"saved Model: {model}"
+            if reset_effort is not None:
+                message += " (reasoning effort reset to default)"
+            return config, message, "yellow", True
 
         models = edit.get("model_choices")
         input_active = bool(edit.get("model_input_active"))
@@ -1628,8 +1639,12 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
                     False,
                 )
         config["model"] = model
+        reset_effort = reconcile_reasoning_effort(config)
         save_config(config)
-        return config, f"saved Model: {model}", "green", True
+        message = f"saved Model: {model}"
+        if reset_effort is not None:
+            message += " (reasoning effort reset to default)"
+        return config, message, "green", True
 
     if key == "system_prompt":
         config[key] = raw_buffer
@@ -1694,6 +1709,8 @@ def _settings_interactive(config: dict) -> None:
         choices: list[tuple[str, str]],
         generation: int,
     ) -> None:
+        nonlocal rows, flash
+
         current_edit = edit
         if (
             current_edit is not None
@@ -1725,6 +1742,16 @@ def _settings_interactive(config: dict) -> None:
                 previous,
                 displayed_choices,
             )
+        if provider == config.get("provider"):
+            from .reasoning import reconcile_reasoning_effort
+
+            if reconcile_reasoning_effort(config) is not None:
+                save_config(config)
+                rows = _settings_rows(config)
+                flash = (
+                    "Reasoning effort reset to default for this model.",
+                    "yellow",
+                )
         if live_holder:
             live_holder[0].refresh()
 
@@ -2097,6 +2124,10 @@ def _settings_interactive(config: dict) -> None:
 
 def cmd_settings() -> None:
     config = load_config()
+    from .reasoning import reconcile_reasoning_effort
+
+    if reconcile_reasoning_effort(config) is not None:
+        save_config(config)
     if not sys.stdin.isatty() or not console.is_terminal:
         _settings_plain(config)
         return

@@ -572,6 +572,7 @@ def _stream_chat_completions(
     client, model, instructions, tools, input_items, reasoning=None,
     service_tier: str | None = None,
     cancellation_token: CancellationToken | None = None,
+    config: dict | None = None,
 ) -> Iterator:
     from .openai_http import build_chat_payload, stream_chat
 
@@ -581,6 +582,7 @@ def _stream_chat_completions(
         sanitize_json_value(_to_chat_tools(tools)) if tools else None,
         reasoning=reasoning,
         service_tier=service_tier,
+        provider_name=str((config or {}).get("provider") or ""),
     )
     accumulators: dict[int, dict] = {}
     started_tool_indices: set[int] = set()
@@ -784,7 +786,7 @@ def _stream_response_direct(
         elif backend == "openai_compat":
             yield from _stream_chat_completions(
                 client, model, instructions, tools, input_items, reasoning,
-                service_tier, cancellation_token,
+                service_tier, cancellation_token, config,
             )
         elif backend == "anthropic":
             yield from _stream_anthropic(

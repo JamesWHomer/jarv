@@ -138,6 +138,17 @@ def validate_config(config: dict) -> bool:
     effort = config.get("reasoning_effort", "")
     if effort is None:
         config["reasoning_effort"] = ""
+    elif isinstance(effort, str):
+        normalized_effort = effort.strip().lower()
+        config["reasoning_effort"] = (
+            "" if normalized_effort == "default" else normalized_effort
+        )
+    from .reasoning import reasoning_effort_error
+
+    effort_error = reasoning_effort_error(config)
+    if effort_error:
+        _console().print(f"[red]Invalid reasoning effort:[/red] {effort_error}.")
+        ok = False
 
     service_tiers = config.get("service_tiers", {})
     if not isinstance(service_tiers, dict):

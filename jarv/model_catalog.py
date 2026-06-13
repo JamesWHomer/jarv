@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import threading
@@ -18,6 +19,7 @@ from .provider_catalog import FALLBACK_PROVIDER_MODELS, LOCAL_PROVIDERS
 
 CACHE_DIR = CONFIG_DIR / "model-catalog"
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+OPENROUTER_ENDPOINTS_DIR = "openrouter-endpoints"
 
 
 @dataclass
@@ -41,6 +43,11 @@ def catalog_cache_key(config: dict) -> str:
 def _cache_path(provider: str) -> Path:
     safe_provider = re.sub(r"[^a-zA-Z0-9_.-]+", "_", provider)
     return CACHE_DIR / f"{safe_provider}.json"
+
+
+def _openrouter_endpoints_path(model: str) -> Path:
+    digest = hashlib.sha256(model.lower().encode("utf-8")).hexdigest()[:24]
+    return CACHE_DIR / OPENROUTER_ENDPOINTS_DIR / f"{digest}.json"
 
 
 def _write_cache(provider: str, models: list[CatalogModel]) -> None:
@@ -110,8 +117,12 @@ def _normalize_openai_models(payload: dict) -> list[CatalogModel]:
                 for key in (
                     "architecture",
                     "context_length",
+                    "canonical_slug",
+                    "default_parameters",
+                    "expiration_date",
                     "pricing",
                     "supported_parameters",
+                    "top_provider",
                 )
                 if key in item
             },
@@ -131,6 +142,16 @@ def _normalize_anthropic_models(payload: dict) -> list[CatalogModel]:
             id=item["id"],
             created=_timestamp(item.get("created_at")),
             display_name=str(item.get("display_name") or ""),
+            metadata={
+                key: item[key]
+                for key in (
+                    "capabilities",
+                    "max_input_tokens",
+                    "max_tokens",
+                    "type",
+                )
+                if key in item
+            },
         ))
     return result
 
@@ -156,6 +177,7 @@ def _normalize_gemini_models(payload: dict) -> list[CatalogModel]:
                     "inputTokenLimit",
                     "outputTokenLimit",
                     "supportedGenerationMethods",
+                    "thinking",
                 )
                 if key in item
             },
@@ -225,6 +247,77 @@ def refresh_openrouter_pricing(config: dict) -> list[CatalogModel]:
         _write_cache("openrouter", models)
         return models
     return _read_cache("openrouter")
+
+
+def discover_openrouter_endpoints(
+    config: dict,
+    model: str,
+) -> list[dict[str, Any]]:
+    """Fetch route-specific metadata for one OpenRouter model."""
+    timeout = float(config.get("model_catalog_timeout", 10))
+    connect_timeout = float(config.get("model_catalog_connect_timeout", 5))
+    url = f"{OPENROUTER_MODELS_URL}/{model}/endpoints"
+    with httpx.Client(
+        timeout=httpx.Timeout(timeout, connect=connect_timeout),
+        headers={"User-Agent": "jarv"},
+    ) as client:
+        response = client.get(url)
+        response.raise_for_status()
+        payload = response.json()
+    data = payload.get("data") if isinstance(payload, dict) else None
+    endpoints = data.get("endpoints") if isinstance(data, dict) else None
+    if not isinstance(endpoints, list):
+        return []
+    return [item for item in endpoints if isinstance(item, dict)]
+
+
+def _write_openrouter_endpoints(model: str, endpoints: list[dict]) -> None:
+    try:
+        path = _openrouter_endpoints_path(model)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "model": model,
+            "fetched_at": time.time(),
+            "endpoints": endpoints,
+        }
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        temporary.replace(path)
+    except OSError:
+        pass
+
+
+def cached_openrouter_endpoints(model: str | None) -> list[dict[str, Any]]:
+    if not model:
+        return []
+    try:
+        payload = json.loads(
+            _openrouter_endpoints_path(str(model)).read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return []
+    if (
+        not isinstance(payload, dict)
+        or str(payload.get("model") or "").lower() != str(model).lower()
+        or not isinstance(payload.get("endpoints"), list)
+    ):
+        return []
+    return [
+        item for item in payload["endpoints"]
+        if isinstance(item, dict)
+    ]
+
+
+def refresh_openrouter_endpoints(config: dict, model: str) -> list[dict[str, Any]]:
+    endpoints: list[dict[str, Any]] = []
+    try:
+        endpoints = discover_openrouter_endpoints(config, model)
+    except Exception:
+        endpoints = []
+    if endpoints:
+        _write_openrouter_endpoints(model, endpoints)
+        return endpoints
+    return cached_openrouter_endpoints(model)
 
 
 _OPENROUTER_PROVIDER_NAMESPACES = {
@@ -320,6 +413,25 @@ def resolve_openrouter_model(
         item for item in models if _model_family_key(item.id) == family
     ]
     return _unique_preferred_match(family_matches)
+
+
+def cached_provider_model(
+    config: dict,
+    model: str | None = None,
+) -> CatalogModel | None:
+    """Return an exact model entry from the active provider cache."""
+    provider = str(config.get("provider", "openai"))
+    target = str(model or config.get("model") or "").strip().lower()
+    if not target:
+        return None
+    return next(
+        (
+            item
+            for item in _read_cache(provider)
+            if item.id.lower() == target
+        ),
+        None,
+    )
 
 
 def openrouter_prices_for_model(
@@ -684,6 +796,8 @@ def refresh_model_choices(config: dict) -> list[tuple[str, str]]:
         _write_cache(provider, models)
     else:
         models = _read_cache(provider)
+    if provider == "openrouter" and config.get("model"):
+        refresh_openrouter_endpoints(config, str(config["model"]))
 
     choices = _merge_fallbacks(provider, recommend_models(provider, models))
     with _CACHE_LOCK:

@@ -204,11 +204,6 @@ def to_tools(tools: list[dict]) -> list[dict]:
     return result
 
 
-def _uses_adaptive_thinking(model: str) -> bool:
-    lowered = model.lower()
-    return any(version in lowered for version in ("-4-6", "-4.6", "-4-7", "-4.7"))
-
-
 def _mark_last_block_cached(content: Any) -> list[dict]:
     """Return content blocks with cache_control on the final block."""
     if isinstance(content, str):
@@ -252,18 +247,38 @@ def _apply_prompt_caching(payload: dict) -> None:
     messages[-2 if len(messages) >= 2 else 0] = target
 
 
-def _apply_reasoning(payload: dict, model: str, reasoning: dict | None) -> None:
+def _apply_reasoning(
+    config: dict,
+    payload: dict,
+    model: str,
+    reasoning: dict | None,
+) -> None:
+    from .reasoning import get_reasoning_capabilities, require_reasoning_effort
+
     effort = str((reasoning or {}).get("effort") or "").lower()
-    if not effort or effort == "none":
+    if not effort:
         return
-    if _uses_adaptive_thinking(model):
+    probe = dict(config)
+    probe["provider"] = "anthropic"
+    probe["model"] = model
+    effort = require_reasoning_effort(probe, effort)
+    if effort == "none":
+        return
+
+    capabilities = get_reasoning_capabilities(probe, model)
+    modes = capabilities.modes or ()
+    if "adaptive" in modes:
         payload["thinking"] = {"type": "adaptive"}
-        payload["output_config"] = {"effort": effort}
+        if capabilities.native_effort is not False:
+            payload["output_config"] = {"effort": effort}
         return
+
     budget = _THINKING_BUDGETS.get(effort)
     if budget is None:
         raise ValueError(f"Unsupported Anthropic reasoning effort: {effort}")
     payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
+    if capabilities.native_effort is True:
+        payload["output_config"] = {"effort": effort}
     if payload["max_tokens"] <= budget:
         payload["max_tokens"] = budget + 1024
 
@@ -300,7 +315,7 @@ def build_payload(
     service_tier = provider_service_tier(config, "anthropic")
     if service_tier:
         payload["service_tier"] = service_tier
-    _apply_reasoning(payload, model, reasoning)
+    _apply_reasoning(config, payload, model, reasoning)
     if config.get("anthropic_prompt_caching", True):
         _apply_prompt_caching(payload)
     return sanitize_json_value(payload)

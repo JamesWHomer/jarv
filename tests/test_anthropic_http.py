@@ -148,6 +148,34 @@ def test_legacy_model_maps_reasoning_effort_to_budget():
     assert "output_config" not in payload
 
 
+def test_current_opus_uses_adaptive_thinking_and_max_effort():
+    payload = build_payload(
+        {},
+        "claude-opus-4-8",
+        "",
+        [],
+        [{"role": "user", "content": "hi"}],
+        reasoning={"effort": "max"},
+    )
+
+    assert payload["thinking"] == {"type": "adaptive"}
+    assert payload["output_config"] == {"effort": "max"}
+
+
+def test_opus_45_combines_manual_thinking_with_native_effort():
+    payload = build_payload(
+        {},
+        "claude-opus-4-5-20251101",
+        "",
+        [],
+        [{"role": "user", "content": "hi"}],
+        reasoning={"effort": "high"},
+    )
+
+    assert payload["thinking"] == {"type": "enabled", "budget_tokens": 4096}
+    assert payload["output_config"] == {"effort": "high"}
+
+
 def test_stream_emits_thinking_text_tool_and_normalized_usage():
     events = [
         ("message_start", {

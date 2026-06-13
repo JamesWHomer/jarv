@@ -1,6 +1,7 @@
 import json
 
 import httpx
+import pytest
 
 from jarv.gemini_http import (
     build_payload as build_gemini_payload,
@@ -10,6 +11,7 @@ from jarv.gemini_http import (
     to_contents,
 )
 from jarv.openai_http import (
+    build_chat_payload,
     build_responses_payload,
     stream_chat,
     stream_response,
@@ -197,14 +199,44 @@ def test_gemini_non_streaming_response_preserves_served_tier_header():
     assert response["service_tier"] == "priority"
 
 
-def test_gemini_pro_maps_unsupported_efforts_to_valid_thinking_levels():
-    low = build_gemini_payload(
-        {}, "gemini-3.1-pro-preview", "", [], [],
-        reasoning={"effort": "minimal"},
-    )
-    high = build_gemini_payload(
+def test_gemini_pro_rejects_unsupported_effort_and_preserves_medium():
+    with pytest.raises(ValueError, match="low, medium, high"):
+        build_gemini_payload(
+            {}, "gemini-3.1-pro-preview", "", [], [],
+            reasoning={"effort": "minimal"},
+        )
+    medium = build_gemini_payload(
         {}, "gemini-3.1-pro-preview", "", [], [],
         reasoning={"effort": "medium"},
     )
-    assert low["generationConfig"]["thinkingConfig"]["thinkingLevel"] == "low"
-    assert high["generationConfig"]["thinkingConfig"]["thinkingLevel"] == "high"
+    assert medium["generationConfig"]["thinkingConfig"]["thinkingLevel"] == "medium"
+
+
+def test_gemini_25_uses_current_reasoning_budgets_and_explicit_none():
+    medium = build_gemini_payload(
+        {}, "gemini-2.5-flash", "", [], [],
+        reasoning={"effort": "medium"},
+    )
+    disabled = build_gemini_payload(
+        {}, "gemini-2.5-flash", "", [], [],
+        reasoning={"effort": "none"},
+    )
+
+    assert medium["generationConfig"]["thinkingConfig"]["thinkingBudget"] == 8192
+    assert disabled["generationConfig"]["thinkingConfig"] == {
+        "includeThoughts": False,
+        "thinkingBudget": 0,
+    }
+
+
+def test_openrouter_uses_standard_reasoning_object_and_strict_routing():
+    payload = build_chat_payload(
+        "openai/gpt-5.4-mini",
+        [{"role": "user", "content": "hi"}],
+        reasoning={"effort": "high"},
+        provider_name="openrouter",
+    )
+
+    assert payload["reasoning"] == {"effort": "high"}
+    assert payload["provider"] == {"require_parameters": True}
+    assert "reasoning_effort" not in payload

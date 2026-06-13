@@ -93,6 +93,9 @@ def setup_provider(config: dict) -> dict:
         console.print(f"  [red]Unknown provider '{choice}'. Please pick again.[/red]")
 
     config["provider"] = provider_name
+    from .reasoning import reconcile_reasoning_effort
+
+    reconcile_reasoning_effort(config)
     return config
 
 
@@ -210,6 +213,9 @@ def setup_model(config: dict) -> dict:
             break
 
     config["model"] = model
+    from .reasoning import reconcile_reasoning_effort
+
+    reconcile_reasoning_effort(config)
     return config
 
 

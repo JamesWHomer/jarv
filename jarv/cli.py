@@ -123,6 +123,10 @@ def _apply_cli_overrides(config: dict, args: argparse.Namespace) -> dict:
         config["model"] = args.model
     if args.effort:
         config["reasoning_effort"] = args.effort
+    elif args.provider or args.model:
+        from .reasoning import reconcile_reasoning_effort
+
+        reconcile_reasoning_effort(config)
     if args.timeout is not None:
         config["command_timeout"] = args.timeout
     if args.system:
@@ -242,7 +246,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Override provider for this run",
     )
     parser.add_argument("-m", "--model", metavar="MODEL", help="Override model for this run (e.g. gpt-4o)")
-    parser.add_argument("-e", "--effort", metavar="EFFORT", help="Override reasoning effort (low/medium/high)")
+    parser.add_argument(
+        "-e",
+        "--effort",
+        metavar="EFFORT",
+        help="Override model-supported reasoning effort (none/minimal/low/medium/high/xhigh/max)",
+    )
     parser.add_argument("--timeout", type=int, metavar="SECONDS", help="Override command timeout in seconds")
     parser.add_argument("-s", "--system", metavar="PROMPT", help="Override system prompt for this run")
     parser.add_argument("--new", action="store_true", help="Start a fresh session (ignore prior history, but still save)")

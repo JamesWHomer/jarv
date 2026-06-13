@@ -82,6 +82,10 @@ def cmd_set(args: list) -> None:
     value = coerce_value(raw)
     trial = dict(config)
     trial[key] = value
+    if key in ("model", "provider"):
+        from .reasoning import reconcile_reasoning_effort
+
+        reconcile_reasoning_effort(trial)
     if not validate_config(trial):
         return
     save_config(trial)
@@ -101,6 +105,10 @@ def cmd_unset(args: list) -> None:
     if key in DEFAULT_CONFIG:
         trial = dict(config)
         trial[key] = DEFAULT_CONFIG[key]
+        if key in ("model", "provider"):
+            from .reasoning import reconcile_reasoning_effort
+
+            reconcile_reasoning_effort(trial)
         if not validate_config(trial):
             return
         save_config(trial)
@@ -257,7 +265,7 @@ Keys:
 - `base_url` - Custom API base URL. Overrides the provider's default endpoint.
 - `model` - Model name. Default: `{DEFAULT_CONFIG['model']}`.
 - `service_tiers` - Per-provider processing tier. Values are `standard`, `flex`, or `priority`; missing providers use `standard`.
-- `reasoning_effort` - Optional reasoning effort value. Empty disables this setting.
+- `reasoning_effort` - Model-supported reasoning effort. Empty uses the provider/model default; `none` explicitly disables reasoning only where supported.
 - `max_history` - Maximum stored history items included as model context (item cap before token trimming). It does not delete saved history. Stored items include user messages, assistant messages, reasoning items, function calls, and function call outputs. Default: `{DEFAULT_CONFIG['max_history']}`.
 - `context_budget_ratio` - Share of the context window used for input. Default: `{DEFAULT_CONFIG['context_budget_ratio']}`.
 - `context_compaction_threshold` - Fill ratio that triggers history compaction. Default: `{DEFAULT_CONFIG['context_compaction_threshold']}`.

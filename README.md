@@ -74,7 +74,7 @@ Flags override config values for a single run and work in both one-shot and head
 | --- | --- | --- |
 | `--provider PROVIDER` | | Override the provider (`openai`, `anthropic`, `gemini`, etc.) |
 | `--model MODEL` | `-m` | Override the model (e.g. `gpt-5.4-mini`) |
-| `--effort EFFORT` | `-e` | Override reasoning effort (`low` / `medium` / `high`) |
+| `--effort EFFORT` | `-e` | Override reasoning effort with a value supported by the selected model |
 | `--timeout SECONDS` | | Override command timeout in seconds |
 | `--system PROMPT` | `-s` | Override the system prompt |
 | `--new` | | Start a fresh session (ignore prior history, but still save) |
@@ -183,7 +183,7 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 | `base_url` | `""` | Custom API base URL. Overrides the provider default. |
 | `model` | `"gpt-5.4-mini"` | Model name passed to the API. |
 | `service_tiers` | `{}` | Per-provider processing tier: `standard`, `flex`, or `priority`. Missing providers use `standard`; unsupported tiers are not offered. |
-| `reasoning_effort` | `""` | Reasoning effort level. Leave empty to disable. |
+| `reasoning_effort` | `""` | Model-supported reasoning effort. Empty uses the provider/model default; `none` explicitly disables reasoning only where supported. |
 | `max_history` | `40` | Max stored history items sent as model context (item cap before token trimming). Does not delete saved history. |
 | `context_budget_ratio` | `0.75` | Share of the context window used for input. |
 | `context_compaction_threshold` | `0.85` | Fill ratio that triggers history compaction. |
