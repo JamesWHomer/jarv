@@ -1,5 +1,6 @@
 """Interactive settings command."""
 
+import difflib
 import sys
 import threading
 from collections.abc import Callable
@@ -641,11 +642,22 @@ def _settings_model_apply_key(
 ) -> bool:
     """Handle model picker navigation and activation of custom input."""
     if edit.get("model_validation_warning"):
-        if key in ("UP", "HOME"):
-            edit["model_warning_selection"] = 0
+        actions = edit.get("model_warning_actions") or []
+        selected = max(
+            0,
+            min(int(edit.get("model_warning_selection", 0)), len(actions) - 1),
+        )
+        if key in ("LEFT", "UP", "HOME"):
+            edit["model_warning_selection"] = (
+                0 if key == "HOME" else max(0, selected - repeat_count)
+            )
             return True
-        if key in ("DOWN", "END"):
-            edit["model_warning_selection"] = 1
+        if key in ("RIGHT", "DOWN", "END"):
+            edit["model_warning_selection"] = (
+                max(0, len(actions) - 1)
+                if key == "END"
+                else min(max(0, len(actions) - 1), selected + repeat_count)
+            )
             return True
         return key not in ("ENTER", "ESC")
 
@@ -712,6 +724,57 @@ def _settings_model_apply_key(
         edit["error"] = ""
         return True
     return False
+
+
+def _settings_model_suggestion(config: dict, model: str) -> str:
+    """Return a cached model only when one fuzzy match is clearly strongest."""
+    from .model_catalog import cached_provider_model_ids
+
+    target = model.strip().lower()
+    candidates = [
+        candidate
+        for candidate in cached_provider_model_ids(config)
+        if target and candidate.lower() != target
+    ]
+    prefix_matches = [
+        candidate
+        for candidate in candidates
+        if candidate.lower().startswith(target)
+    ]
+    if prefix_matches:
+        shortest_length = min(len(candidate) for candidate in prefix_matches)
+        shortest = [
+            candidate
+            for candidate in prefix_matches
+            if len(candidate) == shortest_length
+        ]
+        if len(shortest) == 1:
+            canonical = shortest[0]
+            canonical_lower = canonical.lower()
+            if all(
+                candidate.lower() == canonical_lower
+                or candidate.lower().startswith(f"{canonical_lower}-")
+                for candidate in prefix_matches
+            ):
+                return canonical
+
+    scored = sorted(
+        (
+            (
+                difflib.SequenceMatcher(None, target, candidate.lower()).ratio(),
+                candidate,
+            )
+            for candidate in candidates
+        ),
+        reverse=True,
+    )
+    if not scored:
+        return ""
+    best_score, best_model = scored[0]
+    second_score = scored[1][0] if len(scored) > 1 else 0.0
+    if best_score >= 0.84 and best_score - second_score >= 0.06:
+        return best_model
+    return ""
 
 
 def _settings_column_layout(inner_width: int) -> tuple[int, int, int, int]:
@@ -1330,7 +1393,11 @@ def _settings_editor_lines(
         pass
     else:
         line = Text(no_wrap=True, overflow="crop")
-        input_active = key != "model" or bool(edit.get("model_input_active"))
+        warning_active = bool(edit.get("model_validation_warning"))
+        input_active = (
+            (key != "model" or bool(edit.get("model_input_active")))
+            and not warning_active
+        )
         prompt_style = "bold bright_white" if input_active else "dim"
         line.append(
             _clip_text(f"  {prompt}: ", inner_width),
@@ -1348,6 +1415,7 @@ def _settings_editor_lines(
                 masked=masked,
                 text_style="green" if input_active else "dim",
                 cursor_style="reverse" if input_active else "dim",
+                cursor_visible=not bool(edit.get("model_validation_warning")),
             )
         )
         tail.append(line)
@@ -1355,23 +1423,29 @@ def _settings_editor_lines(
     if edit.get("error"):
         tail.append(Text(_clip_text(f"  {edit['error']}", inner_width), style="red"))
     if key == "model" and edit.get("model_validation_warning"):
-        warning_model = str(edit["model_validation_warning"])
+        suggestion = str(edit.get("model_validation_suggestion") or "")
         warning_selection = int(edit.get("model_warning_selection", 0))
+        warning = (
+            f"  Not found. Did you mean {suggestion}?"
+            if suggestion
+            else f"  Not found in {provider_label}'s cached models."
+        )
         tail.append(Text(
-            _clip_text(
-                f'  Warning: "{warning_model}" is not in the cached '
-                f"{provider_label} model list.",
-                inner_width,
-            ),
+            _clip_text(warning, inner_width),
             style="yellow",
         ))
-        for index, label in enumerate(("Keep editing", "Continue anyway")):
+        action_line = Text("  ", no_wrap=True, overflow="crop")
+        for index, action in enumerate(edit.get("model_warning_actions") or []):
             selected = index == warning_selection
             marker = "\u203a" if selected else " "
-            tail.append(Text(
-                _clip_text(f"  {marker} {label}", inner_width),
+            if index:
+                action_line.append("   ")
+            action_line.append(
+                f"{marker} {action['label']}",
                 style="bold bright_white" if selected else "dim",
-            ))
+            )
+        action_line.truncate(inner_width, overflow="ellipsis")
+        tail.append(action_line)
 
     fixed_count = len(intro) + len(tail)
     if max_lines is not None and fixed_count > max_lines:
@@ -1390,8 +1464,13 @@ def _settings_editor_lines(
         choices = _settings_model_choice_lines(
             models,
             provider,
-            int(edit.get("selected_model_index", 0)),
-            bool(edit.get("model_input_active")),
+            (
+                -1
+                if edit.get("model_validation_warning")
+                else int(edit.get("selected_model_index", 0))
+            ),
+            bool(edit.get("model_input_active"))
+            or bool(edit.get("model_validation_warning")),
             inner_width,
             max_lines=choice_line_budget,
         )
@@ -1468,12 +1547,25 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
     if key == "model":
         warning_model = str(edit.get("model_validation_warning") or "")
         if warning_model:
-            if int(edit.get("model_warning_selection", 0)) == 0:
+            actions = edit.get("model_warning_actions") or []
+            selected = max(
+                0,
+                min(
+                    int(edit.get("model_warning_selection", 0)),
+                    len(actions) - 1,
+                ),
+            )
+            action = actions[selected]["value"] if actions else "edit"
+            if action == "edit":
                 edit.pop("model_validation_warning", None)
+                edit.pop("model_validation_suggestion", None)
+                edit.pop("model_warning_actions", None)
                 edit.pop("model_warning_selection", None)
                 return config, "Continue editing the model name.", "dim", False
-            model = warning_model
+            model = warning_model if action == "continue" else str(action)
             edit.pop("model_validation_warning", None)
+            edit.pop("model_validation_suggestion", None)
+            edit.pop("model_warning_actions", None)
             edit.pop("model_warning_selection", None)
             config["model"] = model
             save_config(config)
@@ -1513,7 +1605,20 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
                 )
             )
             if not listed_model and not cached_provider_has_model(config, model):
+                suggestion = _settings_model_suggestion(config, model)
                 edit["model_validation_warning"] = model
+                edit["model_validation_suggestion"] = suggestion
+                if suggestion:
+                    edit["model_warning_actions"] = [
+                        {"label": f"Use {suggestion}", "value": suggestion},
+                        {"label": "Keep editing", "value": "edit"},
+                        {"label": f"Use {model} anyway", "value": "continue"},
+                    ]
+                else:
+                    edit["model_warning_actions"] = [
+                        {"label": "Keep editing", "value": "edit"},
+                        {"label": "Use anyway", "value": "continue"},
+                    ]
                 edit["model_warning_selection"] = 0
                 edit["error"] = ""
                 return (
@@ -1799,7 +1904,10 @@ def _settings_interactive(config: dict) -> None:
         editor_parts = _settings_editor_lines(edit, config, inner_width, max_lines=content_rows)
         if not editor_parts:
             editor_parts = [Text("")]
-        controls = "" if row.get("multiline") else "Enter save   Esc cancel"
+        if edit is not None and edit.get("model_validation_warning"):
+            controls = "\u2190\u2192 select   Enter confirm   Esc keep editing"
+        else:
+            controls = "" if row.get("multiline") else "Enter save   Esc cancel"
         return Panel(
             Group(*editor_parts),
             title=f"[bold bright_white]jarv \u25b8 edit {row['label']}[/bold bright_white]",
@@ -1885,7 +1993,13 @@ def _settings_interactive(config: dict) -> None:
                             inner_width=max(1, term_w - 4),
                         )
                     continue
-                if key == "ESC":
+                if key == "ESC" and edit.get("model_validation_warning"):
+                    edit.pop("model_validation_warning", None)
+                    edit.pop("model_validation_suggestion", None)
+                    edit.pop("model_warning_actions", None)
+                    edit.pop("model_warning_selection", None)
+                    flash = None
+                elif key == "ESC":
                     edit = None
                     flash = (f"{rows[selected]['label']} unchanged", "dim")
                 elif edit["row"]["key"] == "provider" and key in ("UP", "DOWN", "HOME", "END"):

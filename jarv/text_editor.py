@@ -97,6 +97,7 @@ def render_single_line(
     masked: bool = False,
     text_style: str = "green",
     cursor_style: str = "reverse",
+    cursor_visible: bool = True,
 ) -> Text:
     value = str(state.get("buffer", ""))
     display = _display_value(value, masked=masked).replace("\n", " ")
@@ -113,6 +114,9 @@ def render_single_line(
     local_cursor = cursor - start
 
     line = Text()
+    if not cursor_visible:
+        line.append(segment, style=text_style)
+        return line
     line.append(segment[:local_cursor], style=text_style)
     if local_cursor < len(segment):
         line.append(segment[local_cursor], style=cursor_style)

@@ -664,6 +664,12 @@ def cached_provider_has_model(config: dict, model: str | None) -> bool:
     return any(item.id.lower() == target for item in _read_cache(provider))
 
 
+def cached_provider_model_ids(config: dict) -> list[str]:
+    """Return model IDs from the active provider's cached catalog."""
+    provider = str(config.get("provider", "openai"))
+    return [item.id for item in _read_cache(provider)]
+
+
 def refresh_model_choices(config: dict) -> list[tuple[str, str]]:
     """Refresh choices from the provider, falling back to cached data on failure."""
     provider = str(config.get("provider", "openai"))

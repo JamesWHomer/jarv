@@ -618,11 +618,15 @@ def test_unknown_custom_model_warns_then_can_continue(monkeypatch):
         line.plain
         for line in settings_command._settings_editor_lines(edit, config, 120)
     )
-    assert '"gpt-unknown" is not in the cached OpenAI model list.' in rendered
+    assert "Not found in OpenAI's cached models." in rendered
     assert "\u203a Keep editing" in rendered
-    assert "Continue anyway" in rendered
+    assert "Use anyway" in rendered
+    assert rendered.splitlines()[-2:] == [
+        "  Not found in OpenAI's cached models.",
+        "  \u203a Keep editing     Use anyway",
+    ]
 
-    assert settings_command._settings_model_apply_key(edit, "DOWN") is True
+    assert settings_command._settings_model_apply_key(edit, "RIGHT") is True
     assert edit["model_warning_selection"] == 1
     updated, message, style, done = settings_command._settings_commit_edit(
         edit,
@@ -634,6 +638,112 @@ def test_unknown_custom_model_warns_then_can_continue(monkeypatch):
     assert message == "saved Model: gpt-unknown"
     assert updated["model"] == "gpt-unknown"
     assert saved[-1]["model"] == "gpt-unknown"
+
+
+def test_unknown_custom_model_suggests_clear_cached_match(monkeypatch):
+    saved = []
+    monkeypatch.setattr(
+        model_catalog,
+        "cached_provider_has_model",
+        lambda _config, _model: False,
+    )
+    monkeypatch.setattr(
+        model_catalog,
+        "cached_provider_model_ids",
+        lambda _config: ["gpt-5.5", "gpt-5.4-mini", "gpt-5.4-nano"],
+    )
+    monkeypatch.setattr(
+        settings_command,
+        "save_config",
+        lambda config: saved.append(dict(config)),
+    )
+    config = {"provider": "openai", "model": "gpt-5.4-mini"}
+    edit = {
+        "row": {"key": "model", "kind": "text", "label": "Model"},
+        "model_choices": [("gpt-5.5", "Flagship")],
+        "selected_model_index": 0,
+        "model_input_active": True,
+        "buffer": "gpt-5.5x",
+        "cursor": len("gpt-5.5x"),
+    }
+
+    _updated, _message, _style, done = settings_command._settings_commit_edit(
+        edit,
+        config,
+    )
+
+    assert done is False
+    assert edit["model_validation_suggestion"] == "gpt-5.5"
+    assert edit["model_warning_actions"] == [
+        {"label": "Use gpt-5.5", "value": "gpt-5.5"},
+        {"label": "Keep editing", "value": "edit"},
+        {"label": "Use gpt-5.5x anyway", "value": "continue"},
+    ]
+    lines = settings_command._settings_editor_lines(edit, config, 120)
+    rendered = "\n".join(line.plain for line in lines)
+    input_line = next(
+        line for line in lines
+        if "Model number, name, or custom model:" in line.plain
+    )
+    assert "Not found. Did you mean gpt-5.5?" in rendered
+    assert "\u203a Use gpt-5.5" in rendered
+    assert all(str(span.style) != "reverse" for span in input_line.spans)
+    assert any(str(span.style) == "dim" for span in input_line.spans)
+
+    updated, message, style, done = settings_command._settings_commit_edit(
+        edit,
+        config,
+    )
+
+    assert done is True
+    assert style == "yellow"
+    assert message == "saved Model: gpt-5.5"
+    assert updated["model"] == "gpt-5.5"
+    assert saved[-1]["model"] == "gpt-5.5"
+
+
+def test_model_suggestion_rejects_ambiguous_match(monkeypatch):
+    monkeypatch.setattr(
+        model_catalog,
+        "cached_provider_model_ids",
+        lambda _config: ["gpt-5.4-mini", "gpt-5.4-nano"],
+    )
+
+    assert settings_command._settings_model_suggestion(
+        {"provider": "openai"},
+        "gpt-5.4",
+    ) == ""
+
+
+def test_model_suggestion_uses_canonical_prefix_family(monkeypatch):
+    monkeypatch.setattr(
+        model_catalog,
+        "cached_provider_model_ids",
+        lambda _config: [
+            "gpt-3.5-turbo",
+            "gpt-3.5-turbo-16k",
+            "gpt-3.5-turbo-instruct",
+            "gpt-3.5-turbo-0125",
+        ],
+    )
+
+    assert settings_command._settings_model_suggestion(
+        {"provider": "openai"},
+        "gpt-3.5",
+    ) == "gpt-3.5-turbo"
+
+
+def test_model_suggestion_rejects_ambiguous_prefix_families(monkeypatch):
+    monkeypatch.setattr(
+        model_catalog,
+        "cached_provider_model_ids",
+        lambda _config: ["gpt-5.5", "gpt-5.4-mini", "gpt-5.4-nano"],
+    )
+
+    assert settings_command._settings_model_suggestion(
+        {"provider": "openai"},
+        "gpt-5",
+    ) == ""
 
 
 def test_unknown_custom_model_can_return_to_editing(monkeypatch):
