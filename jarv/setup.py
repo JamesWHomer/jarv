@@ -148,7 +148,11 @@ def setup_model(config: dict) -> dict:
     console.print(section_rule("Model", step=3, total=TOTAL_STEPS))
     console.print()
 
-    from .model_catalog import get_default_model, get_model_choices
+    from .model_catalog import (
+        get_default_model,
+        get_model_choices,
+        model_choice_description,
+    )
 
     with console.status("  [dim]Loading available models...[/dim]", spinner="dots"):
         models = get_model_choices(config, refresh=True)
@@ -160,7 +164,8 @@ def setup_model(config: dict) -> dict:
         )
         for i, (name, desc) in enumerate(models, 1):
             default_tag = " [green]← default[/green]" if name == default_model else ""
-            console.print(f"  [bold cyan]{i}.[/bold cyan] [bold]{name}[/bold] [dim]— {desc}[/dim]{default_tag}")
+            details = model_choice_description(provider_name, name, desc)
+            console.print(f"  [bold cyan]{i}.[/bold cyan] [bold]{name}[/bold] [dim]— {details}[/dim]{default_tag}")
         console.print()
 
         while True:

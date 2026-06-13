@@ -1,11 +1,13 @@
+import io
 import json
 import threading
 import time
 
 import httpx
 import pytest
+from rich.console import Console
 
-from jarv import model_catalog, settings_command
+from jarv import model_catalog, settings_command, setup
 from jarv.anthropic_http import list_models as list_anthropic_models
 from jarv.config import DEFAULT_CONFIG
 from jarv.gemini_http import list_models as list_gemini_models
@@ -221,6 +223,494 @@ def test_openrouter_pricing_resolves_models_for_all_providers(tmp_path, monkeypa
         assert resolved.id == expected
 
 
+def test_model_picker_pricing_formats_rates(tmp_path, monkeypatch):
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    model_catalog._write_cache("openrouter", [
+        CatalogModel(
+            id="openai/gpt-5.5",
+            metadata={
+                "pricing": {
+                    "prompt": "0.000005",
+                    "input_cache_read": "0.0000005",
+                    "completion": "0.00003",
+                },
+            },
+        ),
+    ])
+    assert model_catalog.model_choice_description(
+        "openai",
+        "gpt-5.5",
+        "Flagship - latest GPT",
+    ) == (
+        "$5.00 / $0.50 / $30.00 | Flagship - latest GPT"
+    )
+    assert model_catalog.model_pricing_values("openai", "gpt-5.5") == (
+        "$5.00",
+        "$0.50",
+        "$30.00",
+    )
+    assert model_catalog.model_pricing_values("openai", "missing") == (
+        "n/a",
+        "n/a",
+        "n/a",
+    )
+
+
+def test_settings_model_picker_shows_openrouter_pricing(tmp_path, monkeypatch):
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    model_catalog._write_cache("openrouter", [
+        CatalogModel(
+            id="openai/gpt-5.5",
+            metadata={
+                "pricing": {
+                    "prompt": "0.000005",
+                    "completion": "0.00003",
+                },
+            },
+        ),
+    ])
+    edit = {
+        "row": {"key": "model", "kind": "text", "label": "Model"},
+        "buffer": "gpt-5.5",
+        "model_choices": [("gpt-5.5", "Flagship - latest GPT")],
+    }
+    settings_command.initialize_text_editor(edit, "gpt-5.5")
+
+    rendered = "\n".join(
+        line.plain
+        for line in settings_command._settings_editor_lines(
+            edit,
+            {"provider": "openai", "model": "gpt-5.5"},
+            180,
+        )
+    )
+
+    assert "OpenRouter pricing per 1M" not in rendered
+    assert "Model list is current" not in rendered
+    assert "Model" in rendered
+    assert "Input" in rendered
+    assert "Cached" in rendered
+    assert "Output" in rendered
+    assert "Tier" in rendered
+    assert "$5.00" in rendered
+    assert "n/a" in rendered
+    assert "$30.00" in rendered
+    lines = rendered.splitlines()
+    header = next(line for line in lines if "Input" in line)
+    model = next(line for line in lines if "gpt-5.5" in line)
+    assert header.index("Model") == model.index("gpt-5.5")
+    assert header.index("Input") + len("Input") == model.index("$5.00") + len("$5.00")
+    assert header.index("Cached") + len("Cached") == model.index("n/a") + len("n/a")
+    assert header.index("Output") + len("Output") == model.index("$30.00") + len("$30.00")
+    assert header.index("Tier") == model.index("Flagship")
+    assert "\u203a 1. gpt-5.5" in rendered
+    assert "\n\n  Model number, name, or custom model:" in rendered
+
+
+def test_model_picker_columns_align_with_long_prices(monkeypatch):
+    prices = {
+        "deepseek-v4-pro": ("$0.43", "$0.003625", "$0.87"),
+        "deepseek-v4-flash": ("$0.098", "$0.020", "$0.20"),
+    }
+    monkeypatch.setattr(
+        model_catalog,
+        "model_pricing_values",
+        lambda _provider, model: prices[model],
+    )
+
+    lines = settings_command._settings_model_choice_lines(
+        [
+            ("deepseek-v4-pro", "Flagship"),
+            ("deepseek-v4-flash", "Budget"),
+        ],
+        "deepseek",
+        1,
+        False,
+        78,
+    )
+    header, pro, flash = [line.plain for line in lines]
+
+    for heading, pro_value, flash_value in (
+        ("Input", "$0.43", "$0.098"),
+        ("Cached", "$0.003625", "$0.020"),
+        ("Output", "$0.87", "$0.20"),
+    ):
+        expected_end = header.index(heading) + len(heading)
+        assert pro.index(pro_value) + len(pro_value) == expected_end
+        assert flash.index(flash_value) + len(flash_value) == expected_end
+    assert header.index("Tier") == pro.index("Flagship")
+    assert header.index("Tier") == flash.index("Budget")
+    assert len(header) == len(pro) == len(flash) == 78
+
+    narrow = settings_command._settings_model_choice_lines(
+        [
+            ("deepseek-v4-pro", "Flagship"),
+            ("deepseek-v4-flash", "Budget"),
+        ],
+        "deepseek",
+        1,
+        False,
+        60,
+    )
+    assert len({len(line.plain) for line in narrow}) == 1
+    assert all(len(line.plain) == 60 for line in narrow)
+
+
+def test_settings_model_picker_appends_and_selects_current_provider_model(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    model_catalog._write_cache("openai", [
+        CatalogModel(id="gpt-5.5"),
+        CatalogModel(id="gpt-5.4-mini"),
+        CatalogModel(id="gpt-5.4-nano"),
+        CatalogModel(id="gpt-4o"),
+    ])
+    monkeypatch.setattr(
+        model_catalog,
+        "get_cached_model_choices",
+        lambda _config: [
+            ("gpt-5.5", "Flagship"),
+            ("gpt-5.4-mini", "Balanced"),
+            ("gpt-5.4-nano", "Budget"),
+        ],
+    )
+    config = {"provider": "openai", "model": "gpt-4o"}
+
+    edit = settings_command._settings_begin_edit(
+        {"key": "model", "kind": "text", "label": "Model"},
+        config,
+    )
+    rendered = "\n".join(
+        line.plain
+        for line in settings_command._settings_editor_lines(edit, config, 120)
+    )
+
+    assert edit["model_choices"][-1] == ("gpt-4o", "")
+    assert "\u203a 4. gpt-4o" in rendered
+    assert settings_command._settings_resolve_model(
+        config,
+        "4",
+        models=edit["model_choices"],
+    ) == "gpt-4o"
+    monkeypatch.setattr(settings_command, "save_config", lambda _config: None)
+    edit["buffer"] = "4"
+    updated, _message, _style, done = settings_command._settings_commit_edit(
+        edit,
+        config,
+    )
+    assert done is True
+    assert updated["model"] == "gpt-4o"
+
+
+def test_settings_model_picker_does_not_append_model_from_another_provider(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    model_catalog._write_cache("openai", [CatalogModel(id="gpt-5.5")])
+    monkeypatch.setattr(
+        model_catalog,
+        "get_cached_model_choices",
+        lambda _config: [("gpt-5.5", "Flagship")],
+    )
+
+    edit = settings_command._settings_begin_edit(
+        {"key": "model", "kind": "text", "label": "Model"},
+        {"provider": "openai", "model": "claude-sonnet-4-6"},
+    )
+
+    assert edit["model_choices"] == [("gpt-5.5", "Flagship")]
+
+
+def test_model_picker_arrows_select_rows_and_typing_activates_input(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        model_catalog,
+        "get_cached_model_choices",
+        lambda _config: [
+            ("gpt-5.5", "Flagship"),
+            ("gpt-5.4-mini", "Balanced"),
+            ("gpt-5.4-nano", "Budget"),
+        ],
+    )
+    monkeypatch.setattr(
+        model_catalog,
+        "cached_provider_has_model",
+        lambda _config, _model: False,
+    )
+    monkeypatch.setattr(settings_command, "save_config", lambda _config: None)
+    config = {"provider": "openai", "model": "gpt-5.5"}
+    edit = settings_command._settings_begin_edit(
+        {"key": "model", "kind": "text", "label": "Model"},
+        config,
+    )
+
+    assert edit["selected_model_index"] == 0
+    assert edit["model_input_active"] is False
+    assert edit["buffer"] == ""
+
+    assert settings_command._settings_model_apply_key(edit, "DOWN") is True
+    assert edit["selected_model_index"] == 1
+    assert edit["model_input_active"] is False
+
+    updated, _message, _style, done = settings_command._settings_commit_edit(
+        edit,
+        config,
+    )
+    assert done is True
+    assert updated["model"] == "gpt-5.4-mini"
+
+    assert settings_command._settings_model_apply_key(edit, "c") is True
+    assert edit["model_input_active"] is True
+    assert edit["buffer"] == "c"
+    assert settings_command._settings_model_apply_key(edit, "u") is True
+    assert edit["buffer"] == "cu"
+
+    lines = settings_command._settings_editor_lines(edit, updated, 120)
+    selected_line = next(line for line in lines if "gpt-5.4-mini" in line.plain)
+    input_line = next(
+        line for line in lines
+        if "Model number, name, or custom model:" in line.plain
+    )
+    assert all(span.style != "bold bright_white" for span in selected_line.spans)
+    assert any(span.style == "bold bright_white" for span in input_line.spans)
+
+    assert settings_command._settings_model_apply_key(edit, "UP") is True
+    assert edit["selected_model_index"] == 2
+    assert edit["model_input_active"] is False
+    assert edit["buffer"] == "cu"
+
+    assert settings_command._settings_model_apply_key(edit, "DOWN") is True
+    assert edit["selected_model_index"] == 2
+    assert edit["model_input_active"] is True
+    assert edit["buffer"] == "cu"
+
+
+def test_model_picker_down_past_last_row_focuses_preserved_input():
+    edit = {
+        "model_choices": [
+            ("gpt-5.5", "Flagship"),
+            ("gpt-5.4-mini", "Balanced"),
+            ("gpt-5.4-nano", "Budget"),
+        ],
+        "selected_model_index": 2,
+        "model_input_active": False,
+        "buffer": "custom-model",
+        "cursor": 6,
+    }
+
+    assert settings_command._settings_model_apply_key(edit, "DOWN") is True
+    assert edit["selected_model_index"] == 2
+    assert edit["model_input_active"] is True
+    assert edit["buffer"] == "custom-model"
+    assert edit["cursor"] == 6
+
+    assert settings_command._settings_model_apply_key(edit, "UP") is True
+    assert edit["selected_model_index"] == 2
+    assert edit["model_input_active"] is False
+    assert edit["buffer"] == "custom-model"
+    assert edit["cursor"] == 6
+
+    assert settings_command._settings_model_apply_key(edit, "DOWN") is True
+    assert edit["model_input_active"] is True
+    assert edit["buffer"] == "custom-model"
+    assert edit["cursor"] == 6
+
+
+def test_model_picker_typed_number_uses_number_resolution(monkeypatch):
+    monkeypatch.setattr(settings_command, "save_config", lambda _config: None)
+    config = {"provider": "openai", "model": "gpt-5.5"}
+    edit = {
+        "row": {"key": "model", "kind": "text", "label": "Model"},
+        "model_choices": [
+            ("gpt-5.5", "Flagship"),
+            ("gpt-5.4-mini", "Balanced"),
+            ("gpt-5.4-nano", "Budget"),
+            ("gpt-4o", ""),
+        ],
+        "selected_model_index": 0,
+        "model_input_active": False,
+        "buffer": "",
+        "cursor": 0,
+    }
+
+    settings_command._settings_model_apply_key(edit, "4")
+    updated, _message, _style, done = settings_command._settings_commit_edit(
+        edit,
+        config,
+    )
+
+    assert done is True
+    assert updated["model"] == "gpt-4o"
+
+
+def test_custom_model_validates_against_cached_provider_catalog(monkeypatch):
+    saved = []
+    monkeypatch.setattr(
+        model_catalog,
+        "cached_provider_has_model",
+        lambda _config, model: model == "gpt-valid-custom",
+    )
+    monkeypatch.setattr(
+        settings_command,
+        "save_config",
+        lambda config: saved.append(dict(config)),
+    )
+    config = {"provider": "openai", "model": "gpt-5.5"}
+    edit = {
+        "row": {"key": "model", "kind": "text", "label": "Model"},
+        "model_choices": [("gpt-5.5", "Flagship")],
+        "selected_model_index": 0,
+        "model_input_active": True,
+        "buffer": "gpt-valid-custom",
+        "cursor": len("gpt-valid-custom"),
+    }
+
+    updated, _message, _style, done = settings_command._settings_commit_edit(
+        edit,
+        config,
+    )
+
+    assert done is True
+    assert updated["model"] == "gpt-valid-custom"
+    assert saved[-1]["model"] == "gpt-valid-custom"
+
+
+def test_unknown_custom_model_warns_then_can_continue(monkeypatch):
+    saved = []
+    monkeypatch.setattr(
+        model_catalog,
+        "cached_provider_has_model",
+        lambda _config, _model: False,
+    )
+    monkeypatch.setattr(
+        settings_command,
+        "save_config",
+        lambda config: saved.append(dict(config)),
+    )
+    config = {"provider": "openai", "model": "gpt-5.5"}
+    edit = {
+        "row": {"key": "model", "kind": "text", "label": "Model"},
+        "model_choices": [("gpt-5.5", "Flagship")],
+        "selected_model_index": 0,
+        "model_input_active": True,
+        "buffer": "gpt-unknown",
+        "cursor": len("gpt-unknown"),
+    }
+
+    updated, message, style, done = settings_command._settings_commit_edit(
+        edit,
+        config,
+    )
+
+    assert done is False
+    assert style == "yellow"
+    assert "not found" in message
+    assert updated["model"] == "gpt-5.5"
+    assert saved == []
+    assert edit["model_validation_warning"] == "gpt-unknown"
+    assert edit["model_warning_selection"] == 0
+
+    rendered = "\n".join(
+        line.plain
+        for line in settings_command._settings_editor_lines(edit, config, 120)
+    )
+    assert '"gpt-unknown" is not in the cached OpenAI model list.' in rendered
+    assert "\u203a Keep editing" in rendered
+    assert "Continue anyway" in rendered
+
+    assert settings_command._settings_model_apply_key(edit, "DOWN") is True
+    assert edit["model_warning_selection"] == 1
+    updated, message, style, done = settings_command._settings_commit_edit(
+        edit,
+        config,
+    )
+
+    assert done is True
+    assert style == "yellow"
+    assert message == "saved Model: gpt-unknown"
+    assert updated["model"] == "gpt-unknown"
+    assert saved[-1]["model"] == "gpt-unknown"
+
+
+def test_unknown_custom_model_can_return_to_editing(monkeypatch):
+    monkeypatch.setattr(
+        model_catalog,
+        "cached_provider_has_model",
+        lambda _config, _model: False,
+    )
+    monkeypatch.setattr(settings_command, "save_config", lambda _config: None)
+    config = {"provider": "openai", "model": "gpt-5.5"}
+    edit = {
+        "row": {"key": "model", "kind": "text", "label": "Model"},
+        "model_choices": [("gpt-5.5", "Flagship")],
+        "selected_model_index": 0,
+        "model_input_active": True,
+        "buffer": "gpt-unknown",
+        "cursor": 4,
+    }
+
+    _updated, _message, _style, done = settings_command._settings_commit_edit(
+        edit,
+        config,
+    )
+    assert done is False
+
+    _updated, message, style, done = settings_command._settings_commit_edit(
+        edit,
+        config,
+    )
+
+    assert done is False
+    assert style == "dim"
+    assert message == "Continue editing the model name."
+    assert edit["buffer"] == "gpt-unknown"
+    assert edit["cursor"] == 4
+    assert "model_validation_warning" not in edit
+
+
+def test_setup_model_shows_openrouter_pricing(tmp_path, monkeypatch):
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    model_catalog._write_cache("openrouter", [
+        CatalogModel(
+            id="openai/gpt-5.5",
+            metadata={
+                "pricing": {
+                    "prompt": "0.000005",
+                    "completion": "0.00003",
+                },
+            },
+        ),
+    ])
+    monkeypatch.setattr(
+        model_catalog,
+        "get_model_choices",
+        lambda _config, refresh=False: [("gpt-5.5", "Flagship - latest GPT")],
+    )
+    monkeypatch.setattr(
+        model_catalog,
+        "get_default_model",
+        lambda _config, choices=None: "gpt-5.5",
+    )
+    monkeypatch.setattr(setup.Prompt, "ask", lambda *args, **kwargs: "1")
+    output = io.StringIO()
+    monkeypatch.setattr(
+        setup,
+        "console",
+        Console(file=output, force_terminal=False, color_system=None, width=180),
+    )
+
+    config = setup.setup_model({"provider": "openai"})
+
+    rendered = output.getvalue()
+    assert config["model"] == "gpt-5.5"
+    assert "$5.00 / n/a / $30.00" in rendered
+    assert "OpenRouter pricing per 1M" not in rendered
+
+
 def test_settings_opens_model_editor_from_cache_without_refresh(monkeypatch):
     calls = []
 
@@ -229,6 +719,11 @@ def test_settings_opens_model_editor_from_cache_without_refresh(monkeypatch):
         return [("gpt-5.6", "Flagship")]
 
     monkeypatch.setattr(model_catalog, "get_cached_model_choices", choices)
+    monkeypatch.setattr(
+        model_catalog,
+        "cached_provider_has_model",
+        lambda _config, _model: False,
+    )
     monkeypatch.setattr(
         model_catalog,
         "refresh_model_choices",
@@ -243,7 +738,34 @@ def test_settings_opens_model_editor_from_cache_without_refresh(monkeypatch):
 
     assert calls == ["cached"]
     assert edit["model_choices"] == [("gpt-5.6", "Flagship")]
-    assert edit["catalog_status"] == "loading"
+
+
+def test_model_update_notice_names_replacements_additions_and_removals():
+    notice = settings_command._settings_model_update_notice(
+        [
+            ("gpt-5.5", "Flagship"),
+            ("gpt-5.4-mini", "Balanced"),
+            ("gpt-5.4-nano-preview", "Budget preview"),
+        ],
+        [
+            ("gpt-5.6", "Flagship"),
+            ("gpt-5.4-mini", "Balanced"),
+            ("gpt-5.4-nano", "Budget"),
+        ],
+    )
+
+    assert notice == (
+        "Model list updated: gpt-5.5 \u2192 gpt-5.6; "
+        "added gpt-5.4-nano; removed gpt-5.4-nano-preview"
+    )
+    assert settings_command._settings_model_update_notice(
+        [("gpt-5.6", "Flagship")],
+        [("gpt-5.6", "Flagship")],
+    ) == ""
+    assert settings_command._settings_model_update_notice(
+        [("gpt-5.6", "Flagship"), ("gpt-5.4-mini", "Balanced")],
+        [("gpt-5.4-mini", "Balanced"), ("gpt-5.6", "Flagship")],
+    ) == ""
 
 
 def test_cached_model_choices_never_attempt_discovery(tmp_path, monkeypatch):

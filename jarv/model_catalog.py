@@ -348,6 +348,49 @@ def openrouter_prices_for_model(
     return prices
 
 
+def _format_price_rate(value: float) -> str:
+    if value >= 0.1:
+        return f"${value:.2f}"
+    if value >= 0.01:
+        return f"${value:.3f}"
+    return f"${value:.6f}".rstrip("0").rstrip(".")
+
+
+def model_pricing_values(
+    provider: str | None,
+    model: str | None,
+) -> tuple[str, str, str]:
+    """Return display-ready input, cached-input, and output prices."""
+    prices = openrouter_prices_for_model(provider, model)
+    if prices is None:
+        return "n/a", "n/a", "n/a"
+    cached = (
+        _format_price_rate(prices["cached_input"])
+        if "cached_input" in prices
+        else "n/a"
+    )
+    return (
+        _format_price_rate(prices["input"]),
+        cached,
+        _format_price_rate(prices["output"]),
+    )
+
+
+def model_pricing_summary(provider: str | None, model: str | None) -> str:
+    """Return compact OpenRouter reference pricing for a model picker row."""
+    return " / ".join(model_pricing_values(provider, model))
+
+
+def model_choice_description(
+    provider: str | None,
+    model: str,
+    description: str,
+) -> str:
+    """Combine a recommendation label with its OpenRouter pricing reference."""
+    pricing = model_pricing_summary(provider, model)
+    return f"{pricing} | {description}" if description else pricing
+
+
 def _version_key(*parts: str | None) -> tuple[int, ...]:
     return tuple(int(part or 0) for part in parts)
 
@@ -608,6 +651,17 @@ def get_cached_model_choices(config: dict) -> list[tuple[str, str]]:
     with _CACHE_LOCK:
         _MEMORY_CHOICES[key] = list(choices)
     return list(choices)
+
+
+def cached_provider_has_model(config: dict, model: str | None) -> bool:
+    """Return whether a model is present in the active provider's cached catalog."""
+    if not model:
+        return False
+    target = str(model).strip().lower()
+    if not target:
+        return False
+    provider = str(config.get("provider", "openai"))
+    return any(item.id.lower() == target for item in _read_cache(provider))
 
 
 def refresh_model_choices(config: dict) -> list[tuple[str, str]]:

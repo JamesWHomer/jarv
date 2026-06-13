@@ -543,6 +543,24 @@ def _settings_model_choices(
     return get_cached_model_choices(config)
 
 
+def _settings_model_choices_with_current(
+    config: dict,
+    choices: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """Append the current model when it belongs to the active provider catalog."""
+    from .model_catalog import cached_provider_has_model
+
+    result = list(choices)
+    current = str(config.get("model") or "").strip()
+    if (
+        current
+        and all(name.lower() != current.lower() for name, _description in result)
+        and cached_provider_has_model(config, current)
+    ):
+        result.append((current, ""))
+    return result
+
+
 def _settings_default_model(config: dict) -> str:
     return _settings_default_model_for_provider(
         config.get("provider", "openai"),
@@ -614,6 +632,86 @@ def _settings_resolve_model(
         if raw.lower() == name.lower():
             return name
     return raw
+
+
+def _settings_model_apply_key(
+    edit: dict,
+    key: str,
+    repeat_count: int = 1,
+) -> bool:
+    """Handle model picker navigation and activation of custom input."""
+    if edit.get("model_validation_warning"):
+        if key in ("UP", "HOME"):
+            edit["model_warning_selection"] = 0
+            return True
+        if key in ("DOWN", "END"):
+            edit["model_warning_selection"] = 1
+            return True
+        return key not in ("ENTER", "ESC")
+
+    models = edit.get("model_choices")
+    if not isinstance(models, list) or not models:
+        return False
+
+    selected = max(
+        0,
+        min(int(edit.get("selected_model_index", 0)), len(models) - 1),
+    )
+    if key in ("UP", "DOWN", "HOME", "END"):
+        input_active = bool(edit.get("model_input_active"))
+        if key == "UP":
+            if input_active:
+                edit["model_input_active"] = False
+                selected = max(0, len(models) - repeat_count)
+            else:
+                selected = max(0, selected - repeat_count)
+        elif key == "DOWN":
+            if input_active:
+                edit["error"] = ""
+                return True
+            target = selected + repeat_count
+            if target >= len(models):
+                selected = len(models) - 1
+                edit["model_input_active"] = True
+            else:
+                selected = target
+        elif key == "HOME":
+            selected = 0
+            edit["model_input_active"] = False
+        else:
+            selected = len(models) - 1
+            edit["model_input_active"] = False
+        edit["selected_model_index"] = selected
+        edit["error"] = ""
+        return True
+
+    if isinstance(key, str) and len(key) == 1 and key.isprintable():
+        if not edit.get("model_input_active"):
+            edit["model_input_active"] = True
+        apply_text_editor_key(
+            edit,
+            key,
+            repeat_count,
+            content_width=1,
+            allow_newlines=False,
+        )
+        edit["error"] = ""
+        return True
+
+    if key in ("ENTER", "ESC"):
+        return False
+
+    if edit.get("model_input_active"):
+        apply_text_editor_key(
+            edit,
+            key,
+            repeat_count,
+            content_width=1,
+            allow_newlines=False,
+        )
+        edit["error"] = ""
+        return True
+    return False
 
 
 def _settings_column_layout(inner_width: int) -> tuple[int, int, int, int]:
@@ -721,6 +819,175 @@ def _settings_choice_grid_lines(
         label = "option" if hidden == 1 else "options"
         lines.append(Text(_clip_text(f"  ... {hidden} more {label}; {more_hint}", inner_width), style="dim"))
     return lines
+
+
+def _settings_model_update_notice(
+    previous: list[tuple[str, str]],
+    current: list[tuple[str, str]],
+) -> str:
+    """Describe model replacements, additions, and removals."""
+    previous_names = [name for name, _description in previous]
+    current_names = [name for name, _description in current]
+    if set(previous_names) == set(current_names):
+        return ""
+
+    previous_by_description: dict[str, list[str]] = {}
+    current_by_description: dict[str, list[str]] = {}
+    for name, description in previous:
+        previous_by_description.setdefault(description, []).append(name)
+    for name, description in current:
+        current_by_description.setdefault(description, []).append(name)
+
+    replaced_previous: set[str] = set()
+    replaced_current: set[str] = set()
+    changes: list[str] = []
+    for name, description in current:
+        old_matches = previous_by_description.get(description, [])
+        new_matches = current_by_description.get(description, [])
+        if (
+            len(old_matches) == 1
+            and len(new_matches) == 1
+            and old_matches[0] != name
+        ):
+            old_name = old_matches[0]
+            replaced_previous.add(old_name)
+            replaced_current.add(name)
+            changes.append(f"{old_name} \u2192 {name}")
+
+    previous_set = set(previous_names)
+    current_set = set(current_names)
+    added = [
+        name for name in current_names
+        if name not in previous_set and name not in replaced_current
+    ]
+    removed = [
+        name for name in previous_names
+        if name not in current_set and name not in replaced_previous
+    ]
+    changes.extend(f"added {name}" for name in added)
+    changes.extend(f"removed {name}" for name in removed)
+    return f"Model list updated: {'; '.join(changes)}"
+
+
+def _settings_model_choice_lines(
+    models: list[tuple[str, str]],
+    provider: str,
+    selected_index: int,
+    input_active: bool,
+    inner_width: int,
+    *,
+    max_lines: int | None = None,
+) -> list[Text]:
+    if not models or (max_lines is not None and max_lines <= 0):
+        return []
+
+    from .model_catalog import model_pricing_values
+
+    display_rows = []
+    for name, description in models:
+        input_price, cached_price, output_price = model_pricing_values(
+            provider,
+            name,
+        )
+        display_rows.append((
+            name,
+            input_price,
+            cached_price,
+            output_price,
+            description.split(" - ", 1)[0] if description else "",
+        ))
+
+    prefix_width = 7
+    gap = "   "
+    input_width = max(len("Input"), *(len(row[1]) for row in display_rows))
+    cached_width = max(len("Cached"), *(len(row[2]) for row in display_rows))
+    output_width = max(len("Output"), *(len(row[3]) for row in display_rows))
+    tier_width = max(len("Tier"), *(len(row[4]) for row in display_rows))
+    fixed_width = (
+        prefix_width
+        + len(gap) * 4
+        + input_width
+        + cached_width
+        + output_width
+        + tier_width
+    )
+    max_model_width = max(len(row[0]) for row in display_rows)
+    model_width = min(
+        max(36, max_model_width + 2),
+        max(1, inner_width - fixed_width),
+    )
+
+    header = (
+        " " * prefix_width
+        + f"{'Model':<{model_width}}{gap}"
+        + f"{'Input':>{input_width}}{gap}"
+        + f"{'Cached':>{cached_width}}{gap}"
+        + f"{'Output':>{output_width}}{gap}"
+        + f"{'Tier':<{tier_width}}"
+    )
+    lines = [
+        Text(
+            _clip_text(header, inner_width),
+            style="dim bold",
+            no_wrap=True,
+            overflow="crop",
+        )
+    ]
+
+    rows: list[Text] = []
+    for idx, (
+        name,
+        input_price,
+        cached_price,
+        output_price,
+        tier,
+    ) in enumerate(display_rows, 1):
+        is_selected = idx - 1 == selected_index
+        is_bright = is_selected and not input_active
+        marker = "\u203a" if is_selected else " "
+        line = Text(no_wrap=True, overflow="crop")
+        line.append(
+            f"  {marker}{idx:>2}. ",
+            style="bold cyan" if is_bright else "dim",
+        )
+        line.append(
+            f"{_clip_text(name, model_width):<{model_width}}",
+            style="bold bright_white" if is_bright else "dim",
+        )
+        line.append(gap, style="dim")
+        line.append(
+            f"{input_price:>{input_width}}",
+            style="white" if is_bright else "dim",
+        )
+        line.append(gap, style="dim")
+        line.append(
+            f"{cached_price:>{cached_width}}",
+            style="white" if is_bright else "dim",
+        )
+        line.append(gap, style="dim")
+        line.append(
+            f"{output_price:>{output_width}}",
+            style="white" if is_bright else "dim",
+        )
+        line.append(gap, style="dim")
+        line.append(
+            f"{_clip_text(tier, tier_width):<{tier_width}}",
+            style="white" if is_bright else "dim",
+        )
+        rows.append(line)
+
+    if max_lines is not None and len(lines) + len(rows) > max_lines:
+        visible_rows = max(0, max_lines - 2)
+        hidden = len(rows) - visible_rows
+        rows = rows[:visible_rows]
+        rows.append(Text(
+            _clip_text(
+                f"  ... {hidden} more models; type a number/name/custom",
+                inner_width,
+            ),
+            style="dim",
+        ))
+    return lines + rows
 
 
 def _settings_provider_display_label(label: str) -> str:
@@ -888,9 +1155,22 @@ def _settings_begin_edit(row: dict, config: dict) -> dict:
     if key == "provider":
         edit["selected_provider"] = config.get("provider", "openai")
     elif key == "model":
-        edit["model_choices"] = _settings_model_choices(config)
+        edit["model_choices"] = _settings_model_choices_with_current(
+            config,
+            _settings_model_choices(config),
+        )
         edit["catalog_provider"] = config.get("provider", "openai")
-        edit["catalog_status"] = "loading"
+        current_model = str(config.get("model") or "").lower()
+        edit["selected_model_index"] = next(
+            (
+                idx
+                for idx, (name, _description) in enumerate(edit["model_choices"])
+                if name.lower() == current_model
+            ),
+            0,
+        )
+        edit["model_input_active"] = False
+        initialize_text_editor(edit, "")
     return edit
 
 
@@ -1015,22 +1295,12 @@ def _settings_editor_lines(
         models = edit.get("model_choices")
         if not isinstance(models, list):
             models = _settings_model_choices(config)
-        catalog_status = edit.get("catalog_status")
         if models:
-            intro.append(Text(_clip_text(f"  provider: {provider_label}", inner_width), style="dim"))
-            if catalog_status == "loading":
-                intro.append(Text(_clip_text("  Checking for newer models...", inner_width), style="dim italic"))
-            elif catalog_status == "updated":
-                intro.append(Text(_clip_text("  Model list updated.", inner_width), style="green"))
-            elif catalog_status == "current":
-                intro.append(Text(_clip_text("  Model list is current.", inner_width), style="dim"))
-            elif catalog_status == "deferred":
-                intro.append(Text(
-                    _clip_text("  New models will appear next time this editor opens.", inner_width),
-                    style="dim",
-                ))
-            choice_items = [(idx, name, desc) for idx, (name, desc) in enumerate(models, 1)]
-            prompt = "Model number/name/custom"
+            notice = str(edit.get("catalog_notice") or "")
+            if notice:
+                intro.append(Text(_clip_text(f"  {notice}", inner_width), style="green"))
+            choice_items = []
+            prompt = "Model number, name, or custom model"
         else:
             intro.append(Text(_clip_text(f"  default for {provider_label}: {_settings_default_model(config)}", inner_width), style="dim"))
             choice_items = []
@@ -1060,7 +1330,12 @@ def _settings_editor_lines(
         pass
     else:
         line = Text(no_wrap=True, overflow="crop")
-        line.append(_clip_text(f"  {prompt}: ", inner_width), style="bold")
+        input_active = key != "model" or bool(edit.get("model_input_active"))
+        prompt_style = "bold bright_white" if input_active else "dim"
+        line.append(
+            _clip_text(f"  {prompt}: ", inner_width),
+            style=prompt_style,
+        )
         remaining = max(1, inner_width - len(line.plain))
         masked = bool(
             edit.get("secret")
@@ -1071,12 +1346,32 @@ def _settings_editor_lines(
                 edit,
                 remaining,
                 masked=masked,
+                text_style="green" if input_active else "dim",
+                cursor_style="reverse" if input_active else "dim",
             )
         )
         tail.append(line)
 
     if edit.get("error"):
         tail.append(Text(_clip_text(f"  {edit['error']}", inner_width), style="red"))
+    if key == "model" and edit.get("model_validation_warning"):
+        warning_model = str(edit["model_validation_warning"])
+        warning_selection = int(edit.get("model_warning_selection", 0))
+        tail.append(Text(
+            _clip_text(
+                f'  Warning: "{warning_model}" is not in the cached '
+                f"{provider_label} model list.",
+                inner_width,
+            ),
+            style="yellow",
+        ))
+        for index, label in enumerate(("Keep editing", "Continue anyway")):
+            selected = index == warning_selection
+            marker = "\u203a" if selected else " "
+            tail.append(Text(
+                _clip_text(f"  {marker} {label}", inner_width),
+                style="bold bright_white" if selected else "dim",
+            ))
 
     fixed_count = len(intro) + len(tail)
     if max_lines is not None and fixed_count > max_lines:
@@ -1091,15 +1386,17 @@ def _settings_editor_lines(
             selected_provider=edit.get("selected_provider"),
             max_lines=choice_line_budget,
         )
-    elif key == "model" and choice_items:
-        choices = _settings_choice_grid_lines(
-            choice_items,
+    elif key == "model" and models:
+        choices = _settings_model_choice_lines(
+            models,
+            provider,
+            int(edit.get("selected_model_index", 0)),
+            bool(edit.get("model_input_active")),
             inner_width,
             max_lines=choice_line_budget,
-            max_columns=1,
-            more_hint="type a number/name/custom",
-            align_descriptions=True,
         )
+        if choice_line_budget is None or len(choices) < choice_line_budget:
+            choices.append(Text(""))
 
     return intro + choices + tail
 
@@ -1169,7 +1466,34 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
         return config, "saved API key", "green", True
 
     if key == "model":
+        warning_model = str(edit.get("model_validation_warning") or "")
+        if warning_model:
+            if int(edit.get("model_warning_selection", 0)) == 0:
+                edit.pop("model_validation_warning", None)
+                edit.pop("model_warning_selection", None)
+                return config, "Continue editing the model name.", "dim", False
+            model = warning_model
+            edit.pop("model_validation_warning", None)
+            edit.pop("model_warning_selection", None)
+            config["model"] = model
+            save_config(config)
+            return config, f"saved Model: {model}", "yellow", True
+
         models = edit.get("model_choices")
+        input_active = bool(edit.get("model_input_active"))
+        if (
+            isinstance(models, list)
+            and models
+            and not input_active
+        ):
+            selected = max(
+                0,
+                min(
+                    int(edit.get("selected_model_index", 0)),
+                    len(models) - 1,
+                ),
+            )
+            raw = models[selected][0]
         model = _settings_resolve_model(
             config,
             raw,
@@ -1178,6 +1502,26 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
         if not model.strip():
             edit["error"] = "Model must not be empty."
             return config, edit["error"], "red", False
+        if input_active:
+            from .model_catalog import cached_provider_has_model
+
+            listed_model = (
+                isinstance(models, list)
+                and any(
+                    name.lower() == model.lower()
+                    for name, _description in models
+                )
+            )
+            if not listed_model and not cached_provider_has_model(config, model):
+                edit["model_validation_warning"] = model
+                edit["model_warning_selection"] = 0
+                edit["error"] = ""
+                return (
+                    config,
+                    f"Model not found in cached provider list: {model}",
+                    "yellow",
+                    False,
+                )
         config["model"] = model
         save_config(config)
         return config, f"saved Model: {model}", "green", True
@@ -1252,12 +1596,30 @@ def _settings_interactive(config: dict) -> None:
             and current_edit.get("catalog_provider") == provider
             and current_edit.get("catalog_generation") == generation
         ):
-            previous = current_edit.get("model_choices")
-            if current_edit.get("catalog_input_dirty"):
-                current_edit["catalog_status"] = "deferred"
-            else:
-                current_edit["model_choices"] = list(choices)
-                current_edit["catalog_status"] = "updated" if choices != previous else "current"
+            previous = list(current_edit.get("model_choices") or [])
+            displayed_choices = _settings_model_choices_with_current(
+                config,
+                choices,
+            )
+            selected_name = ""
+            previous_selected = int(
+                current_edit.get("selected_model_index", 0)
+            )
+            if 0 <= previous_selected < len(previous):
+                selected_name = previous[previous_selected][0]
+            current_edit["model_choices"] = displayed_choices
+            current_edit["selected_model_index"] = next(
+                (
+                    idx
+                    for idx, (name, _description) in enumerate(displayed_choices)
+                    if name == selected_name
+                ),
+                min(previous_selected, max(0, len(displayed_choices) - 1)),
+            )
+            current_edit["catalog_notice"] = _settings_model_update_notice(
+                previous,
+                displayed_choices,
+            )
         if live_holder:
             live_holder[0].refresh()
 
@@ -1276,7 +1638,6 @@ def _settings_interactive(config: dict) -> None:
         )
         if target_edit is not None:
             target_edit["catalog_generation"] = generation
-            target_edit["catalog_input_dirty"] = False
 
     def _footer() -> str:
         return "\u2191\u2193 select   Enter edit/toggle   r reset   q exit"
@@ -1547,6 +1908,12 @@ def _settings_interactive(config: dict) -> None:
                         provider_keys[current_idx],
                         delay=0.2,
                     )
+                elif edit["row"]["key"] == "model" and _settings_model_apply_key(
+                    edit,
+                    key,
+                    repeat_count,
+                ):
+                    flash = None
                 elif key == "ENTER":
                     config, message, style, done = _settings_commit_edit(edit, config)
                     if done:
@@ -1565,8 +1932,6 @@ def _settings_interactive(config: dict) -> None:
                         content_width=1,
                         allow_newlines=False,
                     )
-                    if changed and edit["row"]["key"] == "model":
-                        edit["catalog_input_dirty"] = True
                     edit["error"] = ""
                 continue
 
