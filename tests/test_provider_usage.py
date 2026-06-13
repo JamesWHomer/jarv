@@ -128,6 +128,68 @@ class ProviderUsageTests(unittest.TestCase):
             ))
         self.assertEqual(response_output_text(events[-1].response), "partial and recovered")
 
+    def test_responses_stream_polls_after_clean_eof_until_response_completes(self):
+        def truncated(_client, _payload, **_kwargs):
+            yield {"type": "response.created", "response": {"id": "resp_1"}}
+            yield {
+                "type": "response.output_text.delta",
+                "response_id": "resp_1",
+                "delta": "partial",
+            }
+
+        recovered = {
+            "id": "resp_1",
+            "status": "completed",
+            "output_text": "partial and recovered",
+            "output": [],
+        }
+        retrieve_results = [
+            {"id": "resp_1", "status": "in_progress", "output": []},
+            {"id": "resp_1", "status": "in_progress", "output": []},
+            recovered,
+        ]
+        with (
+            patch("jarv.openai_http.stream_response", side_effect=truncated),
+            patch(
+                "jarv.openai_http.retrieve_response",
+                side_effect=retrieve_results,
+            ) as retrieve,
+            patch("jarv.provider._sleep_for_openai_recovery") as recovery_sleep,
+        ):
+            events = list(_stream_responses_api(
+                object(), "model", "system", [], []
+            ))
+
+        self.assertEqual(retrieve.call_count, 3)
+        self.assertEqual(recovery_sleep.call_count, 2)
+        self.assertIsInstance(events[-1], StreamDone)
+        self.assertEqual(response_output_text(events[-1].response), "partial and recovered")
+
+    def test_responses_stream_recovers_using_top_level_response_id(self):
+        def truncated(_client, _payload, **_kwargs):
+            yield {
+                "type": "response.output_text.delta",
+                "response_id": "resp_top_level",
+                "delta": "partial",
+            }
+
+        recovered = {
+            "id": "resp_top_level",
+            "status": "completed",
+            "output_text": "partial and recovered",
+            "output": [],
+        }
+        with (
+            patch("jarv.openai_http.stream_response", side_effect=truncated),
+            patch("jarv.openai_http.retrieve_response", return_value=recovered) as retrieve,
+        ):
+            events = list(_stream_responses_api(
+                object(), "model", "system", [], []
+            ))
+
+        retrieve.assert_called_once()
+        self.assertEqual(response_output_text(events[-1].response), "partial and recovered")
+
     def test_chat_stream_maps_reasoning_tools_and_usage(self):
         chunks = [
             {

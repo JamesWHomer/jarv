@@ -61,6 +61,24 @@ class ProviderError(Exception):
     pass
 
 
+_OPENAI_RECOVERY_ATTEMPTS = 16
+_OPENAI_RECOVERY_MAX_DELAY = 2.0
+
+
+def _sleep_for_openai_recovery(
+    delay: float,
+    cancellation_token: CancellationToken | None,
+) -> None:
+    deadline = time.monotonic() + delay
+    while True:
+        if cancellation_token is not None:
+            cancellation_token.throw_if_cancelled()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(remaining, 0.05))
+
+
 def responses_input_id(item_id: str, prefix: str) -> str:
     """Return an id that is valid for Responses API input items."""
     valid_prefix = f"{prefix}_"
@@ -445,6 +463,8 @@ def _stream_responses_api(
             response = event.get("response")
             if isinstance(response, dict) and response.get("id"):
                 response_id = str(response["id"])
+            elif event.get("response_id"):
+                response_id = str(event["response_id"])
             if event_type == "response.created":
                 continue
             if not reasoning_started and _response_event_has_reasoning_started(event):
@@ -514,7 +534,9 @@ def _stream_responses_api(
             cancellation_token.throw_if_cancelled()
         if response_id:
             recovered_response = None
-            for attempt in range(4):
+            for attempt in range(_OPENAI_RECOVERY_ATTEMPTS):
+                if cancellation_token is not None:
+                    cancellation_token.throw_if_cancelled()
                 try:
                     candidate = retrieve_response(
                         client,
@@ -526,8 +548,11 @@ def _stream_responses_api(
                 if candidate is not None and _is_response_complete(candidate):
                     recovered_response = candidate
                     break
-                if attempt < 3:
-                    time.sleep(0.25 * (attempt + 1))
+                if attempt < _OPENAI_RECOVERY_ATTEMPTS - 1:
+                    _sleep_for_openai_recovery(
+                        min(0.25 * (2 ** attempt), _OPENAI_RECOVERY_MAX_DELAY),
+                        cancellation_token,
+                    )
             if recovered_response is not None:
                 yield from _events_from_recovered_response(
                     recovered_response,
