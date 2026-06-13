@@ -236,7 +236,8 @@ _OPENROUTER_PROVIDER_NAMESPACES = {
 
 
 def _canonical_model_id(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", value.lower())
+    normalized = re.sub(r"(?<=\d)p(?=\d)", "", value.lower())
+    return re.sub(r"[^a-z0-9]+", "", normalized)
 
 
 def _model_basename(value: str) -> str:
@@ -245,6 +246,27 @@ def _model_basename(value: str) -> str:
 
 def _without_snapshot(value: str) -> str:
     return re.sub(r"[-.]?\d{8}$", "", value)
+
+
+def _model_family_key(value: str) -> str:
+    basename = _model_basename(value).lower().split(":", 1)[0]
+    basename = re.sub(r"(?<=\d)p(?=\d)", "", basename)
+    basename = re.sub(r"\d+b[-.]?\d+e", "", basename)
+    basename = re.sub(
+        r"(?:^|[-.])(instruct|versatile|instant|fp8)(?=$|[-.])",
+        "-",
+        basename,
+    )
+    return _canonical_model_id(basename)
+
+
+def _unique_preferred_match(models: list[CatalogModel]) -> CatalogModel | None:
+    if len(models) == 1:
+        return models[0]
+    paid = [item for item in models if not item.id.endswith(":free")]
+    if len(paid) == 1:
+        return paid[0]
+    return None
 
 
 def resolve_openrouter_model(
@@ -289,9 +311,15 @@ def resolve_openrouter_model(
         for item in models
         if _canonical_model_id(_model_basename(item.id)) == basename
     ]
-    if len(basename_matches) == 1:
-        return basename_matches[0]
-    return None
+    match = _unique_preferred_match(basename_matches)
+    if match is not None:
+        return match
+
+    family = _model_family_key(snapshotless)
+    family_matches = [
+        item for item in models if _model_family_key(item.id) == family
+    ]
+    return _unique_preferred_match(family_matches)
 
 
 def openrouter_prices_for_model(

@@ -3,7 +3,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest.mock import patch
 
+from jarv import model_catalog
+from jarv.model_catalog import CatalogModel
 from jarv.usage import (
     append_global_usage_record,
     aggregate_usage_records,
@@ -17,7 +20,55 @@ from jarv.usage import (
 
 
 class UsageRecordingTests(unittest.TestCase):
-    def test_bundled_metadata_prices_cached_input_separately(self):
+    def setUp(self):
+        self.catalog_dir = TemporaryDirectory()
+        self.cache_patch = patch.object(
+            model_catalog,
+            "CACHE_DIR",
+            Path(self.catalog_dir.name),
+        )
+        self.cache_patch.start()
+        model_catalog._write_cache("openrouter", [
+            CatalogModel(
+                id="openai/gpt-5.4-mini",
+                metadata={
+                    "context_length": 272_000,
+                    "pricing": {
+                        "prompt": "0.00000075",
+                        "input_cache_read": "0.000000075",
+                        "completion": "0.0000045",
+                    },
+                },
+            ),
+            CatalogModel(
+                id="anthropic/claude-sonnet-4.6",
+                metadata={
+                    "context_length": 1_000_000,
+                    "pricing": {
+                        "prompt": "0.000003",
+                        "input_cache_read": "0.0000003",
+                        "completion": "0.000015",
+                    },
+                },
+            ),
+            CatalogModel(
+                id="google/gemini-3-flash-preview",
+                metadata={
+                    "context_length": 1_048_576,
+                    "pricing": {
+                        "prompt": "0.0000005",
+                        "input_cache_read": "0.00000005",
+                        "completion": "0.000003",
+                    },
+                },
+            ),
+        ])
+
+    def tearDown(self):
+        self.cache_patch.stop()
+        self.catalog_dir.cleanup()
+
+    def test_openrouter_metadata_prices_cached_input_separately(self):
         record = {
             "input_tokens": 1_000_000,
             "cached_input_tokens": 500_000,

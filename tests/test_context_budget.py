@@ -1,5 +1,9 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
+from jarv import model_catalog
 from jarv.agent import to_response_input_item
 from jarv.config import DEFAULT_CONFIG
 from jarv.context_budget import (
@@ -12,6 +16,7 @@ from jarv.context_budget import (
     trim_items_to_budget,
     trim_turn_input,
 )
+from jarv.model_catalog import CatalogModel
 from jarv.usage import estimate_item_tokens, resolve_context_window
 
 
@@ -233,7 +238,18 @@ class ContextBudgetTests(unittest.TestCase):
         self.assertEqual(api_items[-1]["content"], "four")
 
     def test_resolve_context_window_prefers_metadata_then_fallback(self):
-        self.assertEqual(resolve_context_window("gpt-5.4-mini", {}), 272_000)
+        with TemporaryDirectory() as tmp, patch.object(
+            model_catalog,
+            "CACHE_DIR",
+            Path(tmp),
+        ):
+            model_catalog._write_cache("openrouter", [
+                CatalogModel(
+                    id="openai/gpt-5.4-mini",
+                    metadata={"context_length": 272_000},
+                ),
+            ])
+            self.assertEqual(resolve_context_window("gpt-5.4-mini", {}), 272_000)
         self.assertEqual(
             resolve_context_window("totally-unknown", {"context_window_fallback": 999}),
             999,

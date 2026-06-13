@@ -146,6 +146,21 @@ def test_catalog_uses_disk_cache_when_refresh_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
     monkeypatch.setattr(
         model_catalog,
+        "discover_openrouter_models",
+        lambda _config: [
+            CatalogModel(
+                id="openai/gpt-5.6",
+                metadata={
+                    "pricing": {
+                        "prompt": "0.000001",
+                        "completion": "0.000005",
+                    },
+                },
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        model_catalog,
         "discover_models",
         lambda _config: _models("gpt-5.6", "gpt-5.5-mini", "gpt-5.4-nano"),
     )
@@ -162,6 +177,48 @@ def test_catalog_uses_disk_cache_when_refresh_fails(tmp_path, monkeypatch):
 
     assert cached == live
     assert json.loads((tmp_path / "openai.json").read_text())["provider"] == "openai"
+    assert json.loads((tmp_path / "openrouter.json").read_text())["provider"] == "openrouter"
+
+
+def test_openrouter_pricing_resolves_models_for_all_providers(tmp_path, monkeypatch):
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    model_catalog._write_cache("openrouter", [
+        CatalogModel(id="openai/gpt-5.5"),
+        CatalogModel(id="anthropic/claude-sonnet-4.6"),
+        CatalogModel(id="google/gemini-3-flash-preview"),
+        CatalogModel(id="deepseek/deepseek-v4-flash"),
+        CatalogModel(id="openai/gpt-oss-120b"),
+        CatalogModel(id="meta-llama/llama-3.3-70b-instruct"),
+        CatalogModel(id="meta-llama/llama-3.1-8b-instruct"),
+        CatalogModel(id="meta-llama/llama-4-maverick"),
+        CatalogModel(id="moonshotai/kimi-k2.6"),
+        CatalogModel(id="minimax/minimax-m2.7"),
+        CatalogModel(id="qwen/qwen3-8b"),
+    ])
+
+    cases = [
+        ("openai", "gpt-5.5", "openai/gpt-5.5"),
+        ("anthropic", "claude-sonnet-4-6", "anthropic/claude-sonnet-4.6"),
+        ("gemini", "gemini-3-flash-preview", "google/gemini-3-flash-preview"),
+        ("deepseek", "deepseek-v4-flash", "deepseek/deepseek-v4-flash"),
+        ("groq", "openai/gpt-oss-120b", "openai/gpt-oss-120b"),
+        ("groq", "llama-3.3-70b-versatile", "meta-llama/llama-3.3-70b-instruct"),
+        ("groq", "llama-3.1-8b-instant", "meta-llama/llama-3.1-8b-instruct"),
+        (
+            "together",
+            "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+            "meta-llama/llama-4-maverick",
+        ),
+        ("fireworks", "accounts/fireworks/models/kimi-k2p6", "moonshotai/kimi-k2.6"),
+        ("fireworks", "accounts/fireworks/models/minimax-m2p7", "minimax/minimax-m2.7"),
+        ("fireworks", "accounts/fireworks/models/qwen3-8b", "qwen/qwen3-8b"),
+        ("openrouter", "openai/gpt-5.5", "openai/gpt-5.5"),
+    ]
+
+    for provider, selected_model, expected in cases:
+        resolved = model_catalog.resolve_openrouter_model(provider, selected_model)
+        assert resolved is not None
+        assert resolved.id == expected
 
 
 def test_settings_opens_model_editor_from_cache_without_refresh(monkeypatch):
