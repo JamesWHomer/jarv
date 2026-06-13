@@ -302,6 +302,11 @@ def thought_complete_indicator(text: str) -> Text:
     return Text(f"\u2726 {text}", style="dim")
 
 
+def tool_complete_indicator(text: str) -> Text:
+    """Return the static completed-tool bubble."""
+    return Text(f"\u2713 {text}", style="dim")
+
+
 
 def format_thought_duration(seconds: float) -> str:
     """Return a compact human-readable duration for the thinking timer."""
@@ -854,7 +859,7 @@ def run_agent(
                 tool_phase_completed = True
                 if interactive:
                     console.print(
-                        thought_complete_indicator(
+                        tool_complete_indicator(
                             tool_activity_complete_status(
                                 (tool_completed_at or time.perf_counter())
                                 - tool_started_at,

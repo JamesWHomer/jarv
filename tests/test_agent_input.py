@@ -15,6 +15,7 @@ from jarv.agent import (
     response_wait_label,
     tool_activity_complete_status,
     tool_activity_label,
+    tool_complete_indicator,
     run_agent,
     to_response_input_item,
 )
@@ -81,6 +82,11 @@ class AgentInputTests(unittest.TestCase):
                     tool_activity_complete_status(2.04, (name,)),
                     status,
                 )
+
+    def test_tool_complete_indicator_uses_checkmark(self):
+        indicator = tool_complete_indicator("Wrote command in 2.0 seconds.")
+        self.assertEqual(indicator.plain, "\u2713 Wrote command in 2.0 seconds.")
+        self.assertEqual(indicator.style, "dim")
 
     def test_function_call_id_is_shortened_for_responses_input(self):
         item = {
