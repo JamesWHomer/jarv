@@ -544,50 +544,8 @@ def aggregate_usage_records(records: list[dict]) -> dict:
     return aggregate
 
 
-_MODEL_METADATA = {
-    "gpt-5.5": (1_050_000, 5.0, 0.5, 30.0),
-    "gpt-5.4-mini": (272_000, 0.75, 0.075, 4.5),
-    "gpt-5.4-nano": (272_000, 0.2, 0.02, 1.25),
-    "claude-opus-4-7": (1_000_000, 5.0, 0.5, 25.0),
-    "claude-sonnet-4-6": (1_000_000, 3.0, 0.3, 15.0),
-    "claude-haiku-4-5": (200_000, 1.0, 0.1, 5.0),
-    "gemini-3.1-pro-preview": (1_048_576, 2.0, 0.2, 12.0),
-    "gemini-3-flash-preview": (1_048_576, 0.5, 0.05, 3.0),
-    "anthropic/claude-opus-4.7": (1_000_000, 5.0, 0.5, 25.0),
-    "anthropic/claude-sonnet-4.6": (1_000_000, 3.0, 0.3, 15.0),
-    "anthropic/claude-opus-4.6": (1_000_000, 5.0, 0.5, 25.0),
-    "google/gemini-3-flash-preview": (1_048_576, 0.5, 0.05, 3.0),
-    "deepseek/deepseek-v3.2": (163_840, 0.28, None, 0.4),
-    "google/gemini-2.5-flash": (1_048_576, 0.3, None, 2.5),
-    "openai/gpt-oss-120b": (131_072, 0.15, 0.075, 0.6),
-    "llama-3.3-70b-versatile": (128_000, 0.59, None, 0.79),
-    "llama-3.1-8b-instant": (128_000, 0.05, None, 0.08),
-    "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": (
-        None, 0.27, None, 0.85,
-    ),
-    "accounts/fireworks/models/qwen3-8b": (40_960, 0.2, None, 0.2),
-}
-
-
-def _model_info(model: str | None) -> dict | None:
-    if not model:
-        return None
-    values = _MODEL_METADATA.get(model)
-    if values is None and "/" in model:
-        values = _MODEL_METADATA.get(model.split("/", 1)[-1])
-    if values is None:
-        return None
-    context, input_price, cached_price, output_price = values
-    return {
-        "max_input_tokens": context,
-        "input_price": input_price,
-        "cached_input_price": cached_price,
-        "output_price": output_price,
-    }
-
-
 def _context_window_from_catalog(model: str, config: dict) -> int | None:
-    from .model_catalog import _read_cache
+    from .model_catalog import _read_cache, resolve_openrouter_model
 
     provider = str(config.get("provider", "openai"))
     suffix = model.split("/", 1)[-1] if model else ""
@@ -600,6 +558,11 @@ def _context_window_from_catalog(model: str, config: dict) -> int | None:
             value = metadata.get(key)
             if isinstance(value, (int, float)) and value > 0:
                 return int(value)
+    openrouter_model = resolve_openrouter_model(provider, model)
+    if openrouter_model is not None:
+        value = openrouter_model.metadata.get("context_length")
+        if isinstance(value, (int, float)) and value > 0:
+            return int(value)
     return None
 
 
@@ -608,11 +571,15 @@ def known_context_window(model: str | None, config: dict | None = None) -> int |
         catalog_window = _context_window_from_catalog(model, config)
         if catalog_window is not None:
             return catalog_window
-    info = _model_info(model)
-    window = _int_value(info, "max_input_tokens")
-    if window is None or window <= 0:
-        return None
-    return window
+    if model:
+        from .model_catalog import resolve_openrouter_model
+
+        openrouter_model = resolve_openrouter_model(None, model)
+        if openrouter_model is not None:
+            window = _int_value(openrouter_model.metadata, "context_length")
+            if window is not None and window > 0:
+                return window
+    return None
 
 
 def resolve_context_window(model: str | None, config: dict | None = None) -> int:
@@ -635,52 +602,9 @@ def token_prices_for_model(
     model: str | None,
     provider: str | None = None,
 ) -> dict[str, float] | None:
-    if provider == "openrouter" and model:
-        from .model_catalog import _read_cache
+    from .model_catalog import openrouter_prices_for_model
 
-        for catalog_model in _read_cache("openrouter"):
-            if catalog_model.id != model:
-                continue
-            pricing = catalog_model.metadata.get("pricing")
-            if not isinstance(pricing, dict):
-                break
-            try:
-                input_price = float(pricing["prompt"]) * TOKENS_PER_MILLION
-                output_price = float(pricing["completion"]) * TOKENS_PER_MILLION
-                cached_price = pricing.get("input_cache_read")
-                prices = {"input": input_price, "output": output_price}
-                if cached_price is not None:
-                    prices["cached_input"] = float(cached_price) * TOKENS_PER_MILLION
-                return prices
-            except (KeyError, TypeError, ValueError):
-                break
-    info = _model_info(model)
-    if info is None:
-        return None
-
-    input_price = _first_present(
-        _float_value(info, "input_price"),
-    )
-    cached_input_price = _first_present(
-        _float_value(info, "cached_input_price"),
-    )
-    output_price = _first_present(
-        _float_value(info, "output_price"),
-    )
-
-    if input_price is None or output_price is None:
-        return None
-    if input_price < 0 or output_price < 0:
-        return None
-    if cached_input_price is not None and cached_input_price < 0:
-        return None
-    prices = {
-        "input": input_price,
-        "output": output_price,
-    }
-    if cached_input_price is not None:
-        prices["cached_input"] = cached_input_price
-    return prices
+    return openrouter_prices_for_model(provider, model)
 
 
 def _normalized_tier(value: Any) -> str | None:

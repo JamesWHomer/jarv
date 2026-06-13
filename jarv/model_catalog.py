@@ -10,11 +10,14 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+import httpx
+
 from .config import CONFIG_DIR
 from .provider_catalog import FALLBACK_PROVIDER_MODELS, LOCAL_PROVIDERS
 
 
 CACHE_DIR = CONFIG_DIR / "model-catalog"
+OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 
 
 @dataclass
@@ -196,6 +199,125 @@ def discover_models(config: dict) -> list[CatalogModel]:
         return []
     finally:
         client.close()
+
+
+def discover_openrouter_models(config: dict) -> list[CatalogModel]:
+    """Fetch OpenRouter's public catalog for cross-provider pricing metadata."""
+    timeout = float(config.get("model_catalog_timeout", 10))
+    connect_timeout = float(config.get("model_catalog_connect_timeout", 5))
+    with httpx.Client(
+        timeout=httpx.Timeout(timeout, connect=connect_timeout),
+        headers={"User-Agent": "jarv"},
+    ) as client:
+        response = client.get(OPENROUTER_MODELS_URL)
+        response.raise_for_status()
+        return _normalize_openai_models(response.json())
+
+
+def refresh_openrouter_pricing(config: dict) -> list[CatalogModel]:
+    """Refresh OpenRouter pricing, falling back to its disk cache."""
+    models: list[CatalogModel] = []
+    try:
+        models = discover_openrouter_models(config)
+    except Exception:
+        models = []
+    if models:
+        _write_cache("openrouter", models)
+        return models
+    return _read_cache("openrouter")
+
+
+_OPENROUTER_PROVIDER_NAMESPACES = {
+    "openai": "openai",
+    "anthropic": "anthropic",
+    "gemini": "google",
+    "deepseek": "deepseek",
+}
+
+
+def _canonical_model_id(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
+def _model_basename(value: str) -> str:
+    return value.rstrip("/").rsplit("/", 1)[-1]
+
+
+def _without_snapshot(value: str) -> str:
+    return re.sub(r"[-.]?\d{8}$", "", value)
+
+
+def resolve_openrouter_model(
+    provider: str | None,
+    model: str | None,
+) -> CatalogModel | None:
+    """Resolve a provider model ID to its OpenRouter catalog entry."""
+    if not model:
+        return None
+    models = _read_cache("openrouter")
+    if not models:
+        return None
+
+    model_id = str(model).strip()
+    candidates = [model_id]
+    namespace = _OPENROUTER_PROVIDER_NAMESPACES.get(str(provider or ""))
+    if namespace and "/" not in model_id:
+        candidates.append(f"{namespace}/{model_id}")
+    snapshotless = _without_snapshot(model_id)
+    if snapshotless != model_id:
+        candidates.append(snapshotless)
+        if namespace and "/" not in snapshotless:
+            candidates.append(f"{namespace}/{snapshotless}")
+
+    by_id = {item.id.lower(): item for item in models}
+    for candidate in candidates:
+        match = by_id.get(candidate.lower())
+        if match is not None:
+            return match
+
+    by_canonical: dict[str, list[CatalogModel]] = {}
+    for item in models:
+        by_canonical.setdefault(_canonical_model_id(item.id), []).append(item)
+    for candidate in candidates:
+        matches = by_canonical.get(_canonical_model_id(candidate), [])
+        if len(matches) == 1:
+            return matches[0]
+
+    basename = _canonical_model_id(_model_basename(snapshotless))
+    basename_matches = [
+        item
+        for item in models
+        if _canonical_model_id(_model_basename(item.id)) == basename
+    ]
+    if len(basename_matches) == 1:
+        return basename_matches[0]
+    return None
+
+
+def openrouter_prices_for_model(
+    provider: str | None,
+    model: str | None,
+) -> dict[str, float] | None:
+    """Return OpenRouter catalog prices normalized to dollars per million tokens."""
+    catalog_model = resolve_openrouter_model(provider, model)
+    if catalog_model is None:
+        return None
+    pricing = catalog_model.metadata.get("pricing")
+    if not isinstance(pricing, dict):
+        return None
+    try:
+        prices = {
+            "input": float(pricing["prompt"]) * 1_000_000,
+            "output": float(pricing["completion"]) * 1_000_000,
+        }
+        cached_price = pricing.get("input_cache_read")
+        if cached_price is not None:
+            prices["cached_input"] = float(cached_price) * 1_000_000
+    except (KeyError, TypeError, ValueError):
+        return None
+    if any(price < 0 for price in prices.values()):
+        return None
+    return prices
 
 
 def _version_key(*parts: str | None) -> tuple[int, ...]:
@@ -464,6 +586,7 @@ def refresh_model_choices(config: dict) -> list[tuple[str, str]]:
     """Refresh choices from the provider, falling back to cached data on failure."""
     provider = str(config.get("provider", "openai"))
     key = catalog_cache_key(config)
+    refresh_openrouter_pricing(config)
     models: list[CatalogModel] = []
     try:
         models = discover_models(config)
