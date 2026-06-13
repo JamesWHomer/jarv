@@ -13,14 +13,21 @@ from jarv.agent import (
     _format_agent_usage_line,
     response_start_status,
     response_wait_label,
-    tool_call_start_status,
+    tool_activity_complete_status,
+    tool_activity_label,
     run_agent,
     to_response_input_item,
 )
 from jarv.config import DEFAULT_CONFIG
 from jarv.history import SessionContext, load_history, save_history
 from jarv.history import redo_file_for
-from jarv.provider import StreamDone, TextDelta, ToolCallDone, ToolCallStarted
+from jarv.provider import (
+    ReasoningStarted,
+    StreamDone,
+    TextDelta,
+    ToolCallDone,
+    ToolCallStarted,
+)
 
 
 class AgentInputTests(unittest.TestCase):
@@ -30,22 +37,22 @@ class AgentInputTests(unittest.TestCase):
     def test_response_wait_label_uses_thinking_with_reasoning(self):
         self.assertEqual(response_wait_label(has_reasoning=True), "Thinking")
 
-    def test_response_wait_label_prefers_active_tool_call(self):
-        self.assertEqual(
-            response_wait_label(
-                has_reasoning=True,
-                tool_names=("run_command",),
-            ),
-            "Writing tool call: run_command",
-        )
+    def test_tool_activity_labels_are_specific_to_each_tool(self):
+        expected = {
+            "run_command": "Writing command",
+            "spawn": "Planning parallel tasks",
+            "read_artifact": "Selecting agent result",
+            "ask_user": "Writing question",
+            "unknown": "Preparing action",
+        }
+        for name, label in expected.items():
+            with self.subTest(name=name):
+                self.assertEqual(tool_activity_label((name,)), label)
 
-    def test_response_wait_label_counts_multiple_tool_calls(self):
+    def test_tool_activity_label_counts_multiple_actions(self):
         self.assertEqual(
-            response_wait_label(
-                has_reasoning=False,
-                tool_names=("run_command", "spawn"),
-            ),
-            "Writing 2 tool calls",
+            tool_activity_label(("run_command", "spawn")),
+            "Preparing 2 actions",
         )
 
     def test_response_start_status_uses_reasoning_label_for_reasoning_events(self):
@@ -60,11 +67,20 @@ class AgentInputTests(unittest.TestCase):
             "Started responding in 1.0 second.",
         )
 
-    def test_tool_call_start_status_names_single_tool(self):
-        self.assertEqual(
-            tool_call_start_status(2.04, ("run_command",)),
-            "Prepared run_command in 2.0 seconds.",
-        )
+    def test_tool_activity_complete_status_is_specific_to_each_tool(self):
+        expected = {
+            "run_command": "Wrote command in 2.0 seconds.",
+            "spawn": "Planned parallel tasks in 2.0 seconds.",
+            "read_artifact": "Selected agent result in 2.0 seconds.",
+            "ask_user": "Wrote question in 2.0 seconds.",
+            "unknown": "Prepared action in 2.0 seconds.",
+        }
+        for name, status in expected.items():
+            with self.subTest(name=name):
+                self.assertEqual(
+                    tool_activity_complete_status(2.04, (name,)),
+                    status,
+                )
 
     def test_function_call_id_is_shortened_for_responses_input(self):
         item = {
@@ -487,7 +503,7 @@ class AgentInputTests(unittest.TestCase):
         self.assertLess(events.index("live_start"), events.index("create_client"))
         self.assertLess(events.index("create_client"), events.index("stream_response"))
 
-    def test_run_agent_refreshes_wait_indicator_when_tool_call_starts(self):
+    def test_run_agent_separates_reasoning_and_tool_activity_phases(self):
         with TemporaryDirectory() as tmp:
             history_file = Path(tmp) / "history.json"
             context = SessionContext(
@@ -503,7 +519,7 @@ class AgentInputTests(unittest.TestCase):
                     self.renderable = renderable
 
                 def start(self):
-                    pass
+                    self._capture()
 
                 def stop(self):
                     pass
@@ -511,10 +527,13 @@ class AgentInputTests(unittest.TestCase):
                 def update(self, renderable, *, refresh=False):
                     self.renderable = renderable
                     if refresh:
+                        self._capture()
+
+                def _capture(self):
+                    if hasattr(self.renderable, "_tool_names"):
                         rendered_labels.append(
-                            response_wait_label(
-                                renderable.has_reasoning,
-                                tuple(renderable._tool_names.values()),
+                            tool_activity_label(
+                                tuple(self.renderable._tool_names.values())
                             )
                         )
 
@@ -522,12 +541,14 @@ class AgentInputTests(unittest.TestCase):
                 def isatty(self):
                     return True
 
+            console_output = TtyStringIO()
             stream_count = 0
 
             def fake_stream_response(*_args, **_kwargs):
                 nonlocal stream_count
                 stream_count += 1
                 if stream_count == 1:
+                    yield ReasoningStarted(id="rs_1")
                     yield ToolCallStarted(
                         id="fc_1",
                         call_id="call_1",
@@ -547,12 +568,15 @@ class AgentInputTests(unittest.TestCase):
                 patch("jarv.agent.prepare_session_context", return_value=context),
                 patch("jarv.agent.stream_response", side_effect=fake_stream_response),
                 patch("jarv.agent._dispatch_run_command_with_ui", return_value="ok"),
-                patch("jarv.agent.sys.stdout", new=TtyStringIO()),
+                patch("jarv.agent.sys.stdout", new=console_output),
                 patch("jarv.agent.Live", FakeLive),
             ):
                 run_agent("run it", DEFAULT_CONFIG, client=object(), incognito=True)
 
-        self.assertIn("Writing tool call: run_command", rendered_labels)
+        output = console_output.getvalue()
+        self.assertIn("Writing command", rendered_labels)
+        self.assertIn("Thought for", output)
+        self.assertIn("Wrote command in", output)
 
     def test_run_agent_persists_text_recovered_from_final_response(self):
         with TemporaryDirectory() as tmp:

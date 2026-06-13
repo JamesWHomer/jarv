@@ -86,17 +86,27 @@ class AgentRunResult:
     error: str | None = None
 
 
-def response_wait_label(
-    has_reasoning: bool,
-    tool_names: tuple[str, ...] = (),
-) -> str:
+def response_wait_label(has_reasoning: bool) -> str:
     """Return the live wait label for the response stream."""
-    if tool_names:
-        if len(tool_names) == 1:
-            name = tool_names[0]
-            return f"Writing tool call: {name}" if name else "Writing tool call"
-        return f"Writing {len(tool_names)} tool calls"
     return "Thinking" if has_reasoning else "Waiting"
+
+
+_TOOL_ACTIVITY_LABELS = {
+    "run_command": ("Writing command", "Wrote command"),
+    "spawn": ("Planning parallel tasks", "Planned parallel tasks"),
+    "read_artifact": ("Selecting agent result", "Selected agent result"),
+    "ask_user": ("Writing question", "Wrote question"),
+}
+
+
+def tool_activity_label(tool_names: tuple[str, ...]) -> str:
+    """Return the live activity label for tool-call serialization."""
+    if len(tool_names) != 1:
+        return f"Preparing {len(tool_names)} actions"
+    return _TOOL_ACTIVITY_LABELS.get(
+        tool_names[0],
+        ("Preparing action", "Prepared action"),
+    )[0]
 
 
 class ResponseWaitIndicator:
@@ -105,6 +115,20 @@ class ResponseWaitIndicator:
     def __init__(self, start_time: float):
         self._start = start_time
         self.has_reasoning = False
+
+    def __rich_console__(self, console, options):
+        now = time.perf_counter()
+        elapsed = now - self._start
+        frame = _THINKING_FRAMES[int(now * 10) % len(_THINKING_FRAMES)]
+        label = response_wait_label(self.has_reasoning)
+        yield Text(f"{frame}  {label}\u2026  {int(elapsed)}s")
+
+
+class ToolActivityIndicator:
+    """Animated tool-call serialization line with its own elapsed timer."""
+
+    def __init__(self, start_time: float):
+        self._start = start_time
         self._tool_names: dict[str, str] = {}
 
     def start_tool_call(self, key: str, name: str) -> None:
@@ -114,10 +138,7 @@ class ResponseWaitIndicator:
         now = time.perf_counter()
         elapsed = now - self._start
         frame = _THINKING_FRAMES[int(now * 10) % len(_THINKING_FRAMES)]
-        label = response_wait_label(
-            self.has_reasoning,
-            tuple(self._tool_names.values()),
-        )
+        label = tool_activity_label(tuple(self._tool_names.values()))
         yield Text(f"{frame}  {label}\u2026  {int(elapsed)}s")
 
 
@@ -297,14 +318,16 @@ def response_start_status(seconds: float, has_reasoning: bool) -> str:
     return f"Started responding in {duration}."
 
 
-def tool_call_start_status(seconds: float, tool_names: tuple[str, ...]) -> str:
-    """Return the completed status text for a tool-only response."""
+def tool_activity_complete_status(seconds: float, tool_names: tuple[str, ...]) -> str:
+    """Return the completed status text for tool-call serialization."""
     duration = format_thought_duration(seconds)
-    if len(tool_names) == 1:
-        name = tool_names[0]
-        subject = name if name else "tool call"
-        return f"Prepared {subject} in {duration}."
-    return f"Prepared {len(tool_names)} tool calls in {duration}."
+    if len(tool_names) != 1:
+        return f"Prepared {len(tool_names)} actions in {duration}."
+    completed = _TOOL_ACTIVITY_LABELS.get(
+        tool_names[0],
+        ("Preparing action", "Prepared action"),
+    )[1]
+    return f"{completed} in {duration}."
 
 
 def _format_agent_usage_line(usage: dict) -> Text | None:
@@ -635,6 +658,7 @@ def run_agent(
     artifact_store = None
     usage_path = None
     wait_indicator: ResponseWaitIndicator | None = None
+    tool_indicator: ToolActivityIndicator | None = None
     spinner_live: Live | None = None
     stream_live: Live | None = None
     reasoning_items = []
@@ -646,6 +670,10 @@ def run_agent(
     def _refresh_wait_indicator() -> None:
         if wait_indicator is not None and spinner_live is not None:
             spinner_live.update(wait_indicator, refresh=True)
+
+    def _refresh_tool_indicator() -> None:
+        if tool_indicator is not None and spinner_live is not None:
+            spinner_live.update(tool_indicator, refresh=True)
 
     def _stop_live_displays() -> None:
         nonlocal spinner_live, stream_live
@@ -791,13 +819,56 @@ def run_agent(
             got_text = False
             started_tool_positions: dict[str, int] = {}
             started_tool_names: list[str] = []
+            tool_started_at: float | None = None
+            tool_completed_at: float | None = None
+            response_phase_completed = False
+            tool_phase_completed = False
             stream_preview: StreamingMarkdownPreview | None = None
+
+            def complete_response_phase() -> None:
+                nonlocal spinner_live, wait_indicator, response_phase_completed
+                if response_phase_completed:
+                    return
+                if spinner_live is not None:
+                    spinner_live.stop()
+                    spinner_live = None
+                wait_indicator = None
+                response_phase_completed = True
+                if interactive:
+                    console.print(
+                        thought_complete_indicator(
+                            response_start_status(
+                                time.perf_counter() - thought_started,
+                                has_reasoning=saw_reasoning,
+                            )
+                        )
+                    )
+
+            def complete_tool_phase() -> None:
+                nonlocal spinner_live, tool_phase_completed
+                if tool_started_at is None or tool_phase_completed:
+                    return
+                if spinner_live is not None:
+                    spinner_live.stop()
+                    spinner_live = None
+                tool_phase_completed = True
+                if interactive:
+                    console.print(
+                        thought_complete_indicator(
+                            tool_activity_complete_status(
+                                (tool_completed_at or time.perf_counter())
+                                - tool_started_at,
+                                tuple(started_tool_names),
+                            )
+                        )
+                    )
 
             def note_tool_call_started(
                 item_id: str,
                 call_id: str,
                 name: str,
             ) -> None:
+                nonlocal spinner_live, stream_live, tool_indicator, tool_started_at
                 keys = {value for value in (item_id, call_id) if value}
                 positions = {
                     started_tool_positions[key]
@@ -810,19 +881,40 @@ def run_agent(
                         started_tool_positions[key] = position
                     if name and not started_tool_names[position]:
                         started_tool_names[position] = name
-                        if wait_indicator is not None:
-                            wait_indicator.start_tool_call(str(position), name)
-                            _refresh_wait_indicator()
+                        if tool_indicator is not None:
+                            tool_indicator.start_tool_call(str(position), name)
+                            _refresh_tool_indicator()
                     return
+
+                if tool_started_at is None:
+                    complete_response_phase()
+                    if stream_preview is not None:
+                        stream_preview.flush(refresh=False)
+                    if stream_live is not None:
+                        stream_live.stop()
+                        stream_live = None
+                    tool_started_at = time.perf_counter()
+                    if interactive:
+                        tool_indicator = ToolActivityIndicator(tool_started_at)
+                        spinner_live = Live(
+                            tool_indicator,
+                            refresh_per_second=4,
+                            console=console,
+                            auto_refresh=True,
+                            transient=True,
+                        )
+
                 if not keys:
                     keys = {f"tool_{len(started_tool_names)}"}
                 position = len(started_tool_names)
                 for key in keys:
                     started_tool_positions[key] = position
                 started_tool_names.append(name)
-                if wait_indicator is not None:
-                    wait_indicator.start_tool_call(str(position), name)
-                    _refresh_wait_indicator()
+                if tool_indicator is not None:
+                    tool_indicator.start_tool_call(str(position), name)
+                    if spinner_live is not None:
+                        spinner_live.start()
+                    _refresh_tool_indicator()
 
             if spinner_live is None:
                 thought_started = time.perf_counter()
@@ -848,19 +940,9 @@ def run_agent(
                     if isinstance(event, TextDelta):
                         if not got_text:
                             got_text = True
-                            if spinner_live is not None:
-                                spinner_live.stop()
-                                spinner_live = None
+                            complete_tool_phase()
+                            complete_response_phase()
                             if interactive:
-                                thought_elapsed = time.perf_counter() - thought_started
-                                console.print(
-                                    thought_complete_indicator(
-                                        response_start_status(
-                                            thought_elapsed,
-                                            has_reasoning=saw_reasoning,
-                                        )
-                                    )
-                                )
                                 _, term_h = terminal_size(console=console)
                                 stream_max_lines = term_h - 2
                                 stream_live = InPlaceLive(
@@ -891,6 +973,7 @@ def run_agent(
                             event.call_id,
                             event.name,
                         )
+                        tool_completed_at = time.perf_counter()
                         tool_calls.append(event)
                     elif isinstance(event, ReasoningStarted):
                         saw_reasoning = True
@@ -937,29 +1020,13 @@ def run_agent(
                 if stream_live is not None:
                     stream_live.stop()
                     stream_live = None
+            complete_tool_phase()
+            complete_response_phase()
             if got_text:
                 if interactive:
                     console.print(Markdown(flatten_headings(reply_text)))
                 else:
                     print(reply_text)
-            if not got_text and interactive:
-                thought_elapsed = time.perf_counter() - thought_started
-                status = (
-                    tool_call_start_status(
-                        thought_elapsed,
-                        tuple(started_tool_names),
-                    )
-                    if started_tool_names
-                    else response_start_status(
-                        thought_elapsed,
-                        has_reasoning=saw_reasoning,
-                    )
-                )
-                console.print(
-                    thought_complete_indicator(
-                        status
-                    )
-                )
 
             if tool_calls:
                 new_input_items = []
