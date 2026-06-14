@@ -155,6 +155,9 @@ FALLBACK_PROVIDER_MODELS = {
         ("claude-haiku-4-5", "Budget — fastest, cheapest"),
     ],
     "openrouter": [
+        ("openrouter/auto", "Automatic - compatible model, variable cost"),
+        ("openrouter/free", "Free - compatible free model"),
+        ("google/gemma-4-31b-it:free", "Free - stable Gemma 4 31B"),
         # Top 15 by weekly token usage (openrouter.ai/models?order=top-weekly)
         ("tencent/hy3-preview", "Tencent — Hunyuan H3 (Hy3) Preview"),
         ("deepseek/deepseek-v4-flash", "DeepSeek — V4 Flash"),

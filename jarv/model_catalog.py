@@ -473,6 +473,14 @@ def model_pricing_values(
     model: str | None,
 ) -> tuple[str, str, str]:
     """Return display-ready input, cached-input, and output prices."""
+    provider_name = str(provider or "").lower()
+    model_name = str(model or "").lower()
+    if provider_name == "openrouter" and model_name == "openrouter/auto":
+        return "varies", "varies", "varies"
+    if provider_name == "openrouter" and (
+        model_name == "openrouter/free" or model_name.endswith(":free")
+    ):
+        return "$0", "$0", "$0"
     prices = openrouter_prices_for_model(provider, model)
     if prices is None:
         return "n/a", "n/a", "n/a"
@@ -628,6 +636,90 @@ def _deepseek_choices(models: list[CatalogModel]) -> list[tuple[str, str]]:
     )
 
 
+def _openrouter_choices(models: list[CatalogModel]) -> list[tuple[str, str]]:
+    policies = [
+        (
+            "Automatic",
+            "OpenRouter chooses a compatible model; variable cost",
+            [r"^openrouter/auto$"],
+        ),
+        (
+            "Free",
+            "OpenRouter chooses a compatible free model",
+            [r"^openrouter/free$"],
+        ),
+        (
+            "Preview",
+            "OpenRouter Owl Alpha",
+            [r"^openrouter/owl-alpha$"],
+        ),
+        (
+            "Preview",
+            "Tencent Hunyuan H3",
+            [r"^tencent/hy3-preview$"],
+        ),
+        (
+            "Premium",
+            "latest Claude flagship",
+            [
+                r"^anthropic/claude-fable-\d+(?:[.-]\d+)?$",
+                r"^anthropic/claude-opus-\d+(?:[.-]\d+)?$",
+            ],
+        ),
+        (
+            "Flagship",
+            "latest OpenAI GPT",
+            [r"^openai/gpt-\d+(?:\.\d+)+$"],
+        ),
+        (
+            "Balanced",
+            "latest Claude Sonnet",
+            [r"^anthropic/claude-sonnet-\d+(?:[.-]\d+)?$"],
+        ),
+        (
+            "Balanced",
+            "latest Gemini",
+            [
+                r"^google/gemini-\d+(?:\.\d+)?-pro(?:-preview)?$",
+                r"^google/gemini-\d+(?:\.\d+)?-flash(?:-preview)?$",
+            ],
+        ),
+        (
+            "Value",
+            "latest DeepSeek",
+            [
+                r"^deepseek/deepseek-v\d+(?:\.\d+)?-pro$",
+                r"^deepseek/deepseek-v\d+(?:\.\d+)?-flash$",
+                r"^deepseek/deepseek-v\d+(?:\.\d+)?$",
+            ],
+        ),
+        (
+            "Value",
+            "latest Kimi",
+            [r"^moonshotai/kimi-k\d+(?:\.\d+)+$"],
+        ),
+        (
+            "Budget",
+            "latest MiniMax",
+            [r"^minimax/minimax-m\d+(?:\.\d+)?$"],
+        ),
+        (
+            "Free",
+            "stable Gemma 4 31B",
+            [r"^google/gemma-4-31b-it:free$"],
+        ),
+    ]
+    result = []
+    seen: set[str] = set()
+    for tier, label, patterns in policies:
+        selected = _latest_matching(models, patterns)
+        if selected is None or selected.id in seen:
+            continue
+        seen.add(selected.id)
+        result.append((selected.id, f"{tier} - {label}"))
+    return result
+
+
 def _latest_matching(
     models: list[CatalogModel],
     patterns: list[str],
@@ -645,32 +737,6 @@ def _numbers(value: str) -> tuple[int, ...]:
 
 
 _FAMILY_POLICIES: dict[str, list[tuple[str, str, list[str]]]] = {
-    "openrouter": [
-        (
-            "Premium",
-            "latest Claude Fable",
-            [r"^anthropic/claude-fable-\d+(?:[.-]\d+)?$"],
-        ),
-        (
-            "Flagship",
-            "latest Claude Opus",
-            [r"^anthropic/claude-opus-\d+(?:[.-]\d+)?$"],
-        ),
-        (
-            "Balanced",
-            "latest Claude Sonnet",
-            [r"^anthropic/claude-sonnet-\d+(?:[.-]\d+)?$"],
-        ),
-        (
-            "Budget",
-            "latest fast budget model",
-            [
-                r"^anthropic/claude-haiku-\d+(?:[.-]\d+)?$",
-                r"^google/gemini-\d+(?:\.\d+)?-flash-lite(?:-preview)?$",
-                r":free$",
-            ],
-        ),
-    ],
     "groq": [
         ("Flagship", "latest large general model", [r"gpt-oss-120b", r"llama.*70b"]),
         ("Balanced", "latest versatile model", [r"llama.*versatile", r"qwen.*32b"]),
@@ -719,6 +785,7 @@ def recommend_models(provider: str, models: list[CatalogModel]) -> list[tuple[st
     """Reduce a provider catalog to the models Jarv users are likely to want."""
     policies: dict[str, Callable[[list[CatalogModel]], list[tuple[str, str]]]] = {
         "openai": _openai_choices,
+        "openrouter": _openrouter_choices,
         "anthropic": _anthropic_choices,
         "gemini": _gemini_choices,
         "deepseek": _deepseek_choices,

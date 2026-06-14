@@ -2,6 +2,8 @@
 
 from rich.text import Text
 
+from .command_input import TextInput
+
 
 def initialize_text_editor(
     state: dict,
@@ -204,9 +206,14 @@ def apply_text_editor_key(
         state["buffer"] = value[:cursor] + "\n" + value[cursor:]
         state["cursor"] = cursor + 1
         changed = True
-    elif isinstance(key, str) and len(key) == 1 and key.isprintable():
+    elif (
+        isinstance(key, str)
+        and key
+        and (len(key) == 1 or isinstance(key, TextInput))
+        and all(char.isprintable() for char in key)
+    ):
         state["buffer"] = value[:cursor] + key + value[cursor:]
-        state["cursor"] = cursor + 1
+        state["cursor"] = cursor + len(key)
         changed = True
 
     if changed:

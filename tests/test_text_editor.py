@@ -1,3 +1,4 @@
+from jarv.command_input import TextInput
 from jarv.text_editor import (
     apply_text_editor_key,
     initialize_text_editor,
@@ -17,6 +18,16 @@ def test_single_line_editor_inserts_and_deletes_at_cursor():
 
     assert state["buffer"] == "abXd"
     assert state["cursor"] == 3
+
+
+def test_single_line_editor_inserts_batched_text_at_cursor():
+    state = {}
+    initialize_text_editor(state, "abcd")
+    state["cursor"] = 2
+
+    assert apply_text_editor_key(state, TextInput("custom/model"))
+    assert state["buffer"] == "abcustom/modelcd"
+    assert state["cursor"] == 14
 
 
 def test_single_line_editor_ignores_enter_and_vertical_movement():

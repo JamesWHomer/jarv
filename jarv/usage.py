@@ -743,6 +743,15 @@ def record_response_usage(
     try:
         if usage_path is None and not record_global:
             return
+        requested_model = model
+        served_model = _value(response, "model")
+        if (
+            str(provider or "").lower() == "openrouter"
+            and isinstance(served_model, str)
+            and served_model.strip()
+        ):
+            model = served_model.strip()
+
         token_usage = usage_from_response(response)
         if token_usage is None:
             token_usage = estimated_usage_from_context(model, context_breakdown, output_text)
@@ -757,6 +766,8 @@ def record_response_usage(
             "source": source,
             **token_usage,
         }
+        if model != requested_model:
+            record["requested_model"] = requested_model
         raw_service_tier = _first_present(
             _value(response, "service_tier"),
             _value(_value(response, "usage"), "service_tier"),

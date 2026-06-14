@@ -96,6 +96,21 @@ def test_read_key_with_repeats_does_not_drain_non_repeatable_key(monkeypatch):
     command_input._PENDING_KEYS.clear()
 
 
+def test_read_key_with_repeats_batches_queued_text(monkeypatch):
+    command_input._PENDING_KEYS.clear()
+    keys = [*"openai/gpt-5.5", "ENTER"]
+
+    monkeypatch.setattr(command_input, "_read_key", lambda text_mode=False: keys.pop(0))
+    monkeypatch.setattr(command_input, "_key_available", lambda: bool(keys))
+
+    assert command_input._read_key_with_repeats(
+        text_mode=True,
+        batch_text=True,
+    ) == (command_input.TextInput("openai/gpt-5.5"), 1)
+    assert list(command_input._PENDING_KEYS) == ["ENTER"]
+    command_input._PENDING_KEYS.clear()
+
+
 def test_read_key_returns_resize_when_posix_terminal_size_changes(monkeypatch):
     _install_posix_input(monkeypatch, "")
     sizes = [

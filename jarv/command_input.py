@@ -21,6 +21,10 @@ _LAST_TERMINAL_SIZE: tuple[int, int] | None = None
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
+class TextInput(str):
+    """A queued group of printable characters from an editable input."""
+
+
 @contextmanager
 def mouse_capture():
     """Capture POSIX terminal mouse input while a full-screen view is active."""
@@ -129,15 +133,39 @@ def _read_key_with_repeats(
     *,
     repeatable: Iterable[str] = _REPEATABLE_NAV_KEYS,
     max_count: int = 128,
+    batch_text: bool = False,
 ) -> tuple[str, int]:
     """Read one key and fold immediately queued identical navigation repeats.
 
     Full-screen Rich views are expensive enough that some terminals can queue
     key-repeat events faster than jarv can redraw. Coalescing identical queued
     arrows lets menus advance several rows per refresh while preserving the
-    first different key for the next input loop.
+    first different key for the next input loop. Editable views can also batch
+    queued printable characters so a paste triggers one redraw instead of one
+    redraw per character.
     """
     key = _read_key(text_mode=text_mode)
+    if (
+        batch_text
+        and text_mode
+        and isinstance(key, str)
+        and len(key) == 1
+        and key.isprintable()
+    ):
+        inserted = [key]
+        while len(inserted) < max_count and _key_available():
+            next_key = _read_key(text_mode=text_mode)
+            if (
+                isinstance(next_key, str)
+                and len(next_key) == 1
+                and next_key.isprintable()
+            ):
+                inserted.append(next_key)
+                continue
+            _PENDING_KEYS.appendleft(next_key)
+            break
+        return TextInput("".join(inserted)), 1
+
     repeatable_keys = frozenset(repeatable)
     if key not in repeatable_keys or max_count <= 1:
         return key, 1

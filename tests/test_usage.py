@@ -275,6 +275,41 @@ class UsageRecordingTests(unittest.TestCase):
         self.assertEqual(usage["last_request"]["provider_cost_usd"], 7.125)
         self.assertEqual(usage["totals"]["cost_exact_request_count"], 1)
 
+    def test_openrouter_router_records_served_model(self):
+        with TemporaryDirectory() as tmp:
+            usage_path = Path(tmp) / "usage-test.json"
+            response = {
+                "model": "anthropic/claude-sonnet-4.6",
+                "usage": {
+                    "prompt_tokens": 12,
+                    "completion_tokens": 3,
+                    "total_tokens": 15,
+                    "cost": 0.001,
+                },
+            }
+
+            record_response_usage(
+                usage_path,
+                "session-id",
+                "openrouter/auto",
+                response=response,
+                source="root",
+                provider="openrouter",
+                record_global=False,
+            )
+            usage = load_usage(usage_path, "session-id")
+
+        self.assertEqual(
+            usage["last_request"]["model"],
+            "anthropic/claude-sonnet-4.6",
+        )
+        self.assertEqual(
+            usage["last_request"]["requested_model"],
+            "openrouter/auto",
+        )
+        self.assertIn("anthropic/claude-sonnet-4.6", usage["models"])
+        self.assertNotIn("openrouter/auto", usage["models"])
+
     def test_unreported_priority_downgrade_is_not_guessed(self):
         record = {
             "provider": "openai",

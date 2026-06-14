@@ -102,21 +102,56 @@ def test_deepseek_recommendations_ignore_unrelated_models():
     ]
 
 
-def test_openrouter_uses_stable_family_aliases_not_variants():
+def test_openrouter_recommendations_are_diverse_and_exclude_variants():
     choices = recommend_models("openrouter", _models(
+        "openrouter/auto",
+        "openrouter/free",
+        "openrouter/owl-alpha",
+        "tencent/hy3-preview",
         "anthropic/claude-fable-5",
         "anthropic/claude-opus-4.8",
         "anthropic/claude-opus-4.8-fast",
         "anthropic/claude-sonnet-4.6",
-        "anthropic/claude-haiku-4.5",
+        "openai/gpt-5.5",
+        "google/gemini-3.1-pro-preview",
+        "deepseek/deepseek-v4-pro",
+        "moonshotai/kimi-k2.6",
+        "minimax/minimax-m2.7",
+        "google/gemma-4-31b-it:free",
     ))
 
     assert [model for model, _description in choices] == [
+        "openrouter/auto",
+        "openrouter/free",
+        "openrouter/owl-alpha",
+        "tencent/hy3-preview",
         "anthropic/claude-fable-5",
-        "anthropic/claude-opus-4.8",
+        "openai/gpt-5.5",
         "anthropic/claude-sonnet-4.6",
-        "anthropic/claude-haiku-4.5",
+        "google/gemini-3.1-pro-preview",
+        "deepseek/deepseek-v4-pro",
+        "moonshotai/kimi-k2.6",
+        "minimax/minimax-m2.7",
+        "google/gemma-4-31b-it:free",
     ]
+    assert "anthropic/claude-opus-4.8-fast" not in {
+        model for model, _description in choices
+    }
+
+
+def test_openrouter_router_and_free_pricing_labels():
+    assert model_catalog.model_pricing_values(
+        "openrouter",
+        "openrouter/auto",
+    ) == ("varies", "varies", "varies")
+    assert model_catalog.model_pricing_values(
+        "openrouter",
+        "openrouter/free",
+    ) == ("$0", "$0", "$0")
+    assert model_catalog.model_pricing_values(
+        "openrouter",
+        "google/gemma-4-31b-it:free",
+    ) == ("$0", "$0", "$0")
 
 
 def test_marketplace_provider_policies_select_live_families():
@@ -468,7 +503,6 @@ def test_model_picker_arrows_select_rows_and_typing_activates_input(
     assert edit["buffer"] == "c"
     assert settings_command._settings_model_apply_key(edit, "u") is True
     assert edit["buffer"] == "cu"
-
     lines = settings_command._settings_editor_lines(edit, updated, 120)
     selected_line = next(line for line in lines if "gpt-5.4-mini" in line.plain)
     input_line = next(
@@ -487,6 +521,24 @@ def test_model_picker_arrows_select_rows_and_typing_activates_input(
     assert edit["selected_model_index"] == 2
     assert edit["model_input_active"] is True
     assert edit["buffer"] == "cu"
+
+
+def test_model_picker_inserts_batched_text():
+    edit = {
+        "model_choices": [("gpt-5.5", "Flagship")],
+        "selected_model_index": 0,
+        "model_input_active": False,
+        "buffer": "",
+        "cursor": 0,
+    }
+
+    assert settings_command._settings_model_apply_key(
+        edit,
+        settings_command.TextInput("custom/model"),
+    )
+    assert edit["model_input_active"] is True
+    assert edit["buffer"] == "custom/model"
+    assert edit["cursor"] == len("custom/model")
 
 
 def test_model_picker_down_past_last_row_focuses_preserved_input():

@@ -13,7 +13,7 @@ from rich.table import Table
 from rich.text import Text
 from rich import box
 
-from .command_input import _read_key_with_repeats, mouse_capture
+from .command_input import TextInput, _read_key_with_repeats, mouse_capture
 from .config import (
     CONFIG_FILE,
     DEFAULT_CONFIG,
@@ -703,7 +703,12 @@ def _settings_model_apply_key(
         edit["error"] = ""
         return True
 
-    if isinstance(key, str) and len(key) == 1 and key.isprintable():
+    if (
+        isinstance(key, str)
+        and key
+        and (len(key) == 1 or isinstance(key, TextInput))
+        and all(char.isprintable() for char in key)
+    ):
         if not edit.get("model_input_active"):
             edit["model_input_active"] = True
         apply_text_editor_key(
@@ -1997,7 +2002,10 @@ def _settings_interactive(config: dict) -> None:
         while True:
             live.refresh()
             try:
-                key, repeat_count = _read_key_with_repeats(text_mode=edit is not None)
+                key, repeat_count = _read_key_with_repeats(
+                    text_mode=edit is not None,
+                    batch_text=edit is not None,
+                )
             except KeyboardInterrupt:
                 break
 
