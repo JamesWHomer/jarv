@@ -212,6 +212,24 @@ def test_gemini_pro_rejects_unsupported_effort_and_preserves_medium():
     assert medium["generationConfig"]["thinkingConfig"]["thinkingLevel"] == "medium"
 
 
+def test_gemini_requests_thought_summaries_at_default_effort():
+    payload = build_gemini_payload(
+        {}, "gemini-3.1-pro-preview", "", [], [],
+    )
+
+    assert payload["generationConfig"]["thinkingConfig"] == {
+        "includeThoughts": True,
+    }
+
+
+def test_gemini_does_not_request_thoughts_for_unknown_models():
+    payload = build_gemini_payload(
+        {}, "gemini-test", "", [], [],
+    )
+
+    assert "generationConfig" not in payload
+
+
 def test_gemini_25_uses_current_reasoning_budgets_and_explicit_none():
     medium = build_gemini_payload(
         {}, "gemini-2.5-flash", "", [], [],

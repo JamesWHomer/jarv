@@ -194,7 +194,7 @@ def _settings_has_api_key(config: dict) -> tuple[bool, str]:
 def _settings_rows(config: dict) -> list[dict]:
     from .reasoning import reasoning_effort_choices, reasoning_effort_description
 
-    return [
+    rows = [
         {
             "section": "account",
             "label": "Provider",
@@ -213,6 +213,14 @@ def _settings_rows(config: dict) -> list[dict]:
         },
         {
             "section": "account",
+            "label": "Base URL",
+            "key": "base_url",
+            "kind": "text",
+            "empty": "provider default",
+            "desc": "optional custom endpoint",
+        },
+        {
+            "section": "behaviour",
             "label": "Model",
             "key": "model",
             "kind": "setup",
@@ -220,20 +228,12 @@ def _settings_rows(config: dict) -> list[dict]:
             "desc": "pick from the provider presets or enter a model",
         },
         {
-            "section": "account",
-            "label": "Processing tier",
-            "key": "service_tier",
+            "section": "behaviour",
+            "label": "Reasoning effort",
+            "key": "reasoning_effort",
             "kind": "choice",
-            "choices": _settings_service_tier_choices(config),
-            "desc": _settings_service_tier_description(config),
-        },
-        {
-            "section": "account",
-            "label": "Base URL",
-            "key": "base_url",
-            "kind": "text",
-            "empty": "provider default",
-            "desc": "optional custom endpoint",
+            "choices": reasoning_effort_choices(config),
+            "desc": reasoning_effort_description(config),
         },
         {
             "section": "behaviour",
@@ -253,7 +253,7 @@ def _settings_rows(config: dict) -> list[dict]:
         },
         {
             "section": "display",
-            "label": "Print usage after agent",
+            "label": "Print usage",
             "key": "print_usage_after_agent",
             "kind": "bool",
             "desc": "print token totals after completed agent runs",
@@ -287,14 +287,6 @@ def _settings_rows(config: dict) -> list[dict]:
             "kind": "text",
             "empty": "auto",
             "desc": "empty uses the active model",
-        },
-        {
-            "section": "runtime",
-            "label": "Reasoning effort",
-            "key": "reasoning_effort",
-            "kind": "choice",
-            "choices": reasoning_effort_choices(config),
-            "desc": reasoning_effort_description(config),
         },
         {
             "section": "runtime",
@@ -346,6 +338,20 @@ def _settings_rows(config: dict) -> list[dict]:
             "desc": "background check on one-shot runs",
         },
     ]
+    tier_choices = _settings_service_tier_choices(config)
+    if len(tier_choices) > 1:
+        rows.insert(
+            2,
+            {
+                "section": "account",
+                "label": "Processing tier",
+                "key": "service_tier",
+                "kind": "choice",
+                "choices": tier_choices,
+                "desc": _settings_service_tier_description(config),
+            },
+        )
+    return rows
 
 
 def _settings_value_text(row: dict, config: dict, *, selected: bool = False) -> Text:

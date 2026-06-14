@@ -70,13 +70,32 @@ def test_settings_exposes_print_usage_after_agent(monkeypatch):
     row = next(row for row in settings_command._settings_rows(config) if row["key"] == "print_usage_after_agent")
 
     assert row["section"] == "display"
+    assert row["label"] == "Print usage"
     assert settings_command._settings_value_text(row, config).plain == "off"
 
     monkeypatch.setattr(settings_command, "save_config", lambda _config: None)
     updated, message = settings_command._settings_apply_quick(row, config)
 
     assert updated["print_usage_after_agent"] is True
-    assert message == "saved Print usage after agent: on"
+    assert message == "saved Print usage: on"
+
+
+def test_settings_groups_account_and_behaviour_rows_in_requested_order():
+    rows = settings_command._settings_rows(dict(DEFAULT_CONFIG))
+
+    assert [
+        row["label"] for row in rows if row["section"] == "account"
+    ] == ["Provider", "API key", "Processing tier", "Base URL"]
+    assert [
+        row["label"] for row in rows if row["section"] == "behaviour"
+    ] == ["Model", "Reasoning effort", "System prompt"]
+
+    unsupported_rows = settings_command._settings_rows(
+        {**DEFAULT_CONFIG, "provider": "groq"}
+    )
+    assert [
+        row["label"] for row in unsupported_rows if row["section"] == "account"
+    ] == ["Provider", "API key", "Base URL"]
 
 
 def test_help_about_and_config_use_shared_renderer(monkeypatch):

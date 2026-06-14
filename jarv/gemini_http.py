@@ -171,14 +171,18 @@ def to_tools(tools: list[dict]) -> list[dict]:
 
 
 def _apply_reasoning(config: dict, payload: dict, model: str, reasoning: dict | None) -> None:
-    from .reasoning import require_reasoning_effort
+    from .reasoning import get_reasoning_capabilities, require_reasoning_effort
 
     effort = str((reasoning or {}).get("effort") or "").lower()
-    if not effort:
-        return
     probe = dict(config)
     probe["provider"] = "gemini"
     probe["model"] = model
+    if not effort:
+        if get_reasoning_capabilities(probe).supported is True:
+            payload.setdefault("generationConfig", {})["thinkingConfig"] = {
+                "includeThoughts": True,
+            }
+        return
     effort = require_reasoning_effort(probe, effort)
     if effort == "none":
         payload.setdefault("generationConfig", {})["thinkingConfig"] = {

@@ -93,6 +93,20 @@ def test_settings_store_tiers_per_provider_without_mutating_defaults(monkeypatch
     }
 
 
+def test_settings_hide_processing_tier_for_unsupported_provider():
+    config = {
+        **DEFAULT_CONFIG,
+        "provider": "groq",
+        "service_tiers": {"openai": "priority"},
+    }
+
+    assert all(
+        row["key"] != "service_tier"
+        for row in settings_command._settings_rows(config)
+    )
+    assert config["service_tiers"] == {"openai": "priority"}
+
+
 def test_validate_config_rejects_invalid_or_unsupported_service_tiers():
     invalid = dict(DEFAULT_CONFIG)
     invalid["service_tiers"] = {"openai": "auto"}
