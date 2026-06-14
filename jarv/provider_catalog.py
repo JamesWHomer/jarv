@@ -158,6 +158,7 @@ FALLBACK_PROVIDER_MODELS = {
         ("openrouter/auto", "Automatic - compatible model, variable cost"),
         ("openrouter/free", "Free - compatible free model"),
         ("google/gemma-4-31b-it:free", "Free - stable Gemma 4 31B"),
+        ("nvidia/nemotron-3-ultra-550b-a55b:free", "Free - Nemotron 3 Ultra 550B"),
         # Top 15 by weekly token usage (openrouter.ai/models?order=top-weekly)
         ("tencent/hy3-preview", "Tencent — Hunyuan H3 (Hy3) Preview"),
         ("deepseek/deepseek-v4-flash", "DeepSeek — V4 Flash"),

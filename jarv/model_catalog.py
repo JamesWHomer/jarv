@@ -708,6 +708,11 @@ def _openrouter_choices(models: list[CatalogModel]) -> list[tuple[str, str]]:
             "stable Gemma 4 31B",
             [r"^google/gemma-4-31b-it:free$"],
         ),
+        (
+            "Free",
+            "Nemotron 3 Ultra 550B",
+            [r"^nvidia/nemotron-3-ultra-550b-a55b:free$"],
+        ),
     ]
     result = []
     seen: set[str] = set()

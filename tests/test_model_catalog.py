@@ -118,6 +118,7 @@ def test_openrouter_recommendations_are_diverse_and_exclude_variants():
         "moonshotai/kimi-k2.6",
         "minimax/minimax-m2.7",
         "google/gemma-4-31b-it:free",
+        "nvidia/nemotron-3-ultra-550b-a55b:free",
     ))
 
     assert [model for model, _description in choices] == [
@@ -133,6 +134,7 @@ def test_openrouter_recommendations_are_diverse_and_exclude_variants():
         "moonshotai/kimi-k2.6",
         "minimax/minimax-m2.7",
         "google/gemma-4-31b-it:free",
+        "nvidia/nemotron-3-ultra-550b-a55b:free",
     ]
     assert "anthropic/claude-opus-4.8-fast" not in {
         model for model, _description in choices
