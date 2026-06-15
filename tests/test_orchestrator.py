@@ -12,7 +12,12 @@ from jarv.orchestrator import (
     run_subagent_loop,
     spawn_batch,
 )
-from jarv.provider import StreamDone, TextDelta, ToolCallDone
+from jarv.provider import (
+    RetryableStreamError,
+    StreamDone,
+    TextDelta,
+    ToolCallDone,
+)
 from jarv.cancellation import CancellationToken, TurnCancelled
 from jarv.shell import CommandResult
 
@@ -331,6 +336,81 @@ class OrchestratorTests(unittest.TestCase):
 
         self.assertIsNone(longform)
         self.assertEqual(reason, "subagent terminated without calling finish")
+
+    def test_subagent_replays_truncated_stream_once_and_discards_tool_calls(self):
+        node = AgentNode(
+            label="child",
+            depth=1,
+            parent_label="root",
+            task="do work",
+            sterile=True,
+        )
+        stream_count = 0
+
+        def fake_stream_response(*_args, **_kwargs):
+            nonlocal stream_count
+            stream_count += 1
+            if stream_count == 1:
+                yield ToolCallDone(
+                    id="fc_discarded",
+                    call_id="call_discarded",
+                    name="run_command",
+                    arguments='{"command":"do not run"}',
+                )
+                raise RetryableStreamError("truncated")
+            yield ToolCallDone(
+                id="fc_finish",
+                call_id="call_finish",
+                name="finish",
+                arguments='{"longform":"done","tldr":"done"}',
+            )
+            yield StreamDone(response=None)
+
+        with (
+            patch("jarv.orchestrator.stream_response", side_effect=fake_stream_response),
+            patch("jarv.orchestrator.execute_command") as execute,
+        ):
+            result = run_subagent_loop(
+                node,
+                ArtifactStore(),
+                client=None,
+                config=DEFAULT_CONFIG,
+            )
+
+        self.assertEqual(result, ("done", "done"))
+        self.assertEqual(stream_count, 2)
+        execute.assert_not_called()
+
+    def test_subagent_stops_after_one_stream_replay(self):
+        node = AgentNode(
+            label="child",
+            depth=1,
+            parent_label="root",
+            task="do work",
+            sterile=True,
+        )
+        stream_count = 0
+
+        def fake_stream_response(*_args, **_kwargs):
+            nonlocal stream_count
+            stream_count += 1
+            raise RetryableStreamError("still truncated")
+            yield
+
+        with patch(
+            "jarv.orchestrator.stream_response",
+            side_effect=fake_stream_response,
+        ):
+            longform, reason = run_subagent_loop(
+                node,
+                ArtifactStore(),
+                client=None,
+                config=DEFAULT_CONFIG,
+            )
+
+        self.assertIsNone(longform)
+        self.assertEqual(stream_count, 2)
+        self.assertEqual(reason, "provider error: still truncated")
 
     def test_subagent_uses_higher_max_tokens_for_anthropic(self):
         node = AgentNode(

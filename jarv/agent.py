@@ -38,6 +38,7 @@ from .artifacts import ArtifactStore, load_artifact_store, save_artifact_store
 from .provider import (
     create_client,
     ProviderError,
+    RetryableStreamError,
     ReasoningDone,
     ReasoningStarted,
     StreamDone,
@@ -991,99 +992,128 @@ def run_agent(
                 kwargs.get("input", []),
             )
 
-            try:
-                final_response = None
-                for event in stream_response(
-                    client, config,
-                    kwargs["model"], kwargs["instructions"],
-                    kwargs["tools"], kwargs["input"],
-                    reasoning=kwargs.get("reasoning"),
-                    prompt_cache_key=f"jarv:{session_context.session_id}",
-                    cancellation_token=cancellation_token,
-                ):
-                    if isinstance(event, TextDelta):
-                        if not got_text:
-                            got_text = True
-                            complete_tool_phase()
-                            complete_response_phase()
-                            if interactive:
-                                _, term_h = terminal_size(console=console)
-                                stream_max_lines = term_h - 2
-                                stream_live = InPlaceLive(
-                                    TailMarkdown("", stream_max_lines),
-                                    console=console,
-                                    auto_refresh=False,
-                                    transient=True,
-                                    vertical_overflow="crop",
-                                )
-                                stream_live.start()
-                                stream_preview = StreamingMarkdownPreview(
-                                    stream_live,
-                                    stream_max_lines,
-                                )
-                        if stream_preview is not None:
-                            stream_preview.append(event.delta)
-                        else:
-                            reply_text += event.delta
-                    elif isinstance(event, ToolCallStarted):
-                        note_tool_call_started(
-                            event.id,
-                            event.call_id,
-                            event.name,
-                        )
-                    elif isinstance(event, ToolCallDone):
-                        note_tool_call_started(
-                            event.id,
-                            event.call_id,
-                            event.name,
-                        )
-                        tool_completed_at = time.perf_counter()
-                        tool_calls.append(event)
-                    elif isinstance(event, ReasoningStarted):
-                        saw_reasoning = True
-                        if wait_indicator is not None:
-                            wait_indicator.has_reasoning = True
-                            _refresh_wait_indicator()
-                    elif isinstance(event, ReasoningDone):
-                        saw_reasoning = True
-                        reasoning_items.append(event)
-                        if wait_indicator is not None:
-                            wait_indicator.has_reasoning = True
-                            _refresh_wait_indicator()
-                    elif isinstance(event, StreamDone):
-                        final_response = event.response
-                if stream_preview is not None:
-                    reply_text = stream_preview.text
-                final_text = response_output_text(final_response)
-                if final_text and len(final_text) >= len(reply_text):
-                    reply_text = final_text
-                    got_text = True
+            stream_replays = 0
+            while True:
+                retry_stream = False
+                try:
+                    final_response = None
+                    for event in stream_response(
+                        client, config,
+                        kwargs["model"], kwargs["instructions"],
+                        kwargs["tools"], kwargs["input"],
+                        reasoning=kwargs.get("reasoning"),
+                        prompt_cache_key=f"jarv:{session_context.session_id}",
+                        cancellation_token=cancellation_token,
+                    ):
+                        if isinstance(event, TextDelta):
+                            if not got_text:
+                                got_text = True
+                                complete_tool_phase()
+                                complete_response_phase()
+                                if interactive:
+                                    _, term_h = terminal_size(console=console)
+                                    stream_max_lines = term_h - 2
+                                    stream_live = InPlaceLive(
+                                        TailMarkdown("", stream_max_lines),
+                                        console=console,
+                                        auto_refresh=False,
+                                        transient=True,
+                                        vertical_overflow="crop",
+                                    )
+                                    stream_live.start()
+                                    stream_preview = StreamingMarkdownPreview(
+                                        stream_live,
+                                        stream_max_lines,
+                                    )
+                            if stream_preview is not None:
+                                stream_preview.append(event.delta)
+                            else:
+                                reply_text += event.delta
+                        elif isinstance(event, ToolCallStarted):
+                            note_tool_call_started(
+                                event.id,
+                                event.call_id,
+                                event.name,
+                            )
+                        elif isinstance(event, ToolCallDone):
+                            note_tool_call_started(
+                                event.id,
+                                event.call_id,
+                                event.name,
+                            )
+                            tool_completed_at = time.perf_counter()
+                            tool_calls.append(event)
+                        elif isinstance(event, ReasoningStarted):
+                            saw_reasoning = True
+                            if wait_indicator is not None:
+                                wait_indicator.has_reasoning = True
+                                _refresh_wait_indicator()
+                        elif isinstance(event, ReasoningDone):
+                            saw_reasoning = True
+                            reasoning_items.append(event)
+                            if wait_indicator is not None:
+                                wait_indicator.has_reasoning = True
+                                _refresh_wait_indicator()
+                        elif isinstance(event, StreamDone):
+                            final_response = event.response
                     if stream_preview is not None:
-                        stream_preview.replace(final_text)
-                if not incognito:
-                    record_response_usage(
-                        usage_path,
-                        session_context.session_id,
-                        config["model"],
-                        final_response,
-                        "root",
-                        provider=str(config.get("provider") or "openai"),
-                        requested_service_tier=configured_service_tier(config),
-                        context_breakdown=_ctx_breakdown,
-                        output_text=reply_text or "\n".join(
-                            f"{item.name} {item.arguments}" for item in tool_calls
-                        ),
-                    )
-            finally:
-                if stream_preview is not None:
-                    reply_text = stream_preview.text
-                    stream_preview.flush(refresh=False)
-                if spinner_live is not None:
-                    spinner_live.stop()
-                    spinner_live = None
-                if stream_live is not None:
-                    stream_live.stop()
-                    stream_live = None
+                        reply_text = stream_preview.text
+                    final_text = response_output_text(final_response)
+                    if final_text and len(final_text) >= len(reply_text):
+                        reply_text = final_text
+                        got_text = True
+                        if stream_preview is not None:
+                            stream_preview.replace(final_text)
+                    if not incognito:
+                        record_response_usage(
+                            usage_path,
+                            session_context.session_id,
+                            config["model"],
+                            final_response,
+                            "root",
+                            provider=str(config.get("provider") or "openai"),
+                            requested_service_tier=configured_service_tier(config),
+                            context_breakdown=_ctx_breakdown,
+                            output_text=reply_text or "\n".join(
+                                f"{item.name} {item.arguments}" for item in tool_calls
+                            ),
+                        )
+                except RetryableStreamError:
+                    retry_stream = stream_replays == 0
+                    reply_text = ""
+                    tool_calls = []
+                    reasoning_items = []
+                    saw_reasoning = False
+                    got_text = False
+                    started_tool_positions = {}
+                    started_tool_names = []
+                    tool_started_at = None
+                    tool_completed_at = None
+                    response_phase_completed = False
+                    tool_phase_completed = False
+                    stream_preview = None
+                    tool_indicator = None
+                    wait_indicator = None
+                    if not retry_stream:
+                        raise
+                    stream_replays += 1
+                finally:
+                    if stream_preview is not None:
+                        reply_text = stream_preview.text
+                        stream_preview.flush(refresh=False)
+                    if spinner_live is not None:
+                        spinner_live.stop()
+                        spinner_live = None
+                    if stream_live is not None:
+                        stream_live.stop()
+                        stream_live = None
+                if not retry_stream:
+                    break
+                thought_started = time.perf_counter()
+                wait_indicator, spinner_live = _start_response_wait_indicator(
+                    interactive,
+                    thought_started,
+                )
             complete_tool_phase()
             complete_response_phase()
             if got_text:

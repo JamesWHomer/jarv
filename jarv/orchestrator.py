@@ -20,6 +20,7 @@ from .safety import check_command
 from .anthropic_http import DEFAULT_SUBAGENT_MAX_TOKENS
 from .provider import (
     ProviderError,
+    RetryableStreamError,
     StreamDone,
     TextDelta,
     ToolCallDone,
@@ -373,49 +374,59 @@ def run_subagent_loop(
     while True:
         if cancellation_token is not None:
             cancellation_token.throw_if_cancelled()
-        tool_calls: list = []
-        reasoning_items: list = []
         context_breakdown = estimate_context_breakdown(
             config["model"],
             kwargs["instructions"],
             kwargs["tools"],
             kwargs["input"],
         )
-        try:
-            final_response = None
-            for event in stream_response(
-                client, config,
-                kwargs["model"], kwargs["instructions"],
-                kwargs["tools"], kwargs["input"],
-                reasoning=kwargs.get("reasoning"),
-                prompt_cache_key=f"jarv:{node.session_id}" if node.session_id else None,
-                max_tokens=max_tokens,
-                cancellation_token=cancellation_token,
-            ):
-                if isinstance(event, ToolCallDone):
-                    tool_calls.append(event)
-                elif isinstance(event, ReasoningDone):
-                    reasoning_items.append(event)
-                elif isinstance(event, StreamDone):
-                    final_response = event.response
-            if not node.incognito:
-                record_response_usage(
-                    node.usage_path,
-                    node.session_id,
-                    config["model"],
-                    final_response,
-                    "subagent",
-                    provider=str(config.get("provider") or "openai"),
-                    requested_service_tier=configured_service_tier(config),
-                    context_breakdown=context_breakdown,
-                    output_text="\n".join(f"{item.name} {item.arguments}" for item in tool_calls),
-                )
-        except ProviderError as e:
-            return None, f"provider error: {e}"
-        except TurnCancelled:
-            raise
-        except Exception as e:
-            return None, f"stream error: {e}"
+        stream_replays = 0
+        while True:
+            tool_calls: list = []
+            reasoning_items: list = []
+            try:
+                final_response = None
+                for event in stream_response(
+                    client, config,
+                    kwargs["model"], kwargs["instructions"],
+                    kwargs["tools"], kwargs["input"],
+                    reasoning=kwargs.get("reasoning"),
+                    prompt_cache_key=f"jarv:{node.session_id}" if node.session_id else None,
+                    max_tokens=max_tokens,
+                    cancellation_token=cancellation_token,
+                ):
+                    if isinstance(event, ToolCallDone):
+                        tool_calls.append(event)
+                    elif isinstance(event, ReasoningDone):
+                        reasoning_items.append(event)
+                    elif isinstance(event, StreamDone):
+                        final_response = event.response
+                if not node.incognito:
+                    record_response_usage(
+                        node.usage_path,
+                        node.session_id,
+                        config["model"],
+                        final_response,
+                        "subagent",
+                        provider=str(config.get("provider") or "openai"),
+                        requested_service_tier=configured_service_tier(config),
+                        context_breakdown=context_breakdown,
+                        output_text="\n".join(
+                            f"{item.name} {item.arguments}"
+                            for item in tool_calls
+                        ),
+                    )
+                break
+            except RetryableStreamError as e:
+                if stream_replays >= 1:
+                    return None, f"provider error: {e}"
+                stream_replays += 1
+            except ProviderError as e:
+                return None, f"provider error: {e}"
+            except TurnCancelled:
+                raise
+            except Exception as e:
+                return None, f"stream error: {e}"
 
         if not tool_calls:
             if not finish_nudge_sent:

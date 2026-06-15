@@ -26,6 +26,7 @@ from jarv.history import SessionContext, load_history, save_history
 from jarv.history import redo_file_for
 from jarv.provider import (
     ReasoningStarted,
+    RetryableStreamError,
     StreamDone,
     TextDelta,
     ToolCallDone,
@@ -426,6 +427,96 @@ class AgentInputTests(unittest.TestCase):
         self.assertEqual(saved[3]["call_id"], "call_pending")
         self.assertIn("before execution", saved[4]["output"])
         self.assertEqual(saved[5]["content"], "[Turn cancelled by user.]")
+
+    def test_run_agent_replays_truncated_stream_without_duplicate_tool_execution(self):
+        with TemporaryDirectory() as tmp:
+            history_file = Path(tmp) / "history.json"
+            context = SessionContext(
+                session_id="session-id",
+                session_label="test session",
+                history_file=history_file,
+                now=datetime(2026, 5, 21, tzinfo=timezone.utc),
+            )
+            stream_count = 0
+
+            def fake_stream_response(*_args, **_kwargs):
+                nonlocal stream_count
+                stream_count += 1
+                if stream_count == 1:
+                    yield TextDelta("discarded partial")
+                    yield ToolCallDone(
+                        id="fc_1",
+                        call_id="call_1",
+                        name="run_command",
+                        arguments='{"command":"echo ok"}',
+                    )
+                    raise RetryableStreamError("truncated")
+                if stream_count == 2:
+                    yield ToolCallDone(
+                        id="fc_1",
+                        call_id="call_1",
+                        name="run_command",
+                        arguments='{"command":"echo ok"}',
+                    )
+                    yield StreamDone(response=None)
+                    return
+                yield TextDelta("done")
+                yield StreamDone(response=None)
+
+            output = io.StringIO()
+            with (
+                patch("jarv.agent.prepare_session_context", return_value=context),
+                patch("jarv.agent.stream_response", side_effect=fake_stream_response),
+                patch(
+                    "jarv.agent._dispatch_run_command_with_ui",
+                    return_value="ok",
+                ) as dispatch,
+                patch("jarv.agent.sys.stdout", new=output),
+            ):
+                result = run_agent(
+                    "run it",
+                    DEFAULT_CONFIG,
+                    client=object(),
+                    incognito=True,
+                )
+
+        self.assertIsNone(result.error)
+        self.assertEqual(stream_count, 3)
+        dispatch.assert_called_once()
+        self.assertNotIn("discarded partial", output.getvalue())
+        self.assertIn("done", output.getvalue())
+
+    def test_run_agent_stops_after_one_stream_replay(self):
+        with TemporaryDirectory() as tmp:
+            history_file = Path(tmp) / "history.json"
+            context = SessionContext(
+                session_id="session-id",
+                session_label="test session",
+                history_file=history_file,
+                now=datetime(2026, 5, 21, tzinfo=timezone.utc),
+            )
+            stream_count = 0
+
+            def fake_stream_response(*_args, **_kwargs):
+                nonlocal stream_count
+                stream_count += 1
+                yield TextDelta(f"partial {stream_count}")
+                raise RetryableStreamError("still truncated")
+
+            with (
+                patch("jarv.agent.prepare_session_context", return_value=context),
+                patch("jarv.agent.stream_response", side_effect=fake_stream_response),
+                patch("jarv.agent.sys.stdout", new=io.StringIO()),
+            ):
+                result = run_agent(
+                    "search",
+                    DEFAULT_CONFIG,
+                    client=object(),
+                    incognito=True,
+                )
+
+        self.assertEqual(stream_count, 2)
+        self.assertEqual(result.error, "still truncated")
 
     def test_ask_user_ctrl_c_propagates_to_cancel_turn(self):
         with (

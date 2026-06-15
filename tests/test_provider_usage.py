@@ -7,6 +7,7 @@ from jarv.cancellation import CancellationToken, TurnCancelled
 from jarv.provider import (
     ReasoningDone,
     ReasoningStarted,
+    RetryableStreamError,
     StreamDone,
     TextDelta,
     ToolCallDone,
@@ -99,6 +100,7 @@ class ProviderUsageTests(unittest.TestCase):
             ))
 
         self.assertEqual(captured["payload"]["prompt_cache_key"], "jarv:session")
+        self.assertIs(captured["payload"]["store"], True)
         self.assertIsInstance(events[0], ReasoningStarted)
         self.assertIsInstance(events[1], ToolCallStarted)
         self.assertEqual(events[1].name, "run")
@@ -189,6 +191,67 @@ class ProviderUsageTests(unittest.TestCase):
 
         retrieve.assert_called_once()
         self.assertEqual(response_output_text(events[-1].response), "partial and recovered")
+
+    def test_responses_stream_recovery_failure_preserves_retrieval_error(self):
+        def truncated(_client, _payload, **_kwargs):
+            yield {"type": "response.created", "response": {"id": "resp_1"}}
+            yield {"type": "response.output_text.delta", "delta": "partial"}
+
+        with (
+            patch("jarv.openai_http.stream_response", side_effect=truncated),
+            patch(
+                "jarv.openai_http.retrieve_response",
+                side_effect=RuntimeError("lookup failed"),
+            ),
+            patch("jarv.provider._sleep_for_openai_recovery"),
+        ):
+            with self.assertRaisesRegex(
+                RetryableStreamError,
+                "last retrieval error: lookup failed",
+            ):
+                list(_stream_responses_api(
+                    object(), "model", "system", [], []
+                ))
+
+    def test_responses_stream_recovery_failure_preserves_last_status(self):
+        def truncated(_client, _payload, **_kwargs):
+            yield {"type": "response.created", "response": {"id": "resp_1"}}
+
+        with (
+            patch("jarv.openai_http.stream_response", side_effect=truncated),
+            patch(
+                "jarv.openai_http.retrieve_response",
+                return_value={
+                    "id": "resp_1",
+                    "status": "in_progress",
+                    "output": [],
+                },
+            ),
+            patch("jarv.provider._sleep_for_openai_recovery"),
+        ):
+            with self.assertRaisesRegex(
+                RetryableStreamError,
+                "last recovery status: in_progress",
+            ):
+                list(_stream_responses_api(
+                    object(), "model", "system", [], []
+                ))
+
+    def test_responses_stream_cancellation_does_not_attempt_recovery(self):
+        def cancelled(_client, _payload, **_kwargs):
+            yield {"type": "response.created", "response": {"id": "resp_1"}}
+            raise TurnCancelled
+
+        with (
+            patch("jarv.openai_http.stream_response", side_effect=cancelled),
+            patch("jarv.openai_http.retrieve_response") as retrieve,
+        ):
+            with self.assertRaises(TurnCancelled):
+                list(_stream_responses_api(
+                    object(), "model", "system", [], []
+                ))
+
+        retrieve.assert_not_called()
 
     def test_chat_stream_maps_reasoning_tools_and_usage(self):
         chunks = [

@@ -66,6 +66,7 @@ def test_openai_responses_sends_cache_key_and_parses_completed_event():
     )
     events = list(stream_response(client, payload))
     assert captured["payload"]["prompt_cache_key"] == "jarv:session"
+    assert captured["payload"]["store"] is True
     assert events[-1]["response"]["usage"]["input_tokens_details"]["cached_tokens"] == 20
 
 

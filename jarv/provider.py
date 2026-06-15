@@ -13,6 +13,7 @@ from typing import Any, Iterator
 from .provider_catalog import KEY_PATTERNS, LOCAL_PROVIDERS, PROVIDERS
 from .unicode_safety import sanitize_json_value
 from .cancellation import CancellationToken, TurnCancelled
+from .http_transport import ProviderHTTPError
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +60,10 @@ class StreamDone:
 
 class ProviderError(Exception):
     pass
+
+
+class RetryableStreamError(ProviderError):
+    """A provider stream failed before its response could be recovered."""
 
 
 _OPENAI_RECOVERY_ATTEMPTS = 16
@@ -529,9 +534,11 @@ def _stream_responses_api(
         raise ProviderError("OpenAI response stream ended before response.completed")
     except TurnCancelled:
         raise
-    except Exception:
+    except Exception as stream_error:
         if cancellation_token is not None:
             cancellation_token.throw_if_cancelled()
+        last_recovery_status: str | None = None
+        last_retrieval_error: Exception | None = None
         if response_id:
             recovered_response = None
             for attempt in range(_OPENAI_RECOVERY_ATTEMPTS):
@@ -543,8 +550,13 @@ def _stream_responses_api(
                         response_id,
                         cancellation_token=cancellation_token,
                     )
-                except Exception:
+                except Exception as retrieval_error:
+                    last_retrieval_error = retrieval_error
                     candidate = None
+                else:
+                    last_retrieval_error = None
+                    status = _value(candidate, "status")
+                    last_recovery_status = str(status) if status is not None else None
                 if candidate is not None and _is_response_complete(candidate):
                     recovered_response = candidate
                     break
@@ -561,7 +573,25 @@ def _stream_responses_api(
                 )
                 yield StreamDone(response=recovered_response)
                 return
-        raise
+        recovery_details = []
+        if response_id is None:
+            recovery_details.append("response id was not observed")
+        elif last_retrieval_error is not None:
+            recovery_details.append(
+                f"last retrieval error: {last_retrieval_error}"
+            )
+        elif last_recovery_status is not None:
+            recovery_details.append(
+                f"last recovery status: {last_recovery_status}"
+            )
+        else:
+            recovery_details.append("response retrieval returned no usable result")
+        message = (
+            f"{stream_error}; recovery failed ({'; '.join(recovery_details)})"
+        )
+        if isinstance(stream_error, ProviderHTTPError):
+            raise ProviderError(message) from stream_error
+        raise RetryableStreamError(message) from stream_error
 
 
 # ---------------------------------------------------------------------------

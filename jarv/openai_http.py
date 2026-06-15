@@ -62,6 +62,7 @@ def build_responses_payload(
         "instructions": instructions,
         "tools": tools,
         "input": clean_input,
+        "store": True,
         "stream": stream,
     }
     if reasoning:
