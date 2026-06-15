@@ -57,7 +57,9 @@ from .orchestrator import (
     DepthExceeded,
     SpawnObserver,
     dispatch_tool,
+    filter_enabled_tools,
     spawn_batch,
+    tool_enabled,
 )
 from .safety import check_command
 from .shell import (
@@ -93,6 +95,10 @@ TOOLS = [
     READ_TOOL,
     ASK_USER_TOOL,
 ]
+
+
+def build_agent_tools(config: dict) -> list[dict]:
+    return filter_enabled_tools(TOOLS, config)
 
 
 _THINKING_FRAMES = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"]
@@ -858,18 +864,19 @@ def run_agent(
             config["system_prompt"]
             + f"\n\nSystem info:\n{get_system_info()}"
         )
+        tools = build_agent_tools(config)
         input_items = build_input(
             history,
             model=config["model"],
             config=config,
             instructions=instructions,
-            tools=TOOLS,
+            tools=tools,
         )
 
         kwargs = dict(
             model=config["model"],
             instructions=instructions,
-            tools=TOOLS,
+            tools=tools,
             input=input_items,
         )
         effort = config.get("reasoning_effort")
@@ -1160,6 +1167,13 @@ def run_agent(
                 item_index = 0
                 while item_index < len(tool_calls):
                     item = tool_calls[item_index]
+                    if not tool_enabled(config, item.name):
+                        append_tool_result(
+                            item,
+                            f"[tool disabled: {item.name}]",
+                        )
+                        item_index += 1
+                        continue
                     if item.name == "read":
                         group_end = item_index
                         while (

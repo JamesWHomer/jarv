@@ -15,6 +15,7 @@ DEFAULT_SYSTEM_PROMPT = (
 
 READ_ONLY_COMMAND_DISPLAY_CHOICES = ("fullscreen", "print")
 LEGACY_READ_ONLY_COMMAND_DISPLAY_CHOICES = ("auto", "inline")
+TOOL_NAMES = ("run_command", "web_search", "read", "spawn", "ask_user")
 
 DEFAULT_CONFIG = {
     "provider": "openai",
@@ -31,6 +32,7 @@ DEFAULT_CONFIG = {
     "context_window_fallback": 128_000,
     "max_stdin_chars": 200000,
     "max_tool_output_chars": 20000,
+    "disabled_tools": [],
     "command_timeout": 60,
     "web_timeout": 15,
     "command_safety": "risky",
@@ -196,6 +198,26 @@ def validate_config(config: dict) -> bool:
         choices = ", ".join(READ_ONLY_COMMAND_DISPLAY_CHOICES)
         _console().print(f"[red]Config 'read_only_command_display' must be one of: {choices}.[/red]")
         ok = False
+
+    disabled_tools = config.get("disabled_tools", [])
+    if not isinstance(disabled_tools, list):
+        _console().print("[red]Config 'disabled_tools' must be a list.[/red]")
+        ok = False
+    else:
+        invalid_tools = [
+            name
+            for name in disabled_tools
+            if not isinstance(name, str) or name not in TOOL_NAMES
+        ]
+        if invalid_tools:
+            choices = ", ".join(TOOL_NAMES)
+            _console().print(
+                "[red]Config 'disabled_tools' contains unknown tools. "
+                f"Available tools: {choices}.[/red]"
+            )
+            ok = False
+        elif len(set(disabled_tools)) != len(disabled_tools):
+            config["disabled_tools"] = list(dict.fromkeys(disabled_tools))
 
     try:
         depth = int(config.get("max_subagent_depth", DEFAULT_CONFIG["max_subagent_depth"]))

@@ -102,6 +102,8 @@ Jarv uses a multi-provider tool-calling agent loop (OpenAI Responses API, Anthro
 | `spawn` | Fan out work to parallel subagents, each with their own tool access |
 | `ask_user` | Ask you a question and wait for a reply |
 
+Each tool can be enabled or disabled from `jarv /settings`. Disabled tools are not sent to the model and are also unavailable to spawned subagents. The subagent-only `finish` tool remains enabled so child agents can always return their result.
+
 On Windows, commands run through PowerShell. On other platforms, they run through the system shell.
 
 `run_command` accepts optional `head_chars` and `tail_chars` parameters that control how much of the beginning and end of command output is returned to the model. Omitted values split `max_tool_output_chars` between the two sides. Explicit values override that configured limit for the command. When output is longer than the requested head and tail, Jarv retains the full result under a session-scoped `cmd_<id>` and reports the exact omitted offset and size so the model can retrieve it with `read`.
@@ -200,6 +202,7 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 | `context_window_fallback` | `128000` | Context window when model metadata is unknown. |
 | `max_stdin_chars` | `200000` | Maximum piped stdin characters attached to a one-shot prompt. |
 | `max_tool_output_chars` | `20000` | Maximum generic tool output characters returned to the model. It also supplies the default head/tail budget for `run_command`. |
+| `disabled_tools` | `[]` | Tool names omitted from root agents and subagents. Configure these from the Tools section in `/settings`. |
 | `command_timeout` | `60` | Seconds before a shell command is killed. |
 | `web_timeout` | `15` | Seconds before a web search or URL read is killed. |
 | `command_safety` | `"risky"` | Command confirmation level: `all` (confirm every command), `risky` (confirm dangerous commands only), `none` (no confirmation). |

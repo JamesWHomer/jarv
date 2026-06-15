@@ -244,7 +244,7 @@ Run `jarv` with no prompt to start an interactive session. Type a prompt and pre
 
 ## Tools and shell commands
 
-- The root model sees five tools: `run_command`, `web_search`, `read`, `spawn`, and `ask_user`.
+- The root model can see five tools: `run_command`, `web_search`, `read`, `spawn`, and `ask_user`. The enabled subset is controlled from `/settings`.
 - `read(input, offset, size)` pages through retained command output, visible artifacts, HTTP(S) URLs, and local files using Unicode character offsets. Consecutive reads run concurrently.
 - `web_search` supports any positive result count and a non-negative result offset. URL reads preserve HTTP(S) links as absolute URLs.
 - Spawned subagents also get a mandatory `finish` tool (to return output) and may get `spawn` when the parent sets `sterile: false`.
@@ -276,6 +276,7 @@ Keys:
 - `context_window_fallback` - Context window when model metadata is unknown. Default: `{DEFAULT_CONFIG['context_window_fallback']}`.
 - `max_stdin_chars` - Maximum piped stdin characters attached to a one-shot prompt. Default: `{DEFAULT_CONFIG['max_stdin_chars']}`.
 - `max_tool_output_chars` - Maximum generic tool output characters returned to the model and the default combined head/tail budget for `run_command`. Default: `{DEFAULT_CONFIG['max_tool_output_chars']}`.
+- `disabled_tools` - Tool names omitted from root agents and subagents. Use `/settings` to toggle `run_command`, `web_search`, `read`, `spawn`, and `ask_user`. Default: `[]`.
 - `command_timeout` - Seconds before a shell command is killed. Default: `{DEFAULT_CONFIG['command_timeout']}`.
 - `web_timeout` - Seconds before a web search or URL read is killed. Default: `{DEFAULT_CONFIG['web_timeout']}`.
 - `command_safety` - Command confirmation level. `all` = confirm every command, `risky` = confirm only dangerous commands (destructive ops, privilege escalation, network exfil, etc.), `none` = no confirmation. Default: `risky`.

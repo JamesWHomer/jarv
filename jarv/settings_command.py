@@ -18,6 +18,7 @@ from .config import (
     CONFIG_FILE,
     DEFAULT_CONFIG,
     READ_ONLY_COMMAND_DISPLAY_CHOICES,
+    TOOL_NAMES,
     load_config,
     save_config,
 )
@@ -130,6 +131,14 @@ _SETTINGS_READ_ONLY_DISPLAY_CHOICES = (
     ("fullscreen", "fullscreen"),
     ("print", "print"),
 )
+
+_SETTINGS_TOOL_LABELS = {
+    "run_command": ("Run commands", "execute shell commands"),
+    "web_search": ("Web search", "search the web"),
+    "read": ("Read", "read files, URLs, artifacts, and retained output"),
+    "spawn": ("Subagents", "fan out work to parallel subagents"),
+    "ask_user": ("Ask user", "pause to request clarification"),
+}
 
 
 def _settings_service_tier_choices(config: dict) -> tuple[tuple[str, str], ...]:
@@ -323,6 +332,17 @@ def _settings_rows(config: dict) -> list[dict]:
             "kind": "int",
             "desc": "tool output chars returned to the model",
         },
+        *[
+            {
+                "section": "tools",
+                "label": _SETTINGS_TOOL_LABELS[name][0],
+                "key": f"tool:{name}",
+                "tool_name": name,
+                "kind": "tool_bool",
+                "desc": _SETTINGS_TOOL_LABELS[name][1],
+            }
+            for name in TOOL_NAMES
+        ],
         {
             "section": "subagents",
             "label": "Max depth",
@@ -366,11 +386,15 @@ def _settings_value_text(row: dict, config: dict, *, selected: bool = False) -> 
 
     key = row["key"]
     kind = row["kind"]
-    value = (
-        _settings_service_tier(config)
-        if key == "service_tier"
-        else config.get(key, DEFAULT_CONFIG.get(key, ""))
-    )
+    if kind == "tool_bool":
+        disabled = config.get("disabled_tools", [])
+        value = not isinstance(disabled, list) or row["tool_name"] not in disabled
+    else:
+        value = (
+            _settings_service_tier(config)
+            if key == "service_tier"
+            else config.get(key, DEFAULT_CONFIG.get(key, ""))
+        )
 
     if key == "system_prompt":
         prompt = str(value)
@@ -387,7 +411,7 @@ def _settings_value_text(row: dict, config: dict, *, selected: bool = False) -> 
     if key == "api_key":
         ok, label = _settings_has_api_key(config)
         return Text(label, style=("bold green" if ok and selected else "green") if ok else "bold red")
-    if kind == "bool":
+    if kind in {"bool", "tool_bool"}:
         enabled = bool(value)
         label = "on" if enabled else "off"
         if enabled:
@@ -420,6 +444,20 @@ def _settings_apply_quick(row: dict, config: dict) -> tuple[dict, str] | None:
         state = "on" if config[key] else "off"
         return config, f"saved {row['label']}: {state}"
 
+    if kind == "tool_bool":
+        name = row["tool_name"]
+        raw_disabled = config.get("disabled_tools", [])
+        disabled = list(raw_disabled) if isinstance(raw_disabled, list) else []
+        if name in disabled:
+            disabled.remove(name)
+            state = "on"
+        else:
+            disabled.append(name)
+            state = "off"
+        config["disabled_tools"] = disabled
+        save_config(config)
+        return config, f"saved {row['label']}: {state}"
+
     if kind == "choice":
         choices = row["choices"]
         current = (
@@ -447,6 +485,8 @@ def _settings_apply_quick(row: dict, config: dict) -> tuple[dict, str] | None:
 
 
 def _settings_reset_value(row: dict, config: dict):
+    if row["kind"] == "tool_bool":
+        return True
     if row["key"] == "model":
         return _settings_default_model(config)
     if row["key"] == "service_tier":
@@ -456,6 +496,15 @@ def _settings_reset_value(row: dict, config: dict):
 
 def _settings_reset_row(row: dict, config: dict) -> tuple[dict, str]:
     key = row["key"]
+    if row["kind"] == "tool_bool":
+        name = row["tool_name"]
+        raw_disabled = config.get("disabled_tools", [])
+        disabled = list(raw_disabled) if isinstance(raw_disabled, list) else []
+        if name in disabled:
+            disabled.remove(name)
+            config["disabled_tools"] = disabled
+            save_config(config)
+        return config, f"reset {row['label']}"
     if key == "api_key":
         provider = config.get("provider", "openai")
         changed = False
@@ -495,7 +544,13 @@ def _settings_reset_action_bar(
     else:
         current = _settings_value_text(row, config).plain
         default_config = dict(config)
-        if key == "service_tier":
+        if row["kind"] == "tool_bool":
+            raw_disabled = config.get("disabled_tools", [])
+            disabled = list(raw_disabled) if isinstance(raw_disabled, list) else []
+            if row["tool_name"] in disabled:
+                disabled.remove(row["tool_name"])
+            default_config["disabled_tools"] = disabled
+        elif key == "service_tier":
             _settings_set_service_tier(default_config, "standard")
         else:
             default_config[key] = _settings_reset_value(row, config)

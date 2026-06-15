@@ -14,7 +14,7 @@ from typing import Callable
 
 from .artifacts import ArtifactStore
 from .cancellation import CancellationToken, TurnCancelled
-from .config import DEFAULT_CONFIG
+from .config import DEFAULT_CONFIG, TOOL_NAMES
 from .context_budget import trim_turn_input
 from .safety import check_command
 from .anthropic_http import DEFAULT_SUBAGENT_MAX_TOKENS
@@ -165,14 +165,32 @@ class AgentNode:
     incognito: bool = False
 
 
-def build_subagent_tools(sterile: bool) -> list[dict]:
-    tools = [
+def tool_enabled(config: dict, name: str) -> bool:
+    """Return whether a user-facing tool is enabled in config."""
+    disabled = config.get("disabled_tools", [])
+    return name in TOOL_NAMES and (
+        not isinstance(disabled, list) or name not in disabled
+    )
+
+
+def filter_enabled_tools(tools: list[dict], config: dict) -> list[dict]:
+    """Filter user-facing tool definitions using the current config."""
+    return [
+        tool
+        for tool in tools
+        if tool_enabled(config, str(tool.get("name", "")))
+    ]
+
+
+def build_subagent_tools(sterile: bool, config: dict | None = None) -> list[dict]:
+    config = config or DEFAULT_CONFIG
+    tools = filter_enabled_tools([
         RUN_COMMAND_TOOL,
         WEB_SEARCH_TOOL,
         READ_TOOL,
-        FINISH_TOOL,
-    ]
-    if not sterile:
+    ], config)
+    tools.append(FINISH_TOOL)
+    if not sterile and tool_enabled(config, "spawn"):
         tools.append(SPAWN_TOOL)
     return tools
 
@@ -210,6 +228,9 @@ def dispatch_tool(
     `on_run_command` lets the root agent override run_command rendering with
     its rich UI. Subagents pass None and use the silent default.
     """
+    if name in TOOL_NAMES and not tool_enabled(config, name):
+        return f"[tool disabled: {name}]"
+
     if name == "run_command":
         cmd = args.get("command")
         if not isinstance(cmd, str) or not cmd.strip():
@@ -354,7 +375,7 @@ def run_subagent_loop(
         "finish() is the only way your output is ever seen. You must call it even for the simplest task."
     ) + _format_deps_block(node, store)
 
-    tools = build_subagent_tools(node.sterile)
+    tools = build_subagent_tools(node.sterile, config)
     input_items: list[dict] = [{"role": "user", "content": node.task}]
 
     kwargs = dict(
