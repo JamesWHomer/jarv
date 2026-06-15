@@ -1,5 +1,6 @@
 """Session, archive, and history command screens."""
 
+import json
 import sys
 import threading
 import time
@@ -19,10 +20,12 @@ from .display import (
     console,
     flatten_headings,
     jarv_panel,
+    output_renderable,
     refresh_on_resize,
     rendered_text_lines,
     section_rule,
     terminal_size,
+    tool_card,
 )
 from .history import (
     SESSIONS_DIR,
@@ -118,11 +121,179 @@ def _markdown_to_text_lines(content: str, width: int) -> list[Text]:
     return rendered_text_lines(Markdown(flatten_headings(content)), width)
 
 
+def _tool_call_arguments(item: dict) -> tuple[dict | None, str]:
+    arguments = item.get("arguments", "")
+    if not isinstance(arguments, str):
+        return None, str(arguments)
+    arguments = arguments.strip()
+    if not arguments:
+        return {}, ""
+    try:
+        parsed = json.loads(arguments)
+    except json.JSONDecodeError:
+        return None, arguments
+    if not isinstance(parsed, dict):
+        return None, json.dumps(parsed, ensure_ascii=True)
+    return parsed, json.dumps(parsed, ensure_ascii=True, separators=(", ", ": "))
+
+
+def _tool_call_output(history: list, call_index: int, call_id) -> str:
+    for item in history[call_index + 1:]:
+        if not isinstance(item, dict):
+            continue
+        if item.get("role") == "user" or item.get("type") == "function_call":
+            break
+        if (
+            item.get("type") == "function_call_output"
+            and item.get("call_id") == call_id
+        ):
+            return str(item.get("output", ""))
+    return ""
+
+
+def _next_visible_history_item(history: list, start_index: int) -> dict | None:
+    for candidate in history[start_index:]:
+        if not isinstance(candidate, dict):
+            continue
+        if candidate.get("type") == "function_call":
+            return candidate
+        role = str(candidate.get("role", "")).lower()
+        if role == "system":
+            continue
+        body = _history_content_to_str(candidate.get("content", "")).strip()
+        if role and body:
+            return candidate
+    return None
+
+
+def _tool_call_renderable(item: dict, output: str = ""):
+    name = str(item.get("name") or "unknown")
+    args, raw_arguments = _tool_call_arguments(item)
+    failed = (
+        args is None
+        or output.startswith(("[error:", "[tool argument error:", "[unknown tool:"))
+        or "cancelled by user" in output
+    )
+    status = "failed" if failed else "done"
+    status_style = "red" if failed else "green"
+
+    if name == "run_command" and args is not None:
+        command_line = Text("$ ", style="bold yellow")
+        command_line.append(str(args.get("command", "")))
+        body: object = command_line
+        if output:
+            body = Group(command_line, output_renderable(output))
+        metadata = ""
+        if isinstance(args.get("head_chars"), int) and isinstance(args.get("tail_chars"), int):
+            metadata = (
+                f"model window {args['head_chars']:,} / "
+                f"{args['tail_chars']:,} chars"
+            )
+        return tool_card(
+            name,
+            body,
+            metadata=metadata,
+            status=status,
+            status_style=status_style,
+            display_mode="fullscreen",
+        )
+
+    if name == "read" and args is not None:
+        read_path = Text(
+            str(args.get("input", "")),
+            no_wrap=True,
+            overflow="ellipsis",
+        )
+        read_meta = Text(
+            f"offset {args.get('offset', 0)!r}  \u2022  "
+            f"size {args.get('size', 'default')!r}",
+            style="dim",
+        )
+        body = Group(read_path, read_meta)
+    elif name == "web_search" and args is not None:
+        body = Text(str(args.get("query", "")))
+        return tool_card(
+            name,
+            body,
+            metadata="DuckDuckGo",
+            status=status,
+            status_style=status_style,
+            display_mode="fullscreen",
+        )
+    elif name == "ask_user" and args is not None:
+        parts: list = [Markdown(flatten_headings(str(args.get("question", ""))))]
+        if output:
+            answer = Text("> ", style="bold cyan")
+            answer.append(output)
+            parts.append(answer)
+        body = Group(*parts)
+    elif name == "spawn" and args is not None:
+        result_by_label: dict[str, dict] = {}
+        try:
+            results = json.loads(output) if output else []
+        except json.JSONDecodeError:
+            results = []
+        if isinstance(results, list):
+            result_by_label = {
+                str(result.get("label")): result
+                for result in results
+                if isinstance(result, dict) and result.get("label")
+            }
+        lines: list[Text] = []
+        children = args.get("children", [])
+        if isinstance(children, list):
+            for child in children:
+                if not isinstance(child, dict):
+                    continue
+                label = str(child.get("label", "?"))
+                result = result_by_label.get(label, {})
+                line = Text()
+                line.append("\u2713 ", style="bold green")
+                line.append(label, style="bold cyan")
+                if result.get("tldr"):
+                    line.append(f"  {result['tldr']}", style="dim")
+                lines.append(line)
+        body = Group(*lines) if lines else Text(raw_arguments, style="dim")
+    else:
+        body = Text(raw_arguments, style="dim")
+
+    return tool_card(
+        name,
+        body,
+        status=status,
+        status_style=status_style,
+        display_mode="fullscreen",
+    )
+
+
 def _history_visual_lines_and_anchors(history: list, width: int) -> tuple[list[Text], list[int]]:
     lines: list[Text] = []
     anchors: list[int] = []
-    for item in history:
+    jarv_turn_open = False
+    for item_index, item in enumerate(history):
         if not isinstance(item, dict):
+            continue
+        if item.get("type") == "function_call":
+            start = len(lines)
+            if not jarv_turn_open:
+                lines.append(Text("jarv:", style="bold green", no_wrap=True, overflow="crop"))
+                jarv_turn_open = True
+            output = _tool_call_output(
+                history,
+                item_index,
+                item.get("call_id"),
+            )
+            lines.extend(
+                rendered_text_lines(
+                    _tool_call_renderable(item, output),
+                    width,
+                )
+            )
+            if len(lines) > start:
+                anchors.append(start)
+            next_item = _next_visible_history_item(history, item_index + 1)
+            if not isinstance(next_item, dict) or next_item.get("type") != "function_call":
+                lines.append(Text(""))
             continue
         role = str(item.get("role", "")).lower()
         if role == "system":
@@ -132,6 +303,7 @@ def _history_visual_lines_and_anchors(history: list, width: int) -> tuple[list[T
             continue
         start = len(lines)
         if role == "user":
+            jarv_turn_open = False
             for j, raw in enumerate(body.splitlines() or [""]):
                 t = Text(no_wrap=False, overflow="fold")
                 if j == 0:
@@ -141,9 +313,12 @@ def _history_visual_lines_and_anchors(history: list, width: int) -> tuple[list[T
                 t.append(raw, style="bold")
                 lines.extend(rendered_text_lines(t, width))
         elif role == "assistant":
-            lines.append(Text("jarv:", style="bold green", no_wrap=True, overflow="crop"))
+            if not jarv_turn_open:
+                lines.append(Text("jarv:", style="bold green", no_wrap=True, overflow="crop"))
             lines.extend(_markdown_to_text_lines(body, width))
+            jarv_turn_open = False
         else:
+            jarv_turn_open = False
             label = role or "?"
             for j, raw in enumerate(body.splitlines() or [""]):
                 t = Text(no_wrap=False, overflow="fold")
@@ -1266,9 +1441,21 @@ def cmd_history() -> None:
 
     if not sys.stdin.isatty() or not console.is_terminal:
         parts: list = [section_rule("conversation"), Text("")]
-        for m in history:
+        pending_tool_parts: list = []
+
+        def _append_jarv_heading() -> None:
+            line = Text()
+            line.append("▌ ", style="bold green")
+            line.append("Jarv", style="bold green")
+            parts.append(line)
+
+        for item_index, m in enumerate(history):
             role = m.get("role")
             if role == "user":
+                if pending_tool_parts:
+                    _append_jarv_heading()
+                    parts.extend(pending_tool_parts)
+                    pending_tool_parts.clear()
                 line = Text()
                 line.append("▌ ", style="bold cyan")
                 line.append("You", style="bold cyan")
@@ -1278,12 +1465,25 @@ def cmd_history() -> None:
             elif role == "assistant":
                 content = m.get("content", "")
                 if content:
-                    line = Text()
-                    line.append("▌ ", style="bold green")
-                    line.append("Jarv", style="bold green")
-                    parts.append(line)
+                    _append_jarv_heading()
+                    parts.extend(pending_tool_parts)
+                    pending_tool_parts.clear()
                     parts.append(Markdown(flatten_headings(content)))
                     parts.append(Text(""))
+            elif m.get("type") == "function_call":
+                pending_tool_parts.append(
+                    _tool_call_renderable(
+                        m,
+                        _tool_call_output(
+                            history,
+                            item_index,
+                            m.get("call_id"),
+                        ),
+                    )
+                )
+        if pending_tool_parts:
+            _append_jarv_heading()
+            parts.extend(pending_tool_parts)
         console.print(jarv_panel(Group(*parts), title="history", subtitle=f"{exchanges} exchange(s)"))
         return
 
