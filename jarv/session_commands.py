@@ -178,7 +178,7 @@ def _tool_call_renderable(item: dict, output: str = ""):
     status_style = "red" if failed else "green"
 
     if name == "run_command" and args is not None:
-        command_line = Text("$ ", style="bold yellow")
+        command_line = Text("> ", style="bold yellow")
         command_line.append(str(args.get("command", "")))
         body: object = command_line
         if output:

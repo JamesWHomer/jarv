@@ -22,10 +22,10 @@ ACCENT_STYLE = "bold cyan"
 TITLE_STYLE = "bold bright_white"
 
 TOOL_CARD_STYLES = {
-    "run_command": ("$", "Command", "yellow"),
+    "run_command": (">", "Command", "yellow"),
     "web_search": ("\u2315", "Web search", "green"),
-    "read": ("\u2193", "Read", "cyan"),
-    "spawn": ("\u25c7", "Subagent", "magenta"),
+    "read": ("\u2261", "Read", "cyan"),
+    "spawn": ("\u21b3", "Subagent", "magenta"),
     "ask_user": ("?", "Ask user", "blue"),
 }
 

@@ -227,6 +227,26 @@ def test_tool_card_uses_shared_neutral_shell_and_tool_accent():
     assert "PowerShell documentation" in rendered
 
 
+def test_tool_cards_use_consistent_terminal_safe_symbols():
+    stream = io.StringIO()
+    test_console = Console(
+        file=stream,
+        force_terminal=False,
+        color_system=None,
+        width=80,
+    )
+
+    for tool_name in ("run_command", "web_search", "spawn", "read", "ask_user"):
+        test_console.print(tool_card(tool_name, "body"))
+
+    rendered = stream.getvalue()
+    assert "> Command" in rendered
+    assert "\u2315 Web search" in rendered
+    assert "\u21b3 Subagent" in rendered
+    assert "\u2261 Read" in rendered
+    assert "? Ask user" in rendered
+
+
 def test_fullscreen_tool_card_uses_box_and_right_status():
     stream = io.StringIO()
     test_console = Console(
@@ -263,4 +283,4 @@ def test_print_tool_cards_can_be_separated_by_one_blank_line():
     test_console.print(tool_card("read", "C:\\Windows\\win.ini"))
 
     rendered = stream.getvalue()
-    assert "DuckDuckGo homepage\n\n\u258e \u2193 Read" in rendered
+    assert "DuckDuckGo homepage\n\n\u258e \u2261 Read" in rendered

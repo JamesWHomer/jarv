@@ -67,8 +67,8 @@ class AgentInputTests(unittest.TestCase):
             _print_tool_card(tool_card("read", "second"), config)
 
         rendered = stream.getvalue()
-        self.assertIn("first\n\n\u258e \u2193 Read", rendered)
-        self.assertNotIn("first\n\n\n\u258e \u2193 Read", rendered)
+        self.assertIn("first\n\n\u258e \u2261 Read", rendered)
+        self.assertNotIn("first\n\n\n\u258e \u2261 Read", rendered)
 
     def test_fullscreen_tool_cards_have_no_added_blank_line(self):
         stream = io.StringIO()
@@ -121,6 +121,36 @@ class AgentInputTests(unittest.TestCase):
         self.assertIn("model window 12,000 / 10,000 chars", output)
         self.assertNotIn("(requested)", output)
         self.assertNotIn("(default)", output)
+
+    def test_run_command_is_displayed_before_execution_starts(self):
+        stream = io.StringIO()
+        test_console = Console(
+            file=stream,
+            force_terminal=True,
+            color_system=None,
+            width=120,
+        )
+        config = {**DEFAULT_CONFIG, "tool_call_display": "fullscreen"}
+
+        def execute_after_display(command, *_args, **_kwargs):
+            rendered = stream.getvalue()
+            self.assertIn(command, rendered)
+            self.assertIn("running 0s", rendered)
+            return CommandResult(command, "done", "", 0)
+
+        with (
+            patch("jarv.agent.console", test_console),
+            patch("jarv.agent.check_command", return_value=(True, "")),
+            patch("jarv.agent.execute_command", side_effect=execute_after_display),
+        ):
+            _dispatch_run_command_with_ui(
+                {"command": "Start-Sleep -Seconds 10"},
+                config,
+            )
+
+        output = stream.getvalue()
+        self.assertIn("done", output)
+        self.assertIn("exit 0", output)
 
     def test_response_wait_label_is_neutral_without_reasoning(self):
         self.assertEqual(response_wait_label(has_reasoning=False), "Waiting")

@@ -207,6 +207,41 @@ class ToolActivityIndicator:
         yield Text(f"{frame}  {label}\u2026  {int(elapsed)}s")
 
 
+class RunningCommandCard:
+    """Render a command immediately with a live elapsed timer."""
+
+    def __init__(
+        self,
+        command: str,
+        metadata: str,
+        display_mode: str,
+        start_time: float,
+    ):
+        self._command = command
+        self._metadata = metadata
+        self._display_mode = display_mode
+        self._start = start_time
+
+    def __rich_console__(self, console, options):
+        elapsed = int(max(0.0, time.perf_counter() - self._start))
+        command_line = Text("> ", style="bold yellow")
+        command_line.append(self._command)
+        body = command_line
+        if self._display_mode != "fullscreen":
+            body = Group(
+                command_line,
+                Text(f"Running\u2026 {elapsed}s", style="dim"),
+            )
+        yield tool_card(
+            "run_command",
+            body,
+            metadata=self._metadata,
+            display_mode=self._display_mode,
+            status=f"running {elapsed}s",
+            status_style="blue",
+        )
+
+
 def _start_response_wait_indicator(interactive: bool, start_time: float) -> tuple[ResponseWaitIndicator | None, Live | None]:
     if not interactive:
         return None, None
@@ -548,52 +583,87 @@ def _dispatch_run_command_with_ui(
         console.print(f"[dim]{denial}[/dim]")
         return denial
 
-    result = execute_command(
+    display_mode = config.get(
+        "tool_call_display",
+        DEFAULT_CONFIG["tool_call_display"],
+    )
+    metadata = f"model window {head_chars:,} / {tail_chars:,} chars"
+    running_card = RunningCommandCard(
         cmd,
-        config.get("command_timeout", 60),
-        cancellation_token=cancellation_token,
+        metadata,
+        display_mode,
+        time.perf_counter(),
     )
-    command_line = Text("$ ", style="bold yellow")
-    command_line.append(cmd)
-    body_parts = [command_line, command_result_renderable(result)]
-    output, output_id = retain_command_output(
-        result.full_model_output(),
-        head_chars,
-        tail_chars,
-        retained_store,
-        int(
-            config.get(
-                "max_tool_output_chars",
-                DEFAULT_CONFIG["max_tool_output_chars"],
+    live = Live(
+        running_card,
+        refresh_per_second=4,
+        console=console,
+        auto_refresh=True,
+        transient=False,
+    )
+    with track_live_display(), live:
+        try:
+            result = execute_command(
+                cmd,
+                config.get("command_timeout", 60),
+                cancellation_token=cancellation_token,
             )
-        ),
-    )
-    if output_id is not None:
-        retained_line = Text("Retained command output: ", style="dim")
-        retained_line.append(output_id, style="cyan")
-        body_parts.append(retained_line)
-    _print_tool_card(
-        tool_card(
-            "run_command",
-            Group(*body_parts),
-            metadata=f"model window {head_chars:,} / {tail_chars:,} chars",
-            display_mode=config.get(
-                "tool_call_display",
-                DEFAULT_CONFIG["tool_call_display"],
+        except (KeyboardInterrupt, TurnCancelled):
+            cancelled_line = Text("> ", style="bold yellow")
+            cancelled_line.append(cmd)
+            live.update(
+                tool_card(
+                    "run_command",
+                    Group(cancelled_line, Text("Cancelled", style="bold red")),
+                    metadata=metadata,
+                    display_mode=display_mode,
+                    status="cancelled",
+                    status_style="red",
+                ),
+                refresh=True,
+            )
+            raise
+
+        command_line = Text("> ", style="bold yellow")
+        command_line.append(cmd)
+        body_parts = [command_line, command_result_renderable(result)]
+        output, output_id = retain_command_output(
+            result.full_model_output(),
+            head_chars,
+            tail_chars,
+            retained_store,
+            int(
+                config.get(
+                    "max_tool_output_chars",
+                    DEFAULT_CONFIG["max_tool_output_chars"],
+                )
             ),
-            status=(
-                "done"
-                if not result.timed_out and result.exit_code in (None, 0)
-                else "failed"
+        )
+        if output_id is not None:
+            retained_line = Text("Retained command output: ", style="dim")
+            retained_line.append(output_id, style="cyan")
+            body_parts.append(retained_line)
+        live.update(
+            tool_card(
+                "run_command",
+                Group(*body_parts),
+                metadata=metadata,
+                display_mode=display_mode,
+                status=(
+                    "done"
+                    if not result.timed_out and result.exit_code in (None, 0)
+                    else "failed"
+                ),
+                status_style=(
+                    "green"
+                    if not result.timed_out and result.exit_code in (None, 0)
+                    else "red"
+                ),
             ),
-            status_style=(
-                "green"
-                if not result.timed_out and result.exit_code in (None, 0)
-                else "red"
-            ),
-        ),
-        config,
-    )
+            refresh=True,
+        )
+    if display_mode == "print":
+        console.print()
     return output
 
 

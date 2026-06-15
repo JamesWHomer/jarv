@@ -21,12 +21,12 @@ def test_history_visual_lines_include_tool_calls():
     lines, anchors = session_commands._history_visual_lines_and_anchors(history, 100)
     rendered = "\n".join(line.plain for line in lines)
 
-    assert "$ Command" in rendered
+    assert "> Command" in rendered
     assert "\u2713 done" in rendered
-    assert "$ git status --short" in rendered
+    assert "> git status --short" in rendered
     assert "working tree clean" in rendered
     assert "\u250c" in rendered
-    assert rendered.index("jarv:") < rendered.index("$ Command")
+    assert rendered.index("jarv:") < rendered.index("> Command")
     assert rendered.count("jarv:") == 1
     assert len(anchors) == 3
 
@@ -66,7 +66,7 @@ def test_history_visual_lines_render_read_like_fullscreen_tool_card():
         line.plain for line in session_commands._history_visual_lines(history, 100)
     )
 
-    assert "\u2193 Read" in rendered
+    assert "\u2261 Read" in rendered
     assert "README.md" in rendered
     assert "offset 10  \u2022  size 50" in rendered
     assert "file contents are not shown" not in rendered
@@ -106,8 +106,8 @@ def test_history_visual_lines_group_multiple_tool_calls_under_one_jarv_heading()
 
     assert rendered.count("jarv:") == 1
     assert rendered.index("jarv:") < rendered.index("\u2315 Web search")
-    assert rendered.index("\u2315 Web search") < rendered.index("\u2193 Read")
-    assert rendered.index("\u2193 Read") < rendered.index("Done.")
+    assert rendered.index("\u2315 Web search") < rendered.index("\u2261 Read")
+    assert rendered.index("\u2261 Read") < rendered.index("Done.")
     web_search_bottom = next(
         index
         for index, line in enumerate(rendered.splitlines())
