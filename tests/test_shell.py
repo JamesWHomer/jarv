@@ -7,6 +7,7 @@ from jarv.cancellation import CancellationToken, TurnCancelled
 from jarv.shell import (
     COMMAND_OUTPUT_UNSET,
     CommandResult,
+    compact_command_output,
     execute_command,
     resolve_command_output_window,
     truncate_command_output,
@@ -15,6 +16,14 @@ from jarv.shell import (
 
 
 class ShellOutputLimitTests(unittest.TestCase):
+    def test_compact_command_output_collapses_single_row_table(self):
+        output = "\nPath\n----\nC:\\Users\\ubers\n\n"
+
+        self.assertEqual(
+            compact_command_output(output),
+            "Path  C:\\Users\\ubers",
+        )
+
     def test_command_output_is_middle_truncated_for_model(self):
         output = truncate_model_output("a" * 50 + "MIDDLE" + "z" * 50, 100)
 

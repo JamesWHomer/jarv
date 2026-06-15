@@ -9,6 +9,8 @@ from rich import box
 from rich.console import Console, Group, RenderableType
 from rich.panel import Panel
 from rich.rule import Rule
+from rich.segment import Segment
+from rich.style import Style
 from rich.text import Text
 
 console = Console()
@@ -31,23 +33,51 @@ TOOL_CARD_STYLES = {
 class ToolCardHeader:
     """Render a tool label and status at opposite ends of one row."""
 
-    def __init__(self, title: Text, status: Text):
+    def __init__(self, title: Text, metadata: Text, status: Text):
         self.title = title
+        self.metadata = metadata
         self.status = status
 
     def __rich_console__(self, console, options):
         width = max(1, options.max_width)
-        title = self.title.copy()
+        left = self.title.copy()
+        if self.metadata:
+            left.append("  ")
+            left.append_text(self.metadata)
         status = self.status.copy()
-        gap = max(1, width - title.cell_len - status.cell_len)
-        if title.cell_len + status.cell_len + 1 > width:
-            title.truncate(max(1, width - status.cell_len - 1), overflow="ellipsis")
+        if not status:
+            yield left
+            return
+        gap = max(1, width - left.cell_len - status.cell_len)
+        if left.cell_len + status.cell_len + 1 > width:
+            left.truncate(max(1, width - status.cell_len - 1), overflow="ellipsis")
             gap = 1
         line = Text(no_wrap=True, overflow="crop")
-        line.append_text(title)
+        line.append_text(left)
         line.append(" " * gap)
         line.append_text(status)
         yield line
+
+
+class ToolCard:
+    """Render a compact tool block with a quiet colored left rail."""
+
+    def __init__(self, accent: str, content: RenderableType):
+        self.accent = Style.parse(accent)
+        self.content = content
+
+    def __rich_console__(self, console, options):
+        inner_options = options.update(width=max(1, options.max_width - 2))
+        lines = console.render_lines(
+            self.content,
+            inner_options,
+            pad=False,
+            new_lines=False,
+        )
+        for line in lines:
+            yield Segment("\u258e ", self.accent)
+            yield from line
+            yield Segment.line()
 
 RESIZE_REFRESH_INTERVAL = 0.02
 RESIZE_ACTIVE_INTERVAL = 0.1
@@ -142,9 +172,11 @@ def tool_card(
     tool_name: str,
     body: RenderableType,
     *,
-    status: str = "complete",
+    metadata: str = "",
+    status: str = "done",
     status_style: str = "green",
-) -> Panel:
+    display_mode: str = "print",
+) -> RenderableType:
     """Return the shared compact card used for root tool calls."""
     icon, label, accent = TOOL_CARD_STYLES.get(
         tool_name,
@@ -154,18 +186,33 @@ def tool_card(
     title.append(f"{icon} ", style=f"bold {accent}")
     title.append(label, style=f"bold {accent}")
 
-    status_text = Text(justify="right")
+    metadata_text = Text(metadata, style="dim")
+    status_text = Text(justify="right", style="dim")
     if status:
         if status_style == "green":
             status_text.append("\u2713 ", style="bold green")
-        status_text.append(status, style=f"dim {status_style}")
+        elif status_style == "blue":
+            status_text.append("\u25cf ", style="blue")
+        elif status_style == "red":
+            status_text.append("\u2717 ", style="bold red")
+        else:
+            status_text.append("\u25cf ", style=status_style)
+        status_text.append(status)
 
-    return Panel(
-        Group(ToolCardHeader(title, status_text), body),
-        border_style="bright_black",
-        box=box.ROUNDED,
-        padding=(0, 1),
+    header = ToolCardHeader(
+        title,
+        metadata_text,
+        status_text if display_mode == "fullscreen" else Text(),
     )
+    content = Group(header, body)
+    if display_mode == "fullscreen":
+        return Panel(
+            content,
+            border_style="bright_black",
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
+    return ToolCard(accent, content)
 
 
 @contextmanager

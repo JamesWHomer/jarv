@@ -288,6 +288,7 @@ Keys:
 - `subagent_thread_pool_max_workers` - Max parallel children in one `spawn` batch. Default: `{DEFAULT_CONFIG['subagent_thread_pool_max_workers']}`.
 - `check_updates` - When `true`, a one-shot `jarv <question>` run fires a non-blocking background check against PyPI. If a new version is found it is flagged locally and shown at the start of the next run. Default: `true`. Set to `false` to disable entirely. Heads-up mode (`jarv` with no args) and slash commands do not run this check.
 - `read_only_command_display` - How `/help`, `/about`, `/usage`, and `/config` are displayed in an interactive terminal. `fullscreen` uses a temporary alternate-screen view, compact when content fits and scrollable when it does not. `print` preserves permanent terminal output. Default: `fullscreen`.
+- `tool_call_display` - How agent tool calls are rendered. `auto` uses resize-safe `print` mode for one-shot runs and bordered `fullscreen` cards in heads-up mode. Explicit `print` and `fullscreen` modes override that choice. Default: `auto`.
 - `print_usage_after_agent` - When `true`, print a compact token usage line after each completed agent run. Default: `false`.
 - `/usage` stores request-level provider and processing-tier cost provenance. Provider-reported cost is preferred; otherwise OpenRouter catalog pricing is marked estimated, while unknown and contract-priced requests remain explicit. System-wide views read future usage from `{CONFIG_DIR / "usage.json"}`.
 

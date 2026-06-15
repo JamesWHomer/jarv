@@ -18,6 +18,7 @@ from .config import (
     CONFIG_FILE,
     DEFAULT_CONFIG,
     READ_ONLY_COMMAND_DISPLAY_CHOICES,
+    TOOL_CALL_DISPLAY_CHOICES,
     TOOL_NAMES,
     load_config,
     save_config,
@@ -130,6 +131,10 @@ _SETTINGS_SAFETY_CHOICES = (
 _SETTINGS_READ_ONLY_DISPLAY_CHOICES = (
     ("fullscreen", "fullscreen"),
     ("print", "print"),
+)
+
+_SETTINGS_TOOL_CALL_DISPLAY_CHOICES = tuple(
+    (value, value) for value in TOOL_CALL_DISPLAY_CHOICES
 )
 
 _SETTINGS_TOOL_LABELS = {
@@ -259,6 +264,14 @@ def _settings_rows(config: dict) -> list[dict]:
             "kind": "choice",
             "choices": _SETTINGS_READ_ONLY_DISPLAY_CHOICES,
             "desc": "fullscreen temporary view or permanent print output",
+        },
+        {
+            "section": "display",
+            "label": "Tool calls",
+            "key": "tool_call_display",
+            "kind": "choice",
+            "choices": _SETTINGS_TOOL_CALL_DISPLAY_CHOICES,
+            "desc": "resize-safe print layout or bordered fullscreen cards",
         },
         {
             "section": "display",

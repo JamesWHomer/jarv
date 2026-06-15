@@ -15,6 +15,7 @@ DEFAULT_SYSTEM_PROMPT = (
 
 READ_ONLY_COMMAND_DISPLAY_CHOICES = ("fullscreen", "print")
 LEGACY_READ_ONLY_COMMAND_DISPLAY_CHOICES = ("auto", "inline")
+TOOL_CALL_DISPLAY_CHOICES = ("fullscreen", "print", "auto")
 TOOL_NAMES = ("run_command", "web_search", "read", "spawn", "ask_user")
 
 DEFAULT_CONFIG = {
@@ -44,6 +45,7 @@ DEFAULT_CONFIG = {
     "subagent_thread_pool_max_workers": 8,
     "check_updates": True,
     "read_only_command_display": "fullscreen",
+    "tool_call_display": "auto",
     "print_usage_after_agent": False,
 }
 
@@ -197,6 +199,17 @@ def validate_config(config: dict) -> bool:
     if display_mode not in READ_ONLY_COMMAND_DISPLAY_CHOICES:
         choices = ", ".join(READ_ONLY_COMMAND_DISPLAY_CHOICES)
         _console().print(f"[red]Config 'read_only_command_display' must be one of: {choices}.[/red]")
+        ok = False
+
+    tool_call_display = config.get(
+        "tool_call_display",
+        DEFAULT_CONFIG["tool_call_display"],
+    )
+    if tool_call_display not in TOOL_CALL_DISPLAY_CHOICES:
+        choices = ", ".join(TOOL_CALL_DISPLAY_CHOICES)
+        _console().print(
+            f"[red]Config 'tool_call_display' must be one of: {choices}.[/red]"
+        )
         ok = False
 
     disabled_tools = config.get("disabled_tools", [])

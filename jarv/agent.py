@@ -104,6 +104,41 @@ def build_agent_tools(config: dict) -> list[dict]:
     return filter_enabled_tools(TOOLS, config)
 
 
+def resolve_tool_call_display(config: dict, *, heads_up: bool) -> str:
+    mode = config.get("tool_call_display", DEFAULT_CONFIG["tool_call_display"])
+    if mode == "auto":
+        return "fullscreen" if heads_up else "print"
+    return str(mode)
+
+
+def _print_tool_card(renderable, config: dict) -> None:
+    """Print a tool card with the spacing required by its display mode."""
+    console.print(renderable)
+    if config.get(
+        "tool_call_display",
+        DEFAULT_CONFIG["tool_call_display"],
+    ) == "print":
+        console.print()
+
+
+def _replace_terminal_rows(row_count: int) -> bool:
+    """Clear the preceding terminal rows and return the cursor to their start."""
+    if row_count <= 0 or not console.is_terminal:
+        return False
+    output = console.file
+    output.write("\x1b[?25l")
+    output.write(f"\x1b[{row_count}A")
+    for index in range(row_count):
+        output.write("\r\x1b[2K")
+        if index < row_count - 1:
+            output.write("\x1b[1B")
+    if row_count > 1:
+        output.write(f"\x1b[{row_count - 1}A")
+    output.write("\r\x1b[?25h")
+    output.flush()
+    return True
+
+
 _THINKING_FRAMES = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"]
 STREAM_PREVIEW_REFRESH_INTERVAL = 1 / 12
 
@@ -520,12 +555,7 @@ def _dispatch_run_command_with_ui(
     )
     command_line = Text("$ ", style="bold yellow")
     command_line.append(cmd)
-    model_window = Text(
-        f"Output to model: first {head_chars:,} chars  \u2022  "
-        f"last {tail_chars:,} chars",
-        style="dim",
-    )
-    body_parts = [command_line, model_window, command_result_renderable(result)]
+    body_parts = [command_line, command_result_renderable(result)]
     output, output_id = retain_command_output(
         result.full_model_output(),
         head_chars,
@@ -542,13 +572,17 @@ def _dispatch_run_command_with_ui(
         retained_line = Text("Retained command output: ", style="dim")
         retained_line.append(output_id, style="cyan")
         body_parts.append(retained_line)
-    console.print()
-    console.print(
+    _print_tool_card(
         tool_card(
             "run_command",
             Group(*body_parts),
+            metadata=f"model window {head_chars:,} / {tail_chars:,} chars",
+            display_mode=config.get(
+                "tool_call_display",
+                DEFAULT_CONFIG["tool_call_display"],
+            ),
             status=(
-                "complete"
+                "done"
                 if not result.timed_out and result.exit_code in (None, 0)
                 else "failed"
             ),
@@ -557,12 +591,13 @@ def _dispatch_run_command_with_ui(
                 if not result.timed_out and result.exit_code in (None, 0)
                 else "red"
             ),
-        )
+        ),
+        config,
     )
     return output
 
 
-def _dispatch_ask_user(args: dict) -> str:
+def _dispatch_ask_user(args: dict, config: dict | None = None) -> str:
     question = args.get("question")
     if not isinstance(question, str) or not question.strip():
         msg = "[tool argument error: question must be a non-empty string]"
@@ -570,23 +605,67 @@ def _dispatch_ask_user(args: dict) -> str:
         return msg
     if not sys.stdin.isatty():
         return "[non-interactive session; user unavailable]"
-    console.print()
-    console.print(
-        tool_card(
-            "ask_user",
-            Markdown(flatten_headings(question)),
-            status="awaiting response",
-            status_style="blue",
-        )
+    config = config or DEFAULT_CONFIG
+    display_mode = config.get(
+        "tool_call_display",
+        DEFAULT_CONFIG["tool_call_display"],
     )
+    if display_mode == "auto":
+        display_mode = "print"
+    question_renderable = Markdown(flatten_headings(question))
+    if display_mode == "print":
+        console.print(
+            tool_card(
+                "ask_user",
+                question_renderable,
+                status="waiting",
+                status_style="blue",
+                display_mode="print",
+            )
+        )
+    else:
+        waiting_card = tool_card(
+            "ask_user",
+            question_renderable,
+            status="waiting",
+            status_style="blue",
+            display_mode="fullscreen",
+        )
+        waiting_height = len(
+            console.render_lines(waiting_card, console.options, pad=False)
+        )
+        console.print(
+            waiting_card
+        )
     try:
-        answer = read_editable_line("\x1b[1;36m>\x1b[0m ").strip()
+        prompt = (
+            "\x1b[34m\u258e\x1b[0m \x1b[1;36m>\x1b[0m "
+            if display_mode == "print"
+            else "\x1b[1;36m>\x1b[0m "
+        )
+        answer = read_editable_line(prompt).strip()
     except KeyboardInterrupt:
         raise
     except EOFError:
         answer = "[no response]"
-        console.print(f"\n[dim]{answer}[/dim]")
-    console.print()
+        if display_mode == "print":
+            console.print(f"\n[dim]{answer}[/dim]")
+        else:
+            console.print()
+    if display_mode == "fullscreen":
+        answer_line = Text("> ", style="bold cyan")
+        answer_line.append(answer)
+        _replace_terminal_rows(waiting_height + 1)
+        console.print(
+            tool_card(
+                "ask_user",
+                Group(question_renderable, answer_line),
+                status="done",
+                display_mode="fullscreen",
+            )
+        )
+    if display_mode == "print":
+        console.print()
     return answer
 
 
@@ -674,11 +753,14 @@ def _dispatch_spawn_with_ui(
             yield tool_card(
                 "spawn",
                 Group(*lines),
-                status=f"{done}/{total} complete",
+                status=f"{done}/{total} done",
                 status_style="green" if done == total else "magenta",
+                display_mode=config.get(
+                    "tool_call_display",
+                    DEFAULT_CONFIG["tool_call_display"],
+                ),
             )
 
-    console.print()
     with track_live_display(), Live(
         SpawnPanel(),
         refresh_per_second=10,
@@ -719,7 +801,11 @@ def _dispatch_spawn_with_ui(
         live.update(SpawnPanel())
         output = json.dumps(results)
 
-    console.print()
+    if config.get(
+        "tool_call_display",
+        DEFAULT_CONFIG["tool_call_display"],
+    ) == "print":
+        console.print()
     return output
 
 
@@ -730,7 +816,13 @@ def run_agent(
     propagate_keyboard_interrupt: bool = False,
     new_session: bool = False,
     incognito: bool = False,
+    heads_up: bool = False,
 ) -> AgentRunResult:
+    config = dict(config)
+    config["tool_call_display"] = resolve_tool_call_display(
+        config,
+        heads_up=heads_up,
+    )
     interactive = sys.stdout.isatty()
     reply_text = ""
     tool_calls = []
@@ -1148,6 +1240,11 @@ def run_agent(
                     print(reply_text)
 
             if tool_calls:
+                if config.get(
+                    "tool_call_display",
+                    DEFAULT_CONFIG["tool_call_display"],
+                ) == "print":
+                    console.print()
                 new_input_items = []
                 for ri in reasoning_items:
                     rd = {"type": "reasoning", "id": ri.id, "summary": [], **metadata}
@@ -1244,18 +1341,24 @@ def run_agent(
                             if read_args is not None:
                                 read_path = Text(
                                     str(read_args.get("input", "")),
-                                    style="cyan",
+                                    no_wrap=True,
+                                    overflow="ellipsis",
                                 )
                                 read_meta = Text(
                                     f"offset {read_args.get('offset', 0)!r}  \u2022  "
                                     f"size {read_args.get('size', 'default')!r}",
                                     style="dim",
                                 )
-                                console.print(
+                                _print_tool_card(
                                     tool_card(
                                         "read",
                                         Group(read_path, read_meta),
-                                    )
+                                        display_mode=config.get(
+                                            "tool_call_display",
+                                            DEFAULT_CONFIG["tool_call_display"],
+                                        ),
+                                    ),
+                                    config,
                                 )
                             append_tool_result(read_item, output)
                         item_index = group_end
@@ -1300,19 +1403,21 @@ def run_agent(
                             )
                             query = Text(
                                 str(args.get("query", "")),
-                                style="green",
                             )
-                            console.print(
+                            _print_tool_card(
                                 tool_card(
                                     "web_search",
-                                    Group(
-                                        query,
-                                        Text("Search results returned to model", style="dim"),
+                                    query,
+                                    metadata="DuckDuckGo",
+                                    display_mode=config.get(
+                                        "tool_call_display",
+                                        DEFAULT_CONFIG["tool_call_display"],
                                     ),
-                                )
+                                ),
+                                config,
                             )
                         elif item.name == "ask_user":
-                            output = _dispatch_ask_user(args)
+                            output = _dispatch_ask_user(args, config)
                         else:
                             output = f"[unknown tool: {item.name}]"
                             console.print(f"[red]{output}[/red]")

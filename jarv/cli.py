@@ -473,7 +473,12 @@ def run_heads_up_mode(
             agent_ready.wait()
             if "error" in agent_import:
                 raise agent_import["error"]
-            result = agent_import["module"].run_agent(query, config, client)
+            result = agent_import["module"].run_agent(
+                query,
+                config,
+                client,
+                heads_up=True,
+            )
             if getattr(result, "cancelled", False) is True:
                 console.print("\n[dim]Cancelled.[/dim]")
                 prefill = result.prompt or query

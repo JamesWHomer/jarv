@@ -106,3 +106,38 @@ def test_validate_config_deduplicates_disabled_tools():
 
     assert validate_config(config)
     assert config["disabled_tools"] == ["read", "spawn"]
+
+
+def test_settings_exposes_tool_call_display(monkeypatch):
+    config = dict(DEFAULT_CONFIG)
+    row = next(
+        row
+        for row in settings_command._settings_rows(config)
+        if row["key"] == "tool_call_display"
+    )
+
+    assert settings_command._settings_value_text(row, config).plain == "auto"
+    monkeypatch.setattr(settings_command, "save_config", lambda _config: None)
+
+    updated, message = settings_command._settings_apply_quick(row, config)
+
+    assert updated["tool_call_display"] == "fullscreen"
+    assert message == "saved Tool calls: fullscreen"
+
+
+def test_validate_config_rejects_unknown_tool_call_display(monkeypatch):
+    output = io.StringIO()
+    monkeypatch.setattr(
+        config_module,
+        "_console",
+        lambda: Console(
+            file=output,
+            force_terminal=False,
+            color_system=None,
+        ),
+    )
+
+    assert not validate_config(
+        {**DEFAULT_CONFIG, "tool_call_display": "sideways"}
+    )
+    assert "tool_call_display" in output.getvalue()

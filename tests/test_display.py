@@ -221,7 +221,46 @@ def test_tool_card_uses_shared_neutral_shell_and_tool_accent():
     test_console.print(tool_card("web_search", "PowerShell documentation"))
 
     rendered = stream.getvalue()
-    assert "\u250c\u2500" in rendered
+    assert "\u258e " in rendered
     assert "\u2315 Web search" in rendered
-    assert "\u2713 complete" in rendered
+    assert "\u2713 done" not in rendered
     assert "PowerShell documentation" in rendered
+
+
+def test_fullscreen_tool_card_uses_box_and_right_status():
+    stream = io.StringIO()
+    test_console = Console(
+        file=stream,
+        force_terminal=False,
+        color_system=None,
+        width=80,
+    )
+
+    test_console.print(
+        tool_card(
+            "web_search",
+            "PowerShell documentation",
+            display_mode="fullscreen",
+        )
+    )
+
+    rendered = stream.getvalue()
+    assert "\u250c\u2500" in rendered
+    assert "\u2713 done" in rendered
+
+
+def test_print_tool_cards_can_be_separated_by_one_blank_line():
+    stream = io.StringIO()
+    test_console = Console(
+        file=stream,
+        force_terminal=False,
+        color_system=None,
+        width=80,
+    )
+
+    test_console.print(tool_card("web_search", "DuckDuckGo homepage"))
+    test_console.print()
+    test_console.print(tool_card("read", "C:\\Windows\\win.ini"))
+
+    rendered = stream.getvalue()
+    assert "DuckDuckGo homepage\n\n\u258e \u2193 Read" in rendered

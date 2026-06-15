@@ -11,10 +11,12 @@ from rich.console import Console
 from jarv.agent import (
     _dispatch_ask_user,
     _dispatch_run_command_with_ui,
+    _print_tool_card,
     build_input,
     _format_agent_usage_line,
     response_start_status,
     response_wait_label,
+    resolve_tool_call_display,
     tool_activity_complete_status,
     tool_activity_label,
     tool_complete_indicator,
@@ -22,6 +24,7 @@ from jarv.agent import (
     to_response_input_item,
 )
 from jarv.config import DEFAULT_CONFIG
+from jarv.display import tool_card
 from jarv.history import SessionContext, load_history, save_history
 from jarv.history import redo_file_for
 from jarv.provider import (
@@ -36,6 +39,61 @@ from jarv.shell import CommandResult
 
 
 class AgentInputTests(unittest.TestCase):
+    def test_auto_tool_call_display_depends_on_run_context(self):
+        config = {**DEFAULT_CONFIG, "tool_call_display": "auto"}
+
+        self.assertEqual(
+            resolve_tool_call_display(config, heads_up=False),
+            "print",
+        )
+        self.assertEqual(
+            resolve_tool_call_display(config, heads_up=True),
+            "fullscreen",
+        )
+
+    def test_print_tool_cards_share_one_blank_line(self):
+        stream = io.StringIO()
+        test_console = Console(
+            file=stream,
+            force_terminal=False,
+            color_system=None,
+            width=80,
+        )
+        config = {**DEFAULT_CONFIG, "tool_call_display": "print"}
+
+        with patch("jarv.agent.console", new=test_console):
+            test_console.print()
+            _print_tool_card(tool_card("web_search", "first"), config)
+            _print_tool_card(tool_card("read", "second"), config)
+
+        rendered = stream.getvalue()
+        self.assertIn("first\n\n\u258e \u2193 Read", rendered)
+        self.assertNotIn("first\n\n\n\u258e \u2193 Read", rendered)
+
+    def test_fullscreen_tool_cards_have_no_added_blank_line(self):
+        stream = io.StringIO()
+        test_console = Console(
+            file=stream,
+            force_terminal=False,
+            color_system=None,
+            width=80,
+        )
+        config = {**DEFAULT_CONFIG, "tool_call_display": "fullscreen"}
+
+        with patch("jarv.agent.console", new=test_console):
+            _print_tool_card(
+                tool_card("web_search", "first", display_mode="fullscreen"),
+                config,
+            )
+            _print_tool_card(
+                tool_card("read", "second", display_mode="fullscreen"),
+                config,
+            )
+
+        rendered = stream.getvalue()
+        self.assertNotIn("\u2518\n\n\u250c", rendered)
+        self.assertIn("\u2518\n\u250c", rendered)
+
     def test_run_command_displays_resolved_output_parameters(self):
         stream = io.StringIO()
         test_console = Console(
@@ -60,15 +118,9 @@ class AgentInputTests(unittest.TestCase):
             )
 
         output = stream.getvalue()
-        output_line = next(
-            line for line in output.splitlines() if "Output to model:" in line
-        )
-        self.assertIn("Output to model:", output)
-        self.assertIn("first 12,000 chars", output)
-        self.assertIn("last 10,000 chars", output)
+        self.assertIn("model window 12,000 / 10,000 chars", output)
         self.assertNotIn("(requested)", output)
         self.assertNotIn("(default)", output)
-        self.assertIn("\x1b[", output_line)
 
     def test_response_wait_label_is_neutral_without_reasoning(self):
         self.assertEqual(response_wait_label(has_reasoning=False), "Waiting")
@@ -563,6 +615,42 @@ class AgentInputTests(unittest.TestCase):
         self.assertIn("Changes since v0.23.0", rendered)
         self.assertNotIn("**Version bump:**", rendered)
         self.assertNotIn("```", rendered)
+
+    def test_ask_user_fullscreen_replaces_waiting_box_in_place(self):
+        stream = io.StringIO()
+        test_console = Console(
+            file=stream,
+            force_terminal=True,
+            color_system=None,
+            width=80,
+        )
+
+        def answer_prompt(_prompt):
+            stream.write("> yes\n")
+            return "yes"
+
+        with (
+            patch("jarv.agent.sys.stdin") as stdin,
+            patch("jarv.agent.read_editable_line", side_effect=answer_prompt),
+            patch("jarv.agent.console", new=test_console),
+        ):
+            stdin.isatty.return_value = True
+            result = _dispatch_ask_user(
+                {"question": "Continue?"},
+                {**DEFAULT_CONFIG, "tool_call_display": "fullscreen"},
+            )
+
+        rendered = stream.getvalue()
+        self.assertEqual(result, "yes")
+        self.assertIn("\u25cf waiting", rendered)
+        self.assertIn("\u2713 done", rendered)
+        self.assertEqual(rendered.count("Continue?"), 2)
+        self.assertIn("> yes", rendered)
+        self.assertEqual(rendered.count("\u250c"), 2)
+        self.assertIn("\x1b[5A", rendered)
+        self.assertEqual(rendered.count("\x1b[2K"), 5)
+        self.assertLess(rendered.index("waiting"), rendered.index("\x1b[5A"))
+        self.assertLess(rendered.index("\x1b[5A"), rendered.index("\u2713 done"))
 
     def test_run_agent_passes_session_prompt_cache_key(self):
         with TemporaryDirectory() as tmp:

@@ -245,21 +245,35 @@ def display_command_result(result: CommandResult) -> None:
 def command_result_renderable(result: CommandResult):
     parts = []
     if result.stdout:
-        parts.append(output_renderable(result.stdout.rstrip()))
+        parts.append(output_renderable(compact_command_output(result.stdout)))
     if result.stderr:
         parts.append(Text("stderr:", style="bold red"))
-        parts.append(output_renderable(result.stderr.rstrip()))
+        parts.append(output_renderable(result.stderr.strip()))
     if result.timed_out:
         parts.append(
             Text(f"Timed out after {result.timeout:g}s", style="bold red")
         )
     elif result.exit_code not in (None, 0):
-        exit_line = Text("Exit code: ", style="bold red")
+        exit_line = Text("exit ", style="bold red")
         exit_line.append(str(result.exit_code))
         parts.append(exit_line)
     else:
-        parts.append(Text("Exit code: 0", style="dim"))
+        parts.append(Text("exit 0", style="dim"))
     if not result.stdout and not result.stderr:
         parts.insert(0, Text("(no output)", style="dim"))
     return Group(*parts)
+
+
+def compact_command_output(output: str) -> str:
+    """Trim shell padding and collapse a one-row table to a compact line."""
+    lines = [line.rstrip() for line in output.strip().splitlines()]
+    if (
+        len(lines) == 3
+        and lines[0].strip()
+        and lines[1].strip()
+        and set(lines[1].strip()) == {"-"}
+        and lines[2].strip()
+    ):
+        return f"{lines[0].strip()}  {lines[2].strip()}"
+    return "\n".join(lines)
 

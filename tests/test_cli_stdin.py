@@ -299,6 +299,7 @@ class CliStdinTests(unittest.TestCase):
             cli.run_heads_up_mode({"model": "test"}, client=object())
 
         run_agent.assert_called_once()
+        self.assertTrue(run_agent.call_args.kwargs["heads_up"])
         self.assertEqual(initial_values, ["", "draft prompt"])
 
 
