@@ -433,8 +433,15 @@ def run_heads_up_mode(
             console.print("[dim]Goodbye.[/dim]")
             return
 
-        if query.startswith("/"):
-            parts = query.split()
+        parts = query.split()
+        if (
+            len(parts) > 1
+            and parts[0].lower() == "jarv"
+            and parts[1].startswith("/")
+        ):
+            parts = parts[1:]
+
+        if parts[0].startswith("/"):
             command = parts[0].lower()
             if command in {"/exit", "/quit"}:
                 console.print("[dim]Goodbye.[/dim]")
@@ -450,7 +457,6 @@ def run_heads_up_mode(
             continue
 
         # Check if user typed a command name without the slash
-        parts = query.split()
         result = _maybe_command(parts[0], parts[1:])
         if result is not None:
             _, command, rest = result

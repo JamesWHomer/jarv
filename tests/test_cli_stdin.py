@@ -233,6 +233,24 @@ class CliStdinTests(unittest.TestCase):
         run_slash.assert_called_once_with("/set", ["model", "new-model"])
         reload.assert_called_once_with(config, "old-client", args)
 
+    def test_heads_up_mode_handles_jarv_prefixed_slash_command(self):
+        calls = 0
+
+        def read_line(_prompt, initial=""):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return "jarv /set model new-model"
+            raise KeyboardInterrupt
+
+        with (
+            patch("jarv.command_input.read_editable_line", side_effect=read_line),
+            patch.object(cli, "_run_slash_command", return_value=True) as run_slash,
+        ):
+            cli.run_heads_up_mode({"model": "test"}, client=object())
+
+        run_slash.assert_called_once_with("/set", ["model", "new-model"])
+
     def test_heads_up_mode_skips_reload_for_unknown_slash_command(self):
         args = SimpleNamespace(
             provider=None,
