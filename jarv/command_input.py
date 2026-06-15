@@ -14,6 +14,7 @@ MOUSE_CAPTURE_ENABLE = "\x1b[?1000h\x1b[?1006h"
 MOUSE_CAPTURE_DISABLE = "\x1b[?1006l\x1b[?1000l"
 CURSOR_HIDE = "\x1b[?25l"
 CURSOR_SHOW = "\x1b[?25h"
+ANSI_RESET = "\x1b[0m"
 _PENDING_KEYS: deque[str] = deque()
 _REPEATABLE_NAV_KEYS = frozenset({"UP", "DOWN", "LEFT", "RIGHT", "PAGEUP", "PAGEDOWN"})
 _POSIX_INPUT_POLL_INTERVAL = 0.1
@@ -268,6 +269,7 @@ def _render_editable_line(
     text: str,
     cursor: int,
     *,
+    text_style: str = "",
     write=None,
     columns: int | None = None,
 ) -> None:
@@ -299,7 +301,11 @@ def _render_editable_line(
         visible_width += width
     visible = text[start:end]
 
-    repaint = [CURSOR_HIDE, "\r\x1b[2K", prompt, visible]
+    repaint = [CURSOR_HIDE, "\r\x1b[2K", prompt]
+    if text_style:
+        repaint.extend((text_style, visible, ANSI_RESET))
+    else:
+        repaint.append(visible)
     trailing = visible_width - cursor_column
     if trailing:
         repaint.append(f"\x1b[{trailing}D")
@@ -312,6 +318,7 @@ def read_editable_line(
     prompt: str,
     initial: str = "",
     *,
+    text_style: str = "",
     read_key=None,
     key_available=None,
     write=None,
@@ -327,7 +334,13 @@ def read_editable_line(
     cursor = len(chars)
     pending: deque[str] = deque()
 
-    _render_editable_line(prompt, "".join(chars), cursor, write=write)
+    _render_editable_line(
+        prompt,
+        "".join(chars),
+        cursor,
+        text_style=text_style,
+        write=write,
+    )
     try:
         while True:
             try:
@@ -336,7 +349,13 @@ def read_editable_line(
                 if chars:
                     chars.clear()
                     cursor = 0
-                    _render_editable_line(prompt, "", cursor, write=write)
+                    _render_editable_line(
+                        prompt,
+                        "",
+                        cursor,
+                        text_style=text_style,
+                        write=write,
+                    )
                     continue
                 raise
 
@@ -379,7 +398,13 @@ def read_editable_line(
             else:
                 continue
 
-            _render_editable_line(prompt, "".join(chars), cursor, write=write)
+            _render_editable_line(
+                prompt,
+                "".join(chars),
+                cursor,
+                text_style=text_style,
+                write=write,
+            )
     finally:
         sys.stdout.flush()
 

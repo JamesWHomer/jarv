@@ -713,7 +713,7 @@ def _dispatch_ask_user(args: dict, config: dict | None = None) -> str:
             if display_mode == "print"
             else "\x1b[1;36m>\x1b[0m "
         )
-        answer = read_editable_line(prompt).strip()
+        answer = read_editable_line(prompt, text_style="\x1b[97m").strip()
     except KeyboardInterrupt:
         raise
     except EOFError:
@@ -724,7 +724,7 @@ def _dispatch_ask_user(args: dict, config: dict | None = None) -> str:
             console.print()
     if display_mode == "fullscreen":
         answer_line = Text("> ", style="bold cyan")
-        answer_line.append(answer)
+        answer_line.append(answer, style="bright_white")
         _replace_terminal_rows(waiting_height + 1)
         console.print(
             tool_card(

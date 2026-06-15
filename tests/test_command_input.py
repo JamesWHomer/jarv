@@ -194,6 +194,24 @@ def test_render_editable_line_restores_cursor_after_positioning():
     assert output == ["\x1b[?25l\r\x1b[2Kjarv> hello\x1b[3D\x1b[?25h"]
 
 
+def test_render_editable_line_applies_text_style_without_coloring_prompt():
+    output = []
+
+    command_input._render_editable_line(
+        "\x1b[1;36m>\x1b[0m ",
+        "yes",
+        3,
+        text_style="\x1b[97m",
+        write=output.append,
+        columns=20,
+    )
+
+    assert output == [
+        "\x1b[?25l\r\x1b[2K\x1b[1;36m>\x1b[0m "
+        "\x1b[97myes\x1b[0m\x1b[?25h"
+    ]
+
+
 def test_read_editable_line_batches_queued_paste_before_redrawing():
     keys = deque([*"a long pasted prompt", "ENTER"])
     output = []

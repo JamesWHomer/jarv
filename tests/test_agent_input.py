@@ -624,7 +624,7 @@ class AgentInputTests(unittest.TestCase):
         )
         with (
             patch("jarv.agent.sys.stdin") as stdin,
-            patch("jarv.agent.read_editable_line", return_value="yes"),
+            patch("jarv.agent.read_editable_line", return_value="yes") as read_line,
             patch(
                 "jarv.agent.console",
                 new=Console(
@@ -640,6 +640,10 @@ class AgentInputTests(unittest.TestCase):
 
         rendered = console_output.getvalue()
         self.assertEqual(result, "yes")
+        read_line.assert_called_once_with(
+            "\x1b[34m\u258e\x1b[0m \x1b[1;36m>\x1b[0m ",
+            text_style="\x1b[97m",
+        )
         self.assertIn("Version bump:", rendered)
         self.assertIn("v0.23.0", rendered)
         self.assertIn("Changes since v0.23.0", rendered)
@@ -655,7 +659,7 @@ class AgentInputTests(unittest.TestCase):
             width=80,
         )
 
-        def answer_prompt(_prompt):
+        def answer_prompt(_prompt, **_kwargs):
             stream.write("> yes\n")
             return "yes"
 
