@@ -6,15 +6,12 @@ import threading
 import time
 from dataclasses import dataclass
 
-from rich import box
 from rich.console import Group
 from rich.control import Control, ControlType
 from rich.live import Live
 from rich.live_render import LiveRender
 from rich.markdown import Markdown
 from rich.markup import escape
-from rich.panel import Panel
-from rich.rule import Rule
 from rich.segment import Segment
 from rich.text import Text
 
@@ -22,7 +19,13 @@ from .config import DEFAULT_CONFIG
 from .context_budget import build_input, trim_turn_input
 from .cancellation import CancellationToken, TurnCancelled
 from .command_input import read_editable_line
-from .display import console, flatten_headings, terminal_size, track_live_display
+from .display import (
+    console,
+    flatten_headings,
+    terminal_size,
+    tool_card,
+    track_live_display,
+)
 from .history import (
     artifact_file_for,
     forget_current_session,
@@ -64,7 +67,7 @@ from .orchestrator import (
 from .safety import check_command
 from .shell import (
     COMMAND_OUTPUT_UNSET,
-    display_command_result,
+    command_result_renderable,
     execute_command,
     resolve_command_output_window,
     truncate_model_output,
@@ -510,20 +513,19 @@ def _dispatch_run_command_with_ui(
         console.print(f"[dim]{denial}[/dim]")
         return denial
 
-    console.print()
-    console.print(Rule(f"[bold yellow]$ {escape(cmd)}[/bold yellow]", style="yellow", align="left"))
-    console.print(
-        f"Output to model: first {head_chars:,} chars  \u2022  "
-        f"last {tail_chars:,} chars",
-        highlight=False,
-    )
-    console.print("[dim]Running command...[/dim]")
     result = execute_command(
         cmd,
         config.get("command_timeout", 60),
         cancellation_token=cancellation_token,
     )
-    display_command_result(result)
+    command_line = Text("$ ", style="bold yellow")
+    command_line.append(cmd)
+    model_window = Text(
+        f"Output to model: first {head_chars:,} chars  \u2022  "
+        f"last {tail_chars:,} chars",
+        style="dim",
+    )
+    body_parts = [command_line, model_window, command_result_renderable(result)]
     output, output_id = retain_command_output(
         result.full_model_output(),
         head_chars,
@@ -537,8 +539,26 @@ def _dispatch_run_command_with_ui(
         ),
     )
     if output_id is not None:
-        console.print(f"[dim]Retained command output:[/dim] [cyan]{output_id}[/cyan]")
-    console.print(Rule(style="bright_black"))
+        retained_line = Text("Retained command output: ", style="dim")
+        retained_line.append(output_id, style="cyan")
+        body_parts.append(retained_line)
+    console.print()
+    console.print(
+        tool_card(
+            "run_command",
+            Group(*body_parts),
+            status=(
+                "complete"
+                if not result.timed_out and result.exit_code in (None, 0)
+                else "failed"
+            ),
+            status_style=(
+                "green"
+                if not result.timed_out and result.exit_code in (None, 0)
+                else "red"
+            ),
+        )
+    )
     return output
 
 
@@ -552,11 +572,11 @@ def _dispatch_ask_user(args: dict) -> str:
         return "[non-interactive session; user unavailable]"
     console.print()
     console.print(
-        Panel(
+        tool_card(
+            "ask_user",
             Markdown(flatten_headings(question)),
-            border_style="cyan",
-            box=box.ROUNDED,
-            padding=(0, 1),
+            status="awaiting response",
+            status_style="blue",
         )
     )
     try:
@@ -651,13 +671,11 @@ def _dispatch_spawn_with_ui(
                 lines.append(line)
             total = len(snap)
             done = sum(1 for s in snap.values() if s["status"] != "running")
-            yield Panel(
+            yield tool_card(
+                "spawn",
                 Group(*lines),
-                title=f"[bold magenta]spawn[/bold magenta] [dim]{done}/{total}[/dim]",
-                title_align="left",
-                border_style="magenta",
-                box=box.ROUNDED,
-                padding=(0, 1),
+                status=f"{done}/{total} complete",
+                status_style="green" if done == total else "magenta",
             )
 
     console.print()
@@ -1224,12 +1242,20 @@ def run_agent(
                             outputs,
                         ):
                             if read_args is not None:
+                                read_path = Text(
+                                    str(read_args.get("input", "")),
+                                    style="cyan",
+                                )
+                                read_meta = Text(
+                                    f"offset {read_args.get('offset', 0)!r}  \u2022  "
+                                    f"size {read_args.get('size', 'default')!r}",
+                                    style="dim",
+                                )
                                 console.print(
-                                    "[dim]read("
-                                    f"{read_args.get('input')!r}, "
-                                    f"offset={read_args.get('offset', 0)!r}, "
-                                    f"size={read_args.get('size', 'default')!r}"
-                                    ")[/dim]"
+                                    tool_card(
+                                        "read",
+                                        Group(read_path, read_meta),
+                                    )
                                 )
                             append_tool_result(read_item, output)
                         item_index = group_end
@@ -1272,8 +1298,18 @@ def run_agent(
                                 config,
                                 cancellation_token=cancellation_token,
                             )
+                            query = Text(
+                                str(args.get("query", "")),
+                                style="green",
+                            )
                             console.print(
-                                f"[dim]web_search({args.get('query')!r})[/dim]"
+                                tool_card(
+                                    "web_search",
+                                    Group(
+                                        query,
+                                        Text("Search results returned to model", style="dim"),
+                                    ),
+                                )
                             )
                         elif item.name == "ask_user":
                             output = _dispatch_ask_user(args)

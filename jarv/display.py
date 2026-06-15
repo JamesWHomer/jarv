@@ -6,7 +6,7 @@ import time
 from contextlib import contextmanager
 
 from rich import box
-from rich.console import Console, RenderableType
+from rich.console import Console, Group, RenderableType
 from rich.panel import Panel
 from rich.rule import Rule
 from rich.text import Text
@@ -18,6 +18,36 @@ _live_display_depth = threading.local()
 PANEL_BORDER_STYLE = "cyan"
 ACCENT_STYLE = "bold cyan"
 TITLE_STYLE = "bold bright_white"
+
+TOOL_CARD_STYLES = {
+    "run_command": ("$", "Command", "yellow"),
+    "web_search": ("\u2315", "Web search", "green"),
+    "read": ("\u2193", "Read", "cyan"),
+    "spawn": ("\u25c7", "Subagent", "magenta"),
+    "ask_user": ("?", "Ask user", "blue"),
+}
+
+
+class ToolCardHeader:
+    """Render a tool label and status at opposite ends of one row."""
+
+    def __init__(self, title: Text, status: Text):
+        self.title = title
+        self.status = status
+
+    def __rich_console__(self, console, options):
+        width = max(1, options.max_width)
+        title = self.title.copy()
+        status = self.status.copy()
+        gap = max(1, width - title.cell_len - status.cell_len)
+        if title.cell_len + status.cell_len + 1 > width:
+            title.truncate(max(1, width - status.cell_len - 1), overflow="ellipsis")
+            gap = 1
+        line = Text(no_wrap=True, overflow="crop")
+        line.append_text(title)
+        line.append(" " * gap)
+        line.append_text(status)
+        yield line
 
 RESIZE_REFRESH_INTERVAL = 0.02
 RESIZE_ACTIVE_INTERVAL = 0.1
@@ -106,6 +136,36 @@ def status_line(prefix: str, message: str, prefix_style: str = "bold cyan", mess
     if message_style:
         return f"[{prefix_style}]{prefix}[/{prefix_style}] [{message_style}]{message}[/{message_style}]"
     return f"[{prefix_style}]{prefix}[/{prefix_style}] {message}"
+
+
+def tool_card(
+    tool_name: str,
+    body: RenderableType,
+    *,
+    status: str = "complete",
+    status_style: str = "green",
+) -> Panel:
+    """Return the shared compact card used for root tool calls."""
+    icon, label, accent = TOOL_CARD_STYLES.get(
+        tool_name,
+        ("\u2022", tool_name.replace("_", " ").title(), "cyan"),
+    )
+    title = Text()
+    title.append(f"{icon} ", style=f"bold {accent}")
+    title.append(label, style=f"bold {accent}")
+
+    status_text = Text(justify="right")
+    if status:
+        if status_style == "green":
+            status_text.append("\u2713 ", style="bold green")
+        status_text.append(status, style=f"dim {status_style}")
+
+    return Panel(
+        Group(ToolCardHeader(title, status_text), body),
+        border_style="bright_black",
+        box=box.ROUNDED,
+        padding=(0, 1),
+    )
 
 
 @contextmanager
@@ -204,7 +264,7 @@ def output_display_split(line_limit: int) -> tuple[int, int]:
     return head_lines, tail_lines
 
 
-def display_output(output: str, *, max_lines: int | None = None) -> None:
+def output_renderable(output: str, *, max_lines: int | None = None) -> RenderableType:
     lines = output.splitlines()
     line_limit = (
         output_display_line_limit(console=console)
@@ -214,18 +274,16 @@ def display_output(output: str, *, max_lines: int | None = None) -> None:
     if len(lines) > line_limit:
         head_lines, tail_lines = output_display_split(line_limit)
         hidden = len(lines) - head_lines - tail_lines
-        console.print(
-            "\n".join(lines[:head_lines]),
-            style="dim",
-            markup=False,
+        return Group(
+            Text("\n".join(lines[:head_lines]), style="dim"),
+            Text(
+                f"... {hidden} lines omitted from the middle ...",
+                style="dim italic",
+            ),
+            Text("\n".join(lines[-tail_lines:]), style="dim"),
         )
-        console.print(
-            f"[dim italic]... {hidden} lines omitted from the middle ...[/dim italic]"
-        )
-        console.print(
-            "\n".join(lines[-tail_lines:]),
-            style="dim",
-            markup=False,
-        )
-    else:
-        console.print(output, style="dim", markup=False)
+    return Text(output, style="dim")
+
+
+def display_output(output: str, *, max_lines: int | None = None) -> None:
+    console.print(output_renderable(output, max_lines=max_lines))

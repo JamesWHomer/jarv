@@ -53,7 +53,6 @@ class AgentInputTests(unittest.TestCase):
                 "jarv.agent.execute_command",
                 return_value=CommandResult("echo ok", "", "", 0),
             ),
-            patch("jarv.agent.display_command_result"),
         ):
             _dispatch_run_command_with_ui(
                 {"command": "echo ok", "head_chars": 12000},
@@ -69,7 +68,7 @@ class AgentInputTests(unittest.TestCase):
         self.assertIn("last 10,000 chars", output)
         self.assertNotIn("(requested)", output)
         self.assertNotIn("(default)", output)
-        self.assertNotIn("\x1b[", output_line)
+        self.assertIn("\x1b[", output_line)
 
     def test_response_wait_label_is_neutral_without_reasoning(self):
         self.assertEqual(response_wait_label(has_reasoning=False), "Waiting")

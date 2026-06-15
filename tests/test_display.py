@@ -11,6 +11,7 @@ from jarv.display import (
     output_display_split,
     refresh_on_resize,
     terminal_size,
+    tool_card,
 )
 
 
@@ -206,3 +207,21 @@ def test_output_display_split_biases_toward_head():
     assert (head_lines, tail_lines) == (13, 6)
     assert head_lines > tail_lines
     assert head_lines + tail_lines + 1 == 20
+
+
+def test_tool_card_uses_shared_neutral_shell_and_tool_accent():
+    stream = io.StringIO()
+    test_console = Console(
+        file=stream,
+        force_terminal=False,
+        color_system=None,
+        width=80,
+    )
+
+    test_console.print(tool_card("web_search", "PowerShell documentation"))
+
+    rendered = stream.getvalue()
+    assert "\u250c\u2500" in rendered
+    assert "\u2315 Web search" in rendered
+    assert "\u2713 complete" in rendered
+    assert "PowerShell documentation" in rendered

@@ -6,7 +6,10 @@ import time
 from dataclasses import dataclass
 
 from .cancellation import CancellationToken, TurnCancelled
-from .display import display_output, console
+from rich.console import Group
+from rich.text import Text
+
+from .display import output_renderable, console
 
 
 COMMAND_OUTPUT_UNSET = object()
@@ -236,19 +239,27 @@ def execute_command(
 
 
 def display_command_result(result: CommandResult) -> None:
+    console.print(command_result_renderable(result))
+
+
+def command_result_renderable(result: CommandResult):
+    parts = []
     if result.stdout:
-        display_output(result.stdout.rstrip())
+        parts.append(output_renderable(result.stdout.rstrip()))
     if result.stderr:
-        if result.stdout:
-            console.print()
-        console.print("stderr:", style="bold red")
-        display_output(result.stderr.rstrip())
+        parts.append(Text("stderr:", style="bold red"))
+        parts.append(output_renderable(result.stderr.rstrip()))
     if result.timed_out:
-        console.print(f"[bold red]Timed out after {result.timeout:g}s[/bold red]")
+        parts.append(
+            Text(f"Timed out after {result.timeout:g}s", style="bold red")
+        )
     elif result.exit_code not in (None, 0):
-        console.print(f"[bold red]Exit code:[/bold red] {result.exit_code}")
+        exit_line = Text("Exit code: ", style="bold red")
+        exit_line.append(str(result.exit_code))
+        parts.append(exit_line)
     else:
-        console.print("[dim]Exit code: 0[/dim]")
+        parts.append(Text("Exit code: 0", style="dim"))
     if not result.stdout and not result.stderr:
-        console.print("(no output)", style="dim")
+        parts.insert(0, Text("(no output)", style="dim"))
+    return Group(*parts)
 
