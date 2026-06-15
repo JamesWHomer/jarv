@@ -297,6 +297,13 @@ def _settings_rows(config: dict) -> list[dict]:
         },
         {
             "section": "runtime",
+            "label": "Web timeout",
+            "key": "web_timeout",
+            "kind": "int",
+            "desc": "seconds before web requests are cancelled",
+        },
+        {
+            "section": "runtime",
             "label": "History limit",
             "key": "max_history",
             "kind": "int",

@@ -30,6 +30,7 @@ from .history import (
     history_metadata,
     load_history,
     prepare_session_context,
+    reads_file_for,
     redo_file_for,
     save_history,
 )
@@ -49,7 +50,6 @@ from .provider import (
 )
 from .orchestrator import (
     ASK_USER_TOOL,
-    READ_ARTIFACT_TOOL,
     RUN_COMMAND_TOOL,
     SPAWN_TOOL,
     AgentNode,
@@ -59,7 +59,19 @@ from .orchestrator import (
     spawn_batch,
 )
 from .safety import check_command
-from .shell import display_command_result, execute_command, truncate_model_output
+from .shell import (
+    COMMAND_OUTPUT_UNSET,
+    display_command_result,
+    execute_command,
+    resolve_command_output_window,
+    truncate_model_output,
+)
+from .read_tool import READ_TOOL, dispatch_read_batch, retain_command_output
+from .retained_outputs import (
+    RetainedOutputStore,
+    load_retained_output_store,
+    save_retained_output_store,
+)
 from .usage import (
     estimate_context_breakdown,
     format_cost,
@@ -70,9 +82,16 @@ from .usage import (
     usage_file_for,
 )
 from .provider_catalog import configured_service_tier
+from .web import WEB_SEARCH_TOOL
 
 # Responses API tool format (flat, no "function" wrapper key)
-TOOLS = [RUN_COMMAND_TOOL, SPAWN_TOOL, READ_ARTIFACT_TOOL, ASK_USER_TOOL]
+TOOLS = [
+    RUN_COMMAND_TOOL,
+    WEB_SEARCH_TOOL,
+    SPAWN_TOOL,
+    READ_TOOL,
+    ASK_USER_TOOL,
+]
 
 
 _THINKING_FRAMES = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"]
@@ -94,8 +113,9 @@ def response_wait_label(has_reasoning: bool) -> str:
 _TOOL_ACTIVITY_LABELS = {
     "run_command": ("Writing command", "Wrote command"),
     "spawn": ("Planning parallel tasks", "Planned parallel tasks"),
-    "read_artifact": ("Selecting agent result", "Selected agent result"),
+    "read": ("Selecting content", "Selected content"),
     "ask_user": ("Writing question", "Wrote question"),
+    "web_search": ("Writing web search", "Wrote web search"),
 }
 
 
@@ -448,10 +468,22 @@ def _dispatch_run_command_with_ui(
     usage_path=None,
     session_id: str | None = None,
     cancellation_token: CancellationToken | None = None,
+    retained_store: RetainedOutputStore | None = None,
 ) -> str:
     cmd = args.get("command")
     if not isinstance(cmd, str) or not cmd.strip():
         msg = "[tool argument error: command must be a non-empty string]"
+        console.print(f"[red]{msg}[/red]")
+        return msg
+
+    try:
+        head_chars, tail_chars = resolve_command_output_window(
+            args.get("head_chars", COMMAND_OUTPUT_UNSET),
+            args.get("tail_chars", COMMAND_OUTPUT_UNSET),
+            config.get("max_tool_output_chars", DEFAULT_CONFIG["max_tool_output_chars"]),
+        )
+    except ValueError as e:
+        msg = f"[tool argument error: {e}]"
         console.print(f"[red]{msg}[/red]")
         return msg
 
@@ -473,6 +505,11 @@ def _dispatch_run_command_with_ui(
 
     console.print()
     console.print(Rule(f"[bold yellow]$ {escape(cmd)}[/bold yellow]", style="yellow", align="left"))
+    console.print(
+        f"Output to model: first {head_chars:,} chars  \u2022  "
+        f"last {tail_chars:,} chars",
+        highlight=False,
+    )
     console.print("[dim]Running command...[/dim]")
     result = execute_command(
         cmd,
@@ -480,8 +517,22 @@ def _dispatch_run_command_with_ui(
         cancellation_token=cancellation_token,
     )
     display_command_result(result)
+    output, output_id = retain_command_output(
+        result.full_model_output(),
+        head_chars,
+        tail_chars,
+        retained_store,
+        int(
+            config.get(
+                "max_tool_output_chars",
+                DEFAULT_CONFIG["max_tool_output_chars"],
+            )
+        ),
+    )
+    if output_id is not None:
+        console.print(f"[dim]Retained command output:[/dim] [cyan]{output_id}[/cyan]")
     console.print(Rule(style="bright_black"))
-    return result.to_model_output()
+    return output
 
 
 def _dispatch_ask_user(args: dict) -> str:
@@ -519,6 +570,7 @@ def _dispatch_spawn_with_ui(
     client,
     config,
     cancellation_token: CancellationToken | None = None,
+    retained_store: RetainedOutputStore | None = None,
 ) -> str:
     children_raw = args.get("children")
     if not isinstance(children_raw, list) or not children_raw:
@@ -621,6 +673,7 @@ def _dispatch_spawn_with_ui(
                 usage_path=root_node.usage_path,
                 session_id=root_node.session_id,
                 cancellation_token=cancellation_token,
+                retained_store=retained_store,
             )
         except (KeyboardInterrupt, TurnCancelled):
             with lock:
@@ -661,6 +714,8 @@ def run_agent(
     session_context = None
     artifact_file = None
     artifact_store = None
+    reads_file = None
+    retained_store = None
     usage_path = None
     wait_indicator: ResponseWaitIndicator | None = None
     tool_indicator: ToolActivityIndicator | None = None
@@ -699,6 +754,8 @@ def run_agent(
             save_history(history, session_context.history_file)
         if artifact_store is not None and artifact_file is not None:
             save_artifact_store(artifact_store, artifact_file)
+        if retained_store is not None and reads_file is not None:
+            save_retained_output_store(retained_store, reads_file)
 
     def _checkpoint_cancelled_turn() -> None:
         recorded_reasoning_ids = {
@@ -779,6 +836,8 @@ def run_agent(
 
         artifact_file = artifact_file_for(session_context.history_file)
         artifact_store = load_artifact_store(artifact_file)
+        reads_file = reads_file_for(session_context.history_file)
+        retained_store = load_retained_output_store(reads_file)
         usage_path = usage_file_for(session_context.history_file)
         root_node = AgentNode(
             label="root",
@@ -1043,53 +1102,8 @@ def run_agent(
                     api_item = to_response_input_item(rd)
                     if api_item is not None:
                         new_input_items.append(api_item)
-                for item in tool_calls:
-                    active_tool_call = item
-                    try:
-                        args = json.loads(item.arguments or "{}")
-                    except json.JSONDecodeError as e:
-                        output = f"[tool argument error: invalid JSON: {e}]"
-                        console.print(f"[red]{output}[/red]")
-                    else:
-                        if item.name == "run_command":
-                            output = _dispatch_run_command_with_ui(
-                                args,
-                                config,
-                                history,
-                                usage_path=usage_path,
-                                session_id=session_context.session_id,
-                                cancellation_token=cancellation_token,
-                            )
-                        elif item.name == "spawn":
-                            output = _dispatch_spawn_with_ui(
-                                args,
-                                root_node,
-                                artifact_store,
-                                client,
-                                config,
-                                cancellation_token=cancellation_token,
-                            )
-                        elif item.name == "read_artifact":
-                            output = dispatch_tool(
-                                item.name,
-                                args,
-                                root_node,
-                                artifact_store,
-                                client,
-                                config,
-                                cancellation_token=cancellation_token,
-                            )
-                            console.print(f"[dim]read_artifact({args.get('label')!r})[/dim]")
-                        elif item.name == "ask_user":
-                            output = _dispatch_ask_user(args)
-                        else:
-                            output = f"[unknown tool: {item.name}]"
-                            console.print(f"[red]{output}[/red]")
-
-                    output = truncate_model_output(
-                        output,
-                        config.get("max_tool_output_chars", DEFAULT_CONFIG["max_tool_output_chars"]),
-                    )
+                def append_tool_result(item, output: str) -> None:
+                    nonlocal active_tool_call
                     fc = {
                         "type": "function_call",
                         "id": item.id,
@@ -1112,6 +1126,127 @@ def run_agent(
                         api_item = to_response_input_item(stored_item)
                         if api_item is not None:
                             new_input_items.append(api_item)
+
+                item_index = 0
+                while item_index < len(tool_calls):
+                    item = tool_calls[item_index]
+                    if item.name == "read":
+                        group_end = item_index
+                        while (
+                            group_end < len(tool_calls)
+                            and tool_calls[group_end].name == "read"
+                        ):
+                            group_end += 1
+                        group = tool_calls[item_index:group_end]
+                        active_tool_call = group[0]
+                        outputs = [""] * len(group)
+                        parsed_args: list[dict | None] = [None] * len(group)
+                        valid_args: list[dict] = []
+                        valid_indexes: list[int] = []
+                        for group_index, read_item in enumerate(group):
+                            try:
+                                read_args = json.loads(read_item.arguments or "{}")
+                            except json.JSONDecodeError as e:
+                                outputs[group_index] = (
+                                    f"[tool argument error: invalid JSON: {e}]"
+                                )
+                            else:
+                                if not isinstance(read_args, dict):
+                                    outputs[group_index] = (
+                                        "[tool argument error: read arguments "
+                                        "must be an object]"
+                                    )
+                                else:
+                                    parsed_args[group_index] = read_args
+                                    valid_args.append(read_args)
+                                    valid_indexes.append(group_index)
+                        if valid_args:
+                            batch_outputs = dispatch_read_batch(
+                                valid_args,
+                                visible_labels=root_node.visible_labels,
+                                artifact_store=artifact_store,
+                                retained_store=retained_store,
+                                config=config,
+                                cancellation_token=cancellation_token,
+                            )
+                            for group_index, output in zip(
+                                valid_indexes,
+                                batch_outputs,
+                            ):
+                                outputs[group_index] = output
+                        for read_item, read_args, output in zip(
+                            group,
+                            parsed_args,
+                            outputs,
+                        ):
+                            if read_args is not None:
+                                console.print(
+                                    "[dim]read("
+                                    f"{read_args.get('input')!r}, "
+                                    f"offset={read_args.get('offset', 0)!r}, "
+                                    f"size={read_args.get('size', 'default')!r}"
+                                    ")[/dim]"
+                                )
+                            append_tool_result(read_item, output)
+                        item_index = group_end
+                        continue
+
+                    active_tool_call = item
+                    try:
+                        args = json.loads(item.arguments or "{}")
+                    except json.JSONDecodeError as e:
+                        output = f"[tool argument error: invalid JSON: {e}]"
+                        console.print(f"[red]{output}[/red]")
+                    else:
+                        if item.name == "run_command":
+                            output = _dispatch_run_command_with_ui(
+                                args,
+                                config,
+                                history,
+                                usage_path=usage_path,
+                                session_id=session_context.session_id,
+                                cancellation_token=cancellation_token,
+                                retained_store=retained_store,
+                            )
+                        elif item.name == "spawn":
+                            output = _dispatch_spawn_with_ui(
+                                args,
+                                root_node,
+                                artifact_store,
+                                client,
+                                config,
+                                cancellation_token=cancellation_token,
+                                retained_store=retained_store,
+                            )
+                        elif item.name == "web_search":
+                            output = dispatch_tool(
+                                item.name,
+                                args,
+                                root_node,
+                                artifact_store,
+                                client,
+                                config,
+                                cancellation_token=cancellation_token,
+                            )
+                            console.print(
+                                f"[dim]web_search({args.get('query')!r})[/dim]"
+                            )
+                        elif item.name == "ask_user":
+                            output = _dispatch_ask_user(args)
+                        else:
+                            output = f"[unknown tool: {item.name}]"
+                            console.print(f"[red]{output}[/red]")
+
+                    if item.name not in {"run_command", "read"}:
+                        output = truncate_model_output(
+                            output,
+                            config.get(
+                                "max_tool_output_chars",
+                                DEFAULT_CONFIG["max_tool_output_chars"],
+                            ),
+                        )
+                    append_tool_result(item, output)
+                    item_index += 1
                 kwargs["input"] = trim_turn_input(
                     kwargs["input"] + new_input_items,
                     model=config["model"],
@@ -1138,6 +1273,8 @@ def run_agent(
             save_history(history, session_context.history_file)
         if not incognito and artifact_store is not None and artifact_file is not None:
             save_artifact_store(artifact_store, artifact_file)
+        if not incognito and retained_store is not None and reads_file is not None:
+            save_retained_output_store(retained_store, reads_file)
         return AgentRunResult(error=str(e))
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
@@ -1145,6 +1282,8 @@ def run_agent(
             save_history(history, session_context.history_file)
         if not incognito and artifact_store is not None and artifact_file is not None:
             save_artifact_store(artifact_store, artifact_file)
+        if not incognito and retained_store is not None and reads_file is not None:
+            save_retained_output_store(retained_store, reads_file)
         return AgentRunResult(error=str(e))
     finally:
         _stop_live_displays()

@@ -184,18 +184,48 @@ def refresh_on_resize(
             except (ValueError, OSError):
                 pass
 
-DISPLAY_LINE_LIMIT = 30
+DISPLAY_HEIGHT_RATIO = 3
+DISPLAY_MIN_LINE_LIMIT = 3
 
 
 def flatten_headings(text: str) -> str:
     return re.sub(r"^#{1,6}\s+(.+)$", r"**\1**", text, flags=re.MULTILINE)
 
 
-def display_output(output: str) -> None:
+def output_display_line_limit(*, console: Console = console) -> int:
+    _, terminal_height = terminal_size(console=console)
+    return max(DISPLAY_MIN_LINE_LIMIT, terminal_height // DISPLAY_HEIGHT_RATIO)
+
+
+def output_display_split(line_limit: int) -> tuple[int, int]:
+    visible_lines = max(2, line_limit - 1)
+    tail_lines = max(1, visible_lines // 3)
+    head_lines = visible_lines - tail_lines
+    return head_lines, tail_lines
+
+
+def display_output(output: str, *, max_lines: int | None = None) -> None:
     lines = output.splitlines()
-    if len(lines) > DISPLAY_LINE_LIMIT:
-        console.print("\n".join(lines[:DISPLAY_LINE_LIMIT]), style="dim", markup=False)
-        hidden = len(lines) - DISPLAY_LINE_LIMIT
-        console.print(f"[dim italic]... {hidden} more lines hidden[/dim italic]")
+    line_limit = (
+        output_display_line_limit(console=console)
+        if max_lines is None
+        else max(DISPLAY_MIN_LINE_LIMIT, int(max_lines))
+    )
+    if len(lines) > line_limit:
+        head_lines, tail_lines = output_display_split(line_limit)
+        hidden = len(lines) - head_lines - tail_lines
+        console.print(
+            "\n".join(lines[:head_lines]),
+            style="dim",
+            markup=False,
+        )
+        console.print(
+            f"[dim italic]... {hidden} lines omitted from the middle ...[/dim italic]"
+        )
+        console.print(
+            "\n".join(lines[-tail_lines:]),
+            style="dim",
+            markup=False,
+        )
     else:
         console.print(output, style="dim", markup=False)

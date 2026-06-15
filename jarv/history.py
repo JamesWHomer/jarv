@@ -137,10 +137,11 @@ def history_file_for_session(session_id: str) -> Path:
 
 
 def migrate_flat_session_files() -> None:
-    """Move history-*.json and artifacts-*.json from ~/.jarv/ into ~/.jarv/sessions/."""
+    """Move flat per-session sidecars from ~/.jarv/ into ~/.jarv/sessions/."""
     flat_history = list(CONFIG_DIR.glob("history-*.json"))
     flat_artifacts = list(CONFIG_DIR.glob("artifacts-*.json"))
-    files_to_move = flat_history + flat_artifacts
+    flat_reads = list(CONFIG_DIR.glob("reads-*.json"))
+    files_to_move = flat_history + flat_artifacts + flat_reads
     if not files_to_move:
         return
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
@@ -154,6 +155,10 @@ def migrate_flat_session_files() -> None:
 
 def artifact_file_for(history_path: Path) -> Path:
     return history_path.with_name(history_path.name.replace("history", "artifacts", 1))
+
+
+def reads_file_for(history_path: Path) -> Path:
+    return history_path.with_name(history_path.name.replace("history", "reads", 1))
 
 
 def last_user_message(history: list) -> dict | None:

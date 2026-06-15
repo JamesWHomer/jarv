@@ -239,19 +239,22 @@ Run `jarv` with no prompt to start an interactive session. Type a prompt and pre
 3. Loads recent conversation history from that session's history file.
 4. Sends your query, recent history, the configured system prompt, and system info to the configured provider backend (OpenAI Responses, Anthropic Messages, Gemini, or an OpenAI-compatible API).
 5. Streams the assistant response in the terminal.
-6. When the model issues tool calls, jarv runs the matching handler and feeds results back into the model (for `run_command`, that means showing the command, running it, printing stdout/stderr/exit status, and returning output up to `max_tool_output_chars`).
+6. When the model issues tool calls, jarv runs the matching handler and feeds results back into the model (for `run_command`, that means showing the command, running it, printing stdout/stderr/exit status, and returning the requested output head and tail).
 7. Saves the full session history. On future prompts, `max_history` limits only the recent history items sent back as model context.
 
 ## Tools and shell commands
 
-- The root model sees four tools: `run_command`, `spawn`, `read_artifact`, and `ask_user`.
+- The root model sees five tools: `run_command`, `web_search`, `read`, `spawn`, and `ask_user`.
+- `read(input, offset, size)` pages through retained command output, visible artifacts, HTTP(S) URLs, and local files using Unicode character offsets. Consecutive reads run concurrently.
+- `web_search` supports any positive result count and a non-negative result offset. URL reads preserve HTTP(S) links as absolute URLs.
 - Spawned subagents also get a mandatory `finish` tool (to return output) and may get `spawn` when the parent sets `sterile: false`.
-- Subagent internal transcripts are discarded. Root history stores the parent `spawn`/`read_artifact` tool calls and their returned outputs. Artifact longform content persists per session in `artifacts-<hash>.json`.
+- Subagent internal transcripts are discarded. Root history stores the parent `spawn`/`read` tool calls and their returned outputs. Artifact longform content persists per session in `artifacts-<hash>.json`.
 - Shell commands run only when the model calls `run_command`.
 - On Windows, `run_command` uses PowerShell.
 - On other platforms, `run_command` uses the system shell.
-- Command output shown in the terminal is shortened after 30 lines, and tool output returned to the model is capped by `max_tool_output_chars`.
+- Command output shown in the terminal uses at most one-third of the screen height, biased roughly 2:1 toward the first lines, with the omitted middle count displayed. The UI also shows the resolved `head_chars` and `tail_chars` returned to the model. Truncated model output is retained under a session-scoped ID for later `read` calls.
 - Commands are killed after `command_timeout` seconds.
+- Web requests are killed after `web_timeout` seconds and responses are limited to 2 MiB.
 - Interrupted commands/process trees are terminated when possible.
 
 ## Config
@@ -272,8 +275,9 @@ Keys:
 - `context_output_reserve_ratio` - Context window share reserved for model output. Default: `{DEFAULT_CONFIG['context_output_reserve_ratio']}`.
 - `context_window_fallback` - Context window when model metadata is unknown. Default: `{DEFAULT_CONFIG['context_window_fallback']}`.
 - `max_stdin_chars` - Maximum piped stdin characters attached to a one-shot prompt. Default: `{DEFAULT_CONFIG['max_stdin_chars']}`.
-- `max_tool_output_chars` - Maximum tool output characters returned to the model. Default: `{DEFAULT_CONFIG['max_tool_output_chars']}`.
+- `max_tool_output_chars` - Maximum generic tool output characters returned to the model and the default combined head/tail budget for `run_command`. Default: `{DEFAULT_CONFIG['max_tool_output_chars']}`.
 - `command_timeout` - Seconds before a shell command is killed. Default: `{DEFAULT_CONFIG['command_timeout']}`.
+- `web_timeout` - Seconds before a web search or URL read is killed. Default: `{DEFAULT_CONFIG['web_timeout']}`.
 - `command_safety` - Command confirmation level. `all` = confirm every command, `risky` = confirm only dangerous commands (destructive ops, privilege escalation, network exfil, etc.), `none` = no confirmation. Default: `risky`.
 - `audit` - When `true`, flagged commands are sent to a fast LLM auditor (uses extra tokens). The auditor's verdict appears inside the safety panel. Works with both `risky` and `all` safety levels. Default: `true`.
 - `auditor_auto_approve` - When `true`, the auditor auto-approves commands it deems safe. When `false`, the auditor only shows a recommendation and the user always decides. Default: `true`.
@@ -293,10 +297,10 @@ If the config file is invalid JSON, jarv backs it up and creates a fresh default
 
 Session metadata file: `{SESSIONS_FILE}`
 
-Each terminal is bound to exactly one session at a time. By default a fresh terminal gets its own session (id derived from terminal fingerprint). Per-session history and artifact sidecars live in `{SESSIONS_DIR}` as `history-<hash>.json` and `artifacts-<hash>.json`.
+Each terminal is bound to exactly one session at a time. By default a fresh terminal gets its own session (id derived from terminal fingerprint). Per-session history, artifact, and retained-output sidecars live in `{SESSIONS_DIR}` as `history-<hash>.json`, `artifacts-<hash>.json`, and `reads-<hash>.json`.
 
 - `jarv /new` starts a fresh session by unmapping the current terminal. The next prompt creates a new session.
-- `jarv /archive` archives the current session's history+artifacts and removes the terminal's mapping. The next prompt starts a fresh session.
+- `jarv /archive` archives the current session's history and sidecars and removes the terminal's mapping. The next prompt starts a fresh session.
 - `jarv /sessions` / `jarv /session` lists sessions by recency (all in a TTY; 5 most recent when stdout is not a TTY).
 - `jarv /sessions <id>` binds a specific session id (prefix match) to this terminal.
 
@@ -313,7 +317,7 @@ Each terminal is bound to exactly one session at a time. By default a fresh term
 - Config directory: `{CONFIG_DIR}`
 - Config file: `{CONFIG_FILE}`
 - Session metadata file: `{SESSIONS_FILE}`
-- Session history and artifacts: `{SESSIONS_DIR}`
+- Session history, artifacts, and retained command outputs: `{SESSIONS_DIR}`
 
 ## Version
 

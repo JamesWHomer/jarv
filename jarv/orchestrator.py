@@ -29,8 +29,21 @@ from .provider import (
     stream_response,
 )
 from .provider_catalog import configured_service_tier
-from .shell import execute_command, truncate_model_output
+from .read_tool import (
+    READ_TOOL,
+    dispatch_read_batch,
+    dispatch_read_tool,
+    retain_command_output,
+)
+from .retained_outputs import RetainedOutputStore
+from .shell import (
+    COMMAND_OUTPUT_UNSET,
+    execute_command,
+    resolve_command_output_window,
+    truncate_model_output,
+)
 from .usage import estimate_context_breakdown, record_response_usage
+from .web import WEB_SEARCH_TOOL, dispatch_web_tool
 
 
 RUN_COMMAND_TOOL = {
@@ -40,7 +53,23 @@ RUN_COMMAND_TOOL = {
     "parameters": {
         "type": "object",
         "properties": {
-            "command": {"type": "string", "description": "The shell command to execute"}
+            "command": {"type": "string", "description": "The shell command to execute"},
+            "head_chars": {
+                "type": "integer",
+                "minimum": 0,
+                "description": (
+                    "Number of characters to return from the start of the output. "
+                    "Defaults to half of max_tool_output_chars."
+                ),
+            },
+            "tail_chars": {
+                "type": "integer",
+                "minimum": 0,
+                "description": (
+                    "Number of characters to return from the end of the output. "
+                    "Defaults to the remaining half of max_tool_output_chars."
+                ),
+            },
         },
         "required": ["command"],
     },
@@ -52,7 +81,7 @@ SPAWN_TOOL = {
     "description": (
         "Fan out work to N parallel subagents. Blocks until all children finish. "
         "Each child gets its `task`, plus the (label, tldr) of every artifact named in `deps`. "
-        "Children can call read_artifact on those labels for full content. "
+        "Children can call read on those labels for full content. "
         "sterile=true (default) means the child cannot itself spawn. "
         "Returns one entry per child: {label, status: 'done'|'failed', tldr?, reason?}."
     ),
@@ -91,7 +120,7 @@ FINISH_TOOL = {
     "parameters": {
         "type": "object",
         "properties": {
-            "longform": {"type": "string", "description": "Full report or result. Parent reads this on demand via read_artifact."},
+            "longform": {"type": "string", "description": "Full report or result. Parent reads this on demand via read."},
             "tldr": {"type": "string", "description": "1-2 sentence summary inlined into the parent's next turn."},
         },
         "required": ["longform", "tldr"],
@@ -118,20 +147,6 @@ ASK_USER_TOOL = {
     },
 }
 
-READ_ARTIFACT_TOOL = {
-    "type": "function",
-    "name": "read_artifact",
-    "description": "Fetch the longform of an artifact whose label is currently visible to you.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "label": {"type": "string"},
-        },
-        "required": ["label"],
-    },
-}
-
-
 class DepthExceeded(Exception):
     pass
 
@@ -150,7 +165,12 @@ class AgentNode:
 
 
 def build_subagent_tools(sterile: bool) -> list[dict]:
-    tools = [RUN_COMMAND_TOOL, READ_ARTIFACT_TOOL, FINISH_TOOL]
+    tools = [
+        RUN_COMMAND_TOOL,
+        WEB_SEARCH_TOOL,
+        READ_TOOL,
+        FINISH_TOOL,
+    ]
     if not sterile:
         tools.append(SPAWN_TOOL)
     return tools
@@ -167,7 +187,7 @@ def _format_deps_block(node: AgentNode, store: ArtifactStore) -> str:
     if not lines:
         return ""
     return (
-        "\n\nVisible artifacts (call read_artifact(label) for the full longform):\n"
+        "\n\nVisible artifacts (call read(input=label) for the full longform):\n"
         + "\n".join(lines)
     )
 
@@ -182,6 +202,7 @@ def dispatch_tool(
     on_run_command: Callable[[str], str] | None = None,
     spawn_observer: "SpawnObserver | None" = None,
     cancellation_token: CancellationToken | None = None,
+    retained_store: RetainedOutputStore | None = None,
 ) -> str:
     """Execute a non-finish tool call and return the model-visible output string.
 
@@ -192,6 +213,17 @@ def dispatch_tool(
         cmd = args.get("command")
         if not isinstance(cmd, str) or not cmd.strip():
             return "[tool argument error: command must be a non-empty string]"
+        try:
+            head_chars, tail_chars = resolve_command_output_window(
+                args.get("head_chars", COMMAND_OUTPUT_UNSET),
+                args.get("tail_chars", COMMAND_OUTPUT_UNSET),
+                config.get(
+                    "max_tool_output_chars",
+                    DEFAULT_CONFIG["max_tool_output_chars"],
+                ),
+            )
+        except ValueError as e:
+            return f"[tool argument error: {e}]"
         safety_level = config.get("command_safety", "risky")
         audit = config.get("audit", True)
         auditor_history = [{"role": "user", "content": node.task}] if node.task else None
@@ -208,24 +240,55 @@ def dispatch_tool(
         if not allowed:
             return denial
         if on_run_command is not None:
-            return on_run_command(cmd)
+            output, _ = retain_command_output(
+                on_run_command(cmd),
+                head_chars,
+                tail_chars,
+                retained_store,
+                int(
+                    config.get(
+                        "max_tool_output_chars",
+                        DEFAULT_CONFIG["max_tool_output_chars"],
+                    )
+                ),
+            )
+            return output
         result = execute_command(
             cmd,
             config.get("command_timeout", 60),
             cancellation_token=cancellation_token,
         )
-        return result.to_model_output()
+        output, _ = retain_command_output(
+            result.full_model_output(),
+            head_chars,
+            tail_chars,
+            retained_store,
+            int(
+                config.get(
+                    "max_tool_output_chars",
+                    DEFAULT_CONFIG["max_tool_output_chars"],
+                )
+            ),
+        )
+        return output
 
-    if name == "read_artifact":
-        label = args.get("label")
-        if not isinstance(label, str) or not label:
-            return "[tool argument error: label required]"
-        if label not in node.visible_labels:
-            return f"[error: artifact '{label}' is not visible to this agent]"
-        art = store.get(label)
-        if art is None:
-            return f"[error: artifact '{label}' not found in store]"
-        return art.longform
+    if name == "read":
+        return dispatch_read_tool(
+            args,
+            visible_labels=node.visible_labels,
+            artifact_store=store,
+            retained_store=retained_store or RetainedOutputStore(),
+            config=config,
+            cancellation_token=cancellation_token,
+        )
+
+    if name == "web_search":
+        return dispatch_web_tool(
+            name,
+            args,
+            config,
+            cancellation_token=cancellation_token,
+        )
 
     if name == "spawn":
         children = args.get("children")
@@ -240,6 +303,7 @@ def dispatch_tool(
                 config,
                 observer=spawn_observer,
                 cancellation_token=cancellation_token,
+                retained_store=retained_store,
             )
         except DepthExceeded as e:
             return f"[error: {e}]"
@@ -275,11 +339,13 @@ def run_subagent_loop(
     config: dict,
     spawn_observer: "SpawnObserver | None" = None,
     cancellation_token: CancellationToken | None = None,
+    retained_store: RetainedOutputStore | None = None,
 ) -> tuple[str | None, str]:
     """Run a single subagent to completion.
 
     Returns (longform, tldr) on success, (None, reason) on failure.
     """
+    retained_store = retained_store or RetainedOutputStore()
     instructions = (
         "You are a subagent in a recursive orchestration system. "
         "Complete your task, then call finish(longform, tldr) to terminate — this is mandatory. "
@@ -389,7 +455,69 @@ def run_subagent_loop(
                 item["provider_content"] = ri.provider_content
             new_input.append(item)
 
-        for item in tool_calls:
+        def append_tool_result(item, output: str) -> None:
+            function_call = {
+                "type": "function_call",
+                "id": responses_input_id(str(item.id), "fc"),
+                "call_id": item.call_id,
+                "name": item.name,
+                "arguments": item.arguments,
+            }
+            if item.provider_content:
+                function_call["provider_content"] = item.provider_content
+            new_input.append(function_call)
+            new_input.append({
+                "type": "function_call_output",
+                "call_id": item.call_id,
+                "output": output,
+            })
+
+        item_index = 0
+        while item_index < len(tool_calls):
+            item = tool_calls[item_index]
+            if item.name == "read":
+                group_end = item_index
+                while (
+                    group_end < len(tool_calls)
+                    and tool_calls[group_end].name == "read"
+                ):
+                    group_end += 1
+                group = tool_calls[item_index:group_end]
+                outputs = [""] * len(group)
+                valid_args: list[dict] = []
+                valid_indexes: list[int] = []
+                for group_index, read_item in enumerate(group):
+                    try:
+                        read_args = json.loads(read_item.arguments or "{}")
+                    except json.JSONDecodeError as e:
+                        outputs[group_index] = (
+                            f"[tool argument error: invalid JSON: {e}]"
+                        )
+                    else:
+                        if not isinstance(read_args, dict):
+                            outputs[group_index] = (
+                                "[tool argument error: read arguments "
+                                "must be an object]"
+                            )
+                        else:
+                            valid_args.append(read_args)
+                            valid_indexes.append(group_index)
+                if valid_args:
+                    batch_outputs = dispatch_read_batch(
+                        valid_args,
+                        visible_labels=node.visible_labels,
+                        artifact_store=store,
+                        retained_store=retained_store,
+                        config=config,
+                        cancellation_token=cancellation_token,
+                    )
+                    for group_index, output in zip(valid_indexes, batch_outputs):
+                        outputs[group_index] = output
+                for read_item, output in zip(group, outputs):
+                    append_tool_result(read_item, output)
+                item_index = group_end
+                continue
+
             try:
                 args = json.loads(item.arguments or "{}")
             except json.JSONDecodeError as e:
@@ -407,28 +535,19 @@ def run_subagent_loop(
                         item.name, args, node, store, client, config,
                         spawn_observer=spawn_observer,
                         cancellation_token=cancellation_token,
+                        retained_store=retained_store,
                     )
 
-            output = truncate_model_output(
-                output,
-                config.get("max_tool_output_chars", DEFAULT_CONFIG["max_tool_output_chars"]),
-            )
-
-            function_call = {
-                "type": "function_call",
-                "id": responses_input_id(str(item.id), "fc"),
-                "call_id": item.call_id,
-                "name": item.name,
-                "arguments": item.arguments,
-            }
-            if item.provider_content:
-                function_call["provider_content"] = item.provider_content
-            new_input.append(function_call)
-            new_input.append({
-                "type": "function_call_output",
-                "call_id": item.call_id,
-                "output": output,
-            })
+            if item.name != "run_command":
+                output = truncate_model_output(
+                    output,
+                    config.get(
+                        "max_tool_output_chars",
+                        DEFAULT_CONFIG["max_tool_output_chars"],
+                    ),
+                )
+            append_tool_result(item, output)
+            item_index += 1
 
         kwargs["input"] = trim_turn_input(
             kwargs["input"] + new_input,
@@ -463,6 +582,7 @@ def spawn_batch(
     usage_path: Path | None = None,
     session_id: str | None = None,
     cancellation_token: CancellationToken | None = None,
+    retained_store: RetainedOutputStore | None = None,
 ) -> list[dict]:
     """Spawn N children in parallel, block until all finish, return status reports."""
     new_depth = parent.depth + 1
@@ -520,8 +640,9 @@ def spawn_batch(
                 store,
                 client,
                 config,
-                observer,
-                cancellation_token,
+                spawn_observer=observer,
+                cancellation_token=cancellation_token,
+                retained_store=retained_store,
             ): n
             for n in nodes
         }

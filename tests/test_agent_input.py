@@ -1,4 +1,5 @@
 import io
+import json
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,6 +10,7 @@ from unittest.mock import patch
 from rich.console import Console
 from jarv.agent import (
     _dispatch_ask_user,
+    _dispatch_run_command_with_ui,
     build_input,
     _format_agent_usage_line,
     response_start_status,
@@ -29,9 +31,45 @@ from jarv.provider import (
     ToolCallDone,
     ToolCallStarted,
 )
+from jarv.shell import CommandResult
 
 
 class AgentInputTests(unittest.TestCase):
+    def test_run_command_displays_resolved_output_parameters(self):
+        stream = io.StringIO()
+        test_console = Console(
+            file=stream,
+            force_terminal=True,
+            color_system="standard",
+            width=120,
+        )
+        config = {**DEFAULT_CONFIG, "max_tool_output_chars": 20000}
+
+        with (
+            patch("jarv.agent.console", test_console),
+            patch("jarv.agent.check_command", return_value=(True, "")),
+            patch(
+                "jarv.agent.execute_command",
+                return_value=CommandResult("echo ok", "", "", 0),
+            ),
+            patch("jarv.agent.display_command_result"),
+        ):
+            _dispatch_run_command_with_ui(
+                {"command": "echo ok", "head_chars": 12000},
+                config,
+            )
+
+        output = stream.getvalue()
+        output_line = next(
+            line for line in output.splitlines() if "Output to model:" in line
+        )
+        self.assertIn("Output to model:", output)
+        self.assertIn("first 12,000 chars", output)
+        self.assertIn("last 10,000 chars", output)
+        self.assertNotIn("(requested)", output)
+        self.assertNotIn("(default)", output)
+        self.assertNotIn("\x1b[", output_line)
+
     def test_response_wait_label_is_neutral_without_reasoning(self):
         self.assertEqual(response_wait_label(has_reasoning=False), "Waiting")
 
@@ -42,8 +80,9 @@ class AgentInputTests(unittest.TestCase):
         expected = {
             "run_command": "Writing command",
             "spawn": "Planning parallel tasks",
-            "read_artifact": "Selecting agent result",
+            "read": "Selecting content",
             "ask_user": "Writing question",
+            "web_search": "Writing web search",
             "unknown": "Preparing action",
         }
         for name, label in expected.items():
@@ -72,8 +111,9 @@ class AgentInputTests(unittest.TestCase):
         expected = {
             "run_command": "Wrote command in 2.0 seconds.",
             "spawn": "Planned parallel tasks in 2.0 seconds.",
-            "read_artifact": "Selected agent result in 2.0 seconds.",
+            "read": "Selected content in 2.0 seconds.",
             "ask_user": "Wrote question in 2.0 seconds.",
+            "web_search": "Wrote web search in 2.0 seconds.",
             "unknown": "Prepared action in 2.0 seconds.",
         }
         for name, status in expected.items():
@@ -583,6 +623,131 @@ class AgentInputTests(unittest.TestCase):
         self.assertIn("Writing command", rendered_labels)
         self.assertIn("Thought for", output)
         self.assertIn("Wrote command in", output)
+
+    def test_root_command_window_overrides_generic_tool_limit(self):
+        with TemporaryDirectory() as tmp:
+            history_file = Path(tmp) / "history.json"
+            context = SessionContext(
+                session_id="session-id",
+                session_label="test session",
+                history_file=history_file,
+                now=datetime(2026, 5, 21, tzinfo=timezone.utc),
+            )
+            stream_count = 0
+            captured_output = {}
+
+            def fake_stream_response(*args, **_kwargs):
+                nonlocal stream_count
+                stream_count += 1
+                if stream_count == 1:
+                    yield ToolCallDone(
+                        id="fc_1",
+                        call_id="call_1",
+                        name="run_command",
+                        arguments=(
+                            '{"command": "echo output", '
+                            '"head_chars": 30, "tail_chars": 30}'
+                        ),
+                    )
+                else:
+                    captured_output["value"] = next(
+                        item["output"]
+                        for item in args[5]
+                        if item.get("type") == "function_call_output"
+                        and item.get("call_id") == "call_1"
+                    )
+                    yield TextDelta("done")
+                yield StreamDone(response=None)
+
+            config = {**DEFAULT_CONFIG, "max_tool_output_chars": 10}
+            command_result = CommandResult(
+                "echo output",
+                "a" * 40 + "MIDDLE" + "z" * 40,
+                "",
+                0,
+            )
+            with (
+                patch("jarv.agent.prepare_session_context", return_value=context),
+                patch("jarv.agent.stream_response", side_effect=fake_stream_response),
+                patch("jarv.agent.check_command", return_value=(True, "")),
+                patch("jarv.agent.execute_command", return_value=command_result),
+                patch("jarv.agent.sys.stdout", new=io.StringIO()),
+            ):
+                run_agent("run it", config, client=object(), incognito=True)
+                reads_created = history_file.with_name("reads.json").exists()
+
+        output = captured_output["value"]
+        self.assertFalse(reads_created)
+        self.assertTrue(output.startswith("a" * 30))
+        self.assertTrue(output.endswith("z" * 30))
+        self.assertIn("26 characters omitted from the middle", output)
+        self.assertNotIn("truncated to 10 characters", output)
+
+    def test_root_batches_consecutive_reads_and_preserves_call_order(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "first.txt"
+            second = root / "second.txt"
+            first.write_text("alpha", encoding="utf-8")
+            second.write_text("beta", encoding="utf-8")
+            history_file = root / "history.json"
+            context = SessionContext(
+                session_id="session-id",
+                session_label="test session",
+                history_file=history_file,
+                now=datetime(2026, 5, 21, tzinfo=timezone.utc),
+            )
+            stream_count = 0
+            captured = {}
+
+            def fake_stream_response(*args, **_kwargs):
+                nonlocal stream_count
+                stream_count += 1
+                if stream_count == 1:
+                    yield ToolCallDone(
+                        id="fc_1",
+                        call_id="call_1",
+                        name="read",
+                        arguments=json.dumps(
+                            {"input": str(first), "size": 10}
+                        ),
+                    )
+                    yield ToolCallDone(
+                        id="fc_2",
+                        call_id="call_2",
+                        name="read",
+                        arguments=json.dumps(
+                            {"input": str(second), "size": 10}
+                        ),
+                    )
+                else:
+                    captured["outputs"] = [
+                        item["output"]
+                        for item in args[5]
+                        if item.get("type") == "function_call_output"
+                    ]
+                    yield TextDelta("done")
+                yield StreamDone(response=None)
+
+            with (
+                patch("jarv.agent.prepare_session_context", return_value=context),
+                patch(
+                    "jarv.agent.stream_response",
+                    side_effect=fake_stream_response,
+                ),
+                patch("jarv.agent.sys.stdout", new=io.StringIO()),
+            ):
+                result = run_agent(
+                    "read both",
+                    DEFAULT_CONFIG,
+                    client=object(),
+                    incognito=True,
+                )
+
+        self.assertIsNone(result.error)
+        self.assertEqual(len(captured["outputs"]), 2)
+        self.assertTrue(captured["outputs"][0].endswith("alpha"))
+        self.assertTrue(captured["outputs"][1].endswith("beta"))
 
     def test_run_agent_persists_text_recovered_from_final_response(self):
         with TemporaryDirectory() as tmp:

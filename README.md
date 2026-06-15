@@ -92,16 +92,25 @@ jarv --timeout 120 --system "You are a poet" "write me a haiku"
 
 ## How it works
 
-Jarv uses a multi-provider tool-calling agent loop (OpenAI Responses API, Anthropic Messages, Gemini, and OpenAI-compatible endpoints). The root model can call four tools:
+Jarv uses a multi-provider tool-calling agent loop (OpenAI Responses API, Anthropic Messages, Gemini, and OpenAI-compatible endpoints). The root model can call five tools:
 
 | Tool | Purpose |
 | --- | --- |
 | `run_command` | Execute a shell command and return stdout, stderr, and exit code |
+| `web_search` | Search the web through DuckDuckGo's public HTML endpoint |
+| `read` | Page through command output, artifacts, URLs, or local files |
 | `spawn` | Fan out work to parallel subagents, each with their own tool access |
-| `read_artifact` | Retrieve the full output of a completed subagent |
 | `ask_user` | Ask you a question and wait for a reply |
 
 On Windows, commands run through PowerShell. On other platforms, they run through the system shell.
+
+`run_command` accepts optional `head_chars` and `tail_chars` parameters that control how much of the beginning and end of command output is returned to the model. Omitted values split `max_tool_output_chars` between the two sides. Explicit values override that configured limit for the command. When output is longer than the requested head and tail, Jarv retains the full result under a session-scoped `cmd_<id>` and reports the exact omitted offset and size so the model can retrieve it with `read`.
+
+In the terminal, command output uses at most one-third of the screen height. Truncated output is biased roughly 2:1 toward the first lines, followed by the omitted-middle count and the final lines. Jarv also shows the resolved `head_chars` and `tail_chars` for each command.
+
+`read(input, offset, size)` uses Unicode character offsets. `offset` defaults to 0 and `size` defaults to `max_tool_output_chars`; an explicit size is returned without generic tool-output truncation. Inputs resolve as retained command IDs, visible artifact labels, HTTP(S) URLs, or local file paths. Relative paths use the current working directory. Consecutive reads requested in one model response run concurrently, with results returned in call order.
+
+Web search and reads require no extra API key or package. `web_search` accepts any positive `max_results` plus a non-negative `offset`, following DuckDuckGo result pages as needed. URL reads preserve HTTP(S) hyperlinks as absolute URLs in extracted text, do not execute JavaScript, cap responses at 2 MiB, and mark every returned page as untrusted content. Public, private, and localhost HTTP(S) addresses are supported, including custom ports.
 
 ### Command safety
 
@@ -123,12 +132,12 @@ jarv /set command_safety none     # no prompts
 
 ### Subagent orchestration
 
-When the model calls `spawn`, Jarv runs N child agents in parallel. Each child operates independently — running commands, reasoning through subtasks — and terminates by calling `finish` with a detailed report and a short summary. The parent agent can then read any child's full output via `read_artifact`.
+When the model calls `spawn`, Jarv runs N child agents in parallel. Each child operates independently — running commands, reasoning through subtasks — and terminates by calling `finish` with a detailed report and a short summary. The parent agent can then read any child's full output via `read`.
 
 - **Parallel by default** — all children in a `spawn` call run concurrently in a thread pool.
 - **Artifacts** — each child's output is stored as a named artifact. The parent (or siblings that declare a dependency) can fetch the full content.
 - **Recursive** — children can themselves spawn further children, up to `max_subagent_depth` levels deep (default 4). Children are sterile by default; the parent must explicitly allow further spawning.
-- **Transcript scope** — child-agent transcripts are discarded. Root history stores the parent `spawn`/`read_artifact` tool calls and returned outputs.
+- **Transcript scope** — child-agent transcripts are discarded. Root history stores the parent `spawn`/`read` tool calls and returned outputs.
 - **Session-scoped** — artifacts persist for the active session and are available on later prompts until you start a new session or archive.
 
 The terminal shows a live progress panel as children run, with a green checkmark or red cross as each finishes.
@@ -147,7 +156,7 @@ The terminal shows a live progress panel as children run, with a green checkmark
 | `/config` | Show raw config values |
 | `/setup` | Run the setup wizard |
 | `/new` | Start a fresh session on the next prompt |
-| `/archive` | Archive session history and artifacts |
+| `/archive` | Archive session history and sidecars |
 | `/sessions` | Browse sessions (interactive when in a TTY) |
 | `/sessions <id>` | Load a specific session by ID prefix |
 | `/history` | Show recent conversation history |
@@ -190,8 +199,9 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 | `context_output_reserve_ratio` | `0.15` | Context window share reserved for model output. |
 | `context_window_fallback` | `128000` | Context window when model metadata is unknown. |
 | `max_stdin_chars` | `200000` | Maximum piped stdin characters attached to a one-shot prompt. |
-| `max_tool_output_chars` | `20000` | Maximum tool output characters returned to the model. Longer output is returned with the middle omitted. |
+| `max_tool_output_chars` | `20000` | Maximum generic tool output characters returned to the model. It also supplies the default head/tail budget for `run_command`. |
 | `command_timeout` | `60` | Seconds before a shell command is killed. |
+| `web_timeout` | `15` | Seconds before a web search or URL read is killed. |
 | `command_safety` | `"risky"` | Command confirmation level: `all` (confirm every command), `risky` (confirm dangerous commands only), `none` (no confirmation). |
 | `audit` | `true` | LLM auditor for flagged commands. |
 | `auditor_auto_approve` | `true` | Let the auditor auto-approve commands it deems safe. |
@@ -216,6 +226,7 @@ All state is stored in `~/.jarv/` (on Windows, `%USERPROFILE%\.jarv\`):
 ├── sessions/
 │   ├── history-<hash>.json          # conversation history
 │   ├── artifacts-<hash>.json        # subagent artifacts
+│   ├── reads-<hash>.json            # retained command outputs
 │   ├── usage-<hash>.json            # session token usage totals
 │   └── redo-<hash>.json             # undo/redo stack
 ├── usage.json                       # future system-wide token usage ledger

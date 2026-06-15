@@ -1,8 +1,17 @@
+import io
 import time
 from types import SimpleNamespace
 
+from rich.console import Console
+
 from jarv import display
-from jarv.display import refresh_on_resize, terminal_size
+from jarv.display import (
+    display_output,
+    output_display_line_limit,
+    output_display_split,
+    refresh_on_resize,
+    terminal_size,
+)
 
 
 class FakeConsole:
@@ -144,3 +153,56 @@ def test_refresh_on_resize_uses_slower_polling_while_size_changes(monkeypatch):
             time.sleep(0.005)
 
     assert live.refresh_count == 3
+
+
+def test_display_output_shows_head_tail_and_omitted_middle(monkeypatch):
+    stream = io.StringIO()
+    monkeypatch.setattr(
+        display,
+        "console",
+        Console(file=stream, force_terminal=False, color_system=None, width=120),
+    )
+    monkeypatch.setattr(display, "terminal_size", lambda **_kwargs: (120, 24))
+    output = "\n".join(f"Line {number}" for number in range(1, 41))
+
+    display_output(output)
+
+    rendered = stream.getvalue()
+    assert "Line 1\n" in rendered
+    assert "Line 5\n" in rendered
+    assert "Line 6\n" not in rendered
+    assert "Line 38\n" not in rendered
+    assert "Line 39\n" in rendered
+    assert "Line 40\n" in rendered
+    assert "... 33 lines omitted from the middle ..." in rendered
+
+
+def test_display_output_does_not_truncate_output_within_screen_budget(monkeypatch):
+    stream = io.StringIO()
+    monkeypatch.setattr(
+        display,
+        "console",
+        Console(file=stream, force_terminal=False, color_system=None, width=120),
+    )
+    monkeypatch.setattr(display, "terminal_size", lambda **_kwargs: (120, 24))
+    output = "\n".join(f"Line {number}" for number in range(1, 9))
+
+    display_output(output)
+
+    rendered = stream.getvalue()
+    assert rendered.count("Line ") == 8
+    assert "omitted from the middle" not in rendered
+
+
+def test_output_display_limit_is_one_third_of_screen_height(monkeypatch):
+    monkeypatch.setattr(display, "terminal_size", lambda **_kwargs: (120, 60))
+
+    assert output_display_line_limit(console=FakeConsole()) == 20
+
+
+def test_output_display_split_biases_toward_head():
+    head_lines, tail_lines = output_display_split(20)
+
+    assert (head_lines, tail_lines) == (13, 6)
+    assert head_lines > tail_lines
+    assert head_lines + tail_lines + 1 == 20

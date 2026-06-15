@@ -4,7 +4,14 @@ import threading
 from unittest.mock import patch
 
 from jarv.cancellation import CancellationToken, TurnCancelled
-from jarv.shell import CommandResult, execute_command, truncate_model_output
+from jarv.shell import (
+    COMMAND_OUTPUT_UNSET,
+    CommandResult,
+    execute_command,
+    resolve_command_output_window,
+    truncate_command_output,
+    truncate_model_output,
+)
 
 
 class ShellOutputLimitTests(unittest.TestCase):
@@ -24,6 +31,74 @@ class ShellOutputLimitTests(unittest.TestCase):
 
         self.assertIn("command output truncated", output)
         self.assertIn("[exit code 2]", output)
+
+    def test_command_output_window_uses_exact_head_and_tail_counts(self):
+        output = truncate_command_output("abcdeMIDDLEvwxyz", 5, 5)
+
+        self.assertTrue(output.startswith("abcde"))
+        self.assertTrue(output.endswith("vwxyz"))
+        self.assertIn("6 characters omitted from the middle", output)
+        self.assertNotIn("MIDDLE", output)
+
+    def test_command_output_window_returns_full_output_when_it_fits(self):
+        self.assertEqual(
+            truncate_command_output("abcdefghij", 4, 6),
+            "abcdefghij",
+        )
+        self.assertEqual(
+            truncate_command_output("abcdefghij", 10, 10),
+            "abcdefghij",
+        )
+
+    def test_command_output_window_supports_head_only_tail_only_and_zero(self):
+        head_only = truncate_command_output("abcdefghij", 3, 0)
+        tail_only = truncate_command_output("abcdefghij", 0, 3)
+        hidden = truncate_command_output("abcdefghij", 0, 0)
+
+        self.assertTrue(head_only.startswith("abc"))
+        self.assertFalse(head_only.endswith("hij"))
+        self.assertTrue(tail_only.endswith("hij"))
+        self.assertFalse(tail_only.startswith("abc"))
+        self.assertIn("10 characters omitted from the middle", hidden)
+        self.assertNotIn("abcdefghij", hidden)
+
+    def test_command_output_window_defaults_split_config_limit(self):
+        self.assertEqual(
+            resolve_command_output_window(
+                COMMAND_OUTPUT_UNSET,
+                COMMAND_OUTPUT_UNSET,
+                9,
+            ),
+            (4, 5),
+        )
+        self.assertEqual(
+            resolve_command_output_window(2, COMMAND_OUTPUT_UNSET, 9),
+            (2, 5),
+        )
+        self.assertEqual(
+            resolve_command_output_window(COMMAND_OUTPUT_UNSET, 3, 9),
+            (4, 3),
+        )
+
+    def test_command_output_window_rejects_invalid_values(self):
+        for value in (-1, 1.5, "10", True, None):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    resolve_command_output_window(value, COMMAND_OUTPUT_UNSET, 20)
+
+    def test_explicit_command_window_overrides_max_chars(self):
+        result = CommandResult("cmd", "a" * 50 + "z" * 50, "", 0)
+
+        output = result.to_model_output(
+            10,
+            head_chars=20,
+            tail_chars=20,
+        )
+
+        self.assertTrue(output.startswith("a" * 20))
+        self.assertTrue(output.endswith("z" * 20))
+        self.assertIn("60 characters omitted from the middle", output)
+        self.assertNotIn("truncated to 10 characters", output)
 
     def test_cancellation_kills_active_process_tree(self):
         token = CancellationToken()
@@ -52,7 +127,5 @@ class ShellOutputLimitTests(unittest.TestCase):
             timer.cancel()
 
         self.assertTrue(killed.is_set())
-
-
 if __name__ == "__main__":
     unittest.main()

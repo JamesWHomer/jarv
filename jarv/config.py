@@ -32,6 +32,7 @@ DEFAULT_CONFIG = {
     "max_stdin_chars": 200000,
     "max_tool_output_chars": 20000,
     "command_timeout": 60,
+    "web_timeout": 15,
     "command_safety": "risky",
     "audit": True,
     "auditor_auto_approve": True,
@@ -169,7 +170,13 @@ def validate_config(config: dict) -> bool:
                 )
                 ok = False
 
-    for key in ("max_history", "max_stdin_chars", "max_tool_output_chars", "command_timeout"):
+    for key in (
+        "max_history",
+        "max_stdin_chars",
+        "max_tool_output_chars",
+        "command_timeout",
+        "web_timeout",
+    ):
         try:
             value = int(config.get(key, DEFAULT_CONFIG[key]))
             if value <= 0:
