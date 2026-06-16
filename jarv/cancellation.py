@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import ctypes
+import os
+import signal
 import threading
 from collections.abc import Callable
+from contextlib import contextmanager
 
 
 class TurnCancelled(Exception):
@@ -66,3 +70,61 @@ class CancellationToken:
                 self._callbacks.pop(callback_id, None)
 
         return unregister
+
+
+@contextmanager
+def cancel_token_on_sigint(token: CancellationToken):
+    """Cancel a token immediately when Ctrl+C is received.
+
+    Python raises KeyboardInterrupt on the main thread, which can be delayed on
+    Windows while subprocess pipe I/O is blocked. A Windows console control
+    handler runs promptly on Ctrl+C and lets registered token callbacks kill
+    active subprocesses before KeyboardInterrupt is delivered.
+    """
+
+    previous_sigint = None
+    signal_installed = False
+    windows_handler = None
+
+    if threading.current_thread() is threading.main_thread():
+        previous_sigint = signal.getsignal(signal.SIGINT)
+
+        def _handle_sigint(signum, frame):
+            token.cancel()
+            if callable(previous_sigint):
+                return previous_sigint(signum, frame)
+            if previous_sigint == signal.SIG_DFL:
+                raise KeyboardInterrupt
+            return None
+
+        signal.signal(signal.SIGINT, _handle_sigint)
+        signal_installed = True
+
+    if os.name == "nt":
+        kernel32 = getattr(ctypes, "windll", None)
+        kernel32 = getattr(kernel32, "kernel32", None)
+        if kernel32 is not None:
+            handler_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_uint)
+
+            @handler_type
+            def _handle_console_event(ctrl_type):
+                if ctrl_type in (0, 1):
+                    token.cancel()
+                return False
+
+            try:
+                if kernel32.SetConsoleCtrlHandler(_handle_console_event, True):
+                    windows_handler = _handle_console_event
+            except Exception:
+                windows_handler = None
+
+    try:
+        yield
+    finally:
+        if windows_handler is not None:
+            try:
+                ctypes.windll.kernel32.SetConsoleCtrlHandler(windows_handler, False)
+            except Exception:
+                pass
+        if signal_installed:
+            signal.signal(signal.SIGINT, previous_sigint)

@@ -17,7 +17,7 @@ from rich.text import Text
 
 from .config import DEFAULT_CONFIG
 from .context_budget import build_input, trim_turn_input
-from .cancellation import CancellationToken, TurnCancelled
+from .cancellation import CancellationToken, TurnCancelled, cancel_token_on_sigint
 from .command_input import read_editable_line
 from .display import (
     console,
@@ -1011,7 +1011,9 @@ def run_agent(
         })
         _save_turn_state()
 
+    sigint_cancel_scope = cancel_token_on_sigint(cancellation_token)
     try:
+        sigint_cancel_scope.__enter__()
         if client is None:
             client = create_client(config)
 
@@ -1520,6 +1522,7 @@ def run_agent(
             save_retained_output_store(retained_store, reads_file)
         return AgentRunResult(error=str(e))
     finally:
+        sigint_cancel_scope.__exit__(None, None, None)
         _stop_live_displays()
 
 
