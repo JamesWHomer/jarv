@@ -25,7 +25,8 @@ WEB_SEARCH_TOOL = {
     "type": "function",
     "name": "web_search",
     "description": (
-        "Search the public web. Returns titles, URLs, and snippets from DuckDuckGo."
+        "Search the public web. Returns search result titles, URLs, and snippets "
+        "from DuckDuckGo; it does not read page contents."
     ),
     "parameters": {
         "type": "object",

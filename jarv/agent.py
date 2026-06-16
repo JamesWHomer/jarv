@@ -59,10 +59,13 @@ from .orchestrator import (
     AgentNode,
     DepthExceeded,
     SpawnObserver,
-    dispatch_tool,
+    append_web_search_read_nudge,
+    dispatch_parallel_safe_tool_batch,
     filter_enabled_tools,
+    history_has_web_search_read_nudge,
     spawn_batch,
     tool_enabled,
+    tool_call_is_parallel_safe,
 )
 from .safety import check_command
 from .shell import (
@@ -72,7 +75,7 @@ from .shell import (
     resolve_command_output_window,
     truncate_model_output,
 )
-from .read_tool import READ_TOOL, dispatch_read_batch, retain_command_output
+from .read_tool import READ_TOOL, retain_command_output
 from .retained_outputs import (
     RetainedOutputStore,
     load_retained_output_store,
@@ -1019,6 +1022,7 @@ def run_agent(
             persist_metadata=not incognito,
         )
         history = [] if (new_session or incognito) else load_history(session_context.history_file)
+        web_search_read_nudge_sent = history_has_web_search_read_nudge(history)
         metadata = history_metadata(session_context)
 
         artifact_file = artifact_file_for(session_context.history_file)
@@ -1352,71 +1356,43 @@ def run_agent(
                 item_index = 0
                 while item_index < len(tool_calls):
                     item = tool_calls[item_index]
-                    if not tool_enabled(config, item.name):
-                        append_tool_result(
-                            item,
-                            f"[tool disabled: {item.name}]",
-                        )
-                        item_index += 1
-                        continue
-                    if item.name == "read":
+                    if tool_call_is_parallel_safe(item.name):
                         group_end = item_index
                         while (
                             group_end < len(tool_calls)
-                            and tool_calls[group_end].name == "read"
+                            and tool_call_is_parallel_safe(tool_calls[group_end].name)
                         ):
                             group_end += 1
                         group = tool_calls[item_index:group_end]
                         active_tool_call = group[0]
-                        outputs = [""] * len(group)
-                        parsed_args: list[dict | None] = [None] * len(group)
-                        valid_args: list[dict] = []
-                        valid_indexes: list[int] = []
-                        for group_index, read_item in enumerate(group):
-                            try:
-                                read_args = json.loads(read_item.arguments or "{}")
-                            except json.JSONDecodeError as e:
-                                outputs[group_index] = (
-                                    f"[tool argument error: invalid JSON: {e}]"
-                                )
-                            else:
-                                if not isinstance(read_args, dict):
-                                    outputs[group_index] = (
-                                        "[tool argument error: read arguments "
-                                        "must be an object]"
-                                    )
-                                else:
-                                    parsed_args[group_index] = read_args
-                                    valid_args.append(read_args)
-                                    valid_indexes.append(group_index)
-                        if valid_args:
-                            batch_outputs = dispatch_read_batch(
-                                valid_args,
-                                visible_labels=root_node.visible_labels,
-                                artifact_store=artifact_store,
-                                retained_store=retained_store,
-                                config=config,
-                                cancellation_token=cancellation_token,
-                            )
-                            for group_index, output in zip(
-                                valid_indexes,
-                                batch_outputs,
-                            ):
-                                outputs[group_index] = output
-                        for read_item, read_args, output in zip(
+                        results = dispatch_parallel_safe_tool_batch(
                             group,
-                            parsed_args,
-                            outputs,
-                        ):
-                            if read_args is not None:
+                            node=root_node,
+                            store=artifact_store,
+                            client=client,
+                            config=config,
+                            cancellation_token=cancellation_token,
+                            retained_store=retained_store,
+                        )
+                        for safe_item, result in zip(group, results):
+                            output = result.output
+                            if safe_item.name != "read":
+                                output = truncate_model_output(
+                                    output,
+                                    config.get(
+                                        "max_tool_output_chars",
+                                        DEFAULT_CONFIG["max_tool_output_chars"],
+                                    ),
+                                )
+                            if safe_item.name == "read" and result.args is not None:
                                 read_path = Text(
-                                    str(read_args.get("input", "")),
+                                    str(result.args.get("input", "")),
                                     no_wrap=True,
                                     overflow="ellipsis",
                                 )
                                 read_meta = Text(
-                                    f"offset {read_args.get('offset', 0)!r}  \u2022  "
-                                    f"size {read_args.get('size', 'default')!r}",
+                                    f"offset {result.args.get('offset', 0)!r}  \u2022  "
+                                    f"size {result.args.get('size', 'default')!r}",
                                     style="dim",
                                 )
                                 _print_tool_card(
@@ -1430,10 +1406,38 @@ def run_agent(
                                     ),
                                     config,
                                 )
-                            append_tool_result(read_item, output)
+                            elif (
+                                safe_item.name == "web_search"
+                                and result.args is not None
+                            ):
+                                query = Text(str(result.args.get("query", "")))
+                                _print_tool_card(
+                                    tool_card(
+                                        "web_search",
+                                        query,
+                                        metadata="DuckDuckGo",
+                                        display_mode=config.get(
+                                            "tool_call_display",
+                                            DEFAULT_CONFIG["tool_call_display"],
+                                        ),
+                                    ),
+                                    config,
+                                )
+                                if not web_search_read_nudge_sent:
+                                    output = append_web_search_read_nudge(output)
+                                    web_search_read_nudge_sent = True
+                            append_tool_result(safe_item, output)
+                        active_tool_call = None
                         item_index = group_end
                         continue
 
+                    if not tool_enabled(config, item.name):
+                        append_tool_result(
+                            item,
+                            f"[tool disabled: {item.name}]",
+                        )
+                        item_index += 1
+                        continue
                     active_tool_call = item
                     try:
                         args = json.loads(item.arguments or "{}")
@@ -1460,31 +1464,6 @@ def run_agent(
                                 config,
                                 cancellation_token=cancellation_token,
                                 retained_store=retained_store,
-                            )
-                        elif item.name == "web_search":
-                            output = dispatch_tool(
-                                item.name,
-                                args,
-                                root_node,
-                                artifact_store,
-                                client,
-                                config,
-                                cancellation_token=cancellation_token,
-                            )
-                            query = Text(
-                                str(args.get("query", "")),
-                            )
-                            _print_tool_card(
-                                tool_card(
-                                    "web_search",
-                                    query,
-                                    metadata="DuckDuckGo",
-                                    display_mode=config.get(
-                                        "tool_call_display",
-                                        DEFAULT_CONFIG["tool_call_display"],
-                                    ),
-                                ),
-                                config,
                             )
                         elif item.name == "ask_user":
                             output = _dispatch_ask_user(args, config)

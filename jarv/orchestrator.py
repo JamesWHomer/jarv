@@ -32,7 +32,6 @@ from .provider import (
 from .provider_catalog import configured_service_tier
 from .read_tool import (
     READ_TOOL,
-    dispatch_read_batch,
     dispatch_read_tool,
     retain_command_output,
 )
@@ -152,6 +151,13 @@ class DepthExceeded(Exception):
     pass
 
 
+PARALLEL_SAFE_TOOL_NAMES = {"read", "web_search"}
+WEB_SEARCH_READ_NUDGE = (
+    "[Jarv tool note: To inspect result pages, call `read(input=<URL>)`; "
+    "read multiple independent URLs in the same response.]"
+)
+
+
 @dataclass
 class AgentNode:
     label: str
@@ -180,6 +186,127 @@ def filter_enabled_tools(tools: list[dict], config: dict) -> list[dict]:
         for tool in tools
         if tool_enabled(config, str(tool.get("name", "")))
     ]
+
+
+@dataclass(frozen=True)
+class ToolBatchResult:
+    args: dict | None
+    output: str
+
+
+def tool_call_is_parallel_safe(name: str) -> bool:
+    return name in PARALLEL_SAFE_TOOL_NAMES
+
+
+def history_has_web_search_read_nudge(items: list[dict]) -> bool:
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != "function_call_output":
+            continue
+        output = item.get("output")
+        if isinstance(output, str) and WEB_SEARCH_READ_NUDGE in output:
+            return True
+    return False
+
+
+def append_web_search_read_nudge(output: str) -> str:
+    if not output:
+        return WEB_SEARCH_READ_NUDGE
+    return output.rstrip() + "\n\n" + WEB_SEARCH_READ_NUDGE
+
+
+def _parse_tool_args(arguments: str | None) -> tuple[dict | None, str | None]:
+    try:
+        args = json.loads(arguments or "{}")
+    except json.JSONDecodeError as e:
+        return None, f"[tool argument error: invalid JSON: {e}]"
+    if not isinstance(args, dict):
+        return None, "[tool argument error: arguments must be an object]"
+    return args, None
+
+
+def dispatch_parallel_safe_tool_batch(
+    tool_calls: list,
+    *,
+    node: AgentNode,
+    store: ArtifactStore,
+    client,
+    config: dict,
+    spawn_observer: "SpawnObserver | None" = None,
+    cancellation_token: CancellationToken | None = None,
+    retained_store: RetainedOutputStore | None = None,
+) -> list[ToolBatchResult]:
+    results = [ToolBatchResult(None, "") for _ in tool_calls]
+    valid: list[tuple[int, object, dict]] = []
+
+    for index, item in enumerate(tool_calls):
+        if not tool_call_is_parallel_safe(item.name):
+            results[index] = ToolBatchResult(
+                None,
+                f"[tool not parallel-safe: {item.name}]",
+            )
+            continue
+        if item.name in TOOL_NAMES and not tool_enabled(config, item.name):
+            results[index] = ToolBatchResult(
+                None,
+                f"[tool disabled: {item.name}]",
+            )
+            continue
+        args, error = _parse_tool_args(item.arguments)
+        if error is not None:
+            results[index] = ToolBatchResult(None, error)
+            continue
+        assert args is not None
+        valid.append((index, item, args))
+
+    if not valid:
+        return results
+
+    def run_one(item, args: dict) -> str:
+        return dispatch_tool(
+            item.name,
+            args,
+            node,
+            store,
+            client,
+            config,
+            spawn_observer=spawn_observer,
+            cancellation_token=cancellation_token,
+            retained_store=retained_store,
+        )
+
+    if len(valid) == 1:
+        index, item, args = valid[0]
+        results[index] = ToolBatchResult(args, run_one(item, args))
+        return results
+
+    executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(8, len(valid))
+    )
+    futures = {
+        executor.submit(run_one, item, args): (index, args)
+        for index, item, args in valid
+    }
+    try:
+        for future in concurrent.futures.as_completed(futures):
+            index, args = futures[future]
+            results[index] = ToolBatchResult(args, future.result())
+    except (KeyboardInterrupt, TurnCancelled):
+        if cancellation_token is not None:
+            cancellation_token.cancel()
+        for future in futures:
+            future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    except Exception:
+        for future in futures:
+            future.cancel()
+        executor.shutdown(wait=True, cancel_futures=True)
+        raise
+    else:
+        executor.shutdown(wait=True)
+    return results
 
 
 def build_subagent_tools(sterile: bool, config: dict | None = None) -> list[dict]:
@@ -391,6 +518,7 @@ def run_subagent_loop(
     max_tokens = _subagent_max_tokens(config)
     finish_nudge_sent = False
     finish_truncation_nudge_sent = False
+    web_search_read_nudge_sent = False
 
     while True:
         if cancellation_token is not None:
@@ -507,46 +635,42 @@ def run_subagent_loop(
         item_index = 0
         while item_index < len(tool_calls):
             item = tool_calls[item_index]
-            if item.name == "read":
+            if tool_call_is_parallel_safe(item.name):
                 group_end = item_index
                 while (
                     group_end < len(tool_calls)
-                    and tool_calls[group_end].name == "read"
+                    and tool_call_is_parallel_safe(tool_calls[group_end].name)
                 ):
                     group_end += 1
                 group = tool_calls[item_index:group_end]
-                outputs = [""] * len(group)
-                valid_args: list[dict] = []
-                valid_indexes: list[int] = []
-                for group_index, read_item in enumerate(group):
-                    try:
-                        read_args = json.loads(read_item.arguments or "{}")
-                    except json.JSONDecodeError as e:
-                        outputs[group_index] = (
-                            f"[tool argument error: invalid JSON: {e}]"
+                results = dispatch_parallel_safe_tool_batch(
+                    group,
+                    node=node,
+                    store=store,
+                    client=client,
+                    config=config,
+                    spawn_observer=spawn_observer,
+                    cancellation_token=cancellation_token,
+                    retained_store=retained_store,
+                )
+                for safe_item, result in zip(group, results):
+                    output = result.output
+                    if safe_item.name != "read":
+                        output = truncate_model_output(
+                            output,
+                            config.get(
+                                "max_tool_output_chars",
+                                DEFAULT_CONFIG["max_tool_output_chars"],
+                            ),
                         )
-                    else:
-                        if not isinstance(read_args, dict):
-                            outputs[group_index] = (
-                                "[tool argument error: read arguments "
-                                "must be an object]"
-                            )
-                        else:
-                            valid_args.append(read_args)
-                            valid_indexes.append(group_index)
-                if valid_args:
-                    batch_outputs = dispatch_read_batch(
-                        valid_args,
-                        visible_labels=node.visible_labels,
-                        artifact_store=store,
-                        retained_store=retained_store,
-                        config=config,
-                        cancellation_token=cancellation_token,
-                    )
-                    for group_index, output in zip(valid_indexes, batch_outputs):
-                        outputs[group_index] = output
-                for read_item, output in zip(group, outputs):
-                    append_tool_result(read_item, output)
+                    if (
+                        safe_item.name == "web_search"
+                        and result.args is not None
+                        and not web_search_read_nudge_sent
+                    ):
+                        output = append_web_search_read_nudge(output)
+                        web_search_read_nudge_sent = True
+                    append_tool_result(safe_item, output)
                 item_index = group_end
                 continue
 

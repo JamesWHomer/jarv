@@ -1,16 +1,25 @@
+import time
+from types import SimpleNamespace
+from urllib.parse import parse_qs
+
 import httpx
 import pytest
-from urllib.parse import parse_qs
 
 from jarv.artifacts import ArtifactStore
 from jarv.agent import TOOLS
 from jarv.cancellation import CancellationToken, TurnCancelled
 from jarv.config import DEFAULT_CONFIG
-from jarv.orchestrator import AgentNode, build_subagent_tools, dispatch_tool
-from jarv.read_tool import dispatch_read_tool
+from jarv.orchestrator import (
+    AgentNode,
+    build_subagent_tools,
+    dispatch_parallel_safe_tool_batch,
+    dispatch_tool,
+)
+from jarv.read_tool import READ_TOOL, dispatch_read_tool
 from jarv.retained_outputs import RetainedOutputStore
 from jarv.web import (
     MAX_RESPONSE_BYTES,
+    WEB_SEARCH_TOOL,
     WebToolError,
     _DuckDuckGoHTMLParser,
     _ReadableHTMLParser,
@@ -19,6 +28,15 @@ from jarv.web import (
     fetch_web,
     search_web,
 )
+
+
+def test_default_prompt_and_tool_descriptions_guide_parallel_search_reads():
+    assert (
+        "When several tool calls are independent, issue them in the same response "
+        "instead of one tool call per turn."
+    ) in DEFAULT_CONFIG["system_prompt"]
+    assert "does not read page contents" in WEB_SEARCH_TOOL["description"]
+    assert "Read or fetch a known" in READ_TOOL["description"]
 
 
 def _mock_client(handler):
@@ -350,3 +368,42 @@ def test_subagents_receive_and_dispatch_web_tools(monkeypatch):
         config=DEFAULT_CONFIG,
     )
     assert output == "web"
+
+
+def test_parallel_safe_batch_runs_mixed_tools_concurrently_and_preserves_order(
+    monkeypatch,
+):
+    def fake_web(_name, args, *_pos, **_kwargs):
+        time.sleep(0.1)
+        return "web:" + args["query"]
+
+    def fake_read(args, **_kwargs):
+        time.sleep(0.1)
+        return "read:" + args["input"]
+
+    monkeypatch.setattr("jarv.orchestrator.dispatch_web_tool", fake_web)
+    monkeypatch.setattr("jarv.orchestrator.dispatch_read_tool", fake_read)
+
+    calls = [
+        SimpleNamespace(
+            name="web_search",
+            arguments='{"query": "first"}',
+        ),
+        SimpleNamespace(
+            name="read",
+            arguments='{"input": "second"}',
+        ),
+    ]
+    started = time.perf_counter()
+    results = dispatch_parallel_safe_tool_batch(
+        calls,
+        node=AgentNode("root", 0, None, "task", False),
+        store=ArtifactStore(),
+        client=None,
+        config=DEFAULT_CONFIG,
+        retained_store=RetainedOutputStore(),
+    )
+    elapsed = time.perf_counter() - started
+
+    assert [result.output for result in results] == ["web:first", "read:second"]
+    assert elapsed < 0.18

@@ -27,6 +27,7 @@ from jarv.config import DEFAULT_CONFIG
 from jarv.display import tool_card
 from jarv.history import SessionContext, load_history, save_history
 from jarv.history import redo_file_for
+from jarv.orchestrator import WEB_SEARCH_READ_NUDGE
 from jarv.provider import (
     ReasoningStarted,
     RetryableStreamError,
@@ -960,6 +961,128 @@ class AgentInputTests(unittest.TestCase):
         self.assertEqual(len(captured["outputs"]), 2)
         self.assertTrue(captured["outputs"][0].endswith("alpha"))
         self.assertTrue(captured["outputs"][1].endswith("beta"))
+
+    def test_root_adds_web_search_read_nudge_once_per_history(self):
+        with TemporaryDirectory() as tmp:
+            history_file = Path(tmp) / "history.json"
+            context = SessionContext(
+                session_id="session-id",
+                session_label="test session",
+                history_file=history_file,
+                now=datetime(2026, 5, 21, tzinfo=timezone.utc),
+            )
+            stream_count = 0
+            captured = {}
+
+            def fake_stream_response(*args, **_kwargs):
+                nonlocal stream_count
+                stream_count += 1
+                if stream_count == 1:
+                    yield ToolCallDone(
+                        id="fc_1",
+                        call_id="call_1",
+                        name="web_search",
+                        arguments=json.dumps({"query": "first"}),
+                    )
+                    yield ToolCallDone(
+                        id="fc_2",
+                        call_id="call_2",
+                        name="web_search",
+                        arguments=json.dumps({"query": "second"}),
+                    )
+                else:
+                    captured["outputs"] = [
+                        item["output"]
+                        for item in args[5]
+                        if item.get("type") == "function_call_output"
+                    ]
+                    yield TextDelta("done")
+                yield StreamDone(response=None)
+
+            def fake_web(_name, args, *_pos, **_kwargs):
+                return "search:" + args["query"]
+
+            with (
+                patch("jarv.agent.prepare_session_context", return_value=context),
+                patch("jarv.agent.stream_response", side_effect=fake_stream_response),
+                patch("jarv.orchestrator.dispatch_web_tool", side_effect=fake_web),
+                patch("jarv.agent.sys.stdout", new=io.StringIO()),
+            ):
+                result = run_agent(
+                    "search twice",
+                    DEFAULT_CONFIG,
+                    client=object(),
+                    incognito=True,
+                )
+
+        self.assertIsNone(result.error)
+        self.assertEqual(
+            sum(output.count(WEB_SEARCH_READ_NUDGE) for output in captured["outputs"]),
+            1,
+        )
+
+    def test_root_keeps_run_command_as_parallel_boundary(self):
+        with TemporaryDirectory() as tmp:
+            history_file = Path(tmp) / "history.json"
+            context = SessionContext(
+                session_id="session-id",
+                session_label="test session",
+                history_file=history_file,
+                now=datetime(2026, 5, 21, tzinfo=timezone.utc),
+            )
+            stream_count = 0
+            events = []
+
+            def fake_stream_response(*_args, **_kwargs):
+                nonlocal stream_count
+                stream_count += 1
+                if stream_count == 1:
+                    yield ToolCallDone(
+                        id="fc_1",
+                        call_id="call_1",
+                        name="web_search",
+                        arguments=json.dumps({"query": "first"}),
+                    )
+                    yield ToolCallDone(
+                        id="fc_2",
+                        call_id="call_2",
+                        name="run_command",
+                        arguments=json.dumps({"command": "echo middle"}),
+                    )
+                    yield ToolCallDone(
+                        id="fc_3",
+                        call_id="call_3",
+                        name="web_search",
+                        arguments=json.dumps({"query": "second"}),
+                    )
+                else:
+                    yield TextDelta("done")
+                yield StreamDone(response=None)
+
+            def fake_web(_name, args, *_pos, **_kwargs):
+                events.append("web:" + args["query"])
+                return "web"
+
+            def fake_run(*_args, **_kwargs):
+                events.append("run")
+                return "run"
+
+            with (
+                patch("jarv.agent.prepare_session_context", return_value=context),
+                patch("jarv.agent.stream_response", side_effect=fake_stream_response),
+                patch("jarv.orchestrator.dispatch_web_tool", side_effect=fake_web),
+                patch("jarv.agent._dispatch_run_command_with_ui", side_effect=fake_run),
+                patch("jarv.agent.sys.stdout", new=io.StringIO()),
+            ):
+                result = run_agent(
+                    "search run search",
+                    DEFAULT_CONFIG,
+                    client=object(),
+                    incognito=True,
+                )
+
+        self.assertIsNone(result.error)
+        self.assertEqual(events, ["web:first", "run", "web:second"])
 
     def test_run_agent_persists_text_recovered_from_final_response(self):
         with TemporaryDirectory() as tmp:

@@ -17,9 +17,10 @@ READ_TOOL = {
     "type": "function",
     "name": "read",
     "description": (
-        "Read a retained command-output ID, visible artifact label, HTTP(S) URL, "
-        "or local file. Use offset and size to page through text by Unicode characters. "
-        "Relative file paths resolve from the current working directory."
+        "Read or fetch a known retained command-output ID, visible artifact label, "
+        "HTTP(S) URL, or local file. Use offset and size to page through text by "
+        "Unicode characters. Relative file paths resolve from the current working "
+        "directory."
     ),
     "parameters": {
         "type": "object",
