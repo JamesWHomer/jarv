@@ -215,3 +215,5 @@ Feature-Ideas.txt
 *.bat
 
 /administration
+# Local visualization scripts and generated charts
+/visualize/

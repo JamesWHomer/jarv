@@ -14,6 +14,7 @@ from .http_transport import (
     response_error,
     send_with_retries,
 )
+from .tool_schemas import strict_openai_tools
 from .unicode_safety import sanitize_json_value
 
 
@@ -60,7 +61,7 @@ def build_responses_payload(
     payload: dict[str, Any] = {
         "model": model,
         "instructions": instructions,
-        "tools": tools,
+        "tools": strict_openai_tools(tools),
         "input": clean_input,
         "store": True,
         "stream": stream,

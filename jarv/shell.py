@@ -13,6 +13,7 @@ from .display import output_renderable, console
 
 
 COMMAND_OUTPUT_UNSET = object()
+MAX_COMMAND_OUTPUT_WINDOW_CHARS = 200_000
 
 
 @dataclass
@@ -76,7 +77,16 @@ def resolve_command_output_window(
             continue
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError(f"{name} must be a non-negative integer")
+        if value > MAX_COMMAND_OUTPUT_WINDOW_CHARS:
+            raise ValueError(
+                f"{name} must be at most {MAX_COMMAND_OUTPUT_WINDOW_CHARS} characters"
+            )
         resolved.append(value)
+    if resolved[0] + resolved[1] > MAX_COMMAND_OUTPUT_WINDOW_CHARS:
+        raise ValueError(
+            "head_chars + tail_chars must be at most "
+            f"{MAX_COMMAND_OUTPUT_WINDOW_CHARS} characters"
+        )
     return resolved[0], resolved[1]
 
 

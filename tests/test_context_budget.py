@@ -158,6 +158,35 @@ class ContextBudgetTests(unittest.TestCase):
         self.assertIn("User: hello", summary)
         self.assertIn("Assistant: world", summary)
 
+    def test_structured_image_outputs_are_summarized_for_budgeting(self):
+        image_output = [
+            {"type": "input_text", "text": "[READ RESULT]\nSource: local image"},
+            {
+                "type": "input_image",
+                "image_url": "data:image/png;base64," + ("A" * 4000),
+            },
+        ]
+
+        summary = summarize_turn_items([
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": image_output,
+            }
+        ])
+        tokens = estimate_item_tokens(
+            "unknown-model",
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": image_output,
+            },
+        )
+
+        self.assertIn("[image output 1: image/png", summary)
+        self.assertNotIn("A" * 100, summary)
+        self.assertLess(tokens, 100)
+
     def test_compact_oldest_turns_replaces_prefix_with_summary(self):
         config = self._tiny_config()
         model = "unknown-model"

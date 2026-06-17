@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from .config import DEFAULT_CONFIG
+from .tool_outputs import summarize_tool_output
 from .usage import estimate_context_breakdown, estimate_item_tokens, resolve_context_window
 
 
@@ -224,7 +225,8 @@ def summarize_turn_items(turn_items: list[dict], *, max_chars_per_item: int = 40
             )
         elif typ == "function_call_output":
             lines.append(
-                f"Tool output: {_truncate_text(str(item.get('output') or ''), max_chars_per_item)}"
+                "Tool output: "
+                f"{_truncate_text(summarize_tool_output(item.get('output')), max_chars_per_item)}"
             )
         elif typ == "reasoning":
             lines.append("Reasoning: [omitted]")

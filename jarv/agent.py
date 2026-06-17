@@ -81,6 +81,7 @@ from .retained_outputs import (
     load_retained_output_store,
     save_retained_output_store,
 )
+from .tool_outputs import ToolOutput
 from .usage import (
     estimate_context_breakdown,
     format_cost,
@@ -561,8 +562,16 @@ def _dispatch_run_command_with_ui(
 
     try:
         head_chars, tail_chars = resolve_command_output_window(
-            args.get("head_chars", COMMAND_OUTPUT_UNSET),
-            args.get("tail_chars", COMMAND_OUTPUT_UNSET),
+            (
+                COMMAND_OUTPUT_UNSET
+                if args.get("head_chars", COMMAND_OUTPUT_UNSET) is None
+                else args.get("head_chars", COMMAND_OUTPUT_UNSET)
+            ),
+            (
+                COMMAND_OUTPUT_UNSET
+                if args.get("tail_chars", COMMAND_OUTPUT_UNSET) is None
+                else args.get("tail_chars", COMMAND_OUTPUT_UNSET)
+            ),
             config.get("max_tool_output_chars", DEFAULT_CONFIG["max_tool_output_chars"]),
         )
     except ValueError as e:
@@ -1330,7 +1339,7 @@ def run_agent(
                     api_item = to_response_input_item(rd)
                     if api_item is not None:
                         new_input_items.append(api_item)
-                def append_tool_result(item, output: str) -> None:
+                def append_tool_result(item, output: ToolOutput) -> None:
                     nonlocal active_tool_call
                     fc = {
                         "type": "function_call",

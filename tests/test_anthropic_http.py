@@ -20,6 +20,16 @@ from jarv.provider import (
 )
 
 
+IMAGE_TOOL_OUTPUT = [
+    {"type": "input_text", "text": "[READ RESULT]\nSource: local image"},
+    {
+        "type": "input_image",
+        "image_url": "data:image/png;base64,QUJDRA==",
+        "detail": "auto",
+    },
+]
+
+
 def _sse(events):
     return "".join(
         f"event: {name}\ndata: {json.dumps(data)}\n\n"
@@ -92,6 +102,68 @@ def test_payload_preserves_signed_thinking_and_tool_history():
     }
     assert payload["messages"][2]["content"][0]["type"] == "tool_result"
     assert payload["tools"][0]["input_schema"] == {"type": "object"}
+    assert payload["tools"][0]["strict"] is True
+    assert "input_examples" not in payload["tools"][0]
+
+
+def test_payload_maps_structured_tool_output_to_image_tool_result_blocks():
+    payload = build_payload(
+        {"anthropic_prompt_caching": False},
+        "claude-opus-4-7",
+        "system",
+        [],
+        [
+            {
+                "type": "function_call",
+                "id": "toolu_1",
+                "call_id": "toolu_1",
+                "name": "read",
+                "arguments": "{}",
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "toolu_1",
+                "output": IMAGE_TOOL_OUTPUT,
+            },
+        ],
+    )
+
+    tool_result = payload["messages"][-1]["content"][0]
+    assert tool_result["type"] == "tool_result"
+    assert tool_result["content"] == [
+        {"type": "text", "text": "[READ RESULT]\nSource: local image"},
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": "QUJDRA==",
+            },
+        },
+    ]
+
+
+def test_anthropic_omits_custom_input_examples():
+    payload = build_payload(
+        {"anthropic_prompt_caching": False},
+        "claude-opus-4-7",
+        "system",
+        [{
+            "type": "function",
+            "name": "custom",
+            "description": "Custom",
+            "parameters": {
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+            },
+            "input_examples": [{"value": "example"}],
+        }],
+        [{"role": "user", "content": "hi"}],
+    )
+
+    assert payload["tools"][0]["strict"] is True
+    assert "input_examples" not in payload["tools"][0]
 
 
 def test_build_payload_applies_prompt_caching_breakpoints():

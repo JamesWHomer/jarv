@@ -17,6 +17,7 @@ from .http_transport import (
     response_error,
     send_with_retries,
 )
+from .tool_outputs import to_gemini_function_response_parts
 from .unicode_safety import sanitize_json_value
 
 
@@ -87,9 +88,38 @@ def _json_value(value: Any) -> Any:
         return {"result": value}
 
 
+def _to_gemini_schema(schema: Any) -> Any:
+    if not isinstance(schema, dict):
+        return schema
+    converted = {
+        key: value
+        for key, value in schema.items()
+        if key not in {"additionalProperties"}
+    }
+    if isinstance(converted.get("properties"), dict):
+        converted["properties"] = {
+            key: _to_gemini_schema(value)
+            for key, value in converted["properties"].items()
+        }
+    if "items" in converted:
+        converted["items"] = _to_gemini_schema(converted["items"])
+    for key in ("anyOf", "oneOf", "allOf"):
+        if isinstance(converted.get(key), list):
+            converted[key] = [_to_gemini_schema(item) for item in converted[key]]
+    typ = converted.get("type")
+    if isinstance(typ, list):
+        non_null = [item for item in typ if item != "null"]
+        if len(non_null) == 1:
+            converted["type"] = non_null[0]
+            if len(non_null) != len(typ):
+                converted["nullable"] = True
+    return converted
+
+
 def to_contents(input_items: list[dict]) -> list[dict]:
     contents: list[dict] = []
     call_names: dict[str, str] = {}
+    call_ids: dict[str, str] = {}
     i = 0
     while i < len(input_items):
         item = input_items[i]
@@ -122,14 +152,23 @@ def to_contents(input_items: list[dict]) -> list[dict]:
                 call_names[call_id] = name
                 provider_content = call.get("provider_content")
                 if isinstance(provider_content, list) and provider_content:
+                    for part in provider_content:
+                        if not isinstance(part, dict):
+                            continue
+                        function_call = part.get("functionCall")
+                        if isinstance(function_call, dict) and function_call.get("id"):
+                            call_ids[call_id] = str(function_call["id"])
                     parts.extend(
                         dict(part) for part in provider_content if isinstance(part, dict)
                     )
                 else:
+                    if call_id:
+                        call_ids[call_id] = call_id
                     parts.append({
                         "functionCall": {
                             "name": name,
                             "args": _json_value(call.get("arguments")),
+                            **({"id": call_id} if call_id else {}),
                         }
                     })
                 i += 1
@@ -142,13 +181,21 @@ def to_contents(input_items: list[dict]) -> list[dict]:
                 and input_items[i].get("type") == "function_call_output"
             ):
                 result = input_items[i]
+                output = result.get("output")
+                if isinstance(output, list):
+                    response_body, response_parts = to_gemini_function_response_parts(output)
+                else:
+                    response_body, response_parts = {"result": _json_value(output)}, []
                 call_id = str(result.get("call_id") or "")
-                parts.append({
-                    "functionResponse": {
-                        "name": call_names.get(call_id, call_id),
-                        "response": {"result": _json_value(result.get("output"))},
-                    }
-                })
+                response = {
+                    "name": call_names.get(call_id, call_id),
+                    "response": response_body,
+                }
+                if call_ids.get(call_id):
+                    response["id"] = call_ids[call_id]
+                if response_parts:
+                    response["parts"] = response_parts
+                parts.append({"functionResponse": response})
                 i += 1
             _append_content(contents, "user", parts)
             continue
@@ -165,7 +212,9 @@ def to_tools(tools: list[dict]) -> list[dict]:
         declarations.append({
             "name": function["name"],
             "description": function.get("description", ""),
-            "parameters": function.get("parameters", {"type": "object"}),
+            "parameters": _to_gemini_schema(
+                function.get("parameters", {"type": "object"})
+            ),
         })
     return [{"functionDeclarations": declarations}] if declarations else []
 

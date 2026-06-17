@@ -14,7 +14,7 @@ from typing import Any, Callable
 import httpx
 
 from .config import CONFIG_DIR
-from .provider_catalog import FALLBACK_PROVIDER_MODELS, LOCAL_PROVIDERS
+from .provider_catalog import FALLBACK_PROVIDER_MODELS, LOCAL_PROVIDERS, PROVIDERS
 
 
 CACHE_DIR = CONFIG_DIR / "model-catalog"
@@ -28,6 +28,13 @@ class CatalogModel:
     created: float = 0
     display_name: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ModelImageCapability:
+    supported: bool
+    output_format: str | None = None
+    reason: str = ""
 
 
 _MEMORY_CHOICES: dict[str, list[tuple[str, str]]] = {}
@@ -432,6 +439,132 @@ def cached_provider_model(
         ),
         None,
     )
+
+
+def _backend_for_config(config: dict) -> str:
+    provider = str(config.get("provider", "openai"))
+    info = PROVIDERS.get(provider)
+    if info:
+        return str(info.get("backend") or "responses")
+    if config.get("base_url"):
+        return "openai_compat"
+    return "responses"
+
+
+def _metadata_image_input_supported(metadata: dict[str, Any]) -> bool | None:
+    architecture = metadata.get("architecture")
+    if isinstance(architecture, dict):
+        input_modalities = architecture.get("input_modalities")
+        if isinstance(input_modalities, list):
+            normalized = {str(item).strip().lower() for item in input_modalities}
+            if "image" in normalized:
+                return True
+            if normalized:
+                return False
+
+        modality = architecture.get("modality")
+        if isinstance(modality, str) and modality.strip():
+            input_side = modality.split("->", 1)[0].lower()
+            if "image" in re.split(r"[^a-z0-9]+", input_side):
+                return True
+            return False
+
+    capabilities = metadata.get("capabilities")
+    if isinstance(capabilities, dict):
+        image_input = capabilities.get("image_input")
+        if isinstance(image_input, dict) and isinstance(image_input.get("supported"), bool):
+            return bool(image_input["supported"])
+        if isinstance(image_input, bool):
+            return image_input
+
+    return None
+
+
+def _is_ambiguous_openrouter_model(provider: str, model: str) -> bool:
+    if provider != "openrouter":
+        return False
+    normalized = model.strip().lower()
+    return normalized in {"openrouter/auto", "openrouter/free"}
+
+
+def _is_gemini_3_model(model: str) -> bool:
+    return model.lower().startswith("gemini-3")
+
+
+def get_image_output_capability(
+    config: dict,
+    model: str | None = None,
+) -> ModelImageCapability:
+    """Return whether the active provider/model can receive image tool output."""
+    provider = str(config.get("provider", "openai"))
+    selected_model = str(model or config.get("model") or "").strip()
+    if not selected_model:
+        return ModelImageCapability(False, reason="no active model is configured")
+
+    backend = _backend_for_config(config)
+    output_format = {
+        "responses": "responses",
+        "openai_compat": "openai_chat",
+        "anthropic": "anthropic",
+        "gemini": "gemini",
+    }.get(backend)
+    if output_format is None:
+        return ModelImageCapability(
+            False,
+            reason=f"provider backend '{backend}' does not support image tool output",
+        )
+
+    if provider in LOCAL_PROVIDERS:
+        return ModelImageCapability(
+            False,
+            reason=f"provider '{provider}' is local and has no cached image capability",
+        )
+
+    if _is_ambiguous_openrouter_model(provider, selected_model):
+        return ModelImageCapability(
+            False,
+            reason=f"model '{selected_model}' is an ambiguous OpenRouter route",
+        )
+
+    image_input: bool | None = None
+    provider_model = cached_provider_model(config, selected_model)
+    if provider_model is not None:
+        image_input = _metadata_image_input_supported(provider_model.metadata)
+
+    openrouter_model = None
+    if image_input is None and provider in PROVIDERS:
+        openrouter_model = resolve_openrouter_model(provider, selected_model)
+        if openrouter_model is not None:
+            image_input = _metadata_image_input_supported(openrouter_model.metadata)
+
+    if backend == "gemini":
+        if not _is_gemini_3_model(selected_model):
+            return ModelImageCapability(
+                False,
+                reason=(
+                    f"Gemini model '{selected_model}' does not support "
+                    "multimodal function responses"
+                ),
+            )
+        if image_input is None:
+            # Gemini's native model list does not currently expose modalities.
+            # Gemini 3 is the documented generation for multimodal function
+            # responses, so treat the family as capable unless cache says no.
+            image_input = True
+
+    if image_input is not True:
+        source = "cached metadata"
+        if provider_model is None and openrouter_model is None:
+            source = "provider/OpenRouter caches"
+        return ModelImageCapability(
+            False,
+            reason=(
+                f"model '{selected_model}' via provider '{provider}' does not "
+                f"advertise image input capability in {source}"
+            ),
+        )
+
+    return ModelImageCapability(True, output_format=output_format)
 
 
 def openrouter_prices_for_model(

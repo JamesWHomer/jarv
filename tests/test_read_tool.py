@@ -1,11 +1,13 @@
 import time
 from pathlib import Path
 
+import httpx
 import pytest
 
 from jarv.artifacts import ArtifactStore
 from jarv.cancellation import CancellationToken, TurnCancelled
 from jarv.config import DEFAULT_CONFIG
+from jarv.model_catalog import ModelImageCapability
 from jarv.read_tool import (
     READ_TOOL,
     dispatch_read_batch,
@@ -17,7 +19,11 @@ from jarv.retained_outputs import (
     load_retained_output_store,
     save_retained_output_store,
 )
-from jarv.web import FetchedWebContent
+from jarv.web import FetchedWebBytes
+
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\npngdata"
+WEBP_BYTES = b"RIFF\x00\x00\x00\x00WEBPwebpdata"
 
 
 def _read(args, *, artifacts=None, retained=None, visible=None, config=None):
@@ -31,10 +37,14 @@ def _read(args, *, artifacts=None, retained=None, visible=None, config=None):
 
 
 def test_read_schema_exposes_input_offset_and_size():
+    assert "image-capable models" in READ_TOOL["description"]
+    assert "image reads" in READ_TOOL["description"]
     parameters = READ_TOOL["parameters"]
     assert parameters["required"] == ["input"]
     assert parameters["properties"]["offset"]["minimum"] == 0
     assert parameters["properties"]["size"]["minimum"] == 1
+    assert parameters["properties"]["size"]["maximum"] == 200000
+    assert parameters["additionalProperties"] is False
 
 
 def test_read_rejects_non_object_arguments():
@@ -92,10 +102,26 @@ def test_read_default_size_uses_config_and_eof_allows_empty_final_page():
         ({"input": "x", "offset": "1"}, "offset must be an integer"),
         ({"input": "x", "size": 0}, "positive integer"),
         ({"input": "x", "size": True}, "size must be an integer"),
+        ({"input": "x", "size": 200001}, "at most 200000"),
     ],
 )
 def test_read_validates_paging_arguments(args, message):
     assert message in _read(args)
+
+
+def test_read_treats_null_optional_values_as_defaults():
+    retained = RetainedOutputStore()
+    output_id = retained.put("abcdef")
+
+    output = _read(
+        {"input": output_id, "offset": None, "size": None},
+        retained=retained,
+        config={**DEFAULT_CONFIG, "max_tool_output_chars": 3},
+    )
+
+    assert "Offset: 0" in output
+    assert "Requested size: 3" in output
+    assert output.endswith("abc")
 
 
 def test_read_rejects_offset_beyond_end():
@@ -145,15 +171,71 @@ def test_read_local_relative_file_and_replaces_invalid_utf8(tmp_path, monkeypatc
     assert output.endswith("c\ufffdd")
 
 
+def test_read_local_image_returns_structured_image_output(tmp_path, monkeypatch):
+    path = tmp_path / "image.png"
+    path.write_bytes(PNG_BYTES)
+    monkeypatch.setattr(
+        "jarv.read_tool.get_image_output_capability",
+        lambda _config: ModelImageCapability(True, "responses"),
+    )
+
+    output = _read({"input": str(path), "offset": 5, "size": 10})
+
+    assert isinstance(output, list)
+    assert output[0]["type"] == "input_text"
+    assert "Source: local image" in output[0]["text"]
+    assert "Offset: not applicable for image reads" in output[0]["text"]
+    assert "Image media type: image/png" in output[0]["text"]
+    assert output[1]["type"] == "input_image"
+    assert output[1]["image_url"].startswith("data:image/png;base64,")
+
+
+def test_read_image_without_model_capability_returns_text_fallback(tmp_path, monkeypatch):
+    path = tmp_path / "image.png"
+    path.write_bytes(PNG_BYTES)
+    monkeypatch.setattr(
+        "jarv.read_tool.get_image_output_capability",
+        lambda _config: ModelImageCapability(False, reason="text-only model"),
+    )
+
+    output = _read({"input": str(path)})
+
+    assert isinstance(output, str)
+    assert "does not have image capability" in output
+    assert "text-only model" in output
+    assert "base64" not in output
+
+
+def test_read_rejects_unsupported_image_format(tmp_path):
+    path = tmp_path / "image.bmp"
+    path.write_bytes(b"BMnot-supported")
+
+    output = _read({"input": str(path)})
+
+    assert "unsupported image media type" in output
+    assert "image/bmp" in output
+
+
+def test_read_rejects_oversized_image(tmp_path, monkeypatch):
+    path = tmp_path / "image.png"
+    path.write_bytes(PNG_BYTES + b"x" * 10)
+    monkeypatch.setattr("jarv.read_tool.MAX_IMAGE_READ_BYTES", len(PNG_BYTES) - 1)
+
+    output = _read({"input": str(path)})
+
+    assert "exceeding" in output
+    assert "byte limit" in output
+
+
 def test_every_web_page_is_marked_untrusted(monkeypatch):
     monkeypatch.setattr(
-        "jarv.read_tool.fetch_web_content",
-        lambda *args, **kwargs: FetchedWebContent(
+        "jarv.read_tool.fetch_web_bytes",
+        lambda *args, **kwargs: FetchedWebBytes(
             requested_url="https://example.test/start",
             final_url="https://example.test/final",
+            content_type="text/html",
             media_type="text/html",
-            title="Example",
-            text="abcdefghij",
+            body=b"<title>Example</title><main>abcdefghij</main>",
         ),
     )
 
@@ -165,6 +247,35 @@ def test_every_web_page_is_marked_untrusted(monkeypatch):
     assert "Requested URL: https://example.test/start" in output
     assert "Final URL: https://example.test/final" in output
     assert output.endswith("efg")
+
+
+def test_read_direct_image_url_returns_untrusted_structured_output(monkeypatch):
+    def handler(_request):
+        return httpx.Response(
+            200,
+            headers={"content-type": "image/webp"},
+            content=WEBP_BYTES,
+        )
+
+    monkeypatch.setattr(
+        "jarv.web._create_client",
+        lambda _timeout: httpx.Client(
+            transport=httpx.MockTransport(handler),
+            follow_redirects=False,
+        ),
+    )
+    monkeypatch.setattr(
+        "jarv.read_tool.get_image_output_capability",
+        lambda _config: ModelImageCapability(True, "openai_chat"),
+    )
+
+    output = _read({"input": "https://example.test/image"})
+
+    assert isinstance(output, list)
+    assert "Source: web image" in output[0]["text"]
+    assert "UNTRUSTED WEB IMAGE" in output[0]["text"]
+    assert "Content-Type: image/webp" in output[0]["text"]
+    assert output[1]["image_url"].startswith("data:image/webp;base64,")
 
 
 def test_truncated_command_output_can_be_reconstructed_from_retained_id():

@@ -20,6 +20,7 @@ DUCKDUCKGO_HTML_URL = "https://html.duckduckgo.com/html/"
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_REDIRECTS = 5
 DEFAULT_SEARCH_RESULTS = 5
+MAX_SEARCH_RESULTS = 20
 
 WEB_SEARCH_TOOL = {
     "type": "function",
@@ -38,6 +39,7 @@ WEB_SEARCH_TOOL = {
             "max_results": {
                 "type": "integer",
                 "minimum": 1,
+                "maximum": MAX_SEARCH_RESULTS,
                 "description": "Maximum results to return. Defaults to 5.",
             },
             "offset": {
@@ -47,6 +49,7 @@ WEB_SEARCH_TOOL = {
             },
         },
         "required": ["query"],
+        "additionalProperties": False,
     },
 }
 
@@ -61,6 +64,15 @@ class FetchedWebContent:
     media_type: str
     title: str
     text: str
+
+
+@dataclass(frozen=True)
+class FetchedWebBytes:
+    requested_url: str
+    final_url: str
+    content_type: str
+    media_type: str
+    body: bytes
 
 
 def _normalize_space(value: str) -> str:
@@ -397,6 +409,7 @@ def _request_bytes(
     url: str,
     *,
     timeout: float,
+    max_response_bytes: int = MAX_RESPONSE_BYTES,
     params: dict[str, str] | None = None,
     form_data: dict[str, str] | None = None,
     cancellation_token: CancellationToken | None = None,
@@ -442,15 +455,23 @@ def _request_bytes(
                     message = f"HTTP {response.status_code} {response.reason_phrase}".strip()
                     raise WebToolError(message)
 
+                content_type = response.headers.get("content-type", "")
+                effective_max_bytes = max_response_bytes
+                if (
+                    max_response_bytes > MAX_RESPONSE_BYTES
+                    and _is_textual_media_type(_media_type(content_type))
+                ):
+                    effective_max_bytes = MAX_RESPONSE_BYTES
+
                 content_length = response.headers.get("content-length")
                 if content_length:
                     try:
                         declared_size = int(content_length)
                     except ValueError:
                         declared_size = 0
-                    if declared_size > MAX_RESPONSE_BYTES:
+                    if declared_size > effective_max_bytes:
                         raise WebToolError(
-                            f"response exceeds {MAX_RESPONSE_BYTES} byte limit"
+                            f"response exceeds {effective_max_bytes} byte limit"
                         )
 
                 chunks: list[bytes] = []
@@ -459,12 +480,11 @@ def _request_bytes(
                     if cancellation_token is not None:
                         cancellation_token.throw_if_cancelled()
                     size += len(chunk)
-                    if size > MAX_RESPONSE_BYTES:
+                    if size > effective_max_bytes:
                         raise WebToolError(
-                            f"response exceeds {MAX_RESPONSE_BYTES} byte limit"
+                            f"response exceeds {effective_max_bytes} byte limit"
                         )
                     chunks.append(chunk)
-                content_type = response.headers.get("content-type", "")
                 return str(response.url), content_type, b"".join(chunks)
         raise WebToolError(f"too many redirects (maximum {MAX_REDIRECTS})")
     except httpx.TimeoutException as exc:
@@ -594,6 +614,38 @@ def fetch_web_content(
         timeout=timeout,
         cancellation_token=cancellation_token,
     )
+    return web_content_from_bytes(requested_url, final_url, content_type, body)
+
+
+def fetch_web_bytes(
+    url: str,
+    *,
+    timeout: float,
+    max_response_bytes: int = MAX_RESPONSE_BYTES,
+    cancellation_token: CancellationToken | None = None,
+) -> FetchedWebBytes:
+    requested_url = _validated_url(url)
+    final_url, content_type, body = _request_bytes(
+        requested_url,
+        timeout=timeout,
+        max_response_bytes=max_response_bytes,
+        cancellation_token=cancellation_token,
+    )
+    return FetchedWebBytes(
+        requested_url=requested_url,
+        final_url=final_url,
+        content_type=content_type,
+        media_type=_media_type(content_type),
+        body=body,
+    )
+
+
+def web_content_from_bytes(
+    requested_url: str,
+    final_url: str,
+    content_type: str,
+    body: bytes,
+) -> FetchedWebContent:
     media_type = _media_type(content_type)
     if not _is_textual_media_type(media_type):
         label = media_type or "unknown content type"
@@ -668,11 +720,20 @@ def dispatch_web_tool(
             if not isinstance(query, str) or not query.strip():
                 return "[tool argument error: query must be a non-empty string]"
             max_results = args.get("max_results", DEFAULT_SEARCH_RESULTS)
+            if max_results is None:
+                max_results = DEFAULT_SEARCH_RESULTS
             if isinstance(max_results, bool) or not isinstance(max_results, int):
                 return "[tool argument error: max_results must be an integer]"
             if max_results <= 0:
                 return "[tool argument error: max_results must be a positive integer]"
+            if max_results > MAX_SEARCH_RESULTS:
+                return (
+                    "[tool argument error: max_results must be at most "
+                    f"{MAX_SEARCH_RESULTS}]"
+                )
             offset = args.get("offset", 0)
+            if offset is None:
+                offset = 0
             if isinstance(offset, bool) or not isinstance(offset, int):
                 return "[tool argument error: offset must be an integer]"
             if offset < 0:

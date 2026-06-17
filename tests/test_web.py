@@ -297,10 +297,10 @@ def test_web_dispatch_keeps_requested_count_and_validates_offset(monkeypatch):
 
     assert dispatch_web_tool(
         "web_search",
-        {"query": "test", "max_results": 100, "offset": 25},
+        {"query": "test", "max_results": 20, "offset": 25},
         DEFAULT_CONFIG,
     ) == "ok"
-    assert captured == {"query": "test", "max_results": 100, "offset": 25}
+    assert captured == {"query": "test", "max_results": 20, "offset": 25}
     assert "max_results must be an integer" in dispatch_web_tool(
         "web_search",
         {"query": "test", "max_results": "5"},
@@ -311,11 +311,37 @@ def test_web_dispatch_keeps_requested_count_and_validates_offset(monkeypatch):
         {"query": "test", "max_results": 0},
         DEFAULT_CONFIG,
     )
+    assert "at most 20" in dispatch_web_tool(
+        "web_search",
+        {"query": "test", "max_results": 21},
+        DEFAULT_CONFIG,
+    )
     assert "non-negative integer" in dispatch_web_tool(
         "web_search",
         {"query": "test", "offset": -1},
         DEFAULT_CONFIG,
     )
+
+
+def test_web_dispatch_treats_null_optional_values_as_defaults(monkeypatch):
+    captured = {}
+
+    def fake_search(query, max_results, **_kwargs):
+        captured.update(
+            query=query,
+            max_results=max_results,
+            offset=_kwargs["offset"],
+        )
+        return "ok"
+
+    monkeypatch.setattr("jarv.web.search_web", fake_search)
+
+    assert dispatch_web_tool(
+        "web_search",
+        {"query": "test", "max_results": None, "offset": None},
+        DEFAULT_CONFIG,
+    ) == "ok"
+    assert captured == {"query": "test", "max_results": 5, "offset": 0}
 
 
 def test_pre_cancelled_web_request_propagates_cancellation(monkeypatch):

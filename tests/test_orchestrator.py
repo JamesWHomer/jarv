@@ -28,9 +28,12 @@ class OrchestratorTests(unittest.TestCase):
 
         self.assertEqual(properties["head_chars"]["type"], "integer")
         self.assertEqual(properties["head_chars"]["minimum"], 0)
+        self.assertEqual(properties["head_chars"]["maximum"], 200000)
         self.assertEqual(properties["tail_chars"]["type"], "integer")
         self.assertEqual(properties["tail_chars"]["minimum"], 0)
+        self.assertEqual(properties["tail_chars"]["maximum"], 200000)
         self.assertEqual(RUN_COMMAND_TOOL["parameters"]["required"], ["command"])
+        self.assertFalse(RUN_COMMAND_TOOL["parameters"]["additionalProperties"])
 
     def test_invalid_run_command_window_does_not_execute(self):
         node = AgentNode(
@@ -58,6 +61,62 @@ class OrchestratorTests(unittest.TestCase):
             output,
             "[tool argument error: head_chars must be a non-negative integer]",
         )
+        execute.assert_not_called()
+
+    def test_run_command_null_output_windows_use_defaults(self):
+        node = AgentNode(
+            label="child",
+            depth=1,
+            parent_label="root",
+            task="do work",
+            sterile=True,
+        )
+        command_result = CommandResult(
+            "echo output",
+            "a" * 40 + "MIDDLE" + "z" * 40,
+            "",
+            0,
+        )
+
+        with (
+            patch("jarv.orchestrator.check_command", return_value=(True, "")),
+            patch("jarv.orchestrator.execute_command", return_value=command_result),
+        ):
+            output = dispatch_tool(
+                "run_command",
+                {"command": "echo ok", "head_chars": None, "tail_chars": None},
+                node,
+                ArtifactStore(),
+                client=None,
+                config={**DEFAULT_CONFIG, "max_tool_output_chars": 10},
+            )
+
+        self.assertTrue(output.startswith("a" * 5))
+        self.assertTrue(output.endswith("z" * 5))
+
+    def test_run_command_rejects_oversized_output_window(self):
+        node = AgentNode(
+            label="child",
+            depth=1,
+            parent_label="root",
+            task="do work",
+            sterile=True,
+        )
+
+        with (
+            patch("jarv.orchestrator.check_command", return_value=(True, "")),
+            patch("jarv.orchestrator.execute_command") as execute,
+        ):
+            output = dispatch_tool(
+                "run_command",
+                {"command": "echo ok", "head_chars": 200001},
+                node,
+                ArtifactStore(),
+                client=None,
+                config=DEFAULT_CONFIG,
+            )
+
+        self.assertIn("at most 200000", output)
         execute.assert_not_called()
 
     def test_subagent_command_window_overrides_generic_tool_limit(self):
@@ -125,6 +184,56 @@ class OrchestratorTests(unittest.TestCase):
         self.assertTrue(output.endswith("z" * 30))
         self.assertIn("26 characters omitted from the middle", output)
         self.assertNotIn("truncated to 10 characters", output)
+
+    def test_spawn_rejects_invalid_deps_and_non_boolean_sterile(self):
+        parent = AgentNode(
+            label="root",
+            depth=0,
+            parent_label=None,
+            task="root",
+            sterile=False,
+            visible_labels={"ready"},
+        )
+
+        with self.assertRaisesRegex(ValueError, "invalid deps"):
+            spawn_batch(
+                parent,
+                [{"label": "child", "task": "work", "deps": ["missing"]}],
+                ArtifactStore(),
+                client=None,
+                config=DEFAULT_CONFIG,
+            )
+
+        with self.assertRaisesRegex(ValueError, "sterile must be a boolean"):
+            spawn_batch(
+                parent,
+                [{"label": "child", "task": "work", "sterile": "false"}],
+                ArtifactStore(),
+                client=None,
+                config=DEFAULT_CONFIG,
+            )
+
+    def test_spawn_rejects_too_many_children(self):
+        parent = AgentNode(
+            label="root",
+            depth=0,
+            parent_label=None,
+            task="root",
+            sterile=False,
+        )
+        children = [
+            {"label": f"child_{index}", "task": "work"}
+            for index in range(17)
+        ]
+
+        with self.assertRaisesRegex(ValueError, "at most 16"):
+            spawn_batch(
+                parent,
+                children,
+                ArtifactStore(),
+                client=None,
+                config=DEFAULT_CONFIG,
+            )
 
     def test_subagent_read_size_overrides_generic_tool_limit(self):
         store = ArtifactStore()
@@ -245,6 +354,60 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(len(captured["outputs"]), 2)
         self.assertTrue(captured["outputs"][0].endswith("alpha"))
         self.assertTrue(captured["outputs"][1].endswith("beta"))
+
+    def test_subagent_preserves_structured_read_output(self):
+        node = AgentNode(
+            label="child",
+            depth=1,
+            parent_label="root",
+            task="do work",
+            sterile=True,
+        )
+        structured_output = [
+            {"type": "input_text", "text": "[READ RESULT]\nSource: local image"},
+            {"type": "input_image", "image_url": "data:image/png;base64,QUJDRA=="},
+        ]
+        calls = []
+        captured = {}
+
+        def fake_stream_response(*args, **_kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                yield ToolCallDone(
+                    id="fc_1",
+                    call_id="call_1",
+                    name="read",
+                    arguments='{"input": "image.png"}',
+                )
+                yield StreamDone(response=None)
+                return
+
+            captured["output"] = next(
+                item["output"]
+                for item in args[5]
+                if item.get("type") == "function_call_output"
+            )
+            yield ToolCallDone(
+                id="fc_2",
+                call_id="call_2",
+                name="finish",
+                arguments='{"longform": "done", "tldr": "done"}',
+            )
+            yield StreamDone(response=None)
+
+        with (
+            patch("jarv.orchestrator.stream_response", side_effect=fake_stream_response),
+            patch("jarv.orchestrator.dispatch_read_tool", return_value=structured_output),
+        ):
+            result = run_subagent_loop(
+                node,
+                ArtifactStore(),
+                client=None,
+                config=DEFAULT_CONFIG,
+            )
+
+        self.assertEqual(result, ("done", "done"))
+        self.assertEqual(captured["output"], structured_output)
 
     def test_subagent_passes_session_prompt_cache_key(self):
         node = AgentNode(

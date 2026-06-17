@@ -13,6 +13,7 @@ from .http_transport import (
     request_json,
     send_with_retries,
 )
+from .tool_outputs import to_anthropic_tool_result_content
 from .unicode_safety import sanitize_json_value
 
 
@@ -176,7 +177,7 @@ def to_messages(input_items: list[dict]) -> list[dict]:
                 blocks.append({
                     "type": "tool_result",
                     "tool_use_id": str(result.get("call_id") or ""),
-                    "content": str(result.get("output") or ""),
+                    "content": to_anthropic_tool_result_content(result.get("output")),
                 })
                 i += 1
             _append_message(messages, "user", blocks)
@@ -197,6 +198,7 @@ def to_tools(tools: list[dict]) -> list[dict]:
             "name": function["name"],
             "description": function.get("description", ""),
             "input_schema": function.get("parameters", {"type": "object"}),
+            "strict": bool(function.get("strict", True)),
         }
         if tool.get("cache_control"):
             converted["cache_control"] = tool["cache_control"]

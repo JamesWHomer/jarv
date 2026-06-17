@@ -7,6 +7,7 @@ from typing import Any
 from .config import CONFIG_DIR
 from .display import console
 from .history import isoformat_utc, parse_timestamp, utc_now
+from .tool_outputs import summarize_tool_output
 
 _BREAKDOWN_KEYS = ("system", "tools", "history", "tool_io", "reasoning")
 
@@ -35,7 +36,7 @@ def _item_text(item: dict) -> str:
     if typ == "function_call":
         return f"{item.get('name', '')} {item.get('arguments', '')}"
     if typ == "function_call_output":
-        return str(item.get("output") or "")
+        return summarize_tool_output(item.get("output"))
     if typ == "reasoning":
         summary = item.get("summary") or []
         return " ".join(str(s) for s in summary) if isinstance(summary, list) else str(summary)

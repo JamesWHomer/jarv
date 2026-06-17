@@ -245,7 +245,8 @@ Run `jarv` with no prompt to start an interactive session. Type a prompt and pre
 ## Tools and shell commands
 
 - The root model can see five tools: `run_command`, `web_search`, `read`, `spawn`, and `ask_user`. The enabled subset is controlled from `/settings`.
-- `read(input, offset, size)` pages through retained command output, visible artifacts, HTTP(S) URLs, and local files using Unicode character offsets. Consecutive reads run concurrently.
+- `read(input, offset, size)` pages through retained command output, visible artifacts, HTTP(S) URLs, and local text files using Unicode character offsets. Consecutive reads run concurrently.
+- Direct local and HTTP(S) image reads (`png`, `jpeg`, `webp`, plus provider-supported `gif`) are returned as native image input when the active model advertises image capability in Jarv's cached provider/OpenRouter catalog. Image reads ignore `offset` and `size`, are capped at 10 MiB, and fall back to a text "no image capability" result when the selected model route is text-only or unknown.
 - `web_search` supports any positive result count and a non-negative result offset. URL reads preserve HTTP(S) links as absolute URLs.
 - Spawned subagents also get a mandatory `finish` tool (to return output) and may get `spawn` when the parent sets `sterile: false`.
 - Subagent internal transcripts are discarded. Root history stores the parent `spawn`/`read` tool calls and their returned outputs. Artifact longform content persists per session in `artifacts-<hash>.json`.

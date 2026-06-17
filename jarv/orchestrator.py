@@ -38,13 +38,20 @@ from .read_tool import (
 from .retained_outputs import RetainedOutputStore
 from .shell import (
     COMMAND_OUTPUT_UNSET,
+    MAX_COMMAND_OUTPUT_WINDOW_CHARS,
     execute_command,
     resolve_command_output_window,
     truncate_model_output,
 )
+from .tool_outputs import ToolOutput
 from .usage import estimate_context_breakdown, record_response_usage
 from .web import WEB_SEARCH_TOOL, dispatch_web_tool
 
+
+MAX_SPAWN_CHILDREN = 16
+MAX_SPAWN_DEPS = 32
+MAX_SPAWN_LABEL_CHARS = 80
+MAX_SPAWN_TASK_CHARS = 50_000
 
 RUN_COMMAND_TOOL = {
     "type": "function",
@@ -57,6 +64,7 @@ RUN_COMMAND_TOOL = {
             "head_chars": {
                 "type": "integer",
                 "minimum": 0,
+                "maximum": MAX_COMMAND_OUTPUT_WINDOW_CHARS,
                 "description": (
                     "Number of characters to return from the start of the output. "
                     "Defaults to half of max_tool_output_chars."
@@ -65,6 +73,7 @@ RUN_COMMAND_TOOL = {
             "tail_chars": {
                 "type": "integer",
                 "minimum": 0,
+                "maximum": MAX_COMMAND_OUTPUT_WINDOW_CHARS,
                 "description": (
                     "Number of characters to return from the end of the output. "
                     "Defaults to the remaining half of max_tool_output_chars."
@@ -72,6 +81,7 @@ RUN_COMMAND_TOOL = {
             },
         },
         "required": ["command"],
+        "additionalProperties": False,
     },
 }
 
@@ -90,23 +100,38 @@ SPAWN_TOOL = {
         "properties": {
             "children": {
                 "type": "array",
+                "minItems": 1,
+                "maxItems": MAX_SPAWN_CHILDREN,
                 "items": {
                     "type": "object",
                     "properties": {
-                        "label": {"type": "string", "description": "Unique handle for this child's artifact."},
-                        "task": {"type": "string", "description": "Free-form instructions for the child."},
+                        "label": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": MAX_SPAWN_LABEL_CHARS,
+                            "description": "Unique handle for this child's artifact.",
+                        },
+                        "task": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": MAX_SPAWN_TASK_CHARS,
+                            "description": "Free-form instructions for the child.",
+                        },
                         "sterile": {"type": "boolean", "description": "If true (default), child cannot spawn."},
                         "deps": {
                             "type": "array",
+                            "maxItems": MAX_SPAWN_DEPS,
                             "items": {"type": "string"},
                             "description": "Labels of prior artifacts to make visible to this child.",
                         },
                     },
                     "required": ["label", "task"],
+                    "additionalProperties": False,
                 },
             }
         },
         "required": ["children"],
+        "additionalProperties": False,
     },
 }
 
@@ -124,6 +149,7 @@ FINISH_TOOL = {
             "tldr": {"type": "string", "description": "1-2 sentence summary inlined into the parent's next turn."},
         },
         "required": ["longform", "tldr"],
+        "additionalProperties": False,
     },
 }
 
@@ -144,6 +170,7 @@ ASK_USER_TOOL = {
             },
         },
         "required": ["question"],
+        "additionalProperties": False,
     },
 }
 
@@ -191,11 +218,16 @@ def filter_enabled_tools(tools: list[dict], config: dict) -> list[dict]:
 @dataclass(frozen=True)
 class ToolBatchResult:
     args: dict | None
-    output: str
+    output: ToolOutput
 
 
 def tool_call_is_parallel_safe(name: str) -> bool:
     return name in PARALLEL_SAFE_TOOL_NAMES
+
+
+def _optional_arg(args: dict, name: str, default):
+    value = args.get(name, default)
+    return default if value is None else value
 
 
 def history_has_web_search_read_nudge(items: list[dict]) -> bool:
@@ -263,7 +295,7 @@ def dispatch_parallel_safe_tool_batch(
     if not valid:
         return results
 
-    def run_one(item, args: dict) -> str:
+    def run_one(item, args: dict) -> ToolOutput:
         return dispatch_tool(
             item.name,
             args,
@@ -349,7 +381,7 @@ def dispatch_tool(
     spawn_observer: "SpawnObserver | None" = None,
     cancellation_token: CancellationToken | None = None,
     retained_store: RetainedOutputStore | None = None,
-) -> str:
+) -> ToolOutput:
     """Execute a non-finish tool call and return the model-visible output string.
 
     `on_run_command` lets the root agent override run_command rendering with
@@ -364,8 +396,8 @@ def dispatch_tool(
             return "[tool argument error: command must be a non-empty string]"
         try:
             head_chars, tail_chars = resolve_command_output_window(
-                args.get("head_chars", COMMAND_OUTPUT_UNSET),
-                args.get("tail_chars", COMMAND_OUTPUT_UNSET),
+                _optional_arg(args, "head_chars", COMMAND_OUTPUT_UNSET),
+                _optional_arg(args, "tail_chars", COMMAND_OUTPUT_UNSET),
                 config.get(
                     "max_tool_output_chars",
                     DEFAULT_CONFIG["max_tool_output_chars"],
@@ -443,6 +475,11 @@ def dispatch_tool(
         children = args.get("children")
         if not isinstance(children, list) or not children:
             return "[tool argument error: children must be a non-empty list]"
+        if len(children) > MAX_SPAWN_CHILDREN:
+            return (
+                "[tool argument error: children must contain at most "
+                f"{MAX_SPAWN_CHILDREN} entries]"
+            )
         try:
             results = spawn_batch(
                 node,
@@ -615,7 +652,7 @@ def run_subagent_loop(
                 item["provider_content"] = ri.provider_content
             new_input.append(item)
 
-        def append_tool_result(item, output: str) -> None:
+        def append_tool_result(item, output: ToolOutput) -> None:
             function_call = {
                 "type": "function_call",
                 "id": responses_input_id(str(item.id), "fc"),
@@ -741,6 +778,10 @@ def spawn_batch(
     retained_store: RetainedOutputStore | None = None,
 ) -> list[dict]:
     """Spawn N children in parallel, block until all finish, return status reports."""
+    if len(child_specs) > MAX_SPAWN_CHILDREN:
+        raise ValueError(
+            f"children must contain at most {MAX_SPAWN_CHILDREN} entries"
+        )
     new_depth = parent.depth + 1
     max_depth = int(config.get("max_subagent_depth", 4))
     if new_depth > max_depth:
@@ -755,20 +796,51 @@ def spawn_batch(
     for spec in child_specs:
         if not isinstance(spec, dict):
             raise ValueError(f"child spec must be an object, got {type(spec).__name__}")
+        extra_keys = set(spec) - {"label", "task", "sterile", "deps"}
+        if extra_keys:
+            keys = ", ".join(sorted(extra_keys))
+            raise ValueError(f"child spec contains unknown fields: {keys}")
         label = spec.get("label")
         task = spec.get("task")
         if not isinstance(label, str) or not label:
             raise ValueError("each child needs a non-empty 'label'")
+        if len(label) > MAX_SPAWN_LABEL_CHARS:
+            raise ValueError(
+                f"child label must be at most {MAX_SPAWN_LABEL_CHARS} characters"
+            )
         if label in seen_labels:
             raise ValueError(f"duplicate child label '{label}'")
         seen_labels.add(label)
         if not isinstance(task, str) or not task:
             raise ValueError(f"child '{label}' needs a non-empty 'task'")
-        sterile = bool(spec.get("sterile", True))
-        raw_deps = spec.get("deps") or []
+        if len(task) > MAX_SPAWN_TASK_CHARS:
+            raise ValueError(
+                f"child '{label}' task must be at most {MAX_SPAWN_TASK_CHARS} characters"
+            )
+        sterile_value = spec.get("sterile", True)
+        if sterile_value is None:
+            sterile_value = True
+        if not isinstance(sterile_value, bool):
+            raise ValueError(f"child '{label}' sterile must be a boolean")
+        sterile = sterile_value
+        raw_deps = spec.get("deps", [])
+        if raw_deps is None:
+            raw_deps = []
         if not isinstance(raw_deps, list):
             raise ValueError(f"child '{label}' deps must be a list")
-        valid_deps = {d for d in raw_deps if isinstance(d, str) and d in parent.visible_labels}
+        if len(raw_deps) > MAX_SPAWN_DEPS:
+            raise ValueError(
+                f"child '{label}' deps must contain at most {MAX_SPAWN_DEPS} entries"
+            )
+        invalid_deps = [
+            d for d in raw_deps
+            if not isinstance(d, str) or d not in parent.visible_labels
+        ]
+        if invalid_deps:
+            invalid = ", ".join(repr(d) for d in invalid_deps[:5])
+            suffix = "" if len(invalid_deps) <= 5 else ", ..."
+            raise ValueError(f"child '{label}' has invalid deps: {invalid}{suffix}")
+        valid_deps = set(raw_deps)
         nodes.append(AgentNode(
             label=label,
             depth=new_depth,

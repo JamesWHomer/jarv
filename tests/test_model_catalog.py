@@ -11,7 +11,12 @@ from jarv import model_catalog, settings_command, setup
 from jarv.anthropic_http import list_models as list_anthropic_models
 from jarv.config import DEFAULT_CONFIG
 from jarv.gemini_http import list_models as list_gemini_models
-from jarv.model_catalog import CatalogModel, get_default_model, recommend_models
+from jarv.model_catalog import (
+    CatalogModel,
+    get_default_model,
+    get_image_output_capability,
+    recommend_models,
+)
 
 
 def _models(*ids):
@@ -258,6 +263,98 @@ def test_openrouter_pricing_resolves_models_for_all_providers(tmp_path, monkeypa
         resolved = model_catalog.resolve_openrouter_model(provider, selected_model)
         assert resolved is not None
         assert resolved.id == expected
+
+
+def test_image_capability_uses_openrouter_input_modalities(tmp_path, monkeypatch):
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    model_catalog._write_cache("openrouter", [
+        CatalogModel(
+            id="openai/gpt-5.5",
+            metadata={"architecture": {"input_modalities": ["text", "image"]}},
+        ),
+        CatalogModel(
+            id="openai/gpt-5.4-mini",
+            metadata={"architecture": {"input_modalities": ["text"]}},
+        ),
+    ])
+
+    supported = get_image_output_capability({
+        "provider": "openai",
+        "model": "gpt-5.5",
+    })
+    unsupported = get_image_output_capability({
+        "provider": "openai",
+        "model": "gpt-5.4-mini",
+    })
+
+    assert supported.supported is True
+    assert supported.output_format == "responses"
+    assert unsupported.supported is False
+
+
+def test_image_capability_rejects_ambiguous_openrouter_routes(tmp_path, monkeypatch):
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    model_catalog._write_cache("openrouter", [
+        CatalogModel(
+            id="openrouter/auto",
+            metadata={"architecture": {"input_modalities": ["text", "image"]}},
+        ),
+    ])
+
+    capability = get_image_output_capability({
+        "provider": "openrouter",
+        "model": "openrouter/auto",
+    })
+
+    assert capability.supported is False
+    assert "ambiguous OpenRouter route" in capability.reason
+
+
+def test_image_capability_uses_anthropic_image_input_metadata(tmp_path, monkeypatch):
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    model_catalog._write_cache("anthropic", [
+        CatalogModel(
+            id="claude-sonnet-4-6",
+            metadata={"capabilities": {"image_input": {"supported": True}}},
+        ),
+    ])
+
+    capability = get_image_output_capability({
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6",
+    })
+
+    assert capability.supported is True
+    assert capability.output_format == "anthropic"
+
+
+def test_image_capability_allows_only_gemini_3_function_responses(tmp_path, monkeypatch):
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    supported = get_image_output_capability({
+        "provider": "gemini",
+        "model": "gemini-3-flash-preview",
+    })
+    unsupported = get_image_output_capability({
+        "provider": "gemini",
+        "model": "gemini-2.5-flash",
+    })
+
+    assert supported.supported is True
+    assert supported.output_format == "gemini"
+    assert unsupported.supported is False
+    assert "multimodal function responses" in unsupported.reason
+
+
+def test_image_capability_unknown_models_default_unsupported(tmp_path, monkeypatch):
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+
+    capability = get_image_output_capability({
+        "provider": "openai",
+        "model": "unknown-model",
+    })
+
+    assert capability.supported is False
+    assert "does not advertise image input capability" in capability.reason
 
 
 def test_model_picker_pricing_formats_rates(tmp_path, monkeypatch):

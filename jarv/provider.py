@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from typing import Any, Iterator
 
 from .provider_catalog import KEY_PATTERNS, LOCAL_PROVIDERS, PROVIDERS
+from .tool_schemas import strict_openai_tools
+from .tool_outputs import to_chat_tool_content
 from .unicode_safety import sanitize_json_value
 from .cancellation import CancellationToken, TurnCancelled
 from .http_transport import ProviderHTTPError
@@ -362,7 +364,7 @@ def _to_chat_messages(instructions: str, input_items: list) -> list[dict]:
                 messages.append({
                     "role": "tool",
                     "tool_call_id": fco["call_id"],
-                    "content": str(fco.get("output", "")),
+                    "content": to_chat_tool_content(fco.get("output")),
                 })
                 i += 1
 
@@ -382,7 +384,7 @@ def _to_chat_messages(instructions: str, input_items: list) -> list[dict]:
 def _to_chat_tools(tools: list) -> list:
     """Convert Responses API flat tool format to Chat Completions nested format."""
     result = []
-    for tool in tools:
+    for tool in strict_openai_tools(tools):
         if tool.get("type") == "function" and "name" in tool and "function" not in tool:
             result.append({
                 "type": "function",
@@ -390,6 +392,7 @@ def _to_chat_tools(tools: list) -> list:
                     "name": tool["name"],
                     "description": tool.get("description", ""),
                     "parameters": tool.get("parameters", {}),
+                    "strict": bool(tool.get("strict", True)),
                 },
             })
         else:

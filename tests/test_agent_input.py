@@ -256,6 +256,20 @@ class AgentInputTests(unittest.TestCase):
         })
         self.assertEqual(api_item["provider_content"], provider_content)
 
+    def test_function_call_output_preserves_structured_output(self):
+        output = [
+            {"type": "input_text", "text": "[READ RESULT]"},
+            {"type": "input_image", "image_url": "data:image/png;base64,QUJDRA=="},
+        ]
+
+        api_item = to_response_input_item({
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": output,
+        })
+
+        self.assertEqual(api_item["output"], output)
+
     def test_reasoning_id_is_shortened_for_responses_input(self):
         item = {
             "type": "reasoning",

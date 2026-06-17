@@ -10,12 +10,24 @@ from jarv.gemini_http import (
     stream_content,
     to_contents,
 )
+from jarv.orchestrator import RUN_COMMAND_TOOL
 from jarv.openai_http import (
     build_chat_payload,
     build_responses_payload,
     stream_chat,
     stream_response,
 )
+from jarv.provider import _to_chat_messages, _to_chat_tools
+
+
+IMAGE_TOOL_OUTPUT = [
+    {"type": "input_text", "text": "[READ RESULT]\nSource: local image"},
+    {
+        "type": "input_image",
+        "image_url": "data:image/png;base64,QUJDRA==",
+        "detail": "auto",
+    },
+]
 
 
 def _sse_response(events):
@@ -70,6 +82,78 @@ def test_openai_responses_sends_cache_key_and_parses_completed_event():
     assert events[-1]["response"]["usage"]["input_tokens_details"]["cached_tokens"] == 20
 
 
+def test_openai_responses_strictifies_tool_schema():
+    payload = build_responses_payload(
+        "model",
+        "system",
+        [RUN_COMMAND_TOOL],
+        [{"role": "user", "content": "hi"}],
+    )
+
+    tool = payload["tools"][0]
+    assert tool["strict"] is True
+    parameters = tool["parameters"]
+    assert parameters["additionalProperties"] is False
+    assert parameters["required"] == ["command", "head_chars", "tail_chars"]
+    assert parameters["properties"]["head_chars"]["type"] == ["integer", "null"]
+
+
+def test_openai_responses_preserves_structured_tool_output():
+    payload = build_responses_payload(
+        "model",
+        "system",
+        [],
+        [{
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": IMAGE_TOOL_OUTPUT,
+        }],
+    )
+
+    output = payload["input"][0]["output"]
+    assert output[0]["type"] == "input_text"
+    assert output[1]["type"] == "input_image"
+    assert output[1]["image_url"].startswith("data:image/png;base64,")
+
+
+def test_chat_tools_strictify_inside_function_wrapper():
+    tool = _to_chat_tools([RUN_COMMAND_TOOL])[0]["function"]
+
+    assert tool["strict"] is True
+    assert tool["parameters"]["additionalProperties"] is False
+    assert tool["parameters"]["required"] == ["command", "head_chars", "tail_chars"]
+
+
+def test_openai_compatible_chat_maps_structured_tool_output_to_content_parts():
+    messages = _to_chat_messages(
+        "system",
+        [
+            {
+                "type": "function_call",
+                "id": "call_1",
+                "call_id": "call_1",
+                "name": "read",
+                "arguments": "{}",
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": IMAGE_TOOL_OUTPUT,
+            },
+        ],
+    )
+
+    tool_message = messages[-1]
+    assert tool_message["role"] == "tool"
+    assert tool_message["content"] == [
+        {"type": "text", "text": "[READ RESULT]\nSource: local image"},
+        {
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,QUJDRA=="},
+        },
+    ]
+
+
 def test_openai_compatible_chat_parses_data_only_sse():
     def handler(_request):
         body = (
@@ -98,7 +182,7 @@ def test_gemini_history_replays_thought_signature_on_function_call():
             "name": "run",
             "arguments": "{}",
             "provider_content": [{
-                "functionCall": {"name": "run", "args": {}},
+                "functionCall": {"name": "run", "args": {}, "id": "gemini_call_1"},
                 "thoughtSignature": "signed",
             }],
         },
@@ -110,6 +194,51 @@ def test_gemini_history_replays_thought_signature_on_function_call():
     ])
     assert contents[1]["parts"][0]["thoughtSignature"] == "signed"
     assert contents[2]["parts"][0]["functionResponse"]["name"] == "run"
+    assert contents[2]["parts"][0]["functionResponse"]["id"] == "gemini_call_1"
+
+
+def test_gemini_maps_structured_tool_output_to_multimodal_function_response():
+    contents = to_contents([
+        {
+            "type": "function_call",
+            "id": "call_1",
+            "call_id": "call_1",
+            "name": "read",
+            "arguments": "{}",
+            "provider_content": [{
+                "functionCall": {"name": "read", "args": {}, "id": "gemini_call_1"},
+            }],
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": IMAGE_TOOL_OUTPUT,
+        },
+    ])
+
+    function_response = contents[-1]["parts"][0]["functionResponse"]
+    image_part = function_response["parts"][0]
+    assert function_response["name"] == "read"
+    assert function_response["id"] == "gemini_call_1"
+    assert function_response["response"]["images"]["$ref"] == image_part["displayName"]
+    assert image_part["inlineData"] == {
+        "mimeType": "image/png",
+        "data": "QUJDRA==",
+    }
+
+
+def test_gemini_tool_schema_strips_openai_only_keywords():
+    payload = build_gemini_payload(
+        {},
+        "gemini-test",
+        "system",
+        [RUN_COMMAND_TOOL],
+        [{"role": "user", "content": "hi"}],
+    )
+
+    parameters = payload["tools"][0]["functionDeclarations"][0]["parameters"]
+    assert "additionalProperties" not in parameters
+    assert "additionalProperties" not in parameters["properties"]["command"]
 
 
 def test_gemini_stream_and_usage_preserve_cached_and_thought_tokens():

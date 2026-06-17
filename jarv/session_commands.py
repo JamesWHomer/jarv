@@ -44,6 +44,7 @@ from .history import (
     set_terminal_session,
     utc_now,
 )
+from .tool_outputs import summarize_tool_output
 from .usage import usage_file_for
 
 ARCHIVE_DIR = CONFIG_DIR / "archive"
@@ -147,7 +148,7 @@ def _tool_call_output(history: list, call_index: int, call_id) -> str:
             item.get("type") == "function_call_output"
             and item.get("call_id") == call_id
         ):
-            return str(item.get("output", ""))
+            return summarize_tool_output(item.get("output", ""))
     return ""
 
 
