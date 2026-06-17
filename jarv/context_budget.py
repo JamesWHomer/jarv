@@ -48,7 +48,7 @@ def turn_input_token_budget(model: str, config: dict, instructions: str, tools: 
 
 
 def _to_api_item(stored_item: dict) -> dict | None:
-    from .agent import to_response_input_item
+    from .response_items import to_response_input_item
 
     return to_response_input_item(stored_item)
 

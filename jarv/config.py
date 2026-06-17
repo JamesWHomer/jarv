@@ -1,9 +1,7 @@
 import json
 import sys
-from pathlib import Path
 
-CONFIG_DIR = Path.home() / ".jarv"
-CONFIG_FILE = CONFIG_DIR / "config.json"
+from .paths import CONFIG_DIR, CONFIG_FILE
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are Jarv, a helpful CLI assistant. "
@@ -104,7 +102,8 @@ def load_config() -> dict:
 
 
 def is_setup_complete(config: dict | None = None) -> bool:
-    from .provider import LOCAL_PROVIDERS, resolve_api_key
+    from .provider_auth import resolve_api_key
+    from .provider_catalog import LOCAL_PROVIDERS
 
     if config is None:
         if CONFIG_FILE.exists():

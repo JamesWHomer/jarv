@@ -27,6 +27,7 @@ from .display import (
     terminal_size,
     tool_card,
 )
+from .tui_layout import append_bottom_footer, clip_text
 from .history import (
     SESSIONS_DIR,
     artifact_file_for,
@@ -575,13 +576,7 @@ def cmd_sessions(args: list | None = None) -> None:
     preview_cache: dict[tuple[str, int], list[Text]] = {}  # (sid, width) -> pre-built visual lines
 
     def _truncate(value: str, width: int) -> str:
-        if width <= 0:
-            return ""
-        if len(value) <= width:
-            return value
-        if width <= 3:
-            return value[:width]
-        return value[:width - 3] + "..."
+        return clip_text(value, width)
 
     def _content_rows(term_h: int, has_status: bool, show_footer: bool, has_search: bool = False) -> int:
         # Panel border = 2 rows. Header consumes 1 row. Footer = 2 rows (blank + controls).
@@ -769,12 +764,7 @@ def cmd_sessions(args: list | None = None) -> None:
         return preview_cache[cache_key]
 
     def _append_bottom_footer(parts: list, term_h: int, footer: Text) -> None:
-        footer_rows = 2  # spacer + controls
-        target_rows_before_footer = max(0, term_h - 2 - footer_rows)
-        while len(parts) < target_rows_before_footer:
-            parts.append(Text(""))
-        parts.append(Text(""))
-        parts.append(footer)
+        append_bottom_footer(parts, term_h, footer)
 
     def _render_preview() -> Panel:
         nonlocal preview_offset

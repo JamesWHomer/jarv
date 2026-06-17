@@ -44,13 +44,16 @@ from .provider import (
     RetryableStreamError,
     ReasoningDone,
     ReasoningStarted,
-    StreamDone,
     TextDelta,
     ToolCallDone,
     ToolCallStarted,
-    response_output_text,
-    responses_input_id,
     stream_response,
+)
+from .response_items import (
+    function_call_history_item,
+    function_call_output_item,
+    reasoning_history_item,
+    to_response_input_item,
 )
 from .orchestrator import (
     ASK_USER_TOOL,
@@ -82,6 +85,7 @@ from .retained_outputs import (
     save_retained_output_store,
 )
 from .tool_outputs import ToolOutput
+from .turn_loop import StreamCollection, collect_stream_response
 from .usage import (
     estimate_context_breakdown,
     format_cost,
@@ -488,46 +492,6 @@ def _print_agent_usage_if_enabled(config: dict, usage_path, session_id: str | No
     usage_line = _format_agent_usage_line(load_usage(usage_path, session_id, warn=False))
     if usage_line is not None:
         console.print(usage_line)
-
-
-def to_response_input_item(item: dict) -> dict | None:
-    """Convert one stored history item to a Responses API input item."""
-    role = item.get("role")
-    typ = item.get("type")
-    try:
-        if role == "user":
-            return {"role": "user", "content": str(item.get("content", ""))}
-        if role == "assistant":
-            return {"role": "assistant", "content": str(item.get("content") or "")}
-        if typ == "reasoning" and "id" in item:
-            result = {
-                "type": "reasoning",
-                "id": responses_input_id(str(item["id"]), "rs"),
-                "summary": item.get("summary", []),
-            }
-            if item.get("provider_content"):
-                result["provider_content"] = item["provider_content"]
-            return result
-        if typ == "function_call":
-            result = {
-                "type": "function_call",
-                "id": responses_input_id(str(item["id"]), "fc"),
-                "call_id": item["call_id"],
-                "name": item["name"],
-                "arguments": item["arguments"],
-            }
-            if item.get("provider_content"):
-                result["provider_content"] = item["provider_content"]
-            return result
-        if typ == "function_call_output":
-            return {
-                "type": "function_call_output",
-                "call_id": item["call_id"],
-                "output": item["output"],
-            }
-    except KeyError:
-        return None
-    return None
 
 
 def get_system_info() -> str:
@@ -1194,127 +1158,136 @@ def run_agent(
                 kwargs.get("input", []),
             )
 
-            stream_replays = 0
-            while True:
-                retry_stream = False
-                try:
-                    final_response = None
-                    for event in stream_response(
-                        client, config,
-                        kwargs["model"], kwargs["instructions"],
-                        kwargs["tools"], kwargs["input"],
-                        reasoning=kwargs.get("reasoning"),
-                        prompt_cache_key=f"jarv:{session_context.session_id}",
-                        cancellation_token=cancellation_token,
-                    ):
-                        if isinstance(event, TextDelta):
-                            if not got_text:
-                                got_text = True
-                                complete_tool_phase()
-                                complete_response_phase()
-                                if interactive:
-                                    _, term_h = terminal_size(console=console)
-                                    stream_max_lines = term_h - 2
-                                    stream_live = InPlaceLive(
-                                        TailMarkdown("", stream_max_lines),
-                                        console=console,
-                                        auto_refresh=False,
-                                        transient=True,
-                                        vertical_overflow="crop",
-                                    )
-                                    stream_live.start()
-                                    stream_preview = StreamingMarkdownPreview(
-                                        stream_live,
-                                        stream_max_lines,
-                                    )
-                            if stream_preview is not None:
-                                stream_preview.append(event.delta)
-                            else:
-                                reply_text += event.delta
-                        elif isinstance(event, ToolCallStarted):
-                            note_tool_call_started(
-                                event.id,
-                                event.call_id,
-                                event.name,
-                            )
-                        elif isinstance(event, ToolCallDone):
-                            note_tool_call_started(
-                                event.id,
-                                event.call_id,
-                                event.name,
-                            )
-                            tool_completed_at = time.perf_counter()
-                            tool_calls.append(event)
-                        elif isinstance(event, ReasoningStarted):
-                            saw_reasoning = True
-                            if wait_indicator is not None:
-                                wait_indicator.has_reasoning = True
-                                _refresh_wait_indicator()
-                        elif isinstance(event, ReasoningDone):
-                            saw_reasoning = True
-                            reasoning_items.append(event)
-                            if wait_indicator is not None:
-                                wait_indicator.has_reasoning = True
-                                _refresh_wait_indicator()
-                        elif isinstance(event, StreamDone):
-                            final_response = event.response
-                    if stream_preview is not None:
-                        reply_text = stream_preview.text
-                    final_text = response_output_text(final_response)
-                    if final_text and len(final_text) >= len(reply_text):
-                        reply_text = final_text
+            def make_stream():
+                return stream_response(
+                    client, config,
+                    kwargs["model"], kwargs["instructions"],
+                    kwargs["tools"], kwargs["input"],
+                    reasoning=kwargs.get("reasoning"),
+                    prompt_cache_key=f"jarv:{session_context.session_id}",
+                    cancellation_token=cancellation_token,
+                )
+
+            def on_stream_event(event, _result: StreamCollection) -> None:
+                nonlocal reply_text, got_text, saw_reasoning, stream_live, stream_preview
+                nonlocal tool_completed_at
+                if isinstance(event, TextDelta):
+                    if not got_text:
                         got_text = True
-                        if stream_preview is not None:
-                            stream_preview.replace(final_text)
-                    if not incognito:
-                        record_response_usage(
-                            usage_path,
-                            session_context.session_id,
-                            config["model"],
-                            final_response,
-                            "root",
-                            provider=str(config.get("provider") or "openai"),
-                            requested_service_tier=configured_service_tier(config),
-                            context_breakdown=_ctx_breakdown,
-                            output_text=reply_text or "\n".join(
-                                f"{item.name} {item.arguments}" for item in tool_calls
-                            ),
-                        )
-                except RetryableStreamError:
-                    retry_stream = stream_replays == 0
-                    reply_text = ""
-                    tool_calls = []
-                    reasoning_items = []
-                    saw_reasoning = False
-                    got_text = False
-                    started_tool_positions = {}
-                    started_tool_names = []
-                    tool_started_at = None
-                    tool_completed_at = None
-                    response_phase_completed = False
-                    tool_phase_completed = False
-                    stream_preview = None
-                    tool_indicator = None
-                    wait_indicator = None
-                    if not retry_stream:
-                        raise
-                    stream_replays += 1
-                finally:
+                        complete_tool_phase()
+                        complete_response_phase()
+                        if interactive:
+                            _, term_h = terminal_size(console=console)
+                            stream_max_lines = term_h - 2
+                            stream_live = InPlaceLive(
+                                TailMarkdown("", stream_max_lines),
+                                console=console,
+                                auto_refresh=False,
+                                transient=True,
+                                vertical_overflow="crop",
+                            )
+                            stream_live.start()
+                            stream_preview = StreamingMarkdownPreview(
+                                stream_live,
+                                stream_max_lines,
+                            )
                     if stream_preview is not None:
-                        reply_text = stream_preview.text
-                        stream_preview.flush(refresh=False)
-                    if spinner_live is not None:
-                        spinner_live.stop()
-                        spinner_live = None
-                    if stream_live is not None:
-                        stream_live.stop()
-                        stream_live = None
-                if not retry_stream:
-                    break
+                        stream_preview.append(event.delta)
+                    else:
+                        reply_text += event.delta
+                elif isinstance(event, ToolCallStarted):
+                    note_tool_call_started(
+                        event.id,
+                        event.call_id,
+                        event.name,
+                    )
+                elif isinstance(event, ToolCallDone):
+                    note_tool_call_started(
+                        event.id,
+                        event.call_id,
+                        event.name,
+                    )
+                    tool_completed_at = time.perf_counter()
+                elif isinstance(event, ReasoningStarted):
+                    saw_reasoning = True
+                    if wait_indicator is not None:
+                        wait_indicator.has_reasoning = True
+                        _refresh_wait_indicator()
+                elif isinstance(event, ReasoningDone):
+                    saw_reasoning = True
+                    if wait_indicator is not None:
+                        wait_indicator.has_reasoning = True
+                        _refresh_wait_indicator()
+
+            def on_stream_attempt_end(
+                result: StreamCollection,
+                _retry_stream: bool,
+            ) -> None:
+                nonlocal reply_text, spinner_live, stream_live, stream_preview
+                if result.final_text and stream_preview is not None:
+                    stream_preview.replace(result.final_text)
+                if stream_preview is not None:
+                    result.reply_text = stream_preview.text
+                    stream_preview.flush(refresh=False)
+                reply_text = result.reply_text
+                if spinner_live is not None:
+                    spinner_live.stop()
+                    spinner_live = None
+                if stream_live is not None:
+                    stream_live.stop()
+                    stream_live = None
+
+            def on_stream_retry() -> None:
+                nonlocal reply_text, tool_calls, reasoning_items, saw_reasoning
+                nonlocal got_text, started_tool_positions, started_tool_names
+                nonlocal tool_started_at, tool_completed_at, spinner_live
+                nonlocal response_phase_completed, tool_phase_completed
+                nonlocal stream_preview, tool_indicator, wait_indicator, thought_started
+                reply_text = ""
+                tool_calls = []
+                reasoning_items = []
+                saw_reasoning = False
+                got_text = False
+                started_tool_positions = {}
+                started_tool_names = []
+                tool_started_at = None
+                tool_completed_at = None
+                response_phase_completed = False
+                tool_phase_completed = False
+                stream_preview = None
+                tool_indicator = None
+                wait_indicator = None
                 thought_started = time.perf_counter()
                 wait_indicator, spinner_live = _start_response_wait_indicator(
                     interactive,
                     thought_started,
+                )
+
+            stream_result = collect_stream_response(
+                make_stream,
+                on_event=on_stream_event,
+                on_attempt_end=on_stream_attempt_end,
+                on_retry=on_stream_retry,
+            )
+            reply_text = stream_result.reply_text
+            tool_calls = stream_result.tool_calls
+            reasoning_items = stream_result.reasoning_items
+            saw_reasoning = stream_result.saw_reasoning
+            got_text = stream_result.got_text
+            final_response = stream_result.final_response
+            if not incognito:
+                record_response_usage(
+                    usage_path,
+                    session_context.session_id,
+                    config["model"],
+                    final_response,
+                    "root",
+                    provider=str(config.get("provider") or "openai"),
+                    requested_service_tier=configured_service_tier(config),
+                    context_breakdown=_ctx_breakdown,
+                    output_text=reply_text or "\n".join(
+                        f"{item.name} {item.arguments}" for item in tool_calls
+                    ),
                 )
             complete_tool_phase()
             complete_response_phase()
@@ -1332,31 +1305,15 @@ def run_agent(
                     console.print()
                 new_input_items = []
                 for ri in reasoning_items:
-                    rd = {"type": "reasoning", "id": ri.id, "summary": [], **metadata}
-                    if ri.provider_content:
-                        rd["provider_content"] = ri.provider_content
+                    rd = reasoning_history_item(ri, metadata)
                     history.append(rd)
                     api_item = to_response_input_item(rd)
                     if api_item is not None:
                         new_input_items.append(api_item)
                 def append_tool_result(item, output: ToolOutput) -> None:
                     nonlocal active_tool_call
-                    fc = {
-                        "type": "function_call",
-                        "id": item.id,
-                        "call_id": item.call_id,
-                        "name": item.name,
-                        "arguments": item.arguments,
-                        **metadata,
-                    }
-                    if item.provider_content:
-                        fc["provider_content"] = item.provider_content
-                    fco = {
-                        "type": "function_call_output",
-                        "call_id": item.call_id,
-                        "output": output,
-                        **metadata,
-                    }
+                    fc = function_call_history_item(item, metadata)
+                    fco = function_call_output_item(item.call_id, output, metadata)
                     history.extend([fc, fco])
                     active_tool_call = None
                     for stored_item in (fc, fco):

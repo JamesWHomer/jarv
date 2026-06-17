@@ -17,13 +17,16 @@ from .command_input import TextInput, _read_key_with_repeats, mouse_capture
 from .config import (
     CONFIG_FILE,
     DEFAULT_CONFIG,
-    READ_ONLY_COMMAND_DISPLAY_CHOICES,
-    TOOL_CALL_DISPLAY_CHOICES,
-    TOOL_NAMES,
     load_config,
     save_config,
 )
 from .display import console, jarv_panel, refresh_on_resize, section_rule, terminal_size
+from .settings_schema import (
+    settings_rows,
+    settings_service_tier_choices,
+    settings_service_tier_description,
+)
+from .tui_layout import append_bottom_footer, clip_text
 from .text_editor import (
     apply_text_editor_key,
     initialize_text_editor,
@@ -122,35 +125,8 @@ class _ModelCatalogRefresher:
             timer.cancel()
 
 
-_SETTINGS_SAFETY_CHOICES = (
-    ("risky", "flag risky"),
-    ("all", "confirm all"),
-    ("none", "no prompts"),
-)
-
-_SETTINGS_READ_ONLY_DISPLAY_CHOICES = (
-    ("fullscreen", "fullscreen"),
-    ("print", "print"),
-)
-
-_SETTINGS_TOOL_CALL_DISPLAY_CHOICES = tuple(
-    (value, value) for value in TOOL_CALL_DISPLAY_CHOICES
-)
-
-_SETTINGS_TOOL_LABELS = {
-    "run_command": ("Run commands", "execute shell commands"),
-    "web_search": ("Web search", "search the web"),
-    "read": ("Read", "read files, URLs, artifacts, and retained output"),
-    "spawn": ("Subagents", "fan out work to parallel subagents"),
-    "ask_user": ("Ask user", "pause to request clarification"),
-}
-
-
 def _settings_service_tier_choices(config: dict) -> tuple[tuple[str, str], ...]:
-    from .provider_catalog import service_tier_choices
-
-    provider = str(config.get("provider", "openai"))
-    return tuple((tier, tier) for tier in service_tier_choices(provider))
+    return settings_service_tier_choices(config)
 
 
 def _settings_service_tier(config: dict) -> str:
@@ -160,12 +136,7 @@ def _settings_service_tier(config: dict) -> str:
 
 
 def _settings_service_tier_description(config: dict) -> str:
-    provider = str(config.get("provider", "openai"))
-    if provider == "anthropic":
-        return "priority uses committed capacity, then falls back to standard"
-    if len(_settings_service_tier_choices(config)) == 1:
-        return "this provider uses standard processing"
-    return "standard cost, flex savings, or priority latency"
+    return settings_service_tier_description(config)
 
 
 def _settings_set_service_tier(config: dict, tier: str) -> None:
@@ -177,13 +148,7 @@ def _settings_set_service_tier(config: dict, tier: str) -> None:
 
 
 def _clip_text(value: str, width: int) -> str:
-    if width <= 0:
-        return ""
-    if len(value) <= width:
-        return value
-    if width <= 1:
-        return value[:width]
-    return value[: width - 1] + "\u2026"
+    return clip_text(value, width, ellipsis="\u2026")
 
 
 def _settings_choice_label(value, choices: tuple[tuple[str, str], ...]) -> str:
@@ -206,192 +171,7 @@ def _settings_has_api_key(config: dict) -> tuple[bool, str]:
 
 
 def _settings_rows(config: dict) -> list[dict]:
-    from .reasoning import reasoning_effort_choices, reasoning_effort_description
-
-    rows = [
-        {
-            "section": "account",
-            "label": "Provider",
-            "key": "provider",
-            "kind": "setup",
-            "step": "provider",
-            "desc": "choose an API provider",
-        },
-        {
-            "section": "account",
-            "label": "API key",
-            "key": "api_key",
-            "kind": "setup",
-            "step": "key",
-            "desc": "store or replace the active provider key",
-        },
-        {
-            "section": "account",
-            "label": "Base URL",
-            "key": "base_url",
-            "kind": "text",
-            "empty": "provider default",
-            "desc": "optional custom endpoint",
-        },
-        {
-            "section": "behaviour",
-            "label": "Model",
-            "key": "model",
-            "kind": "setup",
-            "step": "model",
-            "desc": "pick from the provider presets or enter a model",
-        },
-        {
-            "section": "behaviour",
-            "label": "Reasoning effort",
-            "key": "reasoning_effort",
-            "kind": "choice",
-            "choices": reasoning_effort_choices(config),
-            "desc": reasoning_effort_description(config),
-        },
-        {
-            "section": "behaviour",
-            "label": "System prompt",
-            "key": "system_prompt",
-            "kind": "text",
-            "multiline": True,
-            "desc": "instructions sent before each request",
-        },
-        {
-            "section": "display",
-            "label": "Read-only commands",
-            "key": "read_only_command_display",
-            "kind": "choice",
-            "choices": _SETTINGS_READ_ONLY_DISPLAY_CHOICES,
-            "desc": "fullscreen temporary view or permanent print output",
-        },
-        {
-            "section": "display",
-            "label": "Tool calls",
-            "key": "tool_call_display",
-            "kind": "choice",
-            "choices": _SETTINGS_TOOL_CALL_DISPLAY_CHOICES,
-            "desc": "resize-safe print layout or bordered fullscreen cards",
-        },
-        {
-            "section": "display",
-            "label": "Print usage",
-            "key": "print_usage_after_agent",
-            "kind": "bool",
-            "desc": "print token totals after completed agent runs",
-        },
-        {
-            "section": "command review",
-            "label": "Command safety",
-            "key": "command_safety",
-            "kind": "choice",
-            "choices": _SETTINGS_SAFETY_CHOICES,
-            "desc": "default: flag only risky commands",
-        },
-        {
-            "section": "command review",
-            "label": "Auditor",
-            "key": "audit",
-            "kind": "bool",
-            "desc": "LLM reviews flagged commands first",
-        },
-        {
-            "section": "command review",
-            "label": "Audit auto-accept",
-            "key": "auditor_auto_approve",
-            "kind": "bool",
-            "desc": "auto-run commands the auditor marks safe",
-        },
-        {
-            "section": "command review",
-            "label": "Auditor model",
-            "key": "auditor_model",
-            "kind": "text",
-            "empty": "auto",
-            "desc": "empty uses the active model",
-        },
-        {
-            "section": "runtime",
-            "label": "Command timeout",
-            "key": "command_timeout",
-            "kind": "int",
-            "desc": "seconds before shell commands are killed",
-        },
-        {
-            "section": "runtime",
-            "label": "Web timeout",
-            "key": "web_timeout",
-            "kind": "int",
-            "desc": "seconds before web requests are cancelled",
-        },
-        {
-            "section": "runtime",
-            "label": "History limit",
-            "key": "max_history",
-            "kind": "int",
-            "desc": "recent stored items sent as context",
-        },
-        {
-            "section": "runtime",
-            "label": "Stdin limit",
-            "key": "max_stdin_chars",
-            "kind": "int",
-            "desc": "piped stdin chars attached to one-shot prompts",
-        },
-        {
-            "section": "runtime",
-            "label": "Tool output limit",
-            "key": "max_tool_output_chars",
-            "kind": "int",
-            "desc": "tool output chars returned to the model",
-        },
-        *[
-            {
-                "section": "tools",
-                "label": _SETTINGS_TOOL_LABELS[name][0],
-                "key": f"tool:{name}",
-                "tool_name": name,
-                "kind": "tool_bool",
-                "desc": _SETTINGS_TOOL_LABELS[name][1],
-            }
-            for name in TOOL_NAMES
-        ],
-        {
-            "section": "subagents",
-            "label": "Max depth",
-            "key": "max_subagent_depth",
-            "kind": "int",
-            "desc": "maximum nested spawn depth",
-        },
-        {
-            "section": "subagents",
-            "label": "Parallel workers",
-            "key": "subagent_thread_pool_max_workers",
-            "kind": "int",
-            "desc": "subagents per spawn batch",
-        },
-        {
-            "section": "updates",
-            "label": "Update checks",
-            "key": "check_updates",
-            "kind": "bool",
-            "desc": "background check on one-shot runs",
-        },
-    ]
-    tier_choices = _settings_service_tier_choices(config)
-    if len(tier_choices) > 1:
-        rows.insert(
-            2,
-            {
-                "section": "account",
-                "label": "Processing tier",
-                "key": "service_tier",
-                "kind": "choice",
-                "choices": tier_choices,
-                "desc": _settings_service_tier_description(config),
-            },
-        )
-    return rows
+    return settings_rows(config)
 
 
 def _settings_value_text(row: dict, config: dict, *, selected: bool = False) -> Text:
@@ -1861,14 +1641,7 @@ def _settings_interactive(config: dict) -> None:
         return "\u2191\u2193 select   Enter edit/toggle   r reset   q exit"
 
     def _append_bottom_footer(parts: list, height: int, footer: Text) -> None:
-        footer_rows = 2  # spacer + controls
-        target_rows_before_footer = max(0, height - 2 - footer_rows)
-        if len(parts) > target_rows_before_footer:
-            del parts[target_rows_before_footer:]
-        while len(parts) < target_rows_before_footer:
-            parts.append(Text(""))
-        parts.append(Text(""))
-        parts.append(footer)
+        append_bottom_footer(parts, height, footer, crop=True)
 
     def _settings_rendered_row_count(start: int, end: int) -> int:
         line_count = 0

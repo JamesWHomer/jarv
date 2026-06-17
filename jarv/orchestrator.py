@@ -21,13 +21,14 @@ from .anthropic_http import DEFAULT_SUBAGENT_MAX_TOKENS
 from .provider import (
     ProviderError,
     RetryableStreamError,
-    StreamDone,
-    TextDelta,
-    ToolCallDone,
-    ReasoningDone,
     get_backend,
-    responses_input_id,
     stream_response,
+)
+from .response_items import (
+    function_call_history_item,
+    function_call_output_item,
+    reasoning_history_item,
+    to_response_input_item,
 )
 from .provider_catalog import configured_service_tier
 from .read_tool import (
@@ -44,6 +45,7 @@ from .shell import (
     truncate_model_output,
 )
 from .tool_outputs import ToolOutput
+from .turn_loop import collect_stream_response
 from .usage import estimate_context_breakdown, record_response_usage
 from .web import WEB_SEARCH_TOOL, dispatch_web_tool
 
@@ -566,53 +568,46 @@ def run_subagent_loop(
             kwargs["tools"],
             kwargs["input"],
         )
-        stream_replays = 0
-        while True:
-            tool_calls: list = []
-            reasoning_items: list = []
-            try:
-                final_response = None
-                for event in stream_response(
-                    client, config,
-                    kwargs["model"], kwargs["instructions"],
-                    kwargs["tools"], kwargs["input"],
-                    reasoning=kwargs.get("reasoning"),
-                    prompt_cache_key=f"jarv:{node.session_id}" if node.session_id else None,
-                    max_tokens=max_tokens,
-                    cancellation_token=cancellation_token,
-                ):
-                    if isinstance(event, ToolCallDone):
-                        tool_calls.append(event)
-                    elif isinstance(event, ReasoningDone):
-                        reasoning_items.append(event)
-                    elif isinstance(event, StreamDone):
-                        final_response = event.response
-                if not node.incognito:
-                    record_response_usage(
-                        node.usage_path,
-                        node.session_id,
-                        config["model"],
-                        final_response,
-                        "subagent",
-                        provider=str(config.get("provider") or "openai"),
-                        requested_service_tier=configured_service_tier(config),
-                        context_breakdown=context_breakdown,
-                        output_text="\n".join(
-                            f"{item.name} {item.arguments}"
-                            for item in tool_calls
-                        ),
-                    )
-                break
-            except RetryableStreamError as e:
-                if stream_replays >= 1:
-                    return None, f"provider error: {e}"
-                stream_replays += 1
-            except ProviderError as e:
-                return None, f"provider error: {e}"
-            except TurnCancelled:
-                raise
-            except Exception as e:
-                return None, f"stream error: {e}"
+
+        def make_stream():
+            return stream_response(
+                client, config,
+                kwargs["model"], kwargs["instructions"],
+                kwargs["tools"], kwargs["input"],
+                reasoning=kwargs.get("reasoning"),
+                prompt_cache_key=f"jarv:{node.session_id}" if node.session_id else None,
+                max_tokens=max_tokens,
+                cancellation_token=cancellation_token,
+            )
+
+        try:
+            stream_result = collect_stream_response(make_stream)
+            tool_calls = stream_result.tool_calls
+            reasoning_items = stream_result.reasoning_items
+            final_response = stream_result.final_response
+            if not node.incognito:
+                record_response_usage(
+                    node.usage_path,
+                    node.session_id,
+                    config["model"],
+                    final_response,
+                    "subagent",
+                    provider=str(config.get("provider") or "openai"),
+                    requested_service_tier=configured_service_tier(config),
+                    context_breakdown=context_breakdown,
+                    output_text="\n".join(
+                        f"{item.name} {item.arguments}"
+                        for item in tool_calls
+                    ),
+                )
+        except RetryableStreamError as e:
+            return None, f"provider error: {e}"
+        except ProviderError as e:
+            return None, f"provider error: {e}"
+        except TurnCancelled:
+            raise
+        except Exception as e:
+            return None, f"stream error: {e}"
 
         if not tool_calls:
             if not finish_nudge_sent:
@@ -643,31 +638,18 @@ def run_subagent_loop(
 
         new_input: list[dict] = []
         for ri in reasoning_items:
-            item = {
-                "type": "reasoning",
-                "id": responses_input_id(str(ri.id), "rs"),
-                "summary": [],
-            }
-            if ri.provider_content:
-                item["provider_content"] = ri.provider_content
-            new_input.append(item)
+            api_item = to_response_input_item(reasoning_history_item(ri))
+            if api_item is not None:
+                new_input.append(api_item)
 
         def append_tool_result(item, output: ToolOutput) -> None:
-            function_call = {
-                "type": "function_call",
-                "id": responses_input_id(str(item.id), "fc"),
-                "call_id": item.call_id,
-                "name": item.name,
-                "arguments": item.arguments,
-            }
-            if item.provider_content:
-                function_call["provider_content"] = item.provider_content
-            new_input.append(function_call)
-            new_input.append({
-                "type": "function_call_output",
-                "call_id": item.call_id,
-                "output": output,
-            })
+            for stored_item in (
+                function_call_history_item(item),
+                function_call_output_item(item.call_id, output),
+            ):
+                api_item = to_response_input_item(stored_item)
+                if api_item is not None:
+                    new_input.append(api_item)
 
         item_index = 0
         while item_index < len(tool_calls):

@@ -5,8 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .config import CONFIG_DIR
 from .display import console
+from .paths import CONFIG_DIR
 from .unicode_safety import sanitize_json_value
 
 SESSIONS_FILE = CONFIG_DIR / "sessions.json"

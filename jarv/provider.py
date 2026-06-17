@@ -1,7 +1,5 @@
 """Multi-provider abstraction layer over direct HTTP transports."""
 
-import hashlib
-import os
 import queue
 import sys
 import threading
@@ -11,6 +9,8 @@ from dataclasses import dataclass
 from typing import Any, Iterator
 
 from .provider_catalog import KEY_PATTERNS, LOCAL_PROVIDERS, PROVIDERS
+from .provider_auth import resolve_api_key
+from .response_items import responses_input_id
 from .tool_schemas import strict_openai_tools
 from .tool_outputs import to_chat_tool_content
 from .unicode_safety import sanitize_json_value
@@ -84,16 +84,6 @@ def _sleep_for_openai_recovery(
         if remaining <= 0:
             return
         time.sleep(min(remaining, 0.05))
-
-
-def responses_input_id(item_id: str, prefix: str) -> str:
-    """Return an id that is valid for Responses API input items."""
-    valid_prefix = f"{prefix}_"
-    if item_id.startswith(valid_prefix) and len(item_id) <= 64:
-        return item_id
-    digest_len = 64 - len(valid_prefix)
-    digest = hashlib.sha256(item_id.encode("utf-8")).hexdigest()[:digest_len]
-    return f"{valid_prefix}{digest}"
 
 
 def _value(obj: Any, key: str) -> Any:
@@ -268,26 +258,6 @@ def _events_from_recovered_response(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def resolve_api_key(config: dict) -> str:
-    provider_name = config.get("provider", "openai")
-    # Per-provider key takes priority
-    per_provider = config.get("api_keys", {}).get(provider_name, "")
-    if per_provider:
-        return per_provider
-    # Legacy flat key
-    key = config.get("api_key", "")
-    if key:
-        return key
-    # Environment variable
-    info = PROVIDERS.get(provider_name, {})
-    env_key = info.get("env_key")
-    if env_key:
-        return os.environ.get(env_key, "")
-    if provider_name in LOCAL_PROVIDERS:
-        return "not-needed"
-    return ""
-
 
 def get_backend(config: dict) -> str:
     provider_name = config.get("provider", "openai")

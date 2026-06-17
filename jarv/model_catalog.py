@@ -13,7 +13,8 @@ from typing import Any, Callable
 
 import httpx
 
-from .config import CONFIG_DIR
+from .paths import CONFIG_DIR
+from .provider_auth import resolve_api_key
 from .provider_catalog import FALLBACK_PROVIDER_MODELS, LOCAL_PROVIDERS, PROVIDERS
 
 
@@ -194,7 +195,7 @@ def _normalize_gemini_models(payload: dict) -> list[CatalogModel]:
 
 def discover_models(config: dict) -> list[CatalogModel]:
     """Fetch and normalize the current provider's visible model catalog."""
-    from .provider import create_client, get_backend, resolve_api_key
+    from .provider import create_client, get_backend
 
     provider = str(config.get("provider", "openai"))
     if provider not in LOCAL_PROVIDERS and not resolve_api_key(config):
