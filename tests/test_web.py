@@ -250,8 +250,8 @@ def test_fetch_web_rejects_binary_and_oversized_responses(monkeypatch):
     responses = [
         httpx.Response(
             200,
-            headers={"content-type": "application/pdf"},
-            content=b"%PDF",
+            headers={"content-type": "application/octet-stream"},
+            content=b"\x00binary",
         ),
         httpx.Response(
             200,
@@ -272,7 +272,7 @@ def test_fetch_web_rejects_binary_and_oversized_responses(monkeypatch):
     )
 
     with pytest.raises(WebToolError, match="unsupported non-text"):
-        fetch_web("https://example.test/file.pdf", timeout=5)
+        fetch_web("https://example.test/file.bin", timeout=5)
     assert "exceeds" in dispatch_read_tool(
         {"input": "https://example.test/large"},
         visible_labels=set(),

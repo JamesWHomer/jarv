@@ -17,6 +17,7 @@ from .config import DEFAULT_CONFIG
 
 
 DUCKDUCKGO_HTML_URL = "https://html.duckduckgo.com/html/"
+PDF_MAGIC = b"%PDF-"
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_REDIRECTS = 5
 DEFAULT_SEARCH_RESULTS = 5
@@ -456,10 +457,14 @@ def _request_bytes(
                     raise WebToolError(message)
 
                 content_type = response.headers.get("content-type", "")
+                media_type = _media_type(content_type)
                 effective_max_bytes = max_response_bytes
                 if (
                     max_response_bytes > MAX_RESPONSE_BYTES
-                    and _is_textual_media_type(_media_type(content_type))
+                    and (
+                        _is_textual_media_type(media_type)
+                        or _is_pdf_media_type(media_type)
+                    )
                 ):
                     effective_max_bytes = MAX_RESPONSE_BYTES
 
@@ -476,6 +481,7 @@ def _request_bytes(
 
                 chunks: list[bytes] = []
                 size = 0
+                prefix = b""
                 for chunk in response.iter_bytes():
                     if cancellation_token is not None:
                         cancellation_token.throw_if_cancelled()
@@ -485,6 +491,17 @@ def _request_bytes(
                             f"response exceeds {effective_max_bytes} byte limit"
                         )
                     chunks.append(chunk)
+                    if (
+                        effective_max_bytes > MAX_RESPONSE_BYTES
+                        and len(prefix) < len(PDF_MAGIC)
+                    ):
+                        prefix = (prefix + chunk)[: len(PDF_MAGIC)]
+                        if len(prefix) == len(PDF_MAGIC) and prefix == PDF_MAGIC:
+                            effective_max_bytes = MAX_RESPONSE_BYTES
+                            if size > effective_max_bytes:
+                                raise WebToolError(
+                                    f"response exceeds {effective_max_bytes} byte limit"
+                                )
                 return str(response.url), content_type, b"".join(chunks)
         raise WebToolError(f"too many redirects (maximum {MAX_REDIRECTS})")
     except httpx.TimeoutException as exc:
@@ -527,6 +544,10 @@ def _is_textual_media_type(media_type: str) -> bool:
         or media_type.endswith("+json")
         or media_type.endswith("+xml")
     )
+
+
+def _is_pdf_media_type(media_type: str) -> bool:
+    return media_type == "application/pdf"
 
 
 def search_web(

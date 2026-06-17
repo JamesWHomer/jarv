@@ -245,7 +245,7 @@ Run `jarv` with no prompt to start an interactive session. Type a prompt and pre
 ## Tools and shell commands
 
 - The root model can see five tools: `run_command`, `web_search`, `read`, `spawn`, and `ask_user`. The enabled subset is controlled from `/settings`.
-- `read(input, offset, size)` pages through retained command output, visible artifacts, HTTP(S) URLs, and local text files using Unicode character offsets. Consecutive reads run concurrently.
+- `read(input, offset, size)` pages through retained command output, visible artifacts, HTTP(S) URLs, local text files, and embedded-text PDFs using Unicode character offsets. Consecutive reads run concurrently.
 - Direct local and HTTP(S) image reads (`png`, `jpeg`, `webp`, plus provider-supported `gif`) are returned as native image input when the active model advertises image capability in Jarv's cached provider/OpenRouter catalog. Image reads ignore `offset` and `size`, are capped at 10 MiB, and fall back to a text "no image capability" result when the selected model route is text-only or unknown.
 - `web_search` supports any positive result count and a non-negative result offset. URL reads preserve HTTP(S) links as absolute URLs.
 - Spawned subagents also get a mandatory `finish` tool (to return output) and may get `spawn` when the parent sets `sterile: false`.
@@ -255,7 +255,7 @@ Run `jarv` with no prompt to start an interactive session. Type a prompt and pre
 - On other platforms, `run_command` uses the system shell.
 - Command output shown in the terminal uses at most one-third of the screen height, biased roughly 2:1 toward the first lines, with the omitted middle count displayed. The UI also shows the resolved `head_chars` and `tail_chars` returned to the model. Truncated model output is retained under a session-scoped ID for later `read` calls.
 - Commands are killed after `command_timeout` seconds.
-- Web requests are killed after `web_timeout` seconds and responses are limited to 2 MiB.
+- Web requests are killed after `web_timeout` seconds. Text and PDF responses are limited to 2 MiB.
 - Interrupted commands/process trees are terminated when possible.
 
 ## Config

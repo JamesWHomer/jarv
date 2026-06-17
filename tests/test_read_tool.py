@@ -1,3 +1,6 @@
+import subprocess
+import sys
+import textwrap
 import time
 from pathlib import Path
 
@@ -26,6 +29,69 @@ PNG_BYTES = b"\x89PNG\r\n\x1a\npngdata"
 WEBP_BYTES = b"RIFF\x00\x00\x00\x00WEBPwebpdata"
 
 
+def _escape_pdf_text(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _minimal_pdf(pages: list[str]) -> bytes:
+    kids = " ".join(f"{4 + index * 2} 0 R" for index in range(len(pages)))
+    objects: list[tuple[int, bytes]] = [
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>"),
+        (
+            2,
+            f"<< /Type /Pages /Kids [{kids}] /Count {len(pages)} >>".encode(
+                "ascii"
+            ),
+        ),
+        (3, b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"),
+    ]
+    for index, text in enumerate(pages):
+        page_id = 4 + index * 2
+        content_id = page_id + 1
+        stream = (
+            f"BT /F1 12 Tf 72 720 Td ({_escape_pdf_text(text)}) Tj ET"
+        ).encode("ascii")
+        objects.append(
+            (
+                page_id,
+                (
+                    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+                    f"/Resources << /Font << /F1 3 0 R >> >> /Contents {content_id} 0 R >>"
+                ).encode("ascii"),
+            )
+        )
+        objects.append(
+            (
+                content_id,
+                b"<< /Length "
+                + str(len(stream)).encode("ascii")
+                + b" >>\nstream\n"
+                + stream
+                + b"\nendstream",
+            )
+        )
+
+    pdf = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for object_id, content in objects:
+        offsets.append(len(pdf))
+        pdf.extend(f"{object_id} 0 obj\n".encode("ascii"))
+        pdf.extend(content)
+        pdf.extend(b"\nendobj\n")
+    xref_offset = len(pdf)
+    pdf.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    pdf.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        pdf.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    pdf.extend(
+        (
+            f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+            f"startxref\n{xref_offset}\n%%EOF\n"
+        ).encode("ascii")
+    )
+    return bytes(pdf)
+
+
 def _read(args, *, artifacts=None, retained=None, visible=None, config=None):
     return dispatch_read_tool(
         args,
@@ -37,6 +103,7 @@ def _read(args, *, artifacts=None, retained=None, visible=None, config=None):
 
 
 def test_read_schema_exposes_input_offset_and_size():
+    assert "PDFs with embedded text" in READ_TOOL["description"]
     assert "image-capable models" in READ_TOOL["description"]
     assert "image reads" in READ_TOOL["description"]
     parameters = READ_TOOL["parameters"]
@@ -169,6 +236,183 @@ def test_read_local_relative_file_and_replaces_invalid_utf8(tmp_path, monkeypatc
 
     assert "Source: local file" in output
     assert output.endswith("c\ufffdd")
+
+
+def test_read_tool_import_and_text_read_do_not_import_pypdf():
+    script = textwrap.dedent(
+        """
+        import sys
+        import tempfile
+        from pathlib import Path
+
+        import jarv.read_tool as read_tool
+        from jarv.artifacts import ArtifactStore
+        from jarv.config import DEFAULT_CONFIG
+        from jarv.retained_outputs import RetainedOutputStore
+
+        print("after_import=" + str("pypdf" in sys.modules))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "plain.txt"
+            path.write_text("plain text", encoding="utf-8")
+            read_tool.dispatch_read_tool(
+                {"input": str(path)},
+                visible_labels=set(),
+                artifact_store=ArtifactStore(),
+                retained_store=RetainedOutputStore(),
+                config=DEFAULT_CONFIG,
+            )
+        print("after_text_read=" + str("pypdf" in sys.modules))
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    )
+
+    assert result.stdout.splitlines() == [
+        "after_import=False",
+        "after_text_read=False",
+    ]
+
+
+def test_read_local_pdf_extracts_embedded_text_with_page_markers(tmp_path):
+    path = tmp_path / "document.pdf"
+    path.write_bytes(_minimal_pdf(["First PDF page", "Second PDF page"]))
+
+    output = _read({"input": str(path), "size": 1000})
+
+    assert "Source: local PDF" in output
+    assert "PDF pages: 2" in output
+    assert "PDF extraction: embedded text" in output
+    assert "--- Page 1 of 2 ---" in output
+    assert "First PDF page" in output
+    assert "--- Page 2 of 2 ---" in output
+    assert "Second PDF page" in output
+
+
+def test_read_pdf_paging_uses_extracted_text_offsets(tmp_path):
+    path = tmp_path / "document.pdf"
+    path.write_bytes(_minimal_pdf(["First PDF page", "Second PDF page"]))
+    full_output = _read({"input": str(path), "size": 1000})
+    full_text = full_output.split("\n\n", 1)[1]
+
+    paged_output = _read({"input": str(path), "offset": 10, "size": 20})
+    paged_text = paged_output.split("\n\n", 1)[1]
+
+    assert paged_text == full_text[10:30]
+    assert "Offset: 10" in paged_output
+    assert "Returned size: 20" in paged_output
+
+
+def test_read_pdf_detects_pdf_magic_without_pdf_suffix(tmp_path):
+    path = tmp_path / "download.bin"
+    path.write_bytes(_minimal_pdf(["Magic PDF text"]))
+
+    output = _read({"input": str(path), "size": 1000})
+
+    assert "Source: local PDF" in output
+    assert "Magic PDF text" in output
+
+
+def test_read_pdf_reports_no_extractable_text(tmp_path):
+    path = tmp_path / "scanned.pdf"
+    path.write_bytes(_minimal_pdf([""]))
+
+    output = _read({"input": str(path), "size": 1000})
+
+    assert "no extractable text" in output
+    assert "scanned/image-only PDFs are not supported" in output
+
+
+def test_read_pdf_reports_corrupt_pdf(tmp_path):
+    path = tmp_path / "broken.pdf"
+    path.write_bytes(b"%PDF-not-a-valid-file")
+
+    output = _read({"input": str(path), "size": 1000})
+
+    assert "could not parse PDF" in output or "could not read PDF pages" in output
+
+
+def test_read_pdf_reports_encrypted_pdf(tmp_path, monkeypatch):
+    class FakeEncryptedPdfReader:
+        def __init__(self, *_args, **_kwargs):
+            self.is_encrypted = True
+
+        def decrypt(self, _password):
+            return 0
+
+    path = tmp_path / "encrypted.pdf"
+    path.write_bytes(b"%PDF-fake")
+    monkeypatch.setattr("jarv.pdf_extract._PDF_READER_CLASS", FakeEncryptedPdfReader)
+
+    output = _read({"input": str(path), "size": 1000})
+
+    assert "encrypted" in output
+    assert "could not be read" in output
+
+
+def test_read_web_pdf_content_type_extracts_text_and_marks_untrusted(monkeypatch):
+    monkeypatch.setattr(
+        "jarv.read_tool.fetch_web_bytes",
+        lambda *args, **kwargs: FetchedWebBytes(
+            requested_url="https://example.test/start",
+            final_url="https://example.test/document.pdf",
+            content_type="application/pdf",
+            media_type="application/pdf",
+            body=_minimal_pdf(["Remote PDF text"]),
+        ),
+    )
+
+    output = _read({"input": "https://example.test/start", "size": 1000})
+
+    assert "Source: web PDF" in output
+    assert "UNTRUSTED WEB CONTENT" in output
+    assert "Requested URL: https://example.test/start" in output
+    assert "Final URL: https://example.test/document.pdf" in output
+    assert "Content-Type: application/pdf" in output
+    assert "PDF pages: 1" in output
+    assert "Remote PDF text" in output
+
+
+def test_read_web_pdf_magic_extracts_text(monkeypatch):
+    monkeypatch.setattr(
+        "jarv.read_tool.fetch_web_bytes",
+        lambda *args, **kwargs: FetchedWebBytes(
+            requested_url="https://example.test/download",
+            final_url="https://example.test/download",
+            content_type="application/octet-stream",
+            media_type="application/octet-stream",
+            body=_minimal_pdf(["Magic remote PDF text"]),
+        ),
+    )
+
+    output = _read({"input": "https://example.test/download", "size": 1000})
+
+    assert "Source: web PDF" in output
+    assert "Content-Type: application/octet-stream" in output
+    assert "Magic remote PDF text" in output
+
+
+def test_read_batch_handles_concurrent_pdf_reads_in_order(tmp_path):
+    first = tmp_path / "first.pdf"
+    second = tmp_path / "second.pdf"
+    first.write_bytes(_minimal_pdf(["First batch PDF"]))
+    second.write_bytes(_minimal_pdf(["Second batch PDF"]))
+
+    outputs = dispatch_read_batch(
+        [{"input": str(first), "size": 1000}, {"input": str(second), "size": 1000}],
+        visible_labels=set(),
+        artifact_store=ArtifactStore(),
+        retained_store=RetainedOutputStore(),
+        config=DEFAULT_CONFIG,
+    )
+
+    assert "First batch PDF" in outputs[0]
+    assert "Second batch PDF" in outputs[1]
 
 
 def test_read_local_image_returns_structured_image_output(tmp_path, monkeypatch):

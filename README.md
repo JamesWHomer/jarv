@@ -110,11 +110,11 @@ On Windows, commands run through PowerShell. On other platforms, they run throug
 
 In the terminal, command output uses at most one-third of the screen height. Truncated output is biased roughly 2:1 toward the first lines, followed by the omitted-middle count and the final lines. Jarv also shows the resolved `head_chars` and `tail_chars` for each command.
 
-`read(input, offset, size)` uses Unicode character offsets for text. `offset` defaults to 0 and `size` defaults to `max_tool_output_chars`; an explicit size is returned without generic tool-output truncation. Inputs resolve as retained command IDs, visible artifact labels, HTTP(S) URLs, or local file paths. Relative paths use the current working directory. Consecutive reads requested in one model response run concurrently, with results returned in call order.
+`read(input, offset, size)` uses Unicode character offsets for text. `offset` defaults to 0 and `size` defaults to `max_tool_output_chars`; an explicit size is returned without generic tool-output truncation. Inputs resolve as retained command IDs, visible artifact labels, HTTP(S) URLs, or local file paths. Relative paths use the current working directory. Local and HTTP(S) PDFs with embedded text are extracted with page markers; scanned/image-only PDFs are not OCR'd. Consecutive reads requested in one model response run concurrently, with results returned in call order.
 
 When `read` sees a direct local or HTTP(S) image (`png`, `jpeg`, `webp`, and provider-supported `gif`) and the active model advertises image input support in Jarv's cached provider/OpenRouter catalog, Jarv returns it as native multimodal tool output for that provider. Image reads ignore `offset` and `size`, are capped at 10 MiB, and are not resized or transcoded. If the active model route does not advertise image capability, Jarv returns a text result telling the model that image reads are unavailable instead of sending base64 text.
 
-Web search and reads require no extra API key or package. `web_search` accepts any positive `max_results` plus a non-negative `offset`, following DuckDuckGo result pages as needed. URL reads preserve HTTP(S) hyperlinks as absolute URLs in extracted text, do not execute JavaScript, cap responses at 2 MiB, and mark every returned page as untrusted content. Public, private, and localhost HTTP(S) addresses are supported, including custom ports.
+Web search and reads require no extra API key. `web_search` accepts any positive `max_results` plus a non-negative `offset`, following DuckDuckGo result pages as needed. URL reads preserve HTTP(S) hyperlinks as absolute URLs in extracted text, do not execute JavaScript, cap text and PDF responses at 2 MiB, and mark every returned page as untrusted content. Public, private, and localhost HTTP(S) addresses are supported, including custom ports.
 
 ### Command safety
 
@@ -250,6 +250,7 @@ System-wide usage tracking starts from the version that records `~/.jarv/usage.j
 | Package | Role |
 | --- | --- |
 | [httpx](https://pypi.org/project/httpx/) | Direct provider API transports |
+| [pypdf](https://pypi.org/project/pypdf/) | Lazy-loaded embedded-text extraction for PDF reads |
 | [rich](https://pypi.org/project/rich/) | Terminal styling, live rendering, markdown |
 
 ## License

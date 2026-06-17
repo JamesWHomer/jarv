@@ -9,6 +9,7 @@ from .artifacts import ArtifactStore
 from .cancellation import CancellationToken, TurnCancelled
 from .config import DEFAULT_CONFIG
 from .model_catalog import get_image_output_capability
+from .pdf_extract import PdfExtractionError, extract_pdf_text, is_pdf_bytes
 from .retained_outputs import RetainedOutputStore
 from .shell import truncate_command_output
 from .tool_outputs import ToolOutput, image_data_url
@@ -47,7 +48,8 @@ READ_TOOL = {
         "Read or fetch a known retained command-output ID, visible artifact label, "
         "HTTP(S) URL, or local file. Use offset and size to page through text by "
         "Unicode characters. Relative file paths resolve from the current working "
-        "directory. Direct local or HTTP(S) image files/URLs can be viewed by "
+        "directory. Local and HTTP(S) PDFs with embedded text are extracted with "
+        "page markers. Direct local or HTTP(S) image files/URLs can be viewed by "
         "image-capable models; offset and size are ignored for image reads."
     ),
     "parameters": {
@@ -177,6 +179,35 @@ def _image_media_type_from_suffix(value: str) -> str | None:
     return _IMAGE_EXTENSION_MEDIA_TYPES.get(suffix)
 
 
+def _is_pdf_media_type(value: str | None) -> bool:
+    return _normalized_media_type(value) == "application/pdf"
+
+
+def _is_pdf_path(value: str) -> bool:
+    return Path(urlsplit(value).path or value).suffix.lower() == ".pdf"
+
+
+def _source_from_pdf(
+    kind: str,
+    label: str,
+    data: bytes,
+    *,
+    metadata: tuple[str, ...] = (),
+    untrusted: bool = False,
+) -> ReadSource | str:
+    try:
+        pdf = extract_pdf_text(data)
+    except PdfExtractionError as exc:
+        return f"[read error: {exc}]"
+    return ReadSource(
+        kind,
+        label,
+        content=pdf.text,
+        metadata=metadata + pdf.metadata,
+        untrusted=untrusted,
+    )
+
+
 def _detect_image_media_type(
     data: bytes,
     *,
@@ -257,6 +288,21 @@ def _resolve_source(
             )
         except WebToolError as exc:
             return f"[read error: {exc}]"
+        web_metadata = (
+            f"Requested URL: {web_bytes.requested_url}",
+            f"Final URL: {web_bytes.final_url}",
+            f"Content-Type: {web_bytes.media_type or 'unknown'}",
+        )
+        if _is_pdf_media_type(web_bytes.media_type) or is_pdf_bytes(web_bytes.body):
+            if len(web_bytes.body) > MAX_RESPONSE_BYTES:
+                return f"[read error: response exceeds {MAX_RESPONSE_BYTES} byte limit]"
+            return _source_from_pdf(
+                "web PDF",
+                web_bytes.final_url,
+                web_bytes.body,
+                metadata=web_metadata,
+                untrusted=True,
+            )
         media_type = _detect_image_media_type(
             web_bytes.body,
             declared_media_type=web_bytes.media_type,
@@ -272,11 +318,7 @@ def _resolve_source(
                 "web image",
                 web_bytes.final_url,
                 image=ReadImage(media_type=media_type, data=web_bytes.body),
-                metadata=(
-                    f"Requested URL: {web_bytes.requested_url}",
-                    f"Final URL: {web_bytes.final_url}",
-                    f"Content-Type: {web_bytes.media_type or 'unknown'}",
-                ),
+                metadata=web_metadata,
                 untrusted=True,
             )
         if len(web_bytes.body) > MAX_RESPONSE_BYTES:
@@ -321,6 +363,8 @@ def _resolve_source(
         data = resolved.read_bytes()
     except OSError as exc:
         return f"[read error: could not read local file: {exc}]"
+    if _is_pdf_path(str(resolved)) or is_pdf_bytes(data):
+        return _source_from_pdf("local PDF", str(resolved), data)
     media_type = _detect_image_media_type(data, label=str(resolved))
     if media_type is not None:
         size_error = _image_too_large_error(str(resolved), len(data))
