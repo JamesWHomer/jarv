@@ -24,12 +24,6 @@ from .provider import (
     get_backend,
     stream_response,
 )
-from .response_items import (
-    function_call_history_item,
-    function_call_output_item,
-    reasoning_history_item,
-    to_response_input_item,
-)
 from .provider_catalog import configured_service_tier
 from .read_tool import (
     dispatch_read_tool,
@@ -46,6 +40,11 @@ from .shell import (
 )
 from .tool_outputs import ToolOutput
 from .turn_loop import collect_stream_response
+from .turn_records import (
+    append_reasoning_input_items,
+    append_tool_result_input_items,
+    stream_usage_output_text,
+)
 from .usage import estimate_context_breakdown, record_response_usage
 from .web import WEB_SEARCH_TOOL, dispatch_web_tool
 
@@ -595,10 +594,7 @@ def run_subagent_loop(
                     provider=str(config.get("provider") or "openai"),
                     requested_service_tier=configured_service_tier(config),
                     context_breakdown=context_breakdown,
-                    output_text="\n".join(
-                        f"{item.name} {item.arguments}"
-                        for item in tool_calls
-                    ),
+                    output_text=stream_usage_output_text("", tool_calls),
                 )
         except RetryableStreamError as e:
             return None, f"provider error: {e}"
@@ -637,19 +633,10 @@ def run_subagent_loop(
             continue
 
         new_input: list[dict] = []
-        for ri in reasoning_items:
-            api_item = to_response_input_item(reasoning_history_item(ri))
-            if api_item is not None:
-                new_input.append(api_item)
+        append_reasoning_input_items(new_input, reasoning_items)
 
         def append_tool_result(item, output: ToolOutput) -> None:
-            for stored_item in (
-                function_call_history_item(item),
-                function_call_output_item(item.call_id, output),
-            ):
-                api_item = to_response_input_item(stored_item)
-                if api_item is not None:
-                    new_input.append(api_item)
+            append_tool_result_input_items(new_input, item, output)
 
         item_index = 0
         while item_index < len(tool_calls):

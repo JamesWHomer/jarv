@@ -49,12 +49,7 @@ from .provider import (
     ToolCallStarted,
     stream_response,
 )
-from .response_items import (
-    function_call_history_item,
-    function_call_output_item,
-    reasoning_history_item,
-    to_response_input_item,
-)
+from .response_items import to_response_input_item
 from .orchestrator import (
     ASK_USER_TOOL,
     RUN_COMMAND_TOOL,
@@ -86,6 +81,11 @@ from .retained_outputs import (
 )
 from .tool_outputs import ToolOutput
 from .turn_loop import StreamCollection, collect_stream_response
+from .turn_records import (
+    append_reasoning_input_items,
+    append_tool_result_input_items,
+    stream_usage_output_text,
+)
 from .usage import (
     estimate_context_breakdown,
     format_cost,
@@ -1292,9 +1292,7 @@ def run_agent(
                     provider=str(config.get("provider") or "openai"),
                     requested_service_tier=configured_service_tier(config),
                     context_breakdown=_ctx_breakdown,
-                    output_text=reply_text or "\n".join(
-                        f"{item.name} {item.arguments}" for item in tool_calls
-                    ),
+                    output_text=stream_usage_output_text(reply_text, tool_calls),
                 )
             complete_tool_phase()
             complete_response_phase()
@@ -1311,22 +1309,22 @@ def run_agent(
                 ) == "print":
                     console.print()
                 new_input_items = []
-                for ri in reasoning_items:
-                    rd = reasoning_history_item(ri, metadata)
-                    history.append(rd)
-                    api_item = to_response_input_item(rd)
-                    if api_item is not None:
-                        new_input_items.append(api_item)
+                append_reasoning_input_items(
+                    new_input_items,
+                    reasoning_items,
+                    history=history,
+                    metadata=metadata,
+                )
                 def append_tool_result(item, output: ToolOutput) -> None:
                     nonlocal active_tool_call
-                    fc = function_call_history_item(item, metadata)
-                    fco = function_call_output_item(item.call_id, output, metadata)
-                    history.extend([fc, fco])
+                    append_tool_result_input_items(
+                        new_input_items,
+                        item,
+                        output,
+                        history=history,
+                        metadata=metadata,
+                    )
                     active_tool_call = None
-                    for stored_item in (fc, fco):
-                        api_item = to_response_input_item(stored_item)
-                        if api_item is not None:
-                            new_input_items.append(api_item)
 
                 item_index = 0
                 while item_index < len(tool_calls):
