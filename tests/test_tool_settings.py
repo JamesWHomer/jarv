@@ -6,11 +6,16 @@ from jarv import config as config_module
 from jarv import settings_command
 from jarv.agent import build_agent_tools
 from jarv.config import DEFAULT_CONFIG, TOOL_NAMES, validate_config
+from jarv.model_catalog import ModelImageCapability
 from jarv.orchestrator import build_subagent_tools
 
 
 def _tool_names(tools):
     return [tool["name"] for tool in tools]
+
+
+def _tool_by_name(tools, name):
+    return next(tool for tool in tools if tool["name"] == name)
 
 
 def test_settings_exposes_each_tool_as_a_toggle(monkeypatch):
@@ -71,6 +76,39 @@ def test_disabled_tools_are_filtered_for_root_and_subagents():
 
     assert _tool_names(build_agent_tools(config)) == ["read", "ask_user"]
     assert _tool_names(build_subagent_tools(False, config)) == ["read", "finish"]
+
+
+def test_tool_builders_include_read_image_description_for_capable_model(monkeypatch):
+    config = dict(DEFAULT_CONFIG)
+    monkeypatch.setattr(
+        "jarv.read_tool.get_image_output_capability",
+        lambda _config: ModelImageCapability(True, "responses"),
+    )
+
+    root_read = _tool_by_name(build_agent_tools(config), "read")
+    child_read = _tool_by_name(build_subagent_tools(False, config), "read")
+
+    assert "image-capable models" in root_read["description"]
+    assert "image reads" in root_read["description"]
+    assert "image-capable models" in child_read["description"]
+    assert "image reads" in child_read["description"]
+
+
+def test_tool_builders_omit_read_image_description_for_text_only_model(monkeypatch):
+    config = dict(DEFAULT_CONFIG)
+    monkeypatch.setattr(
+        "jarv.read_tool.get_image_output_capability",
+        lambda _config: ModelImageCapability(False, reason="text-only model"),
+    )
+
+    root_read = _tool_by_name(build_agent_tools(config), "read")
+    child_read = _tool_by_name(build_subagent_tools(False, config), "read")
+
+    assert "PDFs with embedded text" in root_read["description"]
+    assert "image-capable models" not in root_read["description"]
+    assert "image reads" not in root_read["description"]
+    assert "image-capable models" not in child_read["description"]
+    assert "image reads" not in child_read["description"]
 
 
 def test_subagent_finish_tool_cannot_be_disabled():

@@ -78,7 +78,7 @@ from .shell import (
     resolve_command_output_window,
     truncate_model_output,
 )
-from .read_tool import READ_TOOL, retain_command_output
+from .read_tool import READ_TOOL, read_tool_for_config, retain_command_output
 from .retained_outputs import (
     RetainedOutputStore,
     load_retained_output_store,
@@ -109,7 +109,14 @@ TOOLS = [
 
 
 def build_agent_tools(config: dict) -> list[dict]:
-    return filter_enabled_tools(TOOLS, config)
+    tools = [
+        RUN_COMMAND_TOOL,
+        WEB_SEARCH_TOOL,
+        SPAWN_TOOL,
+        read_tool_for_config(config),
+        ASK_USER_TOOL,
+    ]
+    return filter_enabled_tools(tools, config)
 
 
 def resolve_tool_call_display(config: dict, *, heads_up: bool) -> str:

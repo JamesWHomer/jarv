@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import copy
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -41,17 +42,22 @@ _SUPPORTED_IMAGE_MEDIA_TYPES = {
     "image/gif",
 }
 
+_READ_TOOL_TEXT_DESCRIPTION = (
+    "Read or fetch a known retained command-output ID, visible artifact label, "
+    "HTTP(S) URL, or local file. Use offset and size to page through text by "
+    "Unicode characters. Relative file paths resolve from the current working "
+    "directory. Local and HTTP(S) PDFs with embedded text are extracted with "
+    "page markers."
+)
+_READ_TOOL_IMAGE_DESCRIPTION = (
+    " Direct local or HTTP(S) image files/URLs can be viewed by "
+    "image-capable models; offset and size are ignored for image reads."
+)
+
 READ_TOOL = {
     "type": "function",
     "name": "read",
-    "description": (
-        "Read or fetch a known retained command-output ID, visible artifact label, "
-        "HTTP(S) URL, or local file. Use offset and size to page through text by "
-        "Unicode characters. Relative file paths resolve from the current working "
-        "directory. Local and HTTP(S) PDFs with embedded text are extracted with "
-        "page markers. Direct local or HTTP(S) image files/URLs can be viewed by "
-        "image-capable models; offset and size are ignored for image reads."
-    ),
+    "description": _READ_TOOL_TEXT_DESCRIPTION + _READ_TOOL_IMAGE_DESCRIPTION,
     "parameters": {
         "type": "object",
         "properties": {
@@ -81,6 +87,14 @@ READ_TOOL = {
         "additionalProperties": False,
     },
 }
+
+
+def read_tool_for_config(config: dict) -> dict:
+    """Return a read tool definition tailored to the active model capability."""
+    tool = copy.deepcopy(READ_TOOL)
+    if not get_image_output_capability(config).supported:
+        tool["description"] = _READ_TOOL_TEXT_DESCRIPTION
+    return tool
 
 
 @dataclass(frozen=True)

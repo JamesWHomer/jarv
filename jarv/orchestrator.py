@@ -32,8 +32,8 @@ from .response_items import (
 )
 from .provider_catalog import configured_service_tier
 from .read_tool import (
-    READ_TOOL,
     dispatch_read_tool,
+    read_tool_for_config,
     retain_command_output,
 )
 from .retained_outputs import RetainedOutputStore
@@ -348,7 +348,7 @@ def build_subagent_tools(sterile: bool, config: dict | None = None) -> list[dict
     tools = filter_enabled_tools([
         RUN_COMMAND_TOOL,
         WEB_SEARCH_TOOL,
-        READ_TOOL,
+        read_tool_for_config(config),
     ], config)
     tools.append(FINISH_TOOL)
     if not sterile and tool_enabled(config, "spawn"):

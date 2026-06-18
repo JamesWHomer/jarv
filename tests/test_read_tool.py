@@ -15,6 +15,7 @@ from jarv.read_tool import (
     READ_TOOL,
     dispatch_read_batch,
     dispatch_read_tool,
+    read_tool_for_config,
     retain_command_output,
 )
 from jarv.retained_outputs import (
@@ -112,6 +113,35 @@ def test_read_schema_exposes_input_offset_and_size():
     assert parameters["properties"]["size"]["minimum"] == 1
     assert parameters["properties"]["size"]["maximum"] == 200000
     assert parameters["additionalProperties"] is False
+
+
+def test_read_tool_for_image_capable_model_includes_image_description(monkeypatch):
+    monkeypatch.setattr(
+        "jarv.read_tool.get_image_output_capability",
+        lambda _config: ModelImageCapability(True, "responses"),
+    )
+
+    tool = read_tool_for_config(DEFAULT_CONFIG)
+
+    assert tool is not READ_TOOL
+    assert tool["parameters"] is not READ_TOOL["parameters"]
+    assert "image-capable models" in tool["description"]
+    assert "image reads" in tool["description"]
+
+
+def test_read_tool_for_text_only_model_omits_image_description(monkeypatch):
+    original_description = READ_TOOL["description"]
+    monkeypatch.setattr(
+        "jarv.read_tool.get_image_output_capability",
+        lambda _config: ModelImageCapability(False, reason="text-only model"),
+    )
+
+    tool = read_tool_for_config(DEFAULT_CONFIG)
+
+    assert "PDFs with embedded text" in tool["description"]
+    assert "image-capable models" not in tool["description"]
+    assert "image reads" not in tool["description"]
+    assert READ_TOOL["description"] == original_description
 
 
 def test_read_rejects_non_object_arguments():
