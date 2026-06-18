@@ -94,3 +94,8 @@ def test_cleanup_import_cycles_stay_broken():
     assert "agent" not in graph["context_budget"]
     assert "config" not in graph["history"]
     assert "provider" not in graph["config"]
+    assert "session_commands" not in graph["session_browser"]
+    assert "session_commands" not in graph["session_render"]
+    assert "session_commands" not in graph["session_store"]
+    assert "settings_interactive" not in graph["settings_command"]
+    assert "settings_command" not in graph["settings_refresher"]
