@@ -253,7 +253,7 @@ def _settings_reset_action_bar(
     key = row["key"]
     if key == "api_key":
         prompt = "Clear stored API key?"
-        controls = "y clear   Esc cancel"
+        controls = "y clear   Esc exit"
         current = default = ""
         left = prompt
     else:
@@ -271,7 +271,7 @@ def _settings_reset_action_bar(
             default_config[key] = _settings_reset_value(row, config)
         default = _settings_value_text(row, default_config).plain
         prompt = f"Reset {row['label']}?"
-        controls = "y reset   Esc cancel"
+        controls = "y reset   Esc exit"
         left = f"{prompt}   {current} \u2192 {default}"
 
     gap = max(3, inner_width - len(left) - len(controls))
@@ -1139,6 +1139,7 @@ def _settings_begin_edit(row: dict, config: dict) -> dict:
         readonly = provider in LOCAL_PROVIDERS
         edit = {"row": row, "secret": True, "readonly": readonly, "error": ""}
         initialize_text_editor(edit, "")
+        edit["discard_armed"] = False
         return edit
 
     edit = {
@@ -1153,6 +1154,8 @@ def _settings_begin_edit(row: dict, config: dict) -> dict:
         edit["discard_armed"] = False
     if key == "provider":
         edit["selected_provider"] = config.get("provider", "openai")
+        edit["original_selected_provider"] = edit["selected_provider"]
+        edit["discard_armed"] = False
     elif _settings_is_model_picker_key(key):
         edit["model_choices"] = _settings_model_choices_for_key(
             config,
@@ -1176,7 +1179,40 @@ def _settings_begin_edit(row: dict, config: dict) -> dict:
         )
         edit["model_input_active"] = False
         initialize_text_editor(edit, "")
+        edit["original_selected_model_index"] = edit["selected_model_index"]
+        edit["original_model_input_active"] = False
+        edit["discard_armed"] = False
     return edit
+
+
+def _settings_edit_is_dirty(edit: dict | None, config: dict) -> bool:
+    if edit is None or edit.get("readonly"):
+        return False
+
+    row = edit["row"]
+    key = row["key"]
+    if key == "provider":
+        return edit.get("selected_provider") != edit.get(
+            "original_selected_provider",
+            config.get("provider", "openai"),
+        )
+    if _settings_is_model_picker_key(key):
+        return (
+            bool(edit.get("model_input_active"))
+            != bool(edit.get("original_model_input_active"))
+            or int(edit.get("selected_model_index", 0))
+            != int(edit.get("original_selected_model_index", 0))
+            or str(edit.get("buffer", "")) != str(edit.get("original", ""))
+            or bool(edit.get("model_validation_warning"))
+        )
+    return str(edit.get("buffer", "")) != str(edit.get("original", ""))
+
+
+def _settings_discard_warning(inner_width: int) -> Text:
+    return Text(
+        _clip_text("  Unsaved changes. Esc again to discard.", inner_width),
+        style="bold yellow",
+    )
 
 
 def _settings_multiline_status(edit: dict) -> str:
@@ -1218,12 +1254,7 @@ def _settings_multiline_editor_lines(
     body, cursor_idx = _settings_multiline_visual_lines(edit, inner_width)
     tail: list[Text] = []
     if edit.get("discard_armed"):
-        tail.append(
-            Text(
-                _clip_text("  Unsaved changes. Esc again to discard.", inner_width),
-                style="bold yellow",
-            )
-        )
+        tail.append(_settings_discard_warning(inner_width))
     tail.append(
         Text(
             _clip_text(
@@ -1323,7 +1354,7 @@ def _settings_editor_lines(
         if edit.get("readonly"):
             lines = [
                 Text(_clip_text(f"  {provider_label} does not need an API key.", inner_width), style="green"),
-                Text(_clip_text("  Esc closes this editor.", inner_width), style="dim italic"),
+                Text(_clip_text("  Esc exits settings.", inner_width), style="dim italic"),
             ]
             return lines[:max_lines] if max_lines is not None else lines
         env_key = PROVIDERS.get(provider, {}).get("env_key") or "provider env var"
@@ -1373,6 +1404,8 @@ def _settings_editor_lines(
 
     if edit.get("error"):
         tail.append(Text(_clip_text(f"  {edit['error']}", inner_width), style="red"))
+    if edit.get("discard_armed"):
+        tail.append(_settings_discard_warning(inner_width))
     if _settings_is_model_picker_key(key) and edit.get("model_validation_warning"):
         suggestion = str(edit.get("model_validation_suggestion") or "")
         warning_selection = int(edit.get("model_warning_selection", 0))

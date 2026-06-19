@@ -265,7 +265,7 @@ def test_fullscreen_tool_card_uses_box_and_right_status():
     )
 
     rendered = stream.getvalue()
-    assert "\u250c\u2500" in rendered
+    assert "\u256d\u2500" in rendered
     assert "\u2713 done" in rendered
 
 

@@ -92,8 +92,8 @@ class AgentInputTests(unittest.TestCase):
             )
 
         rendered = stream.getvalue()
-        self.assertNotIn("\u2518\n\n\u250c", rendered)
-        self.assertIn("\u2518\n\u250c", rendered)
+        self.assertNotIn("\u256f\n\n\u256d", rendered)
+        self.assertIn("\u256f\n\u256d", rendered)
 
     def test_run_command_displays_resolved_output_parameters(self):
         stream = io.StringIO()

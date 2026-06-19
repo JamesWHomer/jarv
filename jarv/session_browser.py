@@ -366,7 +366,7 @@ def cmd_sessions(args: list | None = None) -> None:
 
     def _footer_text() -> str:
         if search_active:
-            return "type to filter   Enter apply   Esc cancel   Backspace delete"
+            return "type to filter   Enter apply   Esc exit   Backspace delete"
         cur_visible = _visible_rows_list()
         cur = cur_visible[_selected_pos(cur_visible)] if cur_visible else None
         a_hint = "a unarchive" if (cur and cur["archived"]) else "a archive"
@@ -450,7 +450,7 @@ def cmd_sessions(args: list | None = None) -> None:
                 term_h,
                 Text(
                     _truncate(
-                        f"↑↓ scroll   ←→ session   Enter load   p/Esc back   ·   {position}",
+                        f"↑↓ scroll   ←→ session   Enter load   p back   Esc exit   ·   {position}",
                         inner_width,
                     ),
                     style="dim italic",
@@ -810,9 +810,7 @@ def cmd_sessions(args: list | None = None) -> None:
             # Search-input mode intercepts most keys (only outside preview).
             if search_active and preview_sid is None:
                 if key == "ESC":
-                    search_active = False
-                    search_query = ""
-                    offset = 0
+                    break
                 elif key in ("ENTER", "DOWN"):
                     # Exit search mode, drop focus into the filtered list.
                     search_active = False
@@ -839,7 +837,9 @@ def cmd_sessions(args: list | None = None) -> None:
 
             # Preview mode intercepts most keys.
             if preview_sid is not None:
-                if key in ("p", "ESC"):
+                if key == "ESC":
+                    break
+                if key == "p":
                     preview_sid = None
                     preview_offset = 0
                 elif key in ("LEFT", "RIGHT"):
@@ -939,10 +939,6 @@ def cmd_sessions(args: list | None = None) -> None:
                 loaded_row = cur
                 break
             elif key == "ESC":
-                if search_query:
-                    search_query = ""
-                    offset = 0
-                    continue
                 break
             elif key == "CTRL_F":
                 _start_prefetch()

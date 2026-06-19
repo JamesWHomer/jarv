@@ -21,6 +21,7 @@ from .settings_command import (
     _settings_column_layout,
     _settings_commit_edit,
     _settings_desired_editor_height,
+    _settings_edit_is_dirty,
     _settings_editor_lines,
     _settings_finish_reset,
     _settings_model_apply_key,
@@ -125,7 +126,7 @@ def run_settings_interactive(config: dict) -> None:
             target_edit["catalog_generation"] = generation
 
     def _footer() -> str:
-        return "\u2191\u2193 select   Enter edit/toggle   r reset   q exit"
+        return "\u2191\u2193 select   Enter edit/toggle   r reset   Esc/q exit"
 
     def _append_bottom_footer(parts: list, height: int, footer: Text) -> None:
         append_bottom_footer(parts, height, footer, crop=True)
@@ -279,6 +280,8 @@ def run_settings_interactive(config: dict) -> None:
             editor_parts = [Text("")]
         if edit is not None and edit.get("model_validation_warning"):
             controls = "\u2190\u2192 select   Enter confirm   Esc keep editing"
+        elif edit is not None and edit.get("discard_armed"):
+            controls = "Esc discard"
         else:
             controls = "" if row.get("multiline") else "Enter save   Esc cancel"
         return Panel(
@@ -348,12 +351,11 @@ def run_settings_interactive(config: dict) -> None:
             if edit is not None:
                 if edit["row"].get("multiline"):
                     if key == "ESC":
-                        dirty = edit["buffer"] != edit.get("original", edit["buffer"])
+                        dirty = _settings_edit_is_dirty(edit, config)
                         if dirty and not edit.get("discard_armed"):
                             edit["discard_armed"] = True
                         else:
-                            edit = None
-                            flash = (f"{rows[selected]['label']} unchanged", "dim")
+                            break
                     elif key == "CTRL_S":
                         config, message, style, done = _settings_commit_edit(edit, config)
                         if done:
@@ -377,9 +379,13 @@ def run_settings_interactive(config: dict) -> None:
                     edit.pop("model_warning_selection", None)
                     flash = None
                 elif key == "ESC":
-                    edit = None
-                    flash = (f"{rows[selected]['label']} unchanged", "dim")
+                    if _settings_edit_is_dirty(edit, config) and not edit.get("discard_armed"):
+                        edit["discard_armed"] = True
+                        flash = None
+                    else:
+                        break
                 elif edit["row"]["key"] == "provider" and key in ("UP", "DOWN", "HOME", "END"):
+                    edit["discard_armed"] = False
                     provider_keys = _settings_provider_keys()
                     current_provider = edit.get("selected_provider", config.get("provider", "openai"))
                     current_idx = provider_keys.index(current_provider) if current_provider in provider_keys else 0
@@ -407,6 +413,7 @@ def run_settings_interactive(config: dict) -> None:
                         repeat_count,
                     )
                 ):
+                    edit["discard_armed"] = False
                     flash = None
                 elif key == "ENTER":
                     config, message, style, done = _settings_commit_edit(edit, config)
@@ -417,9 +424,11 @@ def run_settings_interactive(config: dict) -> None:
                     else:
                         flash = None
                 elif edit["row"]["key"] == "provider":
+                    edit["discard_armed"] = False
                     edit["error"] = ""
                 else:
-                    changed = apply_text_editor_key(
+                    edit["discard_armed"] = False
+                    apply_text_editor_key(
                         edit,
                         key,
                         repeat_count,
@@ -434,6 +443,8 @@ def run_settings_interactive(config: dict) -> None:
                 config, message, style = _settings_finish_reset(row, config, key)
                 rows = _settings_rows(config)
                 pending_reset = None
+                if key == "ESC":
+                    break
                 flash = (message, style) if key in ("y", "Y") else None
                 continue
 

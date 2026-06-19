@@ -146,6 +146,21 @@ def test_compact_text_setting_reuses_cursor_aware_editor():
     assert edit["buffer"] == "Xhttps://example.test"
 
 
+def test_compact_text_setting_renders_discard_guidance():
+    config = {**DEFAULT_CONFIG, "base_url": "https://example.test"}
+    row = next(
+        row for row in settings_command._settings_rows(config)
+        if row["key"] == "base_url"
+    )
+    edit = settings_command._settings_begin_edit(row, config)
+    edit["buffer"] += "/v1"
+    edit["discard_armed"] = True
+
+    lines = settings_command._settings_editor_lines(edit, config, 80)
+
+    assert any("Esc again to discard" in line.plain for line in lines)
+
+
 def test_compact_integer_editor_uses_one_value_row_and_minimal_height():
     config = dict(DEFAULT_CONFIG)
     row = next(
@@ -233,7 +248,7 @@ def test_reset_requires_explicit_confirmation(monkeypatch):
     assert action_bar.plain.startswith(
         "Reset System prompt?   custom \u00b7 16 chars \u2192 default"
     )
-    assert action_bar.plain.endswith("y reset   Esc cancel")
+    assert action_bar.plain.endswith("y reset   Esc exit")
     assert len(action_bar.plain) == 100
     assert config["system_prompt"] == "Keep this prompt"
     assert saved == []
@@ -272,5 +287,5 @@ def test_api_key_reset_action_uses_clear_language():
     action_bar = settings_command._settings_reset_action_bar(row, config, 80)
 
     assert action_bar.plain.startswith("Clear stored API key?")
-    assert action_bar.plain.endswith("y clear   Esc cancel")
+    assert action_bar.plain.endswith("y clear   Esc exit")
     assert len(action_bar.plain) == 80
