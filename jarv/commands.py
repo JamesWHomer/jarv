@@ -226,7 +226,7 @@ def _about_body() -> Markdown:
 - `jarv /archive` - Archive this terminal's session history and start a fresh one on the next message.
 - `jarv /sessions` / `jarv /session` - List sessions by recency. In an interactive terminal you can scroll through all of them; when stdout is not a TTY (e.g. piped), only the 5 most recent are listed.
 - `jarv /sessions <id>` - Bind this terminal to a specific session id (prefix match).
-- `jarv /update` - Check PyPI for the latest version and update the active pip, pipx, or uv installation.
+- `jarv /update` - Update Jarv through the active install channel. Standalone builds update from GitHub Releases; Python installs update through pip, pipx, or uv.
 
 ## Heads-up mode
 
@@ -287,7 +287,7 @@ Keys:
 - `system_prompt` - Instructions sent to the model before each request.
 - `max_subagent_depth` - Maximum recursion depth for `spawn` (root is 0). Default: `{DEFAULT_CONFIG['max_subagent_depth']}`.
 - `subagent_thread_pool_max_workers` - Max parallel children in one `spawn` batch. Default: `{DEFAULT_CONFIG['subagent_thread_pool_max_workers']}`.
-- `check_updates` - When `true`, a one-shot `jarv <question>` run fires a non-blocking background check against PyPI. If a new version is found it is flagged locally and shown at the start of the next run. Default: `true`. Set to `false` to disable entirely. Heads-up mode (`jarv` with no args) and slash commands do not run this check.
+- `check_updates` - When `true`, a one-shot `jarv <question>` run fires a non-blocking background check against the active install channel (GitHub Releases for standalone builds, PyPI for Python installs). If a new version is found it is flagged locally and shown at the start of the next run. Default: `true`. Set to `false` to disable entirely. Heads-up mode (`jarv` with no args) and slash commands do not run this check.
 - `read_only_command_display` - How `/help`, `/about`, `/usage`, and `/config` are displayed in an interactive terminal. `fullscreen` uses a temporary alternate-screen view, compact when content fits and scrollable when it does not. `print` preserves permanent terminal output. Default: `fullscreen`.
 - `tool_call_display` - How agent tool calls are rendered. `auto` uses resize-safe `print` mode for one-shot runs and bordered `fullscreen` cards in heads-up mode. Explicit `print` and `fullscreen` modes override that choice. Default: `auto`.
 - `print_usage_after_agent` - When `true`, print a compact token usage line after each completed agent run. Default: `false`.
@@ -309,8 +309,8 @@ Each terminal is bound to exactly one session at a time. By default a fresh term
 
 ## Updates
 
-- `jarv /update` checks PyPI for the latest version and updates the active pip, pipx, or uv installation. Editable source installs are left untouched.
-- A one-shot `jarv <question>` (arguments on the command line, not heads-up mode) fires a fully non-blocking background check when `check_updates` is true. If an update is found it is saved locally; the next invocation shows the notification instantly with no network wait.
+- `jarv /update` uses GitHub Releases for standalone binaries and PyPI for Python installs. Editable source installs are left untouched.
+- A one-shot `jarv <question>` (arguments on the command line, not heads-up mode) fires a fully non-blocking background check when `check_updates` is true. Standalone installs check GitHub Releases; Python installs check PyPI. If an update is found it is saved locally; the next invocation shows the notification instantly with no network wait.
 - The background check is throttled to at most once every {UPDATE_CHECK_INTERVAL_HOURS} hours.
 - Set `check_updates` to `false` (`jarv /set check_updates false`) to disable the background check entirely.
 - After updating, run `jarv` again to use the new version.
@@ -442,7 +442,54 @@ def _fallback_tool_manager() -> str | None:
     return None
 
 
+def _cmd_update_standalone() -> int:
+    from .standalone import (
+        fetch_release_manifest,
+        install_standalone_asset,
+        normalize_architecture,
+        normalize_platform,
+        select_release_asset,
+    )
+
+    manifest = fetch_release_manifest()
+    if manifest is None:
+        console.print("[bold red]✗[/bold red] [red]Could not reach GitHub Releases.[/red]")
+        return 1
+    latest = str(manifest["version"])
+    if not _is_newer_version(latest, __version__):
+        console.print(f"[bold green]✓[/bold green] [green]Already up to date.[/green] [dim](v{__version__})[/dim]")
+        return 0
+    asset = select_release_asset(manifest)
+    if asset is None:
+        console.print("[bold red]✗[/bold red] [red]No standalone release asset matches this system.[/red]")
+        console.print(
+            f"[dim]Needed platform={normalize_platform()} architecture={normalize_architecture()}.[/dim]"
+        )
+        return 1
+
+    console.print(f"[bold cyan]↓[/bold cyan] Update found [dim](v{__version__} → v{latest})[/dim]. Installing…")
+    try:
+        with console.status("[dim]Downloading and verifying standalone binary…[/dim]", spinner="dots"):
+            result = install_standalone_asset(asset)
+    except Exception as exc:
+        console.print("[bold red]✗[/bold red] [red]Update failed:[/red]")
+        console.print(str(exc), style="dim")
+        return 1
+
+    UPDATE_FLAG_FILE.unlink(missing_ok=True)
+    if result == "staged":
+        console.print("[bold green]✓[/bold green] [green]Update staged.[/green] [dim]Close this process, then run jarv again to use the new version.[/dim]")
+    else:
+        console.print("[bold green]✓[/bold green] [green]Updated successfully.[/green] [dim]Run jarv again to use the new version.[/dim]")
+    return 0
+
+
 def cmd_update() -> int:
+    from .standalone import is_standalone_install
+
+    if is_standalone_install():
+        return _cmd_update_standalone()
+
     console.print("[dim]⟳ Checking for updates…[/dim]")
     release = _fetch_latest_pypi_release()
     if release is None:

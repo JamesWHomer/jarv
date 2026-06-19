@@ -7,6 +7,7 @@ from packaging.version import InvalidVersion, Version
 from . import __version__
 from .config import CONFIG_DIR
 from .display import console
+from .standalone import is_standalone_install, latest_standalone_version
 
 PYPI_VERSION_URL = "https://pypi.org/pypi/jarv/json"
 UPDATE_FLAG_FILE = CONFIG_DIR / "update_available.txt"
@@ -57,11 +58,17 @@ def _record_check_time() -> None:
     LAST_CHECK_FILE.write_text(str(time.time()), encoding="utf-8")
 
 
+def _fetch_latest_update_version() -> str | None:
+    if is_standalone_install():
+        return latest_standalone_version()
+    return _fetch_latest_pypi_version()
+
+
 def _check_update_background() -> None:
-    """Check PyPI for a newer version and write a flag file if one is available."""
+    """Check the active install channel for a newer version and write a flag file."""
     if not _should_check_now():
         return
-    latest = _fetch_latest_pypi_version()
+    latest = _fetch_latest_update_version()
     if not latest:
         return
     _record_check_time()

@@ -11,14 +11,22 @@ jarv refactor the auth module           # complex tasks get split across subagen
 
 ## Install
 
-Requires **Python 3.10+** and an API key for your chosen provider (OpenAI, Anthropic, Gemini, OpenRouter, Groq, and more).
+Jarv can be installed as a standalone binary or as a Python package. After installing, run `jarv /setup` to choose a provider, enter an API key, and pick a model.
 
-```bash
-pip install jarv
-jarv /setup
+```powershell
+winget install JamesWHomer.Jarv
+irm https://github.com/JamesWHomer/jarv/releases/latest/download/install.ps1 | iex
 ```
 
-The setup wizard walks you through choosing a provider, entering an API key, and picking a model. Keys can also be set via provider-specific environment variables or `jarv /set`.
+```bash
+brew install JamesWHomer/tap/jarv
+curl -fsSL https://github.com/JamesWHomer/jarv/releases/latest/download/install.sh | sh
+uv tool install jarv
+pipx install jarv
+pip install jarv
+```
+
+Python package installs require **Python 3.10+**. Keys can also be set via provider-specific environment variables or `jarv /set`.
 
 To upgrade:
 
@@ -169,7 +177,7 @@ The terminal shows a live progress panel as children run, with a green checkmark
 | `/usage` | Show token usage, cost, and context breakdown for the current session |
 | `/usage day` / `/usage week` / `/usage month` | Show system-wide usage for the last 24h, 7d, or 30d |
 | `/usage --all [--since 24h]` | Show system-wide usage across Jarv sessions |
-| `/update` | Update Jarv to the latest version using pip, pipx, or uv |
+| `/update` | Update Jarv to the latest version for the active install channel |
 
 All commands work both as `jarv /command` (one-shot) and inside heads-up mode. Read-only commands (`/help`, `/about`, `/usage`, and `/config`) use a temporary display by default in interactive terminals; change `read_only_command_display` in `/settings` to print them permanently instead.
 
@@ -215,7 +223,7 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 | `auditor_model` | `""` | Auditor model. Empty uses the active `model`. |
 | `max_subagent_depth` | `4` | Maximum nesting depth for spawned subagents. |
 | `subagent_thread_pool_max_workers` | `8` | Max parallel subagents per `spawn` call. |
-| `check_updates` | `true` | Background update check on startup (non-blocking, throttled to once per 24h). |
+| `check_updates` | `true` | Background update check on startup (non-blocking, throttled to once per 24h; PyPI for Python installs, GitHub Releases for standalone installs). |
 | `read_only_command_display` | `"fullscreen"` | Display mode for `/help`, `/about`, `/usage`, and `/config`: temporary `fullscreen` view or permanent `print` output. |
 | `tool_call_display` | `"auto"` | Tool-call layout: `auto` selects `print` for one-shot runs and `fullscreen` in heads-up mode; explicit modes override it. |
 | `print_usage_after_agent` | `false` | Print a compact token usage line after each completed agent run. |
