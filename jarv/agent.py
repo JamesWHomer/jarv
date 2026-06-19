@@ -4,6 +4,7 @@ import platform
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from rich.console import Group
@@ -650,76 +651,114 @@ def _dispatch_run_command_with_ui(
     return output
 
 
+@contextmanager
+def _ask_user_terminal_input():
+    """Temporarily route ask_user input to the controlling terminal when possible."""
+    def is_tty(stream) -> bool:
+        isatty = getattr(stream, "isatty", None)
+        return callable(isatty) and bool(isatty())
+
+    if is_tty(sys.stdin):
+        yield True
+        return
+
+    if not is_tty(sys.stdout):
+        yield False
+        return
+
+    if sys.platform == "win32":
+        yield True
+        return
+
+    encoding = getattr(sys.stdin, "encoding", None)
+    if not isinstance(encoding, str) or not encoding:
+        encoding = "utf-8"
+    try:
+        tty = open("/dev/tty", "r", encoding=encoding)
+    except OSError:
+        yield False
+        return
+
+    original_stdin = sys.stdin
+    try:
+        sys.stdin = tty
+        yield True
+    finally:
+        sys.stdin = original_stdin
+        tty.close()
+
+
 def _dispatch_ask_user(args: dict, config: dict | None = None) -> str:
     question = args.get("question")
     if not isinstance(question, str) or not question.strip():
         msg = "[tool argument error: question must be a non-empty string]"
         console.print(f"[red]{msg}[/red]")
         return msg
-    if not sys.stdin.isatty():
-        return "[non-interactive session; user unavailable]"
-    config = config or DEFAULT_CONFIG
-    display_mode = config.get(
-        "tool_call_display",
-        DEFAULT_CONFIG["tool_call_display"],
-    )
-    if display_mode == "auto":
-        display_mode = "print"
-    question_renderable = Markdown(flatten_headings(question))
-    if display_mode == "print":
-        console.print(
-            tool_card(
+    with _ask_user_terminal_input() as can_prompt:
+        if not can_prompt:
+            return "[non-interactive session; user unavailable]"
+        config = config or DEFAULT_CONFIG
+        display_mode = config.get(
+            "tool_call_display",
+            DEFAULT_CONFIG["tool_call_display"],
+        )
+        if display_mode == "auto":
+            display_mode = "print"
+        question_renderable = Markdown(flatten_headings(question))
+        if display_mode == "print":
+            console.print(
+                tool_card(
+                    "ask_user",
+                    question_renderable,
+                    status="waiting",
+                    status_style="blue",
+                    display_mode="print",
+                )
+            )
+        else:
+            waiting_card = tool_card(
                 "ask_user",
                 question_renderable,
                 status="waiting",
                 status_style="blue",
-                display_mode="print",
-            )
-        )
-    else:
-        waiting_card = tool_card(
-            "ask_user",
-            question_renderable,
-            status="waiting",
-            status_style="blue",
-            display_mode="fullscreen",
-        )
-        waiting_height = len(
-            console.render_lines(waiting_card, console.options, pad=False)
-        )
-        console.print(
-            waiting_card
-        )
-    try:
-        prompt = (
-            "\x1b[34m\u258e\x1b[0m \x1b[1;36m>\x1b[0m "
-            if display_mode == "print"
-            else "\x1b[1;36m>\x1b[0m "
-        )
-        answer = read_editable_line(prompt, text_style="\x1b[97m").strip()
-    except KeyboardInterrupt:
-        raise
-    except EOFError:
-        answer = "[no response]"
-        if display_mode == "print":
-            console.print(f"\n[dim]{answer}[/dim]")
-        else:
-            console.print()
-    if display_mode == "fullscreen":
-        answer_line = Text("> ", style="bold cyan")
-        answer_line.append(answer, style="bright_white")
-        _replace_terminal_rows(waiting_height + 1)
-        console.print(
-            tool_card(
-                "ask_user",
-                Group(question_renderable, answer_line),
-                status="done",
                 display_mode="fullscreen",
             )
-        )
-    if display_mode == "print":
-        console.print()
-    return answer
+            waiting_height = len(
+                console.render_lines(waiting_card, console.options, pad=False)
+            )
+            console.print(
+                waiting_card
+            )
+        try:
+            prompt = (
+                "\x1b[34m\u258e\x1b[0m \x1b[1;36m>\x1b[0m "
+                if display_mode == "print"
+                else "\x1b[1;36m>\x1b[0m "
+            )
+            answer = read_editable_line(prompt, text_style="\x1b[97m").strip()
+        except KeyboardInterrupt:
+            raise
+        except EOFError:
+            answer = "[no response]"
+            if display_mode == "print":
+                console.print(f"\n[dim]{answer}[/dim]")
+            else:
+                console.print()
+        if display_mode == "fullscreen":
+            answer_line = Text("> ", style="bold cyan")
+            answer_line.append(answer, style="bright_white")
+            _replace_terminal_rows(waiting_height + 1)
+            console.print(
+                tool_card(
+                    "ask_user",
+                    Group(question_renderable, answer_line),
+                    status="done",
+                    display_mode="fullscreen",
+                )
+            )
+        if display_mode == "print":
+            console.print()
+        return answer
 
 
 def _dispatch_spawn_with_ui(

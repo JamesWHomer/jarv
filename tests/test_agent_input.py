@@ -629,6 +629,45 @@ class AgentInputTests(unittest.TestCase):
             result = _dispatch_ask_user({"question": "Continue?"})
         self.assertEqual(result, "[non-interactive session; user unavailable]")
 
+    def test_ask_user_uses_controlling_terminal_when_stdin_is_piped(self):
+        tty = io.StringIO()
+        tty.isatty = lambda: True
+        tty.close = unittest.mock.Mock()
+
+        with (
+            patch("jarv.agent.sys.platform", "linux"),
+            patch("jarv.agent.sys.stdin") as stdin,
+            patch("jarv.agent.sys.stdout") as stdout,
+            patch("builtins.open", return_value=tty) as open_tty,
+            patch("jarv.agent.read_editable_line", return_value="yes") as read_line,
+        ):
+            stdin.isatty.return_value = False
+            stdin.encoding = "utf-8"
+            stdout.isatty.return_value = True
+            result = _dispatch_ask_user({"question": "Continue?"})
+
+        self.assertEqual(result, "yes")
+        open_tty.assert_called_once_with(
+            "/dev/tty",
+            "r",
+            encoding="utf-8",
+        )
+        read_line.assert_called_once()
+
+    def test_ask_user_allows_windows_console_when_stdin_is_piped(self):
+        with (
+            patch("jarv.agent.sys.platform", "win32"),
+            patch("jarv.agent.sys.stdin") as stdin,
+            patch("jarv.agent.sys.stdout") as stdout,
+            patch("jarv.agent.read_editable_line", return_value="yes") as read_line,
+        ):
+            stdin.isatty.return_value = False
+            stdout.isatty.return_value = True
+            result = _dispatch_ask_user({"question": "Continue?"})
+
+        self.assertEqual(result, "yes")
+        read_line.assert_called_once()
+
     def test_ask_user_renders_question_as_markdown(self):
         console_output = io.StringIO()
         question = (
