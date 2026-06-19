@@ -76,6 +76,8 @@ jobs:
           path: dist/
 
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
 
   build-standalone:
     needs: validate
@@ -132,7 +134,7 @@ jobs:
         if: matrix.platform == 'windows' && matrix.arch == 'arm64'
         shell: pwsh
         run: |
-          python - <<'PY'
+          @'
           import pathlib
           import subprocess
           import sys
@@ -152,7 +154,7 @@ jobs:
                   "pyinstaller",
                   "pyinstaller",
               ])
-          PY
+          '@ | python -
 
       - name: Build standalone executable
         run: pyinstaller --clean --onefile --name jarv packaging/pyinstaller_launcher.py
