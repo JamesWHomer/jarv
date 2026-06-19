@@ -184,7 +184,7 @@ jobs:
           import zipfile
           from pathlib import Path
 
-          asset_name = f"jarv-${os.environ['GITHUB_REF_NAME'].removeprefix('v')}-{os.environ['ASSET_SUFFIX']}"
+          asset_name = f"jarv-{os.environ['GITHUB_REF_NAME'].removeprefix('v')}-{os.environ['ASSET_SUFFIX']}"
           platform = os.environ["PLATFORM"]
           staging = Path("release-stage")
           output = Path("release-builds")
