@@ -703,6 +703,13 @@ def estimate_token_cost_usd(
     return (input_cost + cached_cost + output_cost) / TOKENS_PER_MILLION
 
 
+def _catalog_has_billable_price(model: str | None, provider: str | None = None) -> bool | None:
+    prices = token_prices_for_model(model, provider)
+    if prices is None:
+        return None
+    return any(float(price or 0.0) > 0 for price in prices.values())
+
+
 def usage_cost_summary(bucket: dict) -> dict:
     exact = float(bucket.get("provider_cost_usd") or 0.0)
     estimated = float(bucket.get("estimated_cost_usd") or 0.0)
@@ -788,14 +795,33 @@ def record_response_usage(
             _float_value(_value(response, "usage"), "cost"),
             _float_value(response, "cost"),
         )
-        if provider_cost is not None and provider_cost >= 0:
+        openrouter_zero_provider_cost = (
+            str(provider or "").lower() == "openrouter"
+            and provider_cost is not None
+            and provider_cost == 0
+        )
+        if provider_cost is not None and provider_cost >= 0 and not openrouter_zero_provider_cost:
             record["provider_cost_usd"] = provider_cost
             record["cost_status"] = "exact"
         else:
-            estimated_cost = estimate_token_cost_usd(record, model, provider)
+            if provider_cost is not None and provider_cost >= 0:
+                record["provider_reported_cost_usd"] = provider_cost
+            billable_catalog_price = (
+                _catalog_has_billable_price(model, provider)
+                if openrouter_zero_provider_cost
+                else None
+            )
+            estimated_cost = (
+                estimate_token_cost_usd(record, model, provider)
+                if not openrouter_zero_provider_cost or billable_catalog_price
+                else None
+            )
             if estimated_cost is not None:
                 record["estimated_cost_usd"] = estimated_cost
                 record["cost_status"] = "estimated"
+            elif openrouter_zero_provider_cost and billable_catalog_price is False:
+                record["provider_cost_usd"] = provider_cost
+                record["cost_status"] = "exact"
             elif str(provider or "") == "anthropic" and effective_tier == "priority":
                 record["cost_status"] = "contract"
             else:

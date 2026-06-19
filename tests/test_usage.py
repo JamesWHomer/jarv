@@ -62,6 +62,17 @@ class UsageRecordingTests(unittest.TestCase):
                     },
                 },
             ),
+            CatalogModel(
+                id="openrouter/free",
+                metadata={
+                    "context_length": 128_000,
+                    "pricing": {
+                        "prompt": "0",
+                        "input_cache_read": "0",
+                        "completion": "0",
+                    },
+                },
+            ),
         ])
 
     def tearDown(self):
@@ -274,6 +285,96 @@ class UsageRecordingTests(unittest.TestCase):
         self.assertEqual(usage["last_request"]["cost_status"], "exact")
         self.assertEqual(usage["last_request"]["provider_cost_usd"], 7.125)
         self.assertEqual(usage["totals"]["cost_exact_request_count"], 1)
+
+    def test_openrouter_zero_cost_for_priced_model_is_estimated(self):
+        with TemporaryDirectory() as tmp:
+            usage_path = Path(tmp) / "usage-test.json"
+            response = {
+                "model": "openai/gpt-5.4-mini",
+                "usage": {
+                    "prompt_tokens": 1_000_000,
+                    "completion_tokens": 1_000_000,
+                    "total_tokens": 2_000_000,
+                    "cost": 0,
+                },
+            }
+
+            record_response_usage(
+                usage_path,
+                "session-id",
+                "openai/gpt-5.4-mini",
+                response=response,
+                source="root",
+                provider="openrouter",
+                record_global=False,
+            )
+            usage = load_usage(usage_path, "session-id")
+
+        self.assertEqual(usage["last_request"]["cost_status"], "estimated")
+        self.assertEqual(usage["last_request"]["provider_reported_cost_usd"], 0)
+        self.assertNotIn("provider_cost_usd", usage["last_request"])
+        self.assertAlmostEqual(usage["last_request"]["estimated_cost_usd"], 5.25)
+        self.assertEqual(usage["totals"]["cost_estimated_request_count"], 1)
+
+    def test_openrouter_zero_cost_for_free_model_stays_exact(self):
+        with TemporaryDirectory() as tmp:
+            usage_path = Path(tmp) / "usage-test.json"
+            response = {
+                "model": "openrouter/free",
+                "usage": {
+                    "prompt_tokens": 1_000_000,
+                    "completion_tokens": 1_000_000,
+                    "total_tokens": 2_000_000,
+                    "cost": 0,
+                },
+            }
+
+            record_response_usage(
+                usage_path,
+                "session-id",
+                "openrouter/free",
+                response=response,
+                source="root",
+                provider="openrouter",
+                record_global=False,
+            )
+            usage = load_usage(usage_path, "session-id")
+
+        self.assertEqual(usage["last_request"]["cost_status"], "exact")
+        self.assertEqual(usage["last_request"]["provider_cost_usd"], 0)
+        self.assertEqual(usage["last_request"]["provider_reported_cost_usd"], 0)
+        self.assertNotIn("estimated_cost_usd", usage["last_request"])
+        self.assertEqual(usage["totals"]["cost_exact_request_count"], 1)
+
+    def test_openrouter_zero_cost_without_catalog_price_is_unknown(self):
+        with TemporaryDirectory() as tmp:
+            usage_path = Path(tmp) / "usage-test.json"
+            response = {
+                "model": "unknown/vendor-model",
+                "usage": {
+                    "prompt_tokens": 1_000_000,
+                    "completion_tokens": 1_000_000,
+                    "total_tokens": 2_000_000,
+                    "cost": 0,
+                },
+            }
+
+            record_response_usage(
+                usage_path,
+                "session-id",
+                "unknown/vendor-model",
+                response=response,
+                source="root",
+                provider="openrouter",
+                record_global=False,
+            )
+            usage = load_usage(usage_path, "session-id")
+
+        self.assertEqual(usage["last_request"]["cost_status"], "unknown")
+        self.assertEqual(usage["last_request"]["provider_reported_cost_usd"], 0)
+        self.assertNotIn("provider_cost_usd", usage["last_request"])
+        self.assertNotIn("estimated_cost_usd", usage["last_request"])
+        self.assertEqual(usage["totals"]["cost_unknown_request_count"], 1)
 
     def test_openrouter_router_records_served_model(self):
         with TemporaryDirectory() as tmp:
