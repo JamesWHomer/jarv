@@ -122,7 +122,7 @@ def settings_rows(config: dict) -> list[dict]:
         },
         {
             "section": "command review",
-            "label": "Command safety",
+            "label": "Command approval",
             "key": "command_safety",
             "kind": "choice",
             "choices": SETTINGS_SAFETY_CHOICES,
