@@ -770,11 +770,16 @@ def _settings_model_choice_lines(
     *,
     max_lines: int | None = None,
     active_model: str = "",
+    include_prices: bool = True,
 ) -> list[Text]:
     if not models or (max_lines is not None and max_lines <= 0):
         return []
 
-    from .model_catalog import model_pricing_values
+    model_pricing_values = None
+    if include_prices:
+        from .model_catalog import model_pricing_values as _model_pricing_values
+
+        model_pricing_values = _model_pricing_values
 
     model_entries = []
     same_model_entries = []
@@ -833,10 +838,13 @@ def _settings_model_choice_lines(
         if entry[0] != "model":
             continue
         _kind, idx, name, description = entry
-        input_price, cached_price, output_price = model_pricing_values(
-            provider,
-            name,
-        )
+        if model_pricing_values is None:
+            input_price, cached_price, output_price = "n/a", "n/a", "n/a"
+        else:
+            input_price, cached_price, output_price = model_pricing_values(
+                provider,
+                name,
+            )
         display_rows.append((
             idx,
             name,
@@ -1264,6 +1272,7 @@ def _settings_editor_lines(
     inner_width: int,
     *,
     max_lines: int | None = None,
+    price_models: bool = True,
 ) -> list[Text]:
     if edit is None:
         return []
@@ -1420,6 +1429,7 @@ def _settings_editor_lines(
                 if key == "auditor_model"
                 else ""
             ),
+            include_prices=price_models,
         )
         if choice_line_budget is None or len(choices) < choice_line_budget:
             choices.append(Text(""))
@@ -1433,7 +1443,16 @@ def _settings_desired_editor_height(
     inner_width: int,
     terminal_height: int,
 ) -> int:
-    content_height = len(_settings_editor_lines(edit, config, inner_width))
+    max_content_lines = max(1, terminal_height - 2)
+    content_height = len(
+        _settings_editor_lines(
+            edit,
+            config,
+            inner_width,
+            max_lines=max_content_lines,
+            price_models=False,
+        )
+    )
     minimum = 7 if edit["row"].get("multiline") else 3
     return max(minimum, min(content_height + 2, terminal_height))
 

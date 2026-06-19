@@ -516,6 +516,35 @@ def test_model_picker_only_prices_visible_rows_when_cropped(monkeypatch):
     assert "model-199" not in priced
 
 
+def test_model_picker_height_does_not_price_models(monkeypatch):
+    priced = []
+
+    def pricing(_provider, model):
+        priced.append(model)
+        return ("$1", "$0", "$2")
+
+    monkeypatch.setattr(model_catalog, "model_pricing_values", pricing)
+    models = [(f"model-{idx:03}", "Catalog") for idx in range(200)]
+    edit = {
+        "row": {"key": "model", "kind": "setup", "label": "Model"},
+        "model_choices": models,
+        "selected_model_index": 100,
+        "model_input_active": False,
+        "buffer": "",
+        "cursor": 0,
+    }
+
+    height = settings_command._settings_desired_editor_height(
+        edit,
+        {"provider": "openrouter", "model": "model-100"},
+        100,
+        12,
+    )
+
+    assert height == 12
+    assert priced == []
+
+
 def test_model_pricing_values_are_cached(monkeypatch):
     calls = []
 
