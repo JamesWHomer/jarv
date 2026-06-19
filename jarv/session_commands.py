@@ -31,6 +31,7 @@ from .session_render import (
     _history_visual_lines,
     _history_visual_lines_and_anchors,
     _session_row_widths,
+    _status_renderable,
     _tool_call_output,
     _tool_call_renderable,
 )
@@ -115,6 +116,13 @@ def cmd_history() -> None:
                     pending_tool_parts.clear()
                     parts.append(Markdown(flatten_headings(content)))
                     parts.append(Text(""))
+            elif m.get("type") == "status":
+                content = str(m.get("content") or "").strip()
+                if content:
+                    _append_jarv_heading()
+                    parts.extend(pending_tool_parts)
+                    pending_tool_parts.clear()
+                    parts.append(_status_renderable(m))
             elif m.get("type") == "function_call":
                 pending_tool_parts.append(
                     _tool_call_renderable(

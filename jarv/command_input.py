@@ -10,8 +10,8 @@ from contextlib import contextmanager
 from rich.cells import cell_len, get_character_cell_size
 
 
-MOUSE_CAPTURE_ENABLE = "\x1b[?1000h\x1b[?1006h"
-MOUSE_CAPTURE_DISABLE = "\x1b[?1006l\x1b[?1000l"
+MOUSE_CAPTURE_ENABLE = "\x1b[?1006h\x1b[?1000h\x1b[?1007l"
+MOUSE_CAPTURE_DISABLE = "\x1b[?1000l\x1b[?1006l\x1b[?1007h"
 CURSOR_HIDE = "\x1b[?25l"
 CURSOR_SHOW = "\x1b[?25h"
 ANSI_RESET = "\x1b[0m"
@@ -26,6 +26,7 @@ _MOUSE_WHEEL_KEYS = {
 _POSIX_INPUT_POLL_INTERVAL = 0.1
 _LAST_TERMINAL_SIZE: tuple[int, int] | None = None
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_WINDOWS_MOUSE_CAPTURE_DEPTH = 0
 
 
 class TextInput(str):
@@ -51,6 +52,8 @@ def mouse_capture():
 
 @contextmanager
 def _windows_virtual_terminal_input():
+    global _WINDOWS_MOUSE_CAPTURE_DEPTH
+
     if sys.platform != "win32":
         yield
         return
@@ -61,21 +64,47 @@ def _windows_virtual_terminal_input():
         yield
         return
 
-    kernel32 = ctypes.windll.kernel32
-    handle = kernel32.GetStdHandle(-10)
-    mode = ctypes.c_uint()
-    if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+    try:
+        kernel32 = ctypes.windll.kernel32
+    except AttributeError:
         yield
         return
 
-    original_mode = mode.value
-    enabled_mode = original_mode | 0x0200
-    changed = enabled_mode != original_mode and kernel32.SetConsoleMode(handle, enabled_mode)
+    input_handle = kernel32.GetStdHandle(-10)
+    output_handle = kernel32.GetStdHandle(-11)
+    input_mode = ctypes.c_uint()
+    output_mode = ctypes.c_uint()
+    has_input_mode = bool(kernel32.GetConsoleMode(input_handle, ctypes.byref(input_mode)))
+    has_output_mode = bool(kernel32.GetConsoleMode(output_handle, ctypes.byref(output_mode)))
+    if not has_input_mode and not has_output_mode:
+        yield
+        return
+
+    original_input_mode = input_mode.value
+    original_output_mode = output_mode.value
+    input_changed = False
+    output_changed = False
+    if has_input_mode:
+        # Enable VT input for Windows Terminal and mouse records for conhost.
+        enabled_input_mode = (original_input_mode | 0x0010 | 0x0080 | 0x0200) & ~0x0040
+        input_changed = enabled_input_mode != original_input_mode and bool(
+            kernel32.SetConsoleMode(input_handle, enabled_input_mode)
+        )
+    if has_output_mode:
+        enabled_output_mode = original_output_mode | 0x0004
+        output_changed = enabled_output_mode != original_output_mode and bool(
+            kernel32.SetConsoleMode(output_handle, enabled_output_mode)
+        )
+
+    _WINDOWS_MOUSE_CAPTURE_DEPTH += 1
     try:
         yield
     finally:
-        if changed:
-            kernel32.SetConsoleMode(handle, original_mode)
+        _WINDOWS_MOUSE_CAPTURE_DEPTH = max(0, _WINDOWS_MOUSE_CAPTURE_DEPTH - 1)
+        if input_changed:
+            kernel32.SetConsoleMode(input_handle, original_input_mode)
+        if output_changed:
+            kernel32.SetConsoleMode(output_handle, original_output_mode)
 
 
 def _read_until_any(chars: set[str]) -> str:
@@ -109,6 +138,143 @@ def _read_windows_until_any(msvcrt, chars: set[str]) -> str:
         data += ch
         if ch in chars:
             return data
+
+
+def _windows_key_from_virtual_key(
+    virtual_key: int,
+    char: str,
+    *,
+    text_mode: bool,
+) -> str | None:
+    if char == "\r":
+        return "ENTER"
+    if char == "\t":
+        return "TAB"
+    if char == "\x1b":
+        return "ESC"
+    if not text_mode and char in ("q", "Q"):
+        return "ESC"
+    if char == "\x06":
+        return "CTRL_F"
+    if char == "\x13":
+        return "CTRL_S"
+    if char in ("\x08", "\x7f"):
+        return "BACKSPACE"
+    if char == "\x03":
+        raise KeyboardInterrupt
+
+    mapped = {
+        0x26: "UP",
+        0x28: "DOWN",
+        0x25: "LEFT",
+        0x27: "RIGHT",
+        0x24: "HOME",
+        0x23: "END",
+        0x21: "PAGEUP",
+        0x22: "PAGEDOWN",
+        0x2E: "DELETE",
+    }.get(virtual_key)
+    if mapped is not None:
+        return mapped
+    if char and char != "\x00":
+        return char
+    return None
+
+
+def _signed_high_word(value: int) -> int:
+    high = (int(value) >> 16) & 0xFFFF
+    return high - 0x10000 if high & 0x8000 else high
+
+
+def _read_windows_console_input_key(
+    *,
+    text_mode: bool,
+    translate_mouse_wheel: bool,
+) -> str | None:
+    if sys.platform != "win32" or not _WINDOWS_MOUSE_CAPTURE_DEPTH:
+        return None
+    if os.environ.get("WT_SESSION"):
+        return None
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except ImportError:
+        return None
+
+    class Coord(ctypes.Structure):
+        _fields_ = [("X", wintypes.SHORT), ("Y", wintypes.SHORT)]
+
+    class KeyEventRecord(ctypes.Structure):
+        _fields_ = [
+            ("bKeyDown", wintypes.BOOL),
+            ("wRepeatCount", wintypes.WORD),
+            ("wVirtualKeyCode", wintypes.WORD),
+            ("wVirtualScanCode", wintypes.WORD),
+            ("UnicodeChar", wintypes.WCHAR),
+            ("dwControlKeyState", wintypes.DWORD),
+        ]
+
+    class MouseEventRecord(ctypes.Structure):
+        _fields_ = [
+            ("dwMousePosition", Coord),
+            ("dwButtonState", wintypes.DWORD),
+            ("dwControlKeyState", wintypes.DWORD),
+            ("dwEventFlags", wintypes.DWORD),
+        ]
+
+    class EventUnion(ctypes.Union):
+        _fields_ = [
+            ("KeyEvent", KeyEventRecord),
+            ("MouseEvent", MouseEventRecord),
+        ]
+
+    class InputRecord(ctypes.Structure):
+        _anonymous_ = ("Event",)
+        _fields_ = [
+            ("EventType", wintypes.WORD),
+            ("Event", EventUnion),
+        ]
+
+    try:
+        kernel32 = ctypes.windll.kernel32
+    except AttributeError:
+        return None
+
+    handle = kernel32.GetStdHandle(-10)
+    record = InputRecord()
+    read = wintypes.DWORD()
+    while True:
+        if not kernel32.ReadConsoleInputW(handle, ctypes.byref(record), 1, ctypes.byref(read)):
+            return None
+        if not read.value:
+            return None
+
+        if record.EventType == 0x0001:
+            key = record.KeyEvent
+            if not key.bKeyDown:
+                continue
+            token = _windows_key_from_virtual_key(
+                int(key.wVirtualKeyCode),
+                key.UnicodeChar,
+                text_mode=text_mode,
+            )
+            if token is None:
+                continue
+            for _ in range(max(0, int(key.wRepeatCount) - 1)):
+                _PENDING_KEYS.append(token)
+            return token
+
+        if record.EventType == 0x0002:
+            mouse = record.MouseEvent
+            if int(mouse.dwEventFlags) != 0x0004:
+                continue
+            delta = _signed_high_word(int(mouse.dwButtonState))
+            if delta == 0:
+                continue
+            if translate_mouse_wheel:
+                return "UP" if delta > 0 else "DOWN"
+            return "MOUSE_WHEEL_UP" if delta > 0 else "MOUSE_WHEEL_DOWN"
 
 
 def _parse_sgr_mouse(sequence: str, *, translate_wheel: bool = True) -> str:
@@ -266,6 +432,13 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
         return _PENDING_KEYS.popleft()
 
     if sys.platform == "win32":
+        captured_key = _read_windows_console_input_key(
+            text_mode=text_mode,
+            translate_mouse_wheel=translate_mouse_wheel,
+        )
+        if captured_key is not None:
+            return captured_key
+
         import msvcrt
         ch = msvcrt.getwch()
         if ch in ("\x00", "\xe0"):

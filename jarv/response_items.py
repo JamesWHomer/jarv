@@ -59,6 +59,19 @@ def function_call_output_item(
     }
 
 
+def status_history_item(
+    text: str,
+    phase: str,
+    metadata: dict | None = None,
+) -> dict:
+    return {
+        "type": "status",
+        "phase": phase,
+        "content": text,
+        **(metadata or {}),
+    }
+
+
 def to_response_input_item(item: dict) -> dict | None:
     """Convert one stored history item to a Responses API input item."""
     role = item.get("role")

@@ -50,6 +50,20 @@ def _install_posix_input(monkeypatch, text: str) -> FakeStdin:
     return stdin
 
 
+class FakeStdout:
+    def __init__(self):
+        self.writes = []
+
+    def isatty(self):
+        return True
+
+    def write(self, text):
+        self.writes.append(text)
+
+    def flush(self):
+        pass
+
+
 def test_read_key_maps_sgr_mouse_wheel_up_to_up(monkeypatch):
     stdin = _install_posix_input(monkeypatch, "\x1b[<64;1;1M")
 
@@ -78,6 +92,87 @@ def test_read_key_can_preserve_sgr_mouse_wheel_tokens(monkeypatch):
     assert command_input._read_key(translate_mouse_wheel=False) == "MOUSE_WHEEL_UP"
     assert command_input._read_key(translate_mouse_wheel=False) == "MOUSE_WHEEL_DOWN"
     assert stdin.remaining == ""
+
+
+def test_mouse_capture_enables_windows_vt_and_mouse_modes(monkeypatch):
+    stdout = FakeStdout()
+    set_modes = []
+
+    class FakeUInt:
+        def __init__(self, value=0):
+            self.value = value
+
+    class FakeKernel32:
+        def GetStdHandle(self, handle):
+            return handle
+
+        def GetConsoleMode(self, handle, mode):
+            mode.value = 0x0040 if handle == -10 else 0
+            return True
+
+        def SetConsoleMode(self, handle, mode):
+            set_modes.append((handle, mode))
+            return True
+
+    fake_ctypes = SimpleNamespace(
+        c_uint=FakeUInt,
+        byref=lambda value: value,
+        windll=SimpleNamespace(kernel32=FakeKernel32()),
+    )
+
+    monkeypatch.setattr(command_input.sys, "platform", "win32")
+    monkeypatch.setattr(command_input.sys, "stdout", stdout)
+    monkeypatch.setitem(sys.modules, "ctypes", fake_ctypes)
+    command_input._WINDOWS_MOUSE_CAPTURE_DEPTH = 0
+
+    with command_input.mouse_capture():
+        assert command_input._WINDOWS_MOUSE_CAPTURE_DEPTH == 1
+
+    assert stdout.writes == [
+        command_input.MOUSE_CAPTURE_ENABLE,
+        command_input.MOUSE_CAPTURE_DISABLE,
+    ]
+    input_mode = set_modes[0][1]
+    output_mode = set_modes[1][1]
+    assert set_modes[-2:] == [(-10, 0x0040), (-11, 0)]
+    assert input_mode & 0x0010
+    assert input_mode & 0x0080
+    assert input_mode & 0x0200
+    assert not input_mode & 0x0040
+    assert output_mode & 0x0004
+    assert command_input._WINDOWS_MOUSE_CAPTURE_DEPTH == 0
+
+
+def test_windows_console_mouse_wheel_record_returns_mouse_token(monkeypatch):
+    import ctypes
+
+    class FakeKernel32:
+        def GetStdHandle(self, handle):
+            return handle
+
+        def ReadConsoleInputW(self, _handle, record, _count, read):
+            target = record._obj
+            target.EventType = 0x0002
+            target.MouseEvent.dwEventFlags = 0x0004
+            target.MouseEvent.dwButtonState = 120 << 16
+            read._obj.value = 1
+            return True
+
+    monkeypatch.setattr(command_input.sys, "platform", "win32")
+    monkeypatch.delenv("WT_SESSION", raising=False)
+    monkeypatch.setattr(ctypes, "windll", SimpleNamespace(kernel32=FakeKernel32()), raising=False)
+    command_input._WINDOWS_MOUSE_CAPTURE_DEPTH = 1
+
+    try:
+        assert (
+            command_input._read_windows_console_input_key(
+                text_mode=True,
+                translate_mouse_wheel=False,
+            )
+            == "MOUSE_WHEEL_UP"
+        )
+    finally:
+        command_input._WINDOWS_MOUSE_CAPTURE_DEPTH = 0
 
 
 def test_read_key_with_repeats_coalesces_identical_navigation(monkeypatch):

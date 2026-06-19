@@ -51,6 +51,7 @@ from .provider import (
     stream_response,
 )
 from .response_items import to_response_input_item
+from .response_items import status_history_item
 from .orchestrator import (
     ASK_USER_TOOL,
     RUN_COMMAND_TOOL,
@@ -1083,6 +1084,7 @@ def run_agent(
     stream_live: Live | None = None
     reasoning_items = []
     active_tool_call = None
+    pending_status_history_items: list[dict] = []
     cancellation_token = CancellationToken()
     thought_started = time.perf_counter()
     _ui_call(ui, "bind_cancel_token", cancellation_token)
@@ -1121,6 +1123,10 @@ def run_agent(
             save_retained_output_store(retained_store, reads_file)
 
     def _checkpoint_cancelled_turn() -> None:
+        if pending_status_history_items:
+            history.extend(pending_status_history_items)
+            pending_status_history_items.clear()
+
         recorded_reasoning_ids = {
             str(item.get("id"))
             for item in history
@@ -1269,6 +1275,9 @@ def run_agent(
                     time.perf_counter() - thought_started,
                     has_reasoning=saw_reasoning,
                 )
+                pending_status_history_items.append(
+                    status_history_item(status_text, "response", metadata)
+                )
                 if ui is not None:
                     _ui_call(ui, "complete_response_phase", status_text)
                     return
@@ -1288,11 +1297,19 @@ def run_agent(
                     - tool_started_at,
                     tuple(started_tool_names),
                 )
+                pending_status_history_items.append(
+                    status_history_item(status_text, "tool", metadata)
+                )
                 if ui is not None:
                     _ui_call(ui, "complete_tool_phase", status_text)
                     return
                 if interactive:
                     console.print(tool_complete_indicator(status_text))
+
+            def append_status_history_items() -> None:
+                if pending_status_history_items:
+                    history.extend(pending_status_history_items)
+                    pending_status_history_items.clear()
 
             def note_tool_call_started(
                 item_id: str,
@@ -1469,6 +1486,7 @@ def run_agent(
                 tool_completed_at = None
                 response_phase_completed = False
                 tool_phase_completed = False
+                pending_status_history_items.clear()
                 stream_preview = None
                 tool_indicator = None
                 wait_indicator = None
@@ -1523,6 +1541,7 @@ def run_agent(
                 ) == "print":
                     console.print()
                 new_input_items = []
+                append_status_history_items()
                 append_reasoning_input_items(
                     new_input_items,
                     reasoning_items,
@@ -1686,6 +1705,7 @@ def run_agent(
                     tools=kwargs["tools"],
                 )
             else:
+                append_status_history_items()
                 history.append({"role": "assistant", "content": reply_text, **metadata})
                 _save_turn_state()
                 _print_agent_usage_if_enabled(
@@ -1707,6 +1727,9 @@ def run_agent(
             _ui_call(ui, "show_error", f"API error: {e}")
         else:
             console.print(f"[red]API error:[/red] {escape(str(e))}")
+        if pending_status_history_items:
+            history.extend(pending_status_history_items)
+            pending_status_history_items.clear()
         if reply_text and not tool_calls:
             history.append({"role": "assistant", "content": reply_text, **metadata})
         if not incognito and session_context is not None:
@@ -1721,6 +1744,9 @@ def run_agent(
             _ui_call(ui, "show_error", f"Unexpected error: {e}")
         else:
             console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        if pending_status_history_items:
+            history.extend(pending_status_history_items)
+            pending_status_history_items.clear()
         if not incognito and session_context is not None:
             save_history(history, session_context.history_file)
         if not incognito and artifact_store is not None and artifact_file is not None:

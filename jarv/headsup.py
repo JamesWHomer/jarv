@@ -47,6 +47,7 @@ from .display import (
 from .history import forget_current_session, load_history, prepare_session_context
 from .session_render import (
     _history_content_to_str,
+    _status_renderable,
     _tool_call_output,
     _tool_call_renderable,
 )
@@ -1064,6 +1065,16 @@ class HeadsupApp:
         entries: list[TranscriptEntry] = [self._initial_notice_entry()]
         for item_index, item in enumerate(history):
             if not isinstance(item, dict):
+                continue
+            if item.get("type") == "status":
+                content = _history_content_to_str(item.get("content", "")).strip()
+                if content:
+                    entries.append(
+                        TranscriptEntry(
+                            "status",
+                            _status_renderable(item),
+                        )
+                    )
                 continue
             if item.get("type") == "function_call":
                 entries.append(

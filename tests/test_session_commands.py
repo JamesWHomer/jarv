@@ -31,6 +31,26 @@ def test_history_visual_lines_include_tool_calls():
     assert len(anchors) == 3
 
 
+def test_history_visual_lines_include_status_records():
+    history = [
+        {"role": "user", "content": "Hello"},
+        {
+            "type": "status",
+            "phase": "response",
+            "content": "Started responding in 1.0 second.",
+        },
+        {"role": "assistant", "content": "Hi."},
+    ]
+
+    lines, anchors = session_commands._history_visual_lines_and_anchors(history, 100)
+    rendered = "\n".join(line.plain for line in lines)
+
+    assert "Started responding in 1.0 second." in rendered
+    assert rendered.index("jarv:") < rendered.index("Started responding")
+    assert rendered.index("Started responding") < rendered.index("Hi.")
+    assert len(anchors) == 2
+
+
 def test_history_visual_lines_include_malformed_tool_arguments():
     history = [
         {

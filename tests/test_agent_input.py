@@ -379,8 +379,11 @@ class AgentInputTests(unittest.TestCase):
 
             saved = load_history(history_file)
 
-        self.assertEqual(len(saved), len(existing) + 2)
-        self.assertEqual([item["content"] for item in saved if "content" in item], [
+        conversation_items = [
+            item for item in saved if item.get("type") != "status"
+        ]
+        self.assertEqual(len(conversation_items), len(existing) + 2)
+        self.assertEqual([item["content"] for item in conversation_items if "content" in item], [
             "one " + ("a" * 500),
             "two " + ("b" * 500),
             "three",
@@ -422,8 +425,11 @@ class AgentInputTests(unittest.TestCase):
 
             saved = load_history(history_file)
 
-        self.assertEqual(len(saved), len(existing) + 2)
-        self.assertEqual([item["content"] for item in saved if "content" in item], [
+        conversation_items = [
+            item for item in saved if item.get("type") != "status"
+        ]
+        self.assertEqual(len(conversation_items), len(existing) + 2)
+        self.assertEqual([item["content"] for item in conversation_items if "content" in item], [
             "one",
             "two",
             "three",
@@ -471,10 +477,15 @@ class AgentInputTests(unittest.TestCase):
 
         self.assertTrue(result.cancelled)
         self.assertEqual(result.prompt, "edit this prompt")
-        self.assertEqual(saved[:2], existing)
-        self.assertEqual(saved[2]["content"], "edit this prompt")
-        self.assertEqual(saved[3]["content"], "partial")
-        self.assertEqual(saved[4]["content"], "[Turn cancelled by user.]")
+        conversation_items = [
+            item for item in saved if item.get("type") != "status"
+        ]
+        status_items = [item for item in saved if item.get("type") == "status"]
+        self.assertEqual(conversation_items[:2], existing)
+        self.assertEqual(conversation_items[2]["content"], "edit this prompt")
+        self.assertEqual(conversation_items[3]["content"], "partial")
+        self.assertEqual(conversation_items[4]["content"], "[Turn cancelled by user.]")
+        self.assertTrue(any("Started responding in" in item["content"] for item in status_items))
         self.assertFalse(redo_exists)
         self.assertEqual(artifact_after, artifact_before)
 
@@ -517,12 +528,17 @@ class AgentInputTests(unittest.TestCase):
             saved = load_history(history_file)
 
         self.assertTrue(result.cancelled)
-        self.assertEqual(saved[0]["content"], "change the files")
-        self.assertEqual(saved[1]["call_id"], "call_active")
-        self.assertIn("may have made partial changes", saved[2]["output"])
-        self.assertEqual(saved[3]["call_id"], "call_pending")
-        self.assertIn("before execution", saved[4]["output"])
-        self.assertEqual(saved[5]["content"], "[Turn cancelled by user.]")
+        conversation_items = [
+            item for item in saved if item.get("type") != "status"
+        ]
+        status_items = [item for item in saved if item.get("type") == "status"]
+        self.assertEqual(conversation_items[0]["content"], "change the files")
+        self.assertEqual(conversation_items[1]["call_id"], "call_active")
+        self.assertIn("may have made partial changes", conversation_items[2]["output"])
+        self.assertEqual(conversation_items[3]["call_id"], "call_pending")
+        self.assertIn("before execution", conversation_items[4]["output"])
+        self.assertEqual(conversation_items[5]["content"], "[Turn cancelled by user.]")
+        self.assertTrue(any("Started responding in" in item["content"] for item in status_items))
 
     def test_run_agent_replays_truncated_stream_without_duplicate_tool_execution(self):
         with TemporaryDirectory() as tmp:
@@ -1166,6 +1182,78 @@ class AgentInputTests(unittest.TestCase):
 
         self.assertEqual(saved[-1]["role"], "assistant")
         self.assertEqual(saved[-1]["content"], "recovered answer")
+
+    def test_run_agent_persists_response_status_without_model_input(self):
+        with TemporaryDirectory() as tmp:
+            history_file = Path(tmp) / "history.json"
+            context = SessionContext(
+                session_id="session-id",
+                session_label="test session",
+                history_file=history_file,
+                now=datetime(2026, 5, 21, tzinfo=timezone.utc),
+            )
+
+            def fake_stream_response(*_args, **_kwargs):
+                yield TextDelta("hello")
+                yield StreamDone(response=None)
+
+            with (
+                patch("jarv.agent.prepare_session_context", return_value=context),
+                patch("jarv.agent.stream_response", side_effect=fake_stream_response),
+                patch("jarv.agent.sys.stdout", new=io.StringIO()),
+            ):
+                run_agent("hello!", DEFAULT_CONFIG, client=object())
+
+            saved = load_history(history_file)
+
+        status_items = [item for item in saved if item.get("type") == "status"]
+        self.assertEqual(len(status_items), 1)
+        self.assertEqual(status_items[0]["phase"], "response")
+        self.assertIn("Started responding in", status_items[0]["content"])
+        self.assertIsNone(to_response_input_item(status_items[0]))
+        self.assertEqual(saved[-1]["role"], "assistant")
+
+    def test_run_agent_persists_tool_status(self):
+        with TemporaryDirectory() as tmp:
+            history_file = Path(tmp) / "history.json"
+            context = SessionContext(
+                session_id="session-id",
+                session_label="test session",
+                history_file=history_file,
+                now=datetime(2026, 5, 21, tzinfo=timezone.utc),
+            )
+            stream_count = 0
+
+            def fake_stream_response(*_args, **_kwargs):
+                nonlocal stream_count
+                stream_count += 1
+                if stream_count == 1:
+                    yield ToolCallDone(
+                        id="fc_1",
+                        call_id="call_1",
+                        name="run_command",
+                        arguments='{"command":"echo ok"}',
+                    )
+                else:
+                    yield TextDelta("done")
+                yield StreamDone(response=None)
+
+            with (
+                patch("jarv.agent.prepare_session_context", return_value=context),
+                patch("jarv.agent.stream_response", side_effect=fake_stream_response),
+                patch("jarv.agent._dispatch_run_command_with_ui", return_value="ok"),
+                patch("jarv.agent.sys.stdout", new=io.StringIO()),
+            ):
+                run_agent("run it", DEFAULT_CONFIG, client=object())
+
+            saved = load_history(history_file)
+
+        status_texts = [
+            item["content"]
+            for item in saved
+            if item.get("type") == "status"
+        ]
+        self.assertTrue(any("Wrote command in" in text for text in status_texts))
 
     def test_run_agent_does_not_print_usage_by_default(self):
         with TemporaryDirectory() as tmp:

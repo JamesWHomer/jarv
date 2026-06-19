@@ -410,6 +410,25 @@ class HeadsupTests(unittest.TestCase):
             tool_complete_indicator("Prepared 2 actions in 0.1 seconds.").plain,
         )
 
+    def test_sync_transcript_from_history_includes_status_records(self):
+        app, _test_console, _output = self._app()
+        history = [
+            {"role": "user", "content": "Hello"},
+            {
+                "type": "status",
+                "phase": "response",
+                "content": "Started responding in 1.0 second.",
+            },
+            {"role": "assistant", "content": "Hi."},
+        ]
+
+        with patch("jarv.headsup.load_history", return_value=history):
+            app._sync_transcript_from_history()
+
+        rendered = self._entry_text(app)
+        self.assertIn("Started responding in 1.0 second.", rendered)
+        self.assertLess(rendered.index("Started responding"), rendered.index("Hi."))
+
     def test_active_wait_status_refresh_updates_elapsed_text(self):
         app, _test_console, _output = self._app()
         ui = HeadsupAgentUI(app)

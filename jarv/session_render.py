@@ -32,6 +32,13 @@ def _markdown_to_text_lines(content: str, width: int) -> list[Text]:
     return rendered_text_lines(Markdown(flatten_headings(content)), width)
 
 
+def _status_renderable(item: dict) -> Text:
+    content = _history_content_to_str(item.get("content", "")).strip()
+    phase = str(item.get("phase", "")).lower()
+    prefix = "\u2713 " if phase == "tool" else "\u2726 "
+    return Text(f"{prefix}{content}", style="dim")
+
+
 def _tool_call_arguments(item: dict) -> tuple[dict | None, str]:
     arguments = item.get("arguments", "")
     if not isinstance(arguments, str):
@@ -183,6 +190,15 @@ def _history_visual_lines_and_anchors(history: list, width: int) -> tuple[list[T
     jarv_turn_open = False
     for item_index, item in enumerate(history):
         if not isinstance(item, dict):
+            continue
+        if item.get("type") == "status":
+            body = _history_content_to_str(item.get("content", "")).strip()
+            if not body:
+                continue
+            if not jarv_turn_open:
+                lines.append(Text("jarv:", style="bold green", no_wrap=True, overflow="crop"))
+                jarv_turn_open = True
+            lines.extend(rendered_text_lines(_status_renderable(item), width))
             continue
         if item.get("type") == "function_call":
             start = len(lines)
