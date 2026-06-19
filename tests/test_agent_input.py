@@ -734,7 +734,7 @@ class AgentInputTests(unittest.TestCase):
         self.assertIn("\u2713 done", rendered)
         self.assertEqual(rendered.count("Continue?"), 2)
         self.assertIn("> yes", rendered)
-        self.assertEqual(rendered.count("\u250c"), 2)
+        self.assertEqual(rendered.count("\u256d"), 2)
         self.assertIn("\x1b[5A", rendered)
         self.assertEqual(rendered.count("\x1b[2K"), 5)
         self.assertLess(rendered.index("waiting"), rendered.index("\x1b[5A"))

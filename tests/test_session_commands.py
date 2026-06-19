@@ -25,7 +25,7 @@ def test_history_visual_lines_include_tool_calls():
     assert "\u2713 done" in rendered
     assert "> git status --short" in rendered
     assert "working tree clean" in rendered
-    assert "\u250c" in rendered
+    assert "\u256d" in rendered
     assert rendered.index("jarv:") < rendered.index("> Command")
     assert rendered.count("jarv:") == 1
     assert len(anchors) == 3
@@ -111,9 +111,9 @@ def test_history_visual_lines_group_multiple_tool_calls_under_one_jarv_heading()
     web_search_bottom = next(
         index
         for index, line in enumerate(rendered.splitlines())
-        if line.startswith("\u2514") and index > rendered.splitlines().index("jarv:")
+        if line.startswith("\u2570") and index > rendered.splitlines().index("jarv:")
     )
-    assert rendered.splitlines()[web_search_bottom + 1].startswith("\u250c")
+    assert rendered.splitlines()[web_search_bottom + 1].startswith("\u256d")
 
 
 def test_history_visual_lines_ignore_hidden_records_between_tool_calls():
@@ -142,10 +142,10 @@ def test_history_visual_lines_ignore_hidden_records_between_tool_calls():
         line.plain for line in session_commands._history_visual_lines(history, 100)
     ]
     first_card_bottom = rendered_lines.index(
-        next(line for line in rendered_lines if line.startswith("\u2514"))
+        next(line for line in rendered_lines if line.startswith("\u2570"))
     )
 
-    assert rendered_lines[first_card_bottom + 1].startswith("\u250c")
+    assert rendered_lines[first_card_bottom + 1].startswith("\u256d")
 
 
 def test_session_row_widths_preserve_message_space_on_small_screens():
