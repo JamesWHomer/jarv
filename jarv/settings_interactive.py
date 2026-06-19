@@ -1,5 +1,7 @@
 """Interactive /settings screen loop."""
 
+import threading
+
 from rich import box
 from rich.console import Group
 from rich.live import Live
@@ -40,6 +42,13 @@ def run_settings_interactive(config: dict) -> None:
     pending_reset: int | None = None
     catalog_refresher = _ModelCatalogRefresher()
     live_holder: list[Live] = []
+    refresh_lock = threading.RLock()
+
+    def _refresh_live() -> None:
+        if not live_holder:
+            return
+        with refresh_lock:
+            live_holder[0].refresh()
 
     def _catalog_refreshed(
         provider: str,
@@ -48,50 +57,51 @@ def run_settings_interactive(config: dict) -> None:
     ) -> None:
         nonlocal rows, flash
 
-        current_edit = edit
-        if (
-            current_edit is not None
-            and current_edit["row"]["key"] in {"model", "auditor_model"}
-            and current_edit.get("catalog_provider") == provider
-            and current_edit.get("catalog_generation") == generation
-        ):
-            previous = list(current_edit.get("model_choices") or [])
-            displayed_choices = _settings_model_choices_for_key(
-                config,
-                current_edit["row"]["key"],
-                choices,
-            )
-            selected_name = ""
-            previous_selected = int(
-                current_edit.get("selected_model_index", 0)
-            )
-            if 0 <= previous_selected < len(previous):
-                selected_name = previous[previous_selected][0]
-            current_edit["model_choices"] = displayed_choices
-            current_edit["selected_model_index"] = next(
-                (
-                    idx
-                    for idx, (name, _description) in enumerate(displayed_choices)
-                    if name == selected_name
-                ),
-                min(previous_selected, max(0, len(displayed_choices) - 1)),
-            )
-            current_edit["catalog_notice"] = _settings_model_update_notice(
-                previous,
-                displayed_choices,
-            )
-        if provider == config.get("provider"):
-            from .reasoning import reconcile_reasoning_effort
-
-            if reconcile_reasoning_effort(config) is not None:
-                save_config(config)
-                rows = _settings_rows(config)
-                flash = (
-                    "Reasoning effort reset to default for this model.",
-                    "yellow",
+        with refresh_lock:
+            current_edit = edit
+            if (
+                current_edit is not None
+                and current_edit["row"]["key"] in {"model", "auditor_model"}
+                and current_edit.get("catalog_provider") == provider
+                and current_edit.get("catalog_generation") == generation
+            ):
+                previous = list(current_edit.get("model_choices") or [])
+                displayed_choices = _settings_model_choices_for_key(
+                    config,
+                    current_edit["row"]["key"],
+                    choices,
                 )
-        if live_holder:
-            live_holder[0].refresh()
+                selected_name = ""
+                previous_selected = int(
+                    current_edit.get("selected_model_index", 0)
+                )
+                if 0 <= previous_selected < len(previous):
+                    selected_name = previous[previous_selected][0]
+                current_edit["model_choices"] = displayed_choices
+                current_edit["selected_model_index"] = next(
+                    (
+                        idx
+                        for idx, (name, _description) in enumerate(displayed_choices)
+                        if name == selected_name
+                    ),
+                    min(previous_selected, max(0, len(displayed_choices) - 1)),
+                )
+                current_edit["catalog_notice"] = _settings_model_update_notice(
+                    previous,
+                    displayed_choices,
+                )
+            if provider == config.get("provider"):
+                from .reasoning import reconcile_reasoning_effort
+
+                if reconcile_reasoning_effort(config) is not None:
+                    save_config(config)
+                    rows = _settings_rows(config)
+                    flash = (
+                        "Reasoning effort reset to default for this model.",
+                        "yellow",
+                    )
+            if live_holder:
+                live_holder[0].refresh()
 
     def _request_catalog_refresh(
         provider: str,
@@ -317,10 +327,10 @@ def run_settings_interactive(config: dict) -> None:
         auto_refresh=False,
         transient=False,
         vertical_overflow="crop",
-    ) as live, refresh_on_resize(live), mouse_capture():
+    ) as live, refresh_on_resize(live, on_change=_refresh_live), mouse_capture():
         live_holder.append(live)
         while True:
-            live.refresh()
+            _refresh_live()
             try:
                 key, repeat_count = _read_key_with_repeats(
                     text_mode=edit is not None,
