@@ -108,6 +108,7 @@ def test_help_about_and_config_use_shared_renderer(monkeypatch):
     commands.cmd_config()
 
     assert [call["title"] for call in calls] == ["help", "about", "config"]
+    assert calls[0]["fill_screen"] is True
     assert calls[2]["config"]["read_only_command_display"] == "fullscreen"
 
 

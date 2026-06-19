@@ -1,10 +1,12 @@
 import io
 import sys
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import jarv.cli as cli
+from jarv.headsup import HeadsupApp
 
 
 class PipedStringIO(io.StringIO):
@@ -18,6 +20,18 @@ class TtyStringIO(io.StringIO):
 
 
 class CliStdinTests(unittest.TestCase):
+    def _headsup_app(self, config=None, client=object(), args=None, handle_slash=None, maybe_command=None, module=None):
+        ready = threading.Event()
+        ready.set()
+        return HeadsupApp(
+            config or {"model": "test"},
+            client,
+            args=args,
+            agent_loader=({"module": module or SimpleNamespace()}, ready),
+            handle_slash=handle_slash or (lambda command, rest, config, client, args, hint: (config, client)),
+            maybe_command=maybe_command or (lambda _first, _rest: None),
+        )
+
     def test_parser_accepts_provider_override(self):
         args = cli._build_parser().parse_args(["--provider", "ANTHROPIC", "hello"])
 
@@ -210,46 +224,35 @@ class CliStdinTests(unittest.TestCase):
             timeout=None,
             system=None,
         )
-        calls = 0
+        calls = []
 
-        def read_line(_prompt, initial=""):
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                return "/set model new-model"
-            raise KeyboardInterrupt
+        def handle_slash(command, rest, current_config, current_client, current_args, unknown_help_hint):
+            calls.append((command, rest, current_config, current_client, current_args, unknown_help_hint))
+            return refreshed, "new-client"
 
-        with (
-            patch("jarv.command_input.read_editable_line", side_effect=read_line),
-            patch.object(cli, "_run_slash_command", return_value=True) as run_slash,
-            patch.object(
-                cli,
-                "_reload_heads_up_runtime",
-                return_value=(refreshed, "new-client"),
-            ) as reload,
-        ):
-            cli.run_heads_up_mode(config, client="old-client", args=args)
+        app = self._headsup_app(
+            config,
+            client="old-client",
+            args=args,
+            handle_slash=handle_slash,
+        )
+        app._handle_query("/set model new-model")
 
-        run_slash.assert_called_once_with("/set", ["model", "new-model"])
-        reload.assert_called_once_with(config, "old-client", args)
+        self.assertEqual(calls, [("/set", ["model", "new-model"], config, "old-client", args, True)])
+        self.assertEqual(app.config, refreshed)
+        self.assertEqual(app.client, "new-client")
 
     def test_heads_up_mode_handles_jarv_prefixed_slash_command(self):
-        calls = 0
+        calls = []
 
-        def read_line(_prompt, initial=""):
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                return "jarv /set model new-model"
-            raise KeyboardInterrupt
+        def handle_slash(command, rest, current_config, current_client, current_args, unknown_help_hint):
+            calls.append((command, rest))
+            return current_config, current_client
 
-        with (
-            patch("jarv.command_input.read_editable_line", side_effect=read_line),
-            patch.object(cli, "_run_slash_command", return_value=True) as run_slash,
-        ):
-            cli.run_heads_up_mode({"model": "test"}, client=object())
+        app = self._headsup_app(handle_slash=handle_slash)
+        app._handle_query("jarv /set model new-model")
 
-        run_slash.assert_called_once_with("/set", ["model", "new-model"])
+        self.assertEqual(calls, [("/set", ["model", "new-model"])])
 
     def test_heads_up_mode_skips_reload_for_unknown_slash_command(self):
         args = SimpleNamespace(
@@ -259,48 +262,31 @@ class CliStdinTests(unittest.TestCase):
             timeout=None,
             system=None,
         )
-        calls = 0
+        calls = []
 
-        def read_line(_prompt, initial=""):
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                return "/bogus"
-            raise KeyboardInterrupt
+        def handle_slash(command, rest, current_config, current_client, current_args, unknown_help_hint):
+            calls.append((command, rest))
+            return current_config, current_client
 
-        with (
-            patch("jarv.command_input.read_editable_line", side_effect=read_line),
-            patch.object(cli, "_run_slash_command", return_value=False),
-            patch.object(cli, "_reload_heads_up_runtime") as reload,
-        ):
-            cli.run_heads_up_mode({"model": "test"}, client=object(), args=args)
+        app = self._headsup_app(args=args, handle_slash=handle_slash)
+        app._handle_query("/bogus")
 
-        reload.assert_not_called()
+        self.assertEqual(calls, [("/bogus", [])])
 
     def test_heads_up_mode_restores_cancelled_prompt(self):
-        initial_values = []
-        calls = 0
+        run_agent_calls = []
 
-        def read_line(_prompt, initial=""):
-            nonlocal calls
-            initial_values.append(initial)
-            calls += 1
-            if calls == 1:
-                return "draft prompt"
-            raise KeyboardInterrupt
+        def run_agent(query, config, client, **kwargs):
+            run_agent_calls.append((query, config, client, kwargs))
+            return SimpleNamespace(cancelled=True, prompt="draft prompt")
 
-        with (
-            patch("jarv.command_input.read_editable_line", side_effect=read_line),
-            patch(
-                "jarv.agent.run_agent",
-                return_value=SimpleNamespace(cancelled=True, prompt="draft prompt"),
-            ) as run_agent,
-        ):
-            cli.run_heads_up_mode({"model": "test"}, client=object())
+        app = self._headsup_app(module=SimpleNamespace(run_agent=run_agent))
+        app._handle_query("draft prompt")
 
-        run_agent.assert_called_once()
-        self.assertTrue(run_agent.call_args.kwargs["heads_up"])
-        self.assertEqual(initial_values, ["", "draft prompt"])
+        self.assertEqual(len(run_agent_calls), 1)
+        self.assertTrue(run_agent_calls[0][3]["heads_up"])
+        self.assertIsNotNone(run_agent_calls[0][3]["ui"])
+        self.assertEqual(app.editor["buffer"], "draft prompt")
 
 
 if __name__ == "__main__":

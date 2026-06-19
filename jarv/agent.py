@@ -127,8 +127,20 @@ def resolve_tool_call_display(config: dict, *, heads_up: bool) -> str:
     return str(mode)
 
 
-def _print_tool_card(renderable, config: dict) -> None:
+def _ui_call(ui, method: str, *args, **kwargs):
+    if ui is None:
+        return None
+    handler = getattr(ui, method, None)
+    if handler is None:
+        return None
+    return handler(*args, **kwargs)
+
+
+def _print_tool_card(renderable, config: dict, ui=None) -> None:
     """Print a tool card with the spacing required by its display mode."""
+    if ui is not None:
+        _ui_call(ui, "show_tool_card", renderable)
+        return
     console.print(renderable)
     if config.get(
         "tool_call_display",
@@ -494,12 +506,24 @@ def _format_agent_usage_line(usage: dict) -> Text | None:
     return line
 
 
-def _print_agent_usage_if_enabled(config: dict, usage_path, session_id: str | None) -> None:
+def _print_agent_usage_if_enabled(
+    config: dict,
+    usage_path,
+    session_id: str | None,
+    ui=None,
+    *,
+    heads_up: bool = False,
+) -> None:
+    if heads_up:
+        return
     if not config.get("print_usage_after_agent", DEFAULT_CONFIG["print_usage_after_agent"]):
         return
     usage_line = _format_agent_usage_line(load_usage(usage_path, session_id, warn=False))
     if usage_line is not None:
-        console.print(usage_line)
+        if ui is not None:
+            _ui_call(ui, "show_usage_line", usage_line)
+        else:
+            console.print(usage_line)
 
 
 def get_system_info() -> str:
@@ -525,11 +549,15 @@ def _dispatch_run_command_with_ui(
     session_id: str | None = None,
     cancellation_token: CancellationToken | None = None,
     retained_store: RetainedOutputStore | None = None,
+    ui=None,
 ) -> str:
     cmd = args.get("command")
     if not isinstance(cmd, str) or not cmd.strip():
         msg = "[tool argument error: command must be a non-empty string]"
-        console.print(f"[red]{msg}[/red]")
+        if ui is not None:
+            _ui_call(ui, "show_error", msg)
+        else:
+            console.print(f"[red]{msg}[/red]")
         return msg
 
     try:
@@ -548,7 +576,10 @@ def _dispatch_run_command_with_ui(
         )
     except ValueError as e:
         msg = f"[tool argument error: {e}]"
-        console.print(f"[red]{msg}[/red]")
+        if ui is not None:
+            _ui_call(ui, "show_error", msg)
+        else:
+            console.print(f"[red]{msg}[/red]")
         return msg
 
     safety_level = config.get("command_safety", "risky")
@@ -564,7 +595,10 @@ def _dispatch_run_command_with_ui(
         cancellation_token=cancellation_token,
     )
     if not allowed:
-        console.print(f"[dim]{denial}[/dim]")
+        if ui is not None:
+            _ui_call(ui, "show_notice", Text(denial, style="dim"))
+        else:
+            console.print(f"[dim]{denial}[/dim]")
         return denial
 
     display_mode = config.get(
@@ -578,6 +612,72 @@ def _dispatch_run_command_with_ui(
         display_mode,
         time.perf_counter(),
     )
+    if ui is not None:
+        _ui_call(ui, "show_tool_card", running_card)
+        try:
+            result = execute_command(
+                cmd,
+                config.get("command_timeout", 60),
+                cancellation_token=cancellation_token,
+            )
+        except (KeyboardInterrupt, TurnCancelled):
+            cancelled_line = Text("> ", style="bold yellow")
+            cancelled_line.append(cmd)
+            _ui_call(
+                ui,
+                "show_tool_card",
+                tool_card(
+                    "run_command",
+                    Group(cancelled_line, Text("Cancelled", style="bold red")),
+                    metadata=metadata,
+                    display_mode=display_mode,
+                    status="cancelled",
+                    status_style="red",
+                ),
+            )
+            raise
+
+        command_line = Text("> ", style="bold yellow")
+        command_line.append(cmd)
+        body_parts = [command_line, command_result_renderable(result)]
+        output, output_id = retain_command_output(
+            result.full_model_output(),
+            head_chars,
+            tail_chars,
+            retained_store,
+            int(
+                config.get(
+                    "max_tool_output_chars",
+                    DEFAULT_CONFIG["max_tool_output_chars"],
+                )
+            ),
+        )
+        if output_id is not None:
+            retained_line = Text("Retained command output: ", style="dim")
+            retained_line.append(output_id, style="cyan")
+            body_parts.append(retained_line)
+        _ui_call(
+            ui,
+            "show_tool_card",
+            tool_card(
+                "run_command",
+                Group(*body_parts),
+                metadata=metadata,
+                display_mode=display_mode,
+                status=(
+                    "done"
+                    if not result.timed_out and result.exit_code in (None, 0)
+                    else "failed"
+                ),
+                status_style=(
+                    "green"
+                    if not result.timed_out and result.exit_code in (None, 0)
+                    else "red"
+                ),
+            ),
+        )
+        return output
+
     live = Live(
         running_card,
         refresh_per_second=4,
@@ -688,12 +788,18 @@ def _ask_user_terminal_input():
         tty.close()
 
 
-def _dispatch_ask_user(args: dict, config: dict | None = None) -> str:
+def _dispatch_ask_user(args: dict, config: dict | None = None, ui=None) -> str:
     question = args.get("question")
     if not isinstance(question, str) or not question.strip():
         msg = "[tool argument error: question must be a non-empty string]"
-        console.print(f"[red]{msg}[/red]")
+        if ui is not None:
+            _ui_call(ui, "show_error", msg)
+        else:
+            console.print(f"[red]{msg}[/red]")
         return msg
+    if ui is not None:
+        answer = _ui_call(ui, "ask_user", question, config or DEFAULT_CONFIG)
+        return str(answer) if answer is not None else "[no response]"
     with _ask_user_terminal_input() as can_prompt:
         if not can_prompt:
             return "[non-interactive session; user unavailable]"
@@ -769,11 +875,15 @@ def _dispatch_spawn_with_ui(
     config,
     cancellation_token: CancellationToken | None = None,
     retained_store: RetainedOutputStore | None = None,
+    ui=None,
 ) -> str:
     children_raw = args.get("children")
     if not isinstance(children_raw, list) or not children_raw:
         msg = "[tool argument error: children must be a non-empty list]"
-        console.print(f"[red]{msg}[/red]")
+        if ui is not None:
+            _ui_call(ui, "show_error", msg)
+        else:
+            console.print(f"[red]{msg}[/red]")
         return msg
 
     top_labels = [c.get("label", "?") for c in children_raw if isinstance(c, dict)]
@@ -784,6 +894,10 @@ def _dispatch_spawn_with_ui(
     for lbl in top_labels:
         states[lbl] = {"status": "running", "depth": 0}
     lock = threading.Lock()
+
+    def _push_spawn_panel() -> None:
+        if ui is not None:
+            _ui_call(ui, "show_tool_card", SpawnPanel())
 
     class PanelObserver(SpawnObserver):
         def on_spawn_start(self, parent_label: str, child_labels: list[str]) -> None:
@@ -797,11 +911,13 @@ def _dispatch_spawn_with_ui(
                     if cl not in states:
                         states[cl] = {"status": "running", "depth": parent_depth + 1}
                         bucket.append(cl)
+            _push_spawn_panel()
 
         def on_child_done(self, parent_label: str, label: str, result: dict) -> None:
             with lock:
                 existing = states.get(label, {"depth": 0})
                 states[label] = {**existing, **result}
+            _push_spawn_panel()
 
     observer = PanelObserver()
 
@@ -852,6 +968,40 @@ def _dispatch_spawn_with_ui(
                     DEFAULT_CONFIG["tool_call_display"],
                 ),
             )
+
+    if ui is not None:
+        _push_spawn_panel()
+        try:
+            results = spawn_batch(
+                root_node,
+                children_raw,
+                store,
+                client,
+                config,
+                observer=observer,
+                usage_path=root_node.usage_path,
+                session_id=root_node.session_id,
+                cancellation_token=cancellation_token,
+                retained_store=retained_store,
+            )
+        except (KeyboardInterrupt, TurnCancelled):
+            with lock:
+                for state in states.values():
+                    if state["status"] == "running":
+                        state["status"] = "cancelled"
+                        state["reason"] = "cancelled"
+            _push_spawn_panel()
+            raise
+        except DepthExceeded as e:
+            output = f"[error: {e}]"
+            _ui_call(ui, "show_error", output)
+            return output
+        except ValueError as e:
+            output = f"[tool argument error: {e}]"
+            _ui_call(ui, "show_error", output)
+            return output
+        _push_spawn_panel()
+        return json.dumps(results)
 
     with track_live_display(), Live(
         SpawnPanel(),
@@ -909,13 +1059,14 @@ def run_agent(
     new_session: bool = False,
     incognito: bool = False,
     heads_up: bool = False,
+    ui=None,
 ) -> AgentRunResult:
     config = dict(config)
     config["tool_call_display"] = resolve_tool_call_display(
         config,
         heads_up=heads_up,
     )
-    interactive = sys.stdout.isatty()
+    interactive = sys.stdout.isatty() and ui is None
     reply_text = ""
     tool_calls = []
     history: list = []
@@ -934,7 +1085,10 @@ def run_agent(
     active_tool_call = None
     cancellation_token = CancellationToken()
     thought_started = time.perf_counter()
-    wait_indicator, spinner_live = _start_response_wait_indicator(interactive, thought_started)
+    _ui_call(ui, "bind_cancel_token", cancellation_token)
+    _ui_call(ui, "start_turn", query, config)
+    if ui is None:
+        wait_indicator, spinner_live = _start_response_wait_indicator(interactive, thought_started)
 
     def _refresh_wait_indicator() -> None:
         if wait_indicator is not None and spinner_live is not None:
@@ -1111,15 +1265,15 @@ def run_agent(
                     spinner_live = None
                 wait_indicator = None
                 response_phase_completed = True
+                status_text = response_start_status(
+                    time.perf_counter() - thought_started,
+                    has_reasoning=saw_reasoning,
+                )
+                if ui is not None:
+                    _ui_call(ui, "complete_response_phase", status_text)
+                    return
                 if interactive:
-                    console.print(
-                        thought_complete_indicator(
-                            response_start_status(
-                                time.perf_counter() - thought_started,
-                                has_reasoning=saw_reasoning,
-                            )
-                        )
-                    )
+                    console.print(thought_complete_indicator(status_text))
 
             def complete_tool_phase() -> None:
                 nonlocal spinner_live, tool_phase_completed
@@ -1129,16 +1283,16 @@ def run_agent(
                     spinner_live.stop()
                     spinner_live = None
                 tool_phase_completed = True
+                status_text = tool_activity_complete_status(
+                    (tool_completed_at or time.perf_counter())
+                    - tool_started_at,
+                    tuple(started_tool_names),
+                )
+                if ui is not None:
+                    _ui_call(ui, "complete_tool_phase", status_text)
+                    return
                 if interactive:
-                    console.print(
-                        tool_complete_indicator(
-                            tool_activity_complete_status(
-                                (tool_completed_at or time.perf_counter())
-                                - tool_started_at,
-                                tuple(started_tool_names),
-                            )
-                        )
-                    )
+                    console.print(tool_complete_indicator(status_text))
 
             def note_tool_call_started(
                 item_id: str,
@@ -1171,7 +1325,9 @@ def run_agent(
                         stream_live.stop()
                         stream_live = None
                     tool_started_at = time.perf_counter()
-                    if interactive:
+                    if ui is not None:
+                        _ui_call(ui, "start_tool_activity", tool_started_at)
+                    elif interactive:
                         tool_indicator = ToolActivityIndicator(tool_started_at)
                         spinner_live = Live(
                             tool_indicator,
@@ -1187,7 +1343,9 @@ def run_agent(
                 for key in keys:
                     started_tool_positions[key] = position
                 started_tool_names.append(name)
-                if tool_indicator is not None:
+                if ui is not None:
+                    _ui_call(ui, "update_tool_activity", tuple(started_tool_names))
+                elif tool_indicator is not None:
                     tool_indicator.start_tool_call(str(position), name)
                     if spinner_live is not None:
                         spinner_live.start()
@@ -1195,7 +1353,10 @@ def run_agent(
 
             if spinner_live is None:
                 thought_started = time.perf_counter()
-                wait_indicator, spinner_live = _start_response_wait_indicator(interactive, thought_started)
+                if ui is not None:
+                    _ui_call(ui, "start_response_wait", thought_started)
+                else:
+                    wait_indicator, spinner_live = _start_response_wait_indicator(interactive, thought_started)
 
             _ctx_breakdown = estimate_context_breakdown(
                 config["model"],
@@ -1239,6 +1400,8 @@ def run_agent(
                             )
                     if stream_preview is not None:
                         stream_preview.append(event.delta)
+                    elif ui is not None:
+                        _ui_call(ui, "append_stream_delta", event.delta)
                     else:
                         reply_text += event.delta
                 elif isinstance(event, ToolCallStarted):
@@ -1256,12 +1419,16 @@ def run_agent(
                     tool_completed_at = time.perf_counter()
                 elif isinstance(event, ReasoningStarted):
                     saw_reasoning = True
-                    if wait_indicator is not None:
+                    if ui is not None:
+                        _ui_call(ui, "set_response_wait_has_reasoning", True)
+                    elif wait_indicator is not None:
                         wait_indicator.has_reasoning = True
                         _refresh_wait_indicator()
                 elif isinstance(event, ReasoningDone):
                     saw_reasoning = True
-                    if wait_indicator is not None:
+                    if ui is not None:
+                        _ui_call(ui, "set_response_wait_has_reasoning", True)
+                    elif wait_indicator is not None:
                         wait_indicator.has_reasoning = True
                         _refresh_wait_indicator()
 
@@ -1272,6 +1439,8 @@ def run_agent(
                 nonlocal reply_text, spinner_live, stream_live, stream_preview
                 if result.final_text and stream_preview is not None:
                     stream_preview.replace(result.final_text)
+                elif result.final_text and ui is not None:
+                    _ui_call(ui, "replace_stream_text", result.final_text)
                 if stream_preview is not None:
                     result.reply_text = stream_preview.text
                     stream_preview.flush(refresh=False)
@@ -1304,10 +1473,14 @@ def run_agent(
                 tool_indicator = None
                 wait_indicator = None
                 thought_started = time.perf_counter()
-                wait_indicator, spinner_live = _start_response_wait_indicator(
-                    interactive,
-                    thought_started,
-                )
+                if ui is not None:
+                    _ui_call(ui, "retry_stream")
+                    _ui_call(ui, "start_response_wait", thought_started)
+                else:
+                    wait_indicator, spinner_live = _start_response_wait_indicator(
+                        interactive,
+                        thought_started,
+                    )
 
             stream_result = collect_stream_response(
                 make_stream,
@@ -1336,7 +1509,9 @@ def run_agent(
             complete_tool_phase()
             complete_response_phase()
             if got_text:
-                if interactive:
+                if ui is not None:
+                    _ui_call(ui, "finish_assistant_message", reply_text)
+                elif interactive:
                     console.print(Markdown(flatten_headings(reply_text)))
                 else:
                     print(reply_text)
@@ -1417,6 +1592,7 @@ def run_agent(
                                         ),
                                     ),
                                     config,
+                                    ui=ui,
                                 )
                             elif (
                                 safe_item.name == "web_search"
@@ -1434,6 +1610,7 @@ def run_agent(
                                         ),
                                     ),
                                     config,
+                                    ui=ui,
                                 )
                                 if not web_search_read_nudge_sent:
                                     output = append_web_search_read_nudge(output)
@@ -1455,7 +1632,10 @@ def run_agent(
                         args = json.loads(item.arguments or "{}")
                     except json.JSONDecodeError as e:
                         output = f"[tool argument error: invalid JSON: {e}]"
-                        console.print(f"[red]{output}[/red]")
+                        if ui is not None:
+                            _ui_call(ui, "show_error", output)
+                        else:
+                            console.print(f"[red]{output}[/red]")
                     else:
                         if item.name == "run_command":
                             output = _dispatch_run_command_with_ui(
@@ -1466,6 +1646,7 @@ def run_agent(
                                 session_id=session_context.session_id,
                                 cancellation_token=cancellation_token,
                                 retained_store=retained_store,
+                                ui=ui,
                             )
                         elif item.name == "spawn":
                             output = _dispatch_spawn_with_ui(
@@ -1476,12 +1657,16 @@ def run_agent(
                                 config,
                                 cancellation_token=cancellation_token,
                                 retained_store=retained_store,
+                                ui=ui,
                             )
                         elif item.name == "ask_user":
-                            output = _dispatch_ask_user(args, config)
+                            output = _dispatch_ask_user(args, config, ui=ui)
                         else:
                             output = f"[unknown tool: {item.name}]"
-                            console.print(f"[red]{output}[/red]")
+                            if ui is not None:
+                                _ui_call(ui, "show_error", output)
+                            else:
+                                console.print(f"[red]{output}[/red]")
 
                     if item.name not in {"run_command", "read"}:
                         output = truncate_model_output(
@@ -1503,7 +1688,13 @@ def run_agent(
             else:
                 history.append({"role": "assistant", "content": reply_text, **metadata})
                 _save_turn_state()
-                _print_agent_usage_if_enabled(config, usage_path, session_context.session_id)
+                _print_agent_usage_if_enabled(
+                    config,
+                    usage_path,
+                    session_context.session_id,
+                    ui=ui,
+                    heads_up=heads_up,
+                )
                 break
         return AgentRunResult()
     except (KeyboardInterrupt, TurnCancelled):
@@ -1512,7 +1703,10 @@ def run_agent(
             _checkpoint_cancelled_turn()
         return AgentRunResult(cancelled=True, prompt=query)
     except ProviderError as e:
-        console.print(f"[red]API error:[/red] {escape(str(e))}")
+        if ui is not None:
+            _ui_call(ui, "show_error", f"API error: {e}")
+        else:
+            console.print(f"[red]API error:[/red] {escape(str(e))}")
         if reply_text and not tool_calls:
             history.append({"role": "assistant", "content": reply_text, **metadata})
         if not incognito and session_context is not None:
@@ -1523,7 +1717,10 @@ def run_agent(
             save_retained_output_store(retained_store, reads_file)
         return AgentRunResult(error=str(e))
     except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
+        if ui is not None:
+            _ui_call(ui, "show_error", f"Unexpected error: {e}")
+        else:
+            console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
         if not incognito and session_context is not None:
             save_history(history, session_context.history_file)
         if not incognito and artifact_store is not None and artifact_file is not None:
@@ -1533,6 +1730,7 @@ def run_agent(
         return AgentRunResult(error=str(e))
     finally:
         sigint_cancel_scope.__exit__(None, None, None)
+        _ui_call(ui, "unbind_cancel_token")
         _stop_live_displays()
 
 

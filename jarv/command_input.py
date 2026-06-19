@@ -129,6 +129,11 @@ def _key_available() -> bool:
         return False
 
 
+def requeue_key(key: str) -> None:
+    """Return a key read out-of-band to the foreground input loop."""
+    _PENDING_KEYS.appendleft(key)
+
+
 def _read_key_with_repeats(
     text_mode: bool = False,
     *,

@@ -1242,6 +1242,201 @@ class AgentInputTests(unittest.TestCase):
         self.assertIn("1,500 last", output)
         self.assertIn("1,500 session", output)
 
+    def test_run_agent_skips_usage_line_in_heads_up_mode_even_when_enabled(self):
+        with TemporaryDirectory() as tmp:
+            history_file = Path(tmp) / "history.json"
+            context = SessionContext(
+                session_id="session-id",
+                session_label="test session",
+                history_file=history_file,
+                now=datetime(2026, 5, 21, tzinfo=timezone.utc),
+            )
+            events = []
+
+            class FakeUI:
+                def start_turn(self, query, _config):
+                    events.append(("start_turn", query))
+
+                def start_response_wait(self, _started_at):
+                    events.append(("start_response_wait",))
+
+                def complete_response_phase(self, text):
+                    events.append(("complete_response", text))
+
+                def append_stream_delta(self, delta):
+                    events.append(("delta", delta))
+
+                def finish_assistant_message(self, text):
+                    events.append(("finish", text))
+
+                def show_usage_line(self, renderable):
+                    events.append(("show_usage_line", renderable))
+
+            def fake_stream_response(*_args, **_kwargs):
+                yield TextDelta("hello")
+                yield StreamDone(
+                    response=SimpleNamespace(
+                        usage=SimpleNamespace(
+                            input_tokens=1200,
+                            cached_input_tokens=200,
+                            output_tokens=300,
+                            total_tokens=1500,
+                        )
+                    )
+                )
+
+            with (
+                patch("jarv.agent.prepare_session_context", return_value=context),
+                patch("jarv.agent.stream_response", side_effect=fake_stream_response),
+                patch("jarv.agent.sys.stdout", new=io.StringIO()),
+            ):
+                run_agent(
+                    "hello!",
+                    {**DEFAULT_CONFIG, "print_usage_after_agent": True},
+                    client=object(),
+                    heads_up=True,
+                    ui=FakeUI(),
+                )
+
+        usage_events = [event for event in events if event[0] == "show_usage_line"]
+        self.assertEqual(usage_events, [])
+
+    def test_run_agent_routes_stream_display_to_ui(self):
+        with TemporaryDirectory() as tmp:
+            history_file = Path(tmp) / "history.json"
+            context = SessionContext(
+                session_id="session-id",
+                session_label="test session",
+                history_file=history_file,
+                now=datetime(2026, 5, 21, tzinfo=timezone.utc),
+            )
+            events = []
+
+            class FakeUI:
+                def start_turn(self, query, _config):
+                    events.append(("start_turn", query))
+
+                def start_response_wait(self, _started_at):
+                    events.append(("start_response_wait",))
+
+                def set_response_wait_has_reasoning(self, value):
+                    events.append(("reasoning", value))
+
+                def complete_response_phase(self, text):
+                    events.append(("complete_response", text))
+
+                def append_stream_delta(self, delta):
+                    events.append(("delta", delta))
+
+                def finish_assistant_message(self, text):
+                    events.append(("finish", text))
+
+            def fake_stream_response(*_args, **_kwargs):
+                yield ReasoningStarted(id="rs_1")
+                yield TextDelta("hello")
+                yield StreamDone(response=None)
+
+            console_output = io.StringIO()
+            with (
+                patch("jarv.agent.prepare_session_context", return_value=context),
+                patch("jarv.agent.stream_response", side_effect=fake_stream_response),
+                patch("jarv.agent.sys.stdout", new=io.StringIO()),
+                patch("jarv.agent.console", new=Console(file=console_output, force_terminal=False, color_system=None)),
+            ):
+                result = run_agent(
+                    "hello!",
+                    DEFAULT_CONFIG,
+                    client=object(),
+                    incognito=True,
+                    ui=FakeUI(),
+                )
+
+        self.assertIsNone(result.error)
+        self.assertIn(("start_turn", "hello!"), events)
+        self.assertIn(("start_response_wait",), events)
+        self.assertIn(("reasoning", True), events)
+        self.assertIn(("delta", "hello"), events)
+        self.assertIn(("finish", "hello"), events)
+        self.assertEqual(console_output.getvalue(), "")
+
+    def test_run_agent_routes_tool_phase_to_ui(self):
+        with TemporaryDirectory() as tmp:
+            history_file = Path(tmp) / "history.json"
+            context = SessionContext(
+                session_id="session-id",
+                session_label="test session",
+                history_file=history_file,
+                now=datetime(2026, 5, 21, tzinfo=timezone.utc),
+            )
+            events = []
+            stream_count = 0
+
+            class FakeUI:
+                def start_turn(self, query, _config):
+                    events.append(("start_turn", query))
+
+                def start_response_wait(self, _started_at):
+                    events.append(("start_response_wait",))
+
+                def complete_response_phase(self, text):
+                    events.append(("complete_response", text))
+
+                def start_tool_activity(self, _started_at):
+                    events.append(("start_tool",))
+
+                def update_tool_activity(self, names):
+                    events.append(("tool_names", names))
+
+                def complete_tool_phase(self, text):
+                    events.append(("complete_tool", text))
+
+                def append_stream_delta(self, delta):
+                    events.append(("delta", delta))
+
+                def finish_assistant_message(self, text):
+                    events.append(("finish", text))
+
+            def fake_stream_response(*_args, **_kwargs):
+                nonlocal stream_count
+                stream_count += 1
+                if stream_count == 1:
+                    yield ToolCallStarted(
+                        id="fc_1",
+                        call_id="call_1",
+                        name="run_command",
+                    )
+                    yield ToolCallDone(
+                        id="fc_1",
+                        call_id="call_1",
+                        name="run_command",
+                        arguments='{"command":"echo ok"}',
+                    )
+                else:
+                    yield TextDelta("done")
+                yield StreamDone(response=None)
+
+            ui = FakeUI()
+            with (
+                patch("jarv.agent.prepare_session_context", return_value=context),
+                patch("jarv.agent.stream_response", side_effect=fake_stream_response),
+                patch("jarv.agent._dispatch_run_command_with_ui", return_value="ok") as dispatch,
+                patch("jarv.agent.sys.stdout", new=io.StringIO()),
+            ):
+                result = run_agent(
+                    "run it",
+                    DEFAULT_CONFIG,
+                    client=object(),
+                    incognito=True,
+                    ui=ui,
+                )
+
+        self.assertIsNone(result.error)
+        self.assertIn(("start_tool",), events)
+        self.assertIn(("tool_names", ("run_command",)), events)
+        self.assertTrue(any(event[0] == "complete_tool" for event in events))
+        self.assertIn(("finish", "done"), events)
+        self.assertIs(dispatch.call_args.kwargs["ui"], ui)
+
     def test_format_agent_usage_line_marks_estimated_usage(self):
         line = _format_agent_usage_line(
             {

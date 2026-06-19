@@ -313,7 +313,7 @@ def main() -> None:
     # "jarv help" permanent alias (only when help is the sole argument)
     if len(query_parts) == 1 and query_parts[0].lower() == "help":
         from .commands import print_help
-        print_help(mode="print", include_setup_nudge=False)
+        print_help(include_setup_nudge=False)
         return
 
     # Slash commands — flags are silently ignored for these
@@ -408,85 +408,33 @@ def run_heads_up_mode(
     args: argparse.Namespace | None = None,
     agent_loader: tuple[dict, threading.Event] | None = None,
 ) -> None:
-    console = _console()
-    console.print("[bold cyan]jarv heads-up mode[/bold cyan]")
-    console.print("[dim]Type a prompt and press Enter. Use /help for commands. Ctrl+C clears; press it again to leave.[/dim]")
-    agent_import, agent_ready = agent_loader or _start_agent_import()
-    prefill = ""
-    while True:
-        try:
-            from .command_input import read_editable_line
+    from .headsup import run_heads_up_mode as run_fullscreen_heads_up
 
-            console.print()
-            query = read_editable_line(
-                "\x1b[1;36mjarv>\x1b[0m ",
-                initial=prefill,
-            ).strip()
-        except (EOFError, KeyboardInterrupt):
-            console.print("\n[dim]Goodbye.[/dim]")
-            return
-        prefill = ""
+    def handle_slash(
+        command: str,
+        rest: list[str],
+        current_config: dict,
+        current_client,
+        current_args: argparse.Namespace | None,
+        unknown_help_hint: bool,
+    ) -> tuple[dict, object]:
+        return _handle_heads_up_slash_command(
+            command,
+            rest,
+            config=current_config,
+            client=current_client,
+            args=current_args,
+            unknown_help_hint=unknown_help_hint,
+        )
 
-        if not query:
-            continue
-        if query.lower() in {"exit", "quit"}:
-            console.print("[dim]Goodbye.[/dim]")
-            return
-
-        parts = query.split()
-        if (
-            len(parts) > 1
-            and parts[0].lower() == "jarv"
-            and parts[1].startswith("/")
-        ):
-            parts = parts[1:]
-
-        if parts[0].startswith("/"):
-            command = parts[0].lower()
-            if command in {"/exit", "/quit"}:
-                console.print("[dim]Goodbye.[/dim]")
-                return
-            config, client = _handle_heads_up_slash_command(
-                command,
-                parts[1:],
-                config=config,
-                client=client,
-                args=args,
-                unknown_help_hint=True,
-            )
-            continue
-
-        # Check if user typed a command name without the slash
-        result = _maybe_command(parts[0], parts[1:])
-        if result is not None:
-            _, command, rest = result
-            config, client = _handle_heads_up_slash_command(
-                command,
-                rest,
-                config=config,
-                client=client,
-                args=args,
-            )
-            continue
-
-        try:
-            agent_ready.wait()
-            if "error" in agent_import:
-                raise agent_import["error"]
-            result = agent_import["module"].run_agent(
-                query,
-                config,
-                client,
-                heads_up=True,
-            )
-            if getattr(result, "cancelled", False) is True:
-                console.print("\n[dim]Cancelled.[/dim]")
-                prefill = result.prompt or query
-            elif isinstance(getattr(result, "error", None), str):
-                continue
-        except KeyboardInterrupt:
-            console.print("\n[dim]Cancelled.[/dim]")
-            prefill = query
+    run_fullscreen_heads_up(
+        config,
+        client,
+        args=args,
+        agent_loader=agent_loader or _start_agent_import(),
+        handle_slash=handle_slash,
+        maybe_command=_maybe_command,
+    )
 
 
 if __name__ == "__main__":

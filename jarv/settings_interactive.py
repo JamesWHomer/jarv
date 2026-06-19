@@ -9,7 +9,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from .command_input import _read_key_with_repeats, mouse_capture
-from .config import DEFAULT_CONFIG, save_config
+from .config import CONFIG_FILE, DEFAULT_CONFIG, save_config
 from .display import console, refresh_on_resize, terminal_size
 from .settings_refresher import _ModelCatalogRefresher
 from .tui_layout import append_bottom_footer
@@ -254,12 +254,11 @@ def run_settings_interactive(config: dict) -> None:
                 footer,
             )
 
-        audit_state = "auditor on" if config.get("audit", True) else "auditor off"
         return Panel(
             Group(*parts),
             title="[bold bright_white]jarv \u25b8 settings[/bold bright_white]",
             title_align="left",
-            subtitle=f"[dim]{audit_state}[/dim]",
+            subtitle=f"[dim]{CONFIG_FILE}[/dim]",
             subtitle_align="right",
             border_style="cyan",
             box=box.ROUNDED,
@@ -283,7 +282,7 @@ def run_settings_interactive(config: dict) -> None:
         elif edit is not None and edit.get("discard_armed"):
             controls = "Esc discard"
         else:
-            controls = "" if row.get("multiline") else "Enter save   Esc exit"
+            controls = "" if row.get("multiline") else "Enter save   Esc back"
         return Panel(
             Group(*editor_parts),
             title=f"[bold bright_white]jarv \u25b8 edit {row['label']}[/bold bright_white]",
@@ -355,7 +354,8 @@ def run_settings_interactive(config: dict) -> None:
                         if dirty and not edit.get("discard_armed"):
                             edit["discard_armed"] = True
                         else:
-                            break
+                            edit = None
+                            flash = (f"{rows[selected]['label']} unchanged", "dim")
                     elif key == "CTRL_S":
                         config, message, style, done = _settings_commit_edit(edit, config)
                         if done:
@@ -383,7 +383,8 @@ def run_settings_interactive(config: dict) -> None:
                         edit["discard_armed"] = True
                         flash = None
                     else:
-                        break
+                        edit = None
+                        flash = (f"{rows[selected]['label']} unchanged", "dim")
                 elif edit["row"]["key"] == "provider" and key in ("UP", "DOWN", "HOME", "END"):
                     edit["discard_armed"] = False
                     provider_keys = _settings_provider_keys()
@@ -443,8 +444,6 @@ def run_settings_interactive(config: dict) -> None:
                 config, message, style = _settings_finish_reset(row, config, key)
                 rows = _settings_rows(config)
                 pending_reset = None
-                if key == "ESC":
-                    break
                 flash = (message, style) if key in ("y", "Y") else None
                 continue
 

@@ -70,8 +70,8 @@ jarv> /new
 
 - Type a prompt and press Enter.
 - Slash commands start with `/` — type `/help` to list them.
-- During a response, Ctrl+C stops further work, checkpoints the turn in history/context, and restores the prompt for editing. Use `/undo` to remove the turn.
-- At the prompt, Ctrl+C clears existing text; press it again on an empty prompt to exit.
+- During a response, Esc or Ctrl+C stops further work, checkpoints the turn in history/context, and restores the prompt for editing. Use `/undo` to remove the turn.
+- At the prompt, Esc or Ctrl+C clears existing text; press either again on an empty prompt to exit.
 - You can also exit with `exit`, `quit`, or `/exit`.
 
 ![jarv interactive session](https://github.com/user-attachments/assets/d56b491b-4498-43f9-a93b-cfee7aee4791)

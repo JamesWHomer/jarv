@@ -253,7 +253,7 @@ def _settings_reset_action_bar(
     key = row["key"]
     if key == "api_key":
         prompt = "Clear stored API key?"
-        controls = "y clear   Esc exit"
+        controls = "y clear   Esc back"
         current = default = ""
         left = prompt
     else:
@@ -271,7 +271,7 @@ def _settings_reset_action_bar(
             default_config[key] = _settings_reset_value(row, config)
         default = _settings_value_text(row, default_config).plain
         prompt = f"Reset {row['label']}?"
-        controls = "y reset   Esc exit"
+        controls = "y reset   Esc back"
         left = f"{prompt}   {current} \u2192 {default}"
 
     gap = max(3, inner_width - len(left) - len(controls))
@@ -1258,7 +1258,7 @@ def _settings_multiline_editor_lines(
     tail.append(
         Text(
             _clip_text(
-                "  Enter newline   Ctrl+S save   Esc exit   Arrows move",
+                "  Enter newline   Ctrl+S save   Esc back   Arrows move",
                 inner_width,
             ),
             style="dim italic",
@@ -1354,7 +1354,7 @@ def _settings_editor_lines(
         if edit.get("readonly"):
             lines = [
                 Text(_clip_text(f"  {provider_label} does not need an API key.", inner_width), style="green"),
-                Text(_clip_text("  Esc exits settings.", inner_width), style="dim italic"),
+                Text(_clip_text("  Esc returns to settings.", inner_width), style="dim italic"),
             ]
             return lines[:max_lines] if max_lines is not None else lines
         env_key = PROVIDERS.get(provider, {}).get("env_key") or "provider env var"

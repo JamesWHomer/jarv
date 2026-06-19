@@ -263,3 +263,10 @@ def test_read_editable_line_ctrl_c_exits_when_empty():
         pass
     else:
         raise AssertionError("empty Ctrl+C should exit the line editor")
+
+
+def test_requeue_key_returns_key_to_pending_queue():
+    command_input._PENDING_KEYS.clear()
+    command_input.requeue_key("ENTER")
+    assert command_input._read_key() == "ENTER"
+    assert not command_input._PENDING_KEYS

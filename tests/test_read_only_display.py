@@ -85,6 +85,22 @@ def test_fullscreen_uses_compact_overlay_for_short_output(monkeypatch):
 
     # Interactive views always render in the alternate screen buffer.
     assert FakeLive.instances[-1].kwargs["screen"] is True
+    assert FakeLive.instances[-1].renderable.height is None
+
+
+def test_fill_screen_uses_full_height_for_short_output(monkeypatch):
+    _install_display_harness(monkeypatch, height=20)
+
+    read_only_display.show_read_only_command(
+        Text("short"),
+        title="test",
+        config={"read_only_command_display": "fullscreen"},
+        include_setup_nudge=False,
+        fill_screen=True,
+    )
+
+    assert FakeLive.instances[-1].kwargs["screen"] is True
+    assert FakeLive.instances[-1].renderable.height == 20
 
 
 def test_fullscreen_uses_scrollable_view_for_long_output(monkeypatch):

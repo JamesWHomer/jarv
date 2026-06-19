@@ -96,13 +96,13 @@ def test_settings_esc_exits_from_main_screen(monkeypatch):
     _run_settings_with_keys(monkeypatch, dict(DEFAULT_CONFIG), ["ESC"])
 
 
-def test_settings_esc_exits_from_unchanged_compact_editor(monkeypatch):
+def test_settings_esc_returns_from_unchanged_compact_editor(monkeypatch):
     config = dict(DEFAULT_CONFIG)
 
     _run_settings_with_keys(
         monkeypatch,
         config,
-        [("DOWN", _row_index(config, "base_url")), "ENTER", "ESC"],
+        [("DOWN", _row_index(config, "base_url")), "ENTER", "ESC", "ESC"],
     )
 
 
@@ -112,7 +112,7 @@ def test_settings_dirty_compact_editor_requires_second_esc(monkeypatch):
     live = _run_settings_with_keys(
         monkeypatch,
         config,
-        [("DOWN", _row_index(config, "base_url")), "ENTER", "x", "ESC", "ESC"],
+        [("DOWN", _row_index(config, "base_url")), "ENTER", "x", "ESC", "ESC", "ESC"],
     )
 
     assert any("Esc again to discard" in snapshot for snapshot in live.snapshots)
@@ -124,27 +124,27 @@ def test_settings_dirty_multiline_editor_requires_second_esc(monkeypatch):
     live = _run_settings_with_keys(
         monkeypatch,
         config,
-        [("DOWN", _row_index(config, "system_prompt")), "ENTER", "x", "ESC", "ESC"],
+        [("DOWN", _row_index(config, "system_prompt")), "ENTER", "x", "ESC", "ESC", "ESC"],
     )
 
     assert any("Esc again to discard" in snapshot for snapshot in live.snapshots)
 
 
-def test_settings_esc_exits_from_readonly_api_key_editor(monkeypatch):
+def test_settings_esc_returns_from_readonly_api_key_editor(monkeypatch):
     config = {**DEFAULT_CONFIG, "provider": "ollama"}
 
     _run_settings_with_keys(
         monkeypatch,
         config,
-        [("DOWN", _row_index(config, "api_key")), "ENTER", "ESC"],
+        [("DOWN", _row_index(config, "api_key")), "ENTER", "ESC", "ESC"],
     )
 
 
-def test_settings_esc_exits_from_reset_confirmation(monkeypatch):
+def test_settings_esc_returns_from_reset_confirmation(monkeypatch):
     config = dict(DEFAULT_CONFIG)
 
     _run_settings_with_keys(
         monkeypatch,
         config,
-        [("DOWN", _row_index(config, "base_url")), "r", "ESC"],
+        [("DOWN", _row_index(config, "base_url")), "r", "ESC", "ESC"],
     )

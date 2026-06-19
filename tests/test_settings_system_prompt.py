@@ -248,7 +248,7 @@ def test_reset_requires_explicit_confirmation(monkeypatch):
     assert action_bar.plain.startswith(
         "Reset System prompt?   custom \u00b7 16 chars \u2192 default"
     )
-    assert action_bar.plain.endswith("y reset   Esc exit")
+    assert action_bar.plain.endswith("y reset   Esc back")
     assert len(action_bar.plain) == 100
     assert config["system_prompt"] == "Keep this prompt"
     assert saved == []
@@ -287,5 +287,5 @@ def test_api_key_reset_action_uses_clear_language():
     action_bar = settings_command._settings_reset_action_bar(row, config, 80)
 
     assert action_bar.plain.startswith("Clear stored API key?")
-    assert action_bar.plain.endswith("y clear   Esc exit")
+    assert action_bar.plain.endswith("y clear   Esc back")
     assert len(action_bar.plain) == 80

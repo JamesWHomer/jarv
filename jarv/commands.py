@@ -196,8 +196,8 @@ def print_help(*, mode: str | None = None, include_setup_nudge: bool = True) -> 
         title="help",
         mode=mode,
         include_setup_nudge=include_setup_nudge,
-        max_width=95,
         close_hint="q / Esc / Enter  Close",
+        fill_screen=True,
     )
 
 
@@ -230,7 +230,7 @@ def _about_body() -> Markdown:
 
 ## Heads-up mode
 
-Run `jarv` with no prompt to start an interactive session. Type a prompt and press Enter to send it. Commands start with `/` (e.g. `/new`, `/history`). During a response, Ctrl+C stops further work, checkpoints the turn in history/context, and restores its prompt. Use `/undo` to remove that turn. At the prompt, Ctrl+C clears text and exits when the prompt is already empty. Type `exit`, `quit`, or `/exit` to leave directly.
+Run `jarv` with no prompt to start an interactive session. Type a prompt and press Enter to send it. Commands start with `/` (e.g. `/new`, `/history`). During a response, Esc or Ctrl+C stops further work, checkpoints the turn in history/context, and restores its prompt. Use `/undo` to remove that turn. At the prompt, Esc or Ctrl+C clears text and exits when the prompt is already empty. Type `exit`, `quit`, or `/exit` to leave directly.
 
 ## How jarv works
 

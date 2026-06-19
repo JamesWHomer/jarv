@@ -107,6 +107,7 @@ def _show_overlay(
     subtitle: str | None,
     max_width: int | None,
     close_hint: str,
+    fill_screen: bool = False,
 ) -> None:
     """Render a read-only command view in the alternate screen buffer.
 
@@ -149,7 +150,7 @@ def _show_overlay(
         lines = _lines(inner_width)
         total = len(lines)
 
-        if _is_compact(term_w, term_h):
+        if not fill_screen and _is_compact(term_w, term_h):
             offset = 0
             parts: list[Text] = list(lines)
             parts.append(Text(""))
@@ -252,6 +253,7 @@ def show_read_only_command(
     include_setup_nudge: bool = True,
     max_width: int | None = None,
     close_hint: str = "q/Esc/Enter close",
+    fill_screen: bool = False,
 ) -> None:
     """Display read-only command output permanently or in a temporary view."""
     body = _with_optional_setup_nudge(body, include_setup_nudge=include_setup_nudge)
@@ -269,4 +271,5 @@ def show_read_only_command(
         subtitle=subtitle,
         max_width=max_width,
         close_hint=close_hint,
+        fill_screen=fill_screen,
     )
