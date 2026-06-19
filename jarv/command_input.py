@@ -17,6 +17,12 @@ CURSOR_SHOW = "\x1b[?25h"
 ANSI_RESET = "\x1b[0m"
 _PENDING_KEYS: deque[str] = deque()
 _REPEATABLE_NAV_KEYS = frozenset({"UP", "DOWN", "LEFT", "RIGHT", "PAGEUP", "PAGEDOWN"})
+_MOUSE_WHEEL_KEYS = {
+    0: "MOUSE_WHEEL_UP",
+    1: "MOUSE_WHEEL_DOWN",
+    2: "MOUSE_WHEEL_PAGEUP",
+    3: "MOUSE_WHEEL_PAGEDOWN",
+}
 _POSIX_INPUT_POLL_INTERVAL = 0.1
 _LAST_TERMINAL_SIZE: tuple[int, int] | None = None
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -28,18 +34,48 @@ class TextInput(str):
 
 @contextmanager
 def mouse_capture():
-    """Capture POSIX terminal mouse input while a full-screen view is active."""
-    if sys.platform == "win32" or not sys.stdout.isatty():
+    """Capture terminal mouse input while a full-screen view is active."""
+    if not sys.stdout.isatty():
         yield
         return
 
-    sys.stdout.write(MOUSE_CAPTURE_ENABLE)
-    sys.stdout.flush()
+    with _windows_virtual_terminal_input():
+        sys.stdout.write(MOUSE_CAPTURE_ENABLE)
+        sys.stdout.flush()
+        try:
+            yield
+        finally:
+            sys.stdout.write(MOUSE_CAPTURE_DISABLE)
+            sys.stdout.flush()
+
+
+@contextmanager
+def _windows_virtual_terminal_input():
+    if sys.platform != "win32":
+        yield
+        return
+
+    try:
+        import ctypes
+    except ImportError:
+        yield
+        return
+
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.GetStdHandle(-10)
+    mode = ctypes.c_uint()
+    if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+        yield
+        return
+
+    original_mode = mode.value
+    enabled_mode = original_mode | 0x0200
+    changed = enabled_mode != original_mode and kernel32.SetConsoleMode(handle, enabled_mode)
     try:
         yield
     finally:
-        sys.stdout.write(MOUSE_CAPTURE_DISABLE)
-        sys.stdout.flush()
+        if changed:
+            kernel32.SetConsoleMode(handle, original_mode)
 
 
 def _read_until_any(chars: set[str]) -> str:
@@ -53,7 +89,29 @@ def _read_until_any(chars: set[str]) -> str:
             return data
 
 
-def _parse_sgr_mouse(sequence: str) -> str:
+def _windows_key_available() -> bool:
+    if sys.platform != "win32":
+        return False
+    try:
+        import msvcrt
+
+        return bool(msvcrt.kbhit())
+    except (ImportError, OSError):
+        return False
+
+
+def _read_windows_until_any(msvcrt, chars: set[str]) -> str:
+    data = ""
+    while True:
+        ch = msvcrt.getwch()
+        if not ch:
+            return data
+        data += ch
+        if ch in chars:
+            return data
+
+
+def _parse_sgr_mouse(sequence: str, *, translate_wheel: bool = True) -> str:
     parts = sequence[:-1].split(";") if sequence and sequence[-1] in ("M", "m") else sequence.split(";")
     if len(parts) != 3:
         return "OTHER"
@@ -66,6 +124,8 @@ def _parse_sgr_mouse(sequence: str) -> str:
         return "OTHER"
 
     wheel = button & 3
+    if not translate_wheel:
+        return _MOUSE_WHEEL_KEYS.get(wheel, "OTHER")
     if wheel == 0:
         return "UP"
     if wheel == 1:
@@ -140,6 +200,7 @@ def _read_key_with_repeats(
     repeatable: Iterable[str] = _REPEATABLE_NAV_KEYS,
     max_count: int = 128,
     batch_text: bool = False,
+    translate_mouse_wheel: bool = True,
 ) -> tuple[str, int]:
     """Read one key and fold immediately queued identical navigation repeats.
 
@@ -150,7 +211,12 @@ def _read_key_with_repeats(
     queued printable characters so a paste triggers one redraw instead of one
     redraw per character.
     """
-    key = _read_key(text_mode=text_mode)
+    def read_key() -> str:
+        if translate_mouse_wheel:
+            return _read_key(text_mode=text_mode)
+        return _read_key(text_mode=text_mode, translate_mouse_wheel=False)
+
+    key = read_key()
     if (
         batch_text
         and text_mode
@@ -160,7 +226,7 @@ def _read_key_with_repeats(
     ):
         inserted = [key]
         while len(inserted) < max_count and _key_available():
-            next_key = _read_key(text_mode=text_mode)
+            next_key = read_key()
             if (
                 isinstance(next_key, str)
                 and len(next_key) == 1
@@ -178,7 +244,7 @@ def _read_key_with_repeats(
 
     count = 1
     while count < max_count and _key_available():
-        next_key = _read_key(text_mode=text_mode)
+        next_key = read_key()
         if next_key != key:
             _PENDING_KEYS.appendleft(next_key)
             break
@@ -186,13 +252,15 @@ def _read_key_with_repeats(
     return key, count
 
 
-def _read_key(text_mode: bool = False) -> str:
+def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) -> str:
     """Read a single keypress and return a normalised token.
 
     Returns one of: UP, DOWN, LEFT, RIGHT, HOME, END, PAGEUP, PAGEDOWN,
     ENTER, ESC, TAB, CTRL_F, CTRL_S, BACKSPACE, DELETE, or the raw character. Raises KeyboardInterrupt on
     Ctrl-C.  When ``text_mode`` is True, the convenience q/Q → ESC mapping is
-    disabled so a search query can include those letters.
+    disabled so a search query can include those letters. When
+    ``translate_mouse_wheel`` is False, SGR wheel input returns MOUSE_WHEEL_*
+    tokens instead of arrow/page navigation tokens.
     """
     if _PENDING_KEYS:
         return _PENDING_KEYS.popleft()
@@ -212,6 +280,22 @@ def _read_key(text_mode: bool = False) -> str:
         if ch == "\t":
             return "TAB"
         if ch == "\x1b":
+            if _windows_key_available():
+                ch2 = msvcrt.getwch()
+                if ch2 == "[" and _windows_key_available():
+                    ch3 = msvcrt.getwch()
+                    if ch3 == "<":
+                        return _parse_sgr_mouse(
+                            _read_windows_until_any(msvcrt, {"M", "m"}),
+                            translate_wheel=translate_mouse_wheel,
+                        )
+                    if ch3 in ("5", "6", "3") and _windows_key_available():
+                        msvcrt.getwch()  # consume trailing ~
+                    return {
+                        "A": "UP", "B": "DOWN", "D": "LEFT", "C": "RIGHT",
+                        "H": "HOME", "F": "END",
+                        "5": "PAGEUP", "6": "PAGEDOWN", "3": "DELETE",
+                    }.get(ch3, "OTHER")
             return "ESC"
         if not text_mode and ch in ("q", "Q"):
             return "ESC"
@@ -239,7 +323,10 @@ def _read_key(text_mode: bool = False) -> str:
                 if ch2 == "[":
                     ch3 = sys.stdin.read(1)
                     if ch3 == "<":
-                        return _parse_sgr_mouse(_read_until_any({"M", "m"}))
+                        return _parse_sgr_mouse(
+                            _read_until_any({"M", "m"}),
+                            translate_wheel=translate_mouse_wheel,
+                        )
                     if ch3 in ("5", "6"):
                         sys.stdin.read(1)  # consume trailing ~
                     if ch3 == "3":

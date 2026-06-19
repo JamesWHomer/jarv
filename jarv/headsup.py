@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable
@@ -41,6 +42,7 @@ from .display import (
     refresh_on_resize,
     rendered_text_lines,
     terminal_size,
+    tool_card,
 )
 from .history import forget_current_session, load_history, prepare_session_context
 from .session_render import (
@@ -98,6 +100,18 @@ _SESSION_SWITCHING_SLASH_COMMANDS = frozenset({
 _HISTORY_SYNC_SLASH_COMMANDS = frozenset({
     "/redo",
     "/undo",
+})
+_HEADSUP_REPEATABLE_KEYS = frozenset({
+    "UP",
+    "DOWN",
+    "LEFT",
+    "RIGHT",
+    "PAGEUP",
+    "PAGEDOWN",
+    "MOUSE_WHEEL_UP",
+    "MOUSE_WHEEL_DOWN",
+    "MOUSE_WHEEL_PAGEUP",
+    "MOUSE_WHEEL_PAGEDOWN",
 })
 
 
@@ -255,17 +269,30 @@ class HeadsupAgentUI:
         self.app.add_usage(renderable)
 
     def ask_user(self, question: str, _config: dict) -> str:
-        self.app.add_tool(
-            Panel(
-                Markdown(flatten_headings(question)),
-                title="[bold blue]Ask user[/bold blue]",
-                title_align="left",
-                border_style="blue",
-                box=box.ROUNDED,
-                padding=(0, 1),
-            )
+        question_renderable = Markdown(flatten_headings(question))
+        self.app.upsert_live_tool(
+            "ask_user",
+            tool_card(
+                "ask_user",
+                question_renderable,
+                status="waiting",
+                status_style="blue",
+                display_mode="fullscreen",
+            ),
         )
-        return self.app.read_answer("answer> ")
+        answer = self.app.read_answer("answer> ", echo_answer=False)
+        answer_line = Text("> ", style="bold cyan")
+        answer_line.append(answer, style="bright_white")
+        self.app.replace_live_tool(
+            "ask_user",
+            tool_card(
+                "ask_user",
+                Group(question_renderable, answer_line),
+                status="done",
+                display_mode="fullscreen",
+            ),
+        )
+        return answer
 
     def bind_cancel_token(self, token: CancellationToken) -> None:
         self.app.bind_cancel_token(token)
@@ -357,6 +384,13 @@ class HeadsupApp:
         self._esc_listener_paused = threading.Event()
         self._live_tool_index: dict[str, int] = {}
         self._refresh_suspended = 0
+        self._foreground_input_active = False
+        self._agent_busy = False
+        self._agent_thread: threading.Thread | None = None
+        self._queued_queries: deque[str] = deque()
+        self._answer_request: dict | None = None
+        self._answer_request_completed: dict = {}
+        self._answer_condition = threading.Condition(self.lock)
         self.incognito = bool(getattr(args, "incognito", False))
         self._started_new_session = bool(getattr(args, "new", False)) and not self.incognito
         self._initial_history_synced = False
@@ -371,6 +405,7 @@ class HeadsupApp:
         )
         self._prompt_history_index: int | None = None
         self._prompt_history_draft = ""
+        self._prompt_notice: RenderableType | None = None
 
     def run(self) -> None:
         self._sync_initial_transcript_from_history()
@@ -383,48 +418,77 @@ class HeadsupApp:
             vertical_overflow="crop",
         ) as live, refresh_on_resize(live, on_change=self.refresh), mouse_capture():
             self.live = live
-            while True:
-                self.refresh()
-                try:
-                    key, repeat = _read_key_with_repeats(
-                        text_mode=True,
-                        batch_text=True,
-                    )
-                except KeyboardInterrupt:
-                    if self._handle_prompt_dismiss():
-                        break
-                    continue
+            self._foreground_input_active = True
+            try:
+                while True:
+                    self.refresh()
+                    try:
+                        key, repeat = _read_key_with_repeats(
+                            text_mode=True,
+                            batch_text=True,
+                            repeatable=_HEADSUP_REPEATABLE_KEYS,
+                            translate_mouse_wheel=False,
+                        )
+                    except KeyboardInterrupt:
+                        if self._handle_prompt_dismiss():
+                            break
+                        continue
 
-                if key == "ENTER":
-                    query = str(self.editor.get("buffer", "")).strip()
-                    self._record_prompt_history(query)
-                    initialize_text_editor(self.editor, "")
-                    self._exit_armed = False
-                    if self._handle_query(query) == "exit":
-                        break
-                elif key == "ESC":
-                    if self._handle_prompt_dismiss():
-                        break
-                elif key == "PAGEUP":
-                    self.scroll_offset += 5 * repeat
-                elif key == "PAGEDOWN":
-                    self.scroll_offset = max(0, self.scroll_offset - 5 * repeat)
-                elif key in {"UP", "DOWN"}:
-                    if self._navigate_prompt_history(key, repeat):
-                        self.scroll_offset = 0
+                    if key == "ENTER":
+                        if self._answer_request is not None:
+                            self._complete_answer()
+                            continue
+                        query = str(self.editor.get("buffer", "")).strip()
+                        self._record_prompt_history(query)
+                        initialize_text_editor(self.editor, "")
+                        self._clear_prompt_notice()
                         self._exit_armed = False
-                else:
-                    changed = apply_text_editor_key(
-                        self.editor,
-                        key,
-                        repeat,
-                        content_width=1,
-                        allow_newlines=False,
-                    )
-                    if changed or isinstance(key, TextInput):
-                        self._reset_prompt_history_navigation()
-                        self.scroll_offset = 0
-                        self._exit_armed = False
+                        if self._handle_query(query) == "exit":
+                            break
+                    elif key == "ESC":
+                        if self._answer_request is not None:
+                            self._cancel_answer()
+                            continue
+                        if self._handle_prompt_dismiss():
+                            break
+                    elif key == "PAGEUP":
+                        self._scroll_transcript(5 * repeat)
+                    elif key == "PAGEDOWN":
+                        self._scroll_transcript(-5 * repeat)
+                    elif key == "MOUSE_WHEEL_UP":
+                        self._scroll_transcript(3 * repeat)
+                    elif key == "MOUSE_WHEEL_DOWN":
+                        self._scroll_transcript(-3 * repeat)
+                    elif key == "MOUSE_WHEEL_PAGEUP":
+                        self._scroll_transcript(5 * repeat)
+                    elif key == "MOUSE_WHEEL_PAGEDOWN":
+                        self._scroll_transcript(-5 * repeat)
+                    elif key in {"UP", "DOWN"} and self._answer_request is None:
+                        if self._navigate_prompt_history(key, repeat):
+                            self.scroll_offset = 0
+                            self._clear_prompt_notice()
+                            self._exit_armed = False
+                    else:
+                        changed = apply_text_editor_key(
+                            self.editor,
+                            key,
+                            repeat,
+                            content_width=1,
+                            allow_newlines=False,
+                        )
+                        if changed or isinstance(key, TextInput):
+                            if self._answer_request is None:
+                                self._reset_prompt_history_navigation()
+                            self.scroll_offset = 0
+                            self._clear_prompt_notice()
+                            self._exit_armed = False
+            finally:
+                if self._answer_request is not None:
+                    self._cancel_answer()
+                self._foreground_input_active = False
+                self._cancel_active_turn(clear_queue=True)
+                self._wait_for_agent_idle(timeout=5.0)
+                self.live = None
 
     def render(self) -> RenderableType:
         term_w, term_h = terminal_size(console=self.console)
@@ -447,15 +511,7 @@ class HeadsupApp:
         while len(visible) < transcript_rows:
             visible.insert(0, Text(""))
 
-        footer = Text(
-            clip_text(
-                "Enter send   Esc/Ctrl+C clear/exit/cancel   PgUp/PgDn scroll   /exit quit",
-                inner_width,
-            ),
-            style="dim italic",
-            no_wrap=True,
-            overflow="crop",
-        )
+        footer = self._footer_line(inner_width)
         prompt = self._prompt_line(inner_width)
         parts: list[RenderableType] = visible
         append_bottom_footer(
@@ -551,7 +607,22 @@ class HeadsupApp:
     def add_notice(self, renderable: RenderableType) -> None:
         self._append("notice", renderable)
 
-    def read_answer(self, label: str) -> str:
+    def set_prompt_notice(self, renderable: RenderableType | None) -> None:
+        with self.lock:
+            self._prompt_notice = renderable
+        self.refresh()
+
+    def _clear_prompt_notice(self) -> None:
+        with self.lock:
+            self._prompt_notice = None
+        self.refresh()
+
+    def read_answer(self, label: str, *, echo_answer: bool = True) -> str:
+        if self._foreground_input_active:
+            return self._read_answer_from_foreground(label, echo_answer=echo_answer)
+        return self._read_answer_direct(label, echo_answer=echo_answer)
+
+    def _read_answer_direct(self, label: str, *, echo_answer: bool = True) -> str:
         previous = dict(self.editor)
         initialize_text_editor(self.editor, "")
         self._pause_esc_listener()
@@ -567,7 +638,8 @@ class HeadsupApp:
                     raise
                 if key == "ENTER":
                     answer = str(self.editor.get("buffer", "")).strip()
-                    self.add_notice(Text(f"{label}{answer}", style="dim"))
+                    if echo_answer:
+                        self.add_notice(Text(f"{label}{answer}", style="dim"))
                     return answer
                 if key == "ESC":
                     if self._cancel_token is not None:
@@ -588,6 +660,8 @@ class HeadsupApp:
     def bind_cancel_token(self, token: CancellationToken) -> None:
         self.unbind_cancel_token()
         self._cancel_token = token
+        if self._foreground_input_active:
+            return
         self._esc_listener_stop = threading.Event()
         self._esc_listener_paused.clear()
         self._esc_listener_thread = threading.Thread(
@@ -638,12 +712,15 @@ class HeadsupApp:
         if str(self.editor.get("buffer", "")):
             initialize_text_editor(self.editor, "")
             self._reset_prompt_history_navigation()
-            self.add_notice(Text("Draft cleared.", style="dim"))
+            self.set_prompt_notice(Text("Draft cleared.", style="dim"))
+            return False
+        if self._cancel_active_turn():
+            self.set_prompt_notice(Text("Cancelling current turn.", style="yellow"))
             return False
         if self._exit_armed:
             return True
         self._exit_armed = True
-        self.add_notice(Text("Press Esc or Ctrl+C again to exit.", style="yellow"))
+        self.set_prompt_notice(Text("Press Esc or Ctrl+C again to exit.", style="yellow"))
         return False
 
     def _handle_query(self, query: str) -> str | None:
@@ -749,6 +826,12 @@ class HeadsupApp:
         self._sync_after_slash(command, None)
 
     def _run_agent_query(self, query: str) -> None:
+        if self.live is not None:
+            self._queue_or_start_agent_query(query)
+            return
+        self._run_agent_query_now(query)
+
+    def _run_agent_query_now(self, query: str) -> None:
         try:
             self.agent_ready.wait()
             if "error" in self.agent_import:
@@ -763,13 +846,145 @@ class HeadsupApp:
                 ui=ui,
             )
             if getattr(result, "cancelled", False) is True:
-                initialize_text_editor(self.editor, result.prompt or query)
+                prompt = result.prompt or query
+                with self.lock:
+                    can_restore_prompt = (
+                        not str(self.editor.get("buffer", ""))
+                        and self._answer_request is None
+                    )
+                    if can_restore_prompt:
+                        initialize_text_editor(self.editor, prompt)
                 self.add_notice(Text("Cancelled.", style="yellow"))
             elif isinstance(getattr(result, "error", None), str):
                 self.add_notice(Text("Turn failed.", style="red"))
         except KeyboardInterrupt:
-            initialize_text_editor(self.editor, query)
+            with self.lock:
+                if not str(self.editor.get("buffer", "")) and self._answer_request is None:
+                    initialize_text_editor(self.editor, query)
             self.add_notice(Text("Cancelled.", style="yellow"))
+
+    def _queue_or_start_agent_query(self, query: str) -> None:
+        with self.lock:
+            if self._agent_busy:
+                self._queued_queries.append(query)
+                queued_position = len(self._queued_queries)
+            else:
+                self._agent_busy = True
+                queued_position = 0
+        if queued_position:
+            self.add_notice(Text(f"Queued message #{queued_position}.", style="dim"))
+            return
+        self._start_agent_thread(query)
+
+    def _start_agent_thread(self, query: str) -> None:
+        thread = threading.Thread(
+            target=self._agent_worker,
+            args=(query,),
+            name="headsup-agent-turn",
+            daemon=True,
+        )
+        with self.lock:
+            self._agent_thread = thread
+        thread.start()
+
+    def _agent_worker(self, query: str) -> None:
+        try:
+            self._run_agent_query_now(query)
+        finally:
+            next_query: str | None = None
+            with self.lock:
+                if self._queued_queries:
+                    next_query = self._queued_queries.popleft()
+                else:
+                    self._agent_busy = False
+                    self._agent_thread = None
+            if next_query is not None:
+                self._start_agent_thread(next_query)
+
+    def _cancel_active_turn(self, *, clear_queue: bool = False) -> bool:
+        with self.lock:
+            token = self._cancel_token
+            if clear_queue:
+                self._queued_queries.clear()
+        if token is None or token.cancelled:
+            return False
+        token.cancel()
+        return True
+
+    def _wait_for_agent_idle(self, *, timeout: float | None = None) -> None:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            with self.lock:
+                thread = self._agent_thread
+                busy = self._agent_busy
+            if not busy or thread is None or thread is threading.current_thread():
+                return
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            if remaining == 0.0:
+                return
+            thread.join(timeout=remaining)
+
+    def _read_answer_from_foreground(self, label: str, *, echo_answer: bool = True) -> str:
+        previous = dict(self.editor)
+        with self._answer_condition:
+            initialize_text_editor(self.editor, "")
+            self._answer_request = {
+                "label": label,
+                "answer": None,
+                "cancelled": False,
+                "previous": previous,
+                "echo_answer": echo_answer,
+            }
+            self._reset_prompt_history_navigation()
+        self.refresh()
+
+        with self._answer_condition:
+            while self._answer_request is not None:
+                self._answer_condition.wait()
+            request = self._answer_request_completed
+        if request.get("cancelled"):
+            raise TurnCancelled
+        return str(request.get("answer") or "")
+
+    def _complete_answer(self) -> None:
+        answer = str(self.editor.get("buffer", "")).strip()
+        with self._answer_condition:
+            request = self._answer_request
+            if request is None:
+                return
+            if request.get("echo_answer", True):
+                label = request.get("label", "answer> ")
+                self.add_notice(Text(f"{label}{answer}", style="dim"))
+            previous = dict(request.get("previous") or {})
+            if previous:
+                self.editor = previous
+            else:
+                initialize_text_editor(self.editor, "")
+            request["answer"] = answer
+            request["cancelled"] = False
+            self._answer_request_completed = request
+            self._answer_request = None
+            self._answer_condition.notify_all()
+        self.refresh()
+
+    def _cancel_answer(self) -> None:
+        with self._answer_condition:
+            request = self._answer_request
+            if request is None:
+                return
+            previous = dict(request.get("previous") or {})
+            if previous:
+                self.editor = previous
+            else:
+                initialize_text_editor(self.editor, "")
+            token = self._cancel_token
+            if token is not None:
+                token.cancel()
+            request["cancelled"] = True
+            self._answer_request_completed = request
+            self._answer_request = None
+            self._answer_condition.notify_all()
+        self.refresh()
 
     @contextmanager
     def _captured_console_output(self):
@@ -836,7 +1051,8 @@ class HeadsupApp:
         if command in _SESSION_SWITCHING_SLASH_COMMANDS:
             changed = self._refresh_session_context()
             if changed:
-                self._sync_transcript_from_history(notice)
+                self._sync_transcript_from_history()
+                self.set_prompt_notice(notice)
                 return True
         return False
 
@@ -960,6 +1176,9 @@ class HeadsupApp:
         initialize_text_editor(self.editor, value)
         return True
 
+    def _scroll_transcript(self, delta: int) -> None:
+        self.scroll_offset = max(0, self.scroll_offset + delta)
+
     def _append(self, kind: str, renderable: RenderableType, *, spacer_before: bool = False) -> None:
         with self.lock:
             self.entries.append(TranscriptEntry(kind, renderable, spacer_before=spacer_before))
@@ -988,7 +1207,8 @@ class HeadsupApp:
         return lines or [Text("")]
 
     def _prompt_line(self, width: int) -> Text:
-        label = "jarv> "
+        request = self._answer_request
+        label = str(request.get("label") if request is not None else "jarv> ")
         line = Text(label, style="bold cyan", no_wrap=True, overflow="crop")
         edit_width = max(1, width - len(label))
         line.append_text(
@@ -1000,6 +1220,39 @@ class HeadsupApp:
             )
         )
         return line
+
+    def _footer_line(self, width: int) -> Text:
+        with self.lock:
+            notice = self._prompt_notice
+            has_draft = bool(str(self.editor.get("buffer", "")))
+            answering = self._answer_request is not None
+            cancelling = self._cancel_token is not None
+            exit_armed = self._exit_armed
+
+        if notice is not None:
+            lines = rendered_text_lines(notice, width)
+            footer = lines[0].copy() if lines else Text("")
+            footer.truncate(max(1, width), overflow="ellipsis")
+            footer.no_wrap = True
+            footer.overflow = "crop"
+            return footer
+
+        if exit_armed:
+            value = "Esc/Ctrl+C exit   Any other key continue"
+        elif answering:
+            value = "Enter answer   Esc no response/cancel"
+        elif has_draft:
+            value = "Enter send   Esc/Ctrl+C clear draft   Wheel/PgUp/PgDn scroll"
+        elif cancelling:
+            value = "Enter send   Esc/Ctrl+C cancel turn   Wheel/PgUp/PgDn scroll"
+        else:
+            value = "Enter send   Esc/Ctrl+C clear/exit/cancel   Wheel/PgUp/PgDn scroll   /exit quit"
+        return Text(
+            clip_text(value, width),
+            style="dim italic",
+            no_wrap=True,
+            overflow="crop",
+        )
 
     def _usage_status(self, width: int) -> Text:
         try:
@@ -1025,7 +1278,10 @@ class HeadsupApp:
 
         status.append(" · ", style="dim")
         context_percent: float | None = None
-        if isinstance(last_root, dict):
+        request_count = int(totals.get("request_count") or 0)
+        if request_count == 0 and last_root is None:
+            context_percent = 0.0
+        elif isinstance(last_root, dict):
             model = str(last_root.get("model") or self.config.get("model") or "")
             context_window = known_context_window(model, config=self.config)
             if context_window:
@@ -1035,8 +1291,9 @@ class HeadsupApp:
         if context_percent is None:
             status.append("context unknown", style="dim")
         else:
+            context_label = "0% full" if context_percent == 0.0 else f"{context_percent:.1f}% full"
             status.append(
-                f"{context_percent:.1f}% full",
+                context_label,
                 style=_context_fill_style(context_percent),
             )
 

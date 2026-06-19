@@ -72,6 +72,14 @@ def test_read_key_maps_page_like_sgr_wheel_variants(monkeypatch):
     assert stdin.remaining == ""
 
 
+def test_read_key_can_preserve_sgr_mouse_wheel_tokens(monkeypatch):
+    stdin = _install_posix_input(monkeypatch, "\x1b[<64;1;1M\x1b[<65;1;1M")
+
+    assert command_input._read_key(translate_mouse_wheel=False) == "MOUSE_WHEEL_UP"
+    assert command_input._read_key(translate_mouse_wheel=False) == "MOUSE_WHEEL_DOWN"
+    assert stdin.remaining == ""
+
+
 def test_read_key_with_repeats_coalesces_identical_navigation(monkeypatch):
     command_input._PENDING_KEYS.clear()
     keys = ["DOWN", "DOWN", "DOWN", "ENTER"]

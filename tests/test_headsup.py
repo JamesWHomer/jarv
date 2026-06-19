@@ -1,6 +1,8 @@
 import io
 import threading
+import time
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -10,7 +12,14 @@ from rich.text import Text
 
 from jarv.agent import thought_complete_indicator, tool_complete_indicator
 from jarv.cancellation import CancellationToken, TurnCancelled
+from jarv.command_input import TextInput
 from jarv.headsup import HeadsupAgentUI, HeadsupApp
+from jarv.text_editor import initialize_text_editor
+
+
+@contextmanager
+def noop_context(*_args, **_kwargs):
+    yield
 
 
 class HeadsupTests(unittest.TestCase):
@@ -35,8 +44,33 @@ class HeadsupTests(unittest.TestCase):
         )
         return app, test_console, output
 
+    class _FakeLive:
+        def refresh(self):
+            pass
+
+        def start(self, refresh=False):
+            pass
+
+        def stop(self):
+            pass
+
+    def _wait_for(self, predicate, timeout=1.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.01)
+        return predicate()
+
     def _entry_text(self, app: HeadsupApp) -> str:
         return "\n".join(line.plain for line in app._transcript_lines(100))
+
+    def _rendered_text(self, app: HeadsupApp, console: Console, output: io.StringIO, *, width=80, height=12) -> str:
+        output.seek(0)
+        output.truncate(0)
+        with patch("jarv.headsup.terminal_size", return_value=(width, height)):
+            console.print(app.render())
+        return output.getvalue()
 
     def test_render_keeps_prompt_and_footer_in_narrow_terminal(self):
         app, test_console, output = self._app(width=42)
@@ -121,6 +155,20 @@ class HeadsupTests(unittest.TestCase):
                 for span in status.spans
             )
         )
+
+    def test_usage_status_shows_zero_context_for_new_session(self):
+        app, _test_console, _output = self._app(width=80)
+        usage = {
+            "totals": {"request_count": 0},
+            "last_root_request": None,
+        }
+
+        with patch("jarv.headsup.load_usage", return_value=usage):
+            status = app._usage_status(80)
+
+        self.assertIn("cost $0.00", status.plain)
+        self.assertIn("0% full", status.plain)
+        self.assertNotIn("context unknown", status.plain)
 
     def test_usage_line_appends_to_transcript(self):
         app, _test_console, _output = self._app()
@@ -225,6 +273,127 @@ class HeadsupTests(unittest.TestCase):
         self.assertTrue(run_agent_calls[0][3]["incognito"])
         self.assertNotIn("new_session", run_agent_calls[0][3])
 
+    def test_live_agent_query_runs_in_background_and_prompt_remains_editable(self):
+        started = threading.Event()
+        release = threading.Event()
+        run_agent_calls = []
+
+        def run_agent(query, config, client, **kwargs):
+            run_agent_calls.append((query, config, client, kwargs))
+            started.set()
+            release.wait(timeout=1.0)
+            return SimpleNamespace(cancelled=False)
+
+        app, _test_console, _output = self._app()
+        app.live = self._FakeLive()
+        app._foreground_input_active = True
+        app.agent_import["module"] = SimpleNamespace(run_agent=run_agent)
+
+        app._run_agent_query("first prompt")
+
+        self.assertTrue(started.wait(timeout=1.0))
+        self.assertEqual(len(run_agent_calls), 1)
+        initialize_text_editor(app.editor, "next prompt")
+        self.assertEqual(app.editor["buffer"], "next prompt")
+
+        release.set()
+        app._wait_for_agent_idle(timeout=1.0)
+        self.assertFalse(app._agent_busy)
+
+    def test_live_agent_query_queues_next_message_until_current_finishes(self):
+        first_started = threading.Event()
+        release_first = threading.Event()
+        second_started = threading.Event()
+        run_order = []
+
+        def run_agent(query, _config, _client, **_kwargs):
+            run_order.append(query)
+            if query == "first":
+                first_started.set()
+                release_first.wait(timeout=1.0)
+            if query == "second":
+                second_started.set()
+            return SimpleNamespace(cancelled=False)
+
+        app, _test_console, _output = self._app()
+        app.live = self._FakeLive()
+        app._foreground_input_active = True
+        app.agent_import["module"] = SimpleNamespace(run_agent=run_agent)
+
+        app._run_agent_query("first")
+        self.assertTrue(first_started.wait(timeout=1.0))
+        app._run_agent_query("second")
+
+        self.assertFalse(second_started.is_set())
+        self.assertIn("Queued message #1.", self._entry_text(app))
+
+        release_first.set()
+        self.assertTrue(second_started.wait(timeout=1.0))
+        app._wait_for_agent_idle(timeout=1.0)
+
+        self.assertEqual(run_order, ["first", "second"])
+
+    def test_foreground_input_owns_cancel_key_while_agent_runs(self):
+        app, _test_console, _output = self._app()
+        token = CancellationToken()
+        app._foreground_input_active = True
+
+        app.bind_cancel_token(token)
+
+        self.assertIsNone(app._esc_listener_thread)
+        self.assertTrue(app._cancel_active_turn())
+        self.assertTrue(token.cancelled)
+        app.unbind_cancel_token()
+
+    def test_foreground_read_answer_restores_existing_draft(self):
+        app, _test_console, _output = self._app()
+        app._foreground_input_active = True
+        initialize_text_editor(app.editor, "draft prompt")
+        result = {}
+
+        def read_answer():
+            result["answer"] = app.read_answer("answer> ")
+
+        thread = threading.Thread(target=read_answer)
+        thread.start()
+        self.assertTrue(self._wait_for(lambda: app._answer_request is not None))
+
+        initialize_text_editor(app.editor, "yes")
+        app._complete_answer()
+        thread.join(timeout=1.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result["answer"], "yes")
+        self.assertEqual(app.editor["buffer"], "draft prompt")
+
+    def test_ask_user_replaces_waiting_card_with_answered_card(self):
+        app, _test_console, _output = self._app()
+        ui = HeadsupAgentUI(app)
+        app._foreground_input_active = True
+        result = {}
+
+        def ask_user():
+            result["answer"] = ui.ask_user("What next?", app.config)
+
+        thread = threading.Thread(target=ask_user)
+        thread.start()
+        self.assertTrue(self._wait_for(lambda: app._answer_request is not None))
+
+        initialize_text_editor(app.editor, "nothing")
+        app._complete_answer()
+        thread.join(timeout=1.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result["answer"], "nothing")
+        self.assertIsNone(app._answer_request)
+        tool_entries = [entry for entry in app.entries if entry.kind == "tool"]
+        self.assertEqual(len(tool_entries), 1)
+        rendered = self._entry_text(app)
+        self.assertEqual(rendered.count("Ask user"), 1)
+        self.assertIn("What next?", rendered)
+        self.assertIn("> nothing", rendered)
+        self.assertNotIn("answer> nothing", rendered)
+
     def test_status_indicators_match_oneshot_glyphs(self):
         app, _test_console, _output = self._app()
         ui = HeadsupAgentUI(app)
@@ -315,11 +484,13 @@ class HeadsupTests(unittest.TestCase):
         self.assertFalse(app._handle_prompt_dismiss())
         self.assertEqual(app.editor["buffer"], "")
         self.assertFalse(app._exit_armed)
+        self.assertEqual(app._prompt_notice.plain, "Draft cleared.")
         self.assertFalse(app._handle_prompt_dismiss())
         self.assertTrue(app._exit_armed)
+        self.assertEqual(app._prompt_notice.plain, "Press Esc or Ctrl+C again to exit.")
         self.assertTrue(app._handle_prompt_dismiss())
 
-    def test_prompt_dismiss_clears_draft_with_notice(self):
+    def test_prompt_dismiss_clears_draft_with_transient_notice(self):
         app, _test_console, _output = self._app()
         app.editor["buffer"] = "draft"
         app._exit_armed = True
@@ -328,8 +499,61 @@ class HeadsupTests(unittest.TestCase):
 
         self.assertEqual(app.editor["buffer"], "")
         self.assertTrue(app._exit_armed)
+        self.assertEqual(app._prompt_notice.plain, "Draft cleared.")
         notices = [entry.renderable.plain for entry in app.entries if entry.kind == "notice"]
-        self.assertIn("Draft cleared.", notices)
+        self.assertNotIn("Draft cleared.", notices)
+
+    def test_exit_prompt_notice_is_not_transcript_history(self):
+        app, _test_console, _output = self._app()
+
+        self.assertFalse(app._handle_prompt_dismiss())
+
+        self.assertEqual(app._prompt_notice.plain, "Press Esc or Ctrl+C again to exit.")
+        self.assertNotIn("Press Esc or Ctrl+C again to exit.", self._entry_text(app))
+
+    def test_prompt_notice_clears_before_next_message(self):
+        class FakeLive:
+            def __init__(self, *args, **kwargs):
+                self.args = args
+                self.kwargs = kwargs
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def refresh(self):
+                return None
+
+        run_agent_calls = []
+
+        def run_agent(query, config, client, **kwargs):
+            run_agent_calls.append((query, config, client, kwargs))
+            return SimpleNamespace(cancelled=False)
+
+        app, _test_console, _output = self._app()
+        app._initial_history_synced = True
+        app.agent_import["module"] = SimpleNamespace(run_agent=run_agent)
+        keys = [
+            ("ESC", 1),
+            (TextInput("hi"), 1),
+            ("ENTER", 1),
+            (TextInput("exit"), 1),
+            ("ENTER", 1),
+        ]
+
+        with (
+            patch("jarv.headsup.Live", FakeLive),
+            patch("jarv.headsup.refresh_on_resize", noop_context),
+            patch("jarv.headsup.mouse_capture", noop_context),
+            patch("jarv.headsup._read_key_with_repeats", side_effect=lambda **kwargs: keys.pop(0)),
+        ):
+            app.run()
+
+        self.assertNotEqual(getattr(app._prompt_notice, "plain", None), "Press Esc or Ctrl+C again to exit.")
+        self.assertNotIn("Press Esc or Ctrl+C again to exit.", self._entry_text(app))
+        self.assertEqual(run_agent_calls[0][0], "hi")
 
     def test_prompt_history_replays_sent_prompts_and_restores_draft(self):
         app, _test_console, _output = self._app()
@@ -350,6 +574,38 @@ class HeadsupTests(unittest.TestCase):
 
         self.assertTrue(app._navigate_prompt_history("DOWN", 1))
         self.assertEqual(app.editor["buffer"], "draft")
+        self.assertIsNone(app._prompt_history_index)
+
+    def test_mouse_wheel_scrolls_transcript_without_prompt_history_navigation(self):
+        class FakeLive:
+            def __init__(self, *args, **kwargs):
+                self.args = args
+                self.kwargs = kwargs
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def refresh(self):
+                return None
+
+        app, _test_console, _output = self._app()
+        app._initial_history_synced = True
+        app._prompt_history = ["previous prompt"]
+        initialize_text_editor(app.editor, "exit")
+        keys = [("MOUSE_WHEEL_UP", 2), ("ENTER", 1)]
+
+        with (
+            patch("jarv.headsup.Live", FakeLive),
+            patch("jarv.headsup.refresh_on_resize", noop_context),
+            patch("jarv.headsup.mouse_capture", noop_context),
+            patch("jarv.headsup._read_key_with_repeats", side_effect=lambda **kwargs: keys.pop(0)),
+        ):
+            app.run()
+
+        self.assertEqual(app.scroll_offset, 6)
         self.assertIsNone(app._prompt_history_index)
 
     def test_prompt_history_loads_user_messages_from_synced_history(self):
@@ -572,7 +828,7 @@ class HeadsupTests(unittest.TestCase):
         self.assertNotIn("live frame should not be captured", rendered)
 
     def test_new_refreshes_session_context_and_clears_visible_transcript(self):
-        app, _test_console, _output = self._app()
+        app, test_console, output = self._app()
         old_context = SimpleNamespace(
             session_id="old-session",
             history_file=Path("history-old.json"),
@@ -599,9 +855,11 @@ class HeadsupTests(unittest.TestCase):
             app._run_slash("/new", [])
 
         rendered = self._entry_text(app)
+        screen = self._rendered_text(app, test_console, output)
         self.assertEqual(app.session_context.session_id, "new-session")
         self.assertEqual(app.usage_path, Path("usage-new.json"))
-        self.assertIn("new session ready", rendered)
+        self.assertNotIn("new session ready", rendered)
+        self.assertIn("new session ready", screen)
         self.assertNotIn("old visible message", rendered)
         self.assertNotIn("old visible reply", rendered)
 
