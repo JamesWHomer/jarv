@@ -308,6 +308,7 @@ def _cmd_global_usage(since: timedelta | None, window_label: str) -> None:
             Text(f"No system-wide token usage recorded for {window_label}.", style="dim"),
             title="usage",
             subtitle=subtitle,
+            fill_screen=True,
         )
         return
 
@@ -375,13 +376,13 @@ def _cmd_global_usage(since: timedelta | None, window_label: str) -> None:
             _breakdown_table(models, kind="Model"),
         ]
 
-    show_read_only_command(Group(*panel_parts), title="usage", subtitle=subtitle)
+    show_read_only_command(Group(*panel_parts), title="usage", subtitle=subtitle, fill_screen=True)
 
 
 def cmd_usage(args: list[str] | None = None) -> None:
     is_global, since, window_label, error = _parse_global_usage_args(args)
     if error is not None:
-        show_read_only_command(Text(error, style="yellow"), title="usage")
+        show_read_only_command(Text(error, style="yellow"), title="usage", fill_screen=True)
         return
     if is_global:
         _cmd_global_usage(since, window_label)
@@ -397,6 +398,7 @@ def cmd_usage(args: list[str] | None = None) -> None:
             Text("No token usage recorded for this session yet.", style="dim"),
             title="usage",
             subtitle=str(usage_path),
+            fill_screen=True,
         )
         return
 
@@ -461,6 +463,6 @@ def cmd_usage(args: list[str] | None = None) -> None:
         token_table,
     ]
 
-    show_read_only_command(Group(*panel_parts), title="usage", subtitle=str(usage_path))
+    show_read_only_command(Group(*panel_parts), title="usage", subtitle=str(usage_path), fill_screen=True)
 
 

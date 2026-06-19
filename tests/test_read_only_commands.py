@@ -234,6 +234,7 @@ def test_usage_empty_state_uses_shared_renderer(monkeypatch):
     assert len(calls) == 1
     assert calls[0]["title"] == "usage"
     assert calls[0]["subtitle"] == "usage.json"
+    assert calls[0]["fill_screen"] is True
 
 
 def test_usage_breakdown_is_reconciled_to_recorded_input_tokens():
@@ -317,6 +318,7 @@ def test_session_usage_uses_current_and_exchange_labels(monkeypatch):
     usage_command.cmd_usage()
 
     rendered = _render_read_only_text(calls[0][0])
+    assert calls[0][1]["fill_screen"] is True
     assert "Current model" in rendered
     assert "Current provider" in rendered
     assert "Exchanges" in rendered
@@ -357,6 +359,7 @@ def test_usage_all_since_uses_global_renderer(monkeypatch):
     assert captured["warn"] is True
     assert calls[0]["title"] == "usage"
     assert calls[0]["subtitle"] == "global-usage.json - last 24h"
+    assert calls[0]["fill_screen"] is True
 
 
 def test_usage_day_alias_uses_24_hour_global_window(monkeypatch):
