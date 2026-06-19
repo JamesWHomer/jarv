@@ -283,7 +283,7 @@ def run_settings_interactive(config: dict) -> None:
         elif edit is not None and edit.get("discard_armed"):
             controls = "Esc discard"
         else:
-            controls = "" if row.get("multiline") else "Enter save   Esc cancel"
+            controls = "" if row.get("multiline") else "Enter save   Esc exit"
         return Panel(
             Group(*editor_parts),
             title=f"[bold bright_white]jarv \u25b8 edit {row['label']}[/bold bright_white]",

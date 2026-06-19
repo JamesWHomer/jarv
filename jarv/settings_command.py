@@ -1258,7 +1258,7 @@ def _settings_multiline_editor_lines(
     tail.append(
         Text(
             _clip_text(
-                "  Enter newline   Ctrl+S save   Esc cancel   Arrows move",
+                "  Enter newline   Ctrl+S save   Esc exit   Arrows move",
                 inner_width,
             ),
             style="dim italic",
