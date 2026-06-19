@@ -209,7 +209,7 @@ def tool_card(
         return Panel(
             content,
             border_style="bright_black",
-            box=box.ROUNDED,
+            box=box.SQUARE,
             padding=(0, 1),
         )
     return ToolCard(accent, content)
