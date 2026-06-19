@@ -14,12 +14,14 @@ jarv refactor the auth module           # complex tasks get split across subagen
 Jarv can be installed as a standalone binary or as a Python package. After installing, run `jarv /setup` to choose a provider, enter an API key, and pick a model.
 
 ```powershell
-winget install JamesWHomer.Jarv
+# WinGet package in progress:
+# winget install JamesWHomer.Jarv
 irm https://github.com/JamesWHomer/jarv/releases/latest/download/install.ps1 | iex
 ```
 
 ```bash
-brew install JamesWHomer/tap/jarv
+# Homebrew tap in progress:
+# brew install JamesWHomer/tap/jarv
 curl -fsSL https://github.com/JamesWHomer/jarv/releases/latest/download/install.sh | sh
 uv tool install jarv
 pipx install jarv
