@@ -14,7 +14,7 @@ from jarv.headsup import HeadsupAgentUI, HeadsupApp
 
 
 class HeadsupTests(unittest.TestCase):
-    def _app(self, *, width=50):
+    def _app(self, *, width=50, args=None):
         ready = threading.Event()
         ready.set()
         output = io.StringIO()
@@ -27,7 +27,7 @@ class HeadsupTests(unittest.TestCase):
         app = HeadsupApp(
             {"provider": "openai", "model": "test-model"},
             client=object(),
-            args=None,
+            args=args,
             agent_loader=({"module": SimpleNamespace()}, ready),
             handle_slash=lambda command, rest, config, client, args, hint: (config, client),
             maybe_command=lambda _first, _rest: None,
@@ -134,6 +134,97 @@ class HeadsupTests(unittest.TestCase):
         self.assertEqual(app.entries[-1].kind, "usage")
         self.assertEqual(app.entries[-1].renderable.plain, "Usage: 1 in")
 
+    def test_initial_sync_loads_saved_history_and_tool_cards(self):
+        context = SimpleNamespace(
+            session_id="current-session",
+            history_file=Path("history-current.json"),
+        )
+        saved_history = [
+            {"role": "user", "content": "inspect the repo"},
+            {
+                "type": "function_call",
+                "call_id": "call-1",
+                "name": "run_command",
+                "arguments": '{"command":"rg headsup"}',
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call-1",
+                "output": "jarv/headsup.py:1",
+            },
+            {"role": "assistant", "content": "Found it."},
+        ]
+
+        with (
+            patch("jarv.headsup.prepare_session_context", return_value=context),
+            patch("jarv.headsup.load_history", return_value=saved_history),
+        ):
+            app, _test_console, _output = self._app()
+            app._sync_initial_transcript_from_history()
+
+        rendered = self._entry_text(app)
+        self.assertIn("inspect the repo", rendered)
+        self.assertIn("Command", rendered)
+        self.assertIn("rg headsup", rendered)
+        self.assertIn("jarv/headsup.py:1", rendered)
+        self.assertIn("Found it.", rendered)
+
+    def test_initial_sync_skips_history_in_incognito(self):
+        context = SimpleNamespace(
+            session_id="current-session",
+            history_file=Path("history-current.json"),
+        )
+        args = SimpleNamespace(incognito=True, new=False)
+
+        with (
+            patch("jarv.headsup.prepare_session_context", return_value=context),
+            patch("jarv.headsup.load_history") as load_history,
+        ):
+            app, _test_console, _output = self._app(args=args)
+            app._sync_initial_transcript_from_history()
+
+        load_history.assert_not_called()
+        self.assertIn("Heads-up mode.", self._entry_text(app))
+
+    def test_new_session_is_consumed_at_headsup_startup(self):
+        context = SimpleNamespace(
+            session_id="new-session",
+            history_file=Path("history-new.json"),
+        )
+        args = SimpleNamespace(incognito=False, new=True)
+
+        with (
+            patch("jarv.headsup.forget_current_session") as forget_current_session,
+            patch("jarv.headsup.prepare_session_context", return_value=context),
+            patch("jarv.headsup.load_history") as load_history,
+        ):
+            app, _test_console, _output = self._app(args=args)
+            app._sync_initial_transcript_from_history()
+
+        forget_current_session.assert_called_once_with()
+        load_history.assert_not_called()
+        self.assertEqual(app.session_context.session_id, "new-session")
+
+    def test_agent_query_passes_incognito_flag(self):
+        run_agent_calls = []
+
+        def run_agent(query, config, client, **kwargs):
+            run_agent_calls.append((query, config, client, kwargs))
+            return SimpleNamespace(cancelled=False)
+
+        args = SimpleNamespace(incognito=True, new=False)
+        app, _test_console, _output = self._app(
+            args=args,
+        )
+        app.agent_import["module"] = SimpleNamespace(run_agent=run_agent)
+
+        app._run_agent_query("private prompt")
+
+        self.assertEqual(len(run_agent_calls), 1)
+        self.assertTrue(run_agent_calls[0][3]["heads_up"])
+        self.assertTrue(run_agent_calls[0][3]["incognito"])
+        self.assertNotIn("new_session", run_agent_calls[0][3])
+
     def test_status_indicators_match_oneshot_glyphs(self):
         app, _test_console, _output = self._app()
         ui = HeadsupAgentUI(app)
@@ -239,6 +330,41 @@ class HeadsupTests(unittest.TestCase):
         self.assertTrue(app._exit_armed)
         notices = [entry.renderable.plain for entry in app.entries if entry.kind == "notice"]
         self.assertIn("Draft cleared.", notices)
+
+    def test_prompt_history_replays_sent_prompts_and_restores_draft(self):
+        app, _test_console, _output = self._app()
+        app._prompt_history = []
+        app._record_prompt_history("first")
+        app._record_prompt_history("second")
+        app.editor["buffer"] = "draft"
+        app.editor["cursor"] = len("draft")
+
+        self.assertTrue(app._navigate_prompt_history("UP", 1))
+        self.assertEqual(app.editor["buffer"], "second")
+
+        self.assertTrue(app._navigate_prompt_history("UP", 1))
+        self.assertEqual(app.editor["buffer"], "first")
+
+        self.assertTrue(app._navigate_prompt_history("DOWN", 1))
+        self.assertEqual(app.editor["buffer"], "second")
+
+        self.assertTrue(app._navigate_prompt_history("DOWN", 1))
+        self.assertEqual(app.editor["buffer"], "draft")
+        self.assertIsNone(app._prompt_history_index)
+
+    def test_prompt_history_loads_user_messages_from_synced_history(self):
+        app, _test_console, _output = self._app()
+        updated_history = [
+            {"role": "system", "content": "ignore"},
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "one"},
+            {"role": "user", "content": "second"},
+        ]
+
+        with patch("jarv.headsup.load_history", return_value=updated_history):
+            app._sync_transcript_from_history()
+
+        self.assertEqual(app._prompt_history, ["first", "second"])
 
     def test_bind_cancel_token_esc_cancels(self):
         app, _test_console, _output = self._app()

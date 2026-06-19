@@ -42,7 +42,7 @@ from .display import (
     rendered_text_lines,
     terminal_size,
 )
-from .history import load_history, prepare_session_context
+from .history import forget_current_session, load_history, prepare_session_context
 from .session_render import (
     _history_content_to_str,
     _tool_call_output,
@@ -357,10 +357,23 @@ class HeadsupApp:
         self._esc_listener_paused = threading.Event()
         self._live_tool_index: dict[str, int] = {}
         self._refresh_suspended = 0
+        self.incognito = bool(getattr(args, "incognito", False))
+        self._started_new_session = bool(getattr(args, "new", False)) and not self.incognito
+        self._initial_history_synced = False
+        if self._started_new_session:
+            forget_current_session()
         self.session_context = prepare_session_context(persist_metadata=False)
         self.usage_path = usage_file_for(self.session_context.history_file)
+        self._prompt_history = (
+            []
+            if self.incognito or self._started_new_session
+            else self._load_prompt_history()
+        )
+        self._prompt_history_index: int | None = None
+        self._prompt_history_draft = ""
 
     def run(self) -> None:
+        self._sync_initial_transcript_from_history()
         with Live(
             get_renderable=self.render,
             console=self.console,
@@ -384,6 +397,7 @@ class HeadsupApp:
 
                 if key == "ENTER":
                     query = str(self.editor.get("buffer", "")).strip()
+                    self._record_prompt_history(query)
                     initialize_text_editor(self.editor, "")
                     self._exit_armed = False
                     if self._handle_query(query) == "exit":
@@ -395,6 +409,10 @@ class HeadsupApp:
                     self.scroll_offset += 5 * repeat
                 elif key == "PAGEDOWN":
                     self.scroll_offset = max(0, self.scroll_offset - 5 * repeat)
+                elif key in {"UP", "DOWN"}:
+                    if self._navigate_prompt_history(key, repeat):
+                        self.scroll_offset = 0
+                        self._exit_armed = False
                 else:
                     changed = apply_text_editor_key(
                         self.editor,
@@ -404,6 +422,7 @@ class HeadsupApp:
                         allow_newlines=False,
                     )
                     if changed or isinstance(key, TextInput):
+                        self._reset_prompt_history_navigation()
                         self.scroll_offset = 0
                         self._exit_armed = False
 
@@ -618,6 +637,7 @@ class HeadsupApp:
     def _handle_prompt_dismiss(self) -> bool:
         if str(self.editor.get("buffer", "")):
             initialize_text_editor(self.editor, "")
+            self._reset_prompt_history_navigation()
             self.add_notice(Text("Draft cleared.", style="dim"))
             return False
         if self._exit_armed:
@@ -739,6 +759,7 @@ class HeadsupApp:
                 self.config,
                 self.client,
                 heads_up=True,
+                incognito=self.incognito,
                 ui=ui,
             )
             if getattr(result, "cancelled", False) is True:
@@ -794,6 +815,14 @@ class HeadsupApp:
         self.session_context = prepare_session_context(persist_metadata=False)
         self.usage_path = usage_file_for(self.session_context.history_file)
         return self.session_context.session_id != old_session_id
+
+    def _sync_initial_transcript_from_history(self) -> None:
+        if self._initial_history_synced:
+            return
+        self._initial_history_synced = True
+        if self.incognito or self._started_new_session:
+            return
+        self._sync_transcript_from_history()
 
     def _sync_after_slash(
         self,
@@ -872,7 +901,64 @@ class HeadsupApp:
             self.entries = entries
             self._live_tool_index.clear()
             self.scroll_offset = 0
+            self._prompt_history = self._history_user_messages(history)
+            self._reset_prompt_history_navigation()
         self.refresh()
+
+    def _load_prompt_history(self) -> list[str]:
+        try:
+            return self._history_user_messages(load_history(self.session_context.history_file))
+        except Exception:
+            return []
+
+    def _history_user_messages(self, history: list) -> list[str]:
+        messages: list[str] = []
+        for item in history:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("role", "")).lower() != "user":
+                continue
+            content = _history_content_to_str(item.get("content", "")).strip()
+            if content:
+                messages.append(content)
+        return messages
+
+    def _record_prompt_history(self, query: str) -> None:
+        if query:
+            self._prompt_history.append(query)
+        self._reset_prompt_history_navigation()
+
+    def _reset_prompt_history_navigation(self) -> None:
+        self._prompt_history_index = None
+        self._prompt_history_draft = ""
+
+    def _navigate_prompt_history(self, key: str, repeat: int) -> bool:
+        if not self._prompt_history:
+            return False
+        repeat = max(1, repeat)
+        if self._prompt_history_index is None:
+            if key != "UP":
+                return False
+            self._prompt_history_draft = str(self.editor.get("buffer", ""))
+            index = len(self._prompt_history)
+        else:
+            index = self._prompt_history_index
+
+        if key == "UP":
+            index = max(0, index - repeat)
+            value = self._prompt_history[index]
+            self._prompt_history_index = index
+        else:
+            index += repeat
+            if index >= len(self._prompt_history):
+                value = self._prompt_history_draft
+                self._reset_prompt_history_navigation()
+            else:
+                value = self._prompt_history[index]
+                self._prompt_history_index = index
+
+        initialize_text_editor(self.editor, value)
+        return True
 
     def _append(self, kind: str, renderable: RenderableType, *, spacer_before: bool = False) -> None:
         with self.lock:
