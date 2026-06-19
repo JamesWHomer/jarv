@@ -163,7 +163,10 @@ jobs:
         shell: bash
         run: |
           exe="./dist/jarv"
-          if [ "${{ matrix.platform }}" = "windows" ]; then exe="./dist/jarv.exe"; fi
+          if [ "${{ matrix.platform }}" = "windows" ]; then
+            export MSYS_NO_PATHCONV=1
+            exe="./dist/jarv.exe"
+          fi
           "$exe" --version
           "$exe" /about
           "$exe" /config
