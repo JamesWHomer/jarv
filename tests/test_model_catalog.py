@@ -490,6 +490,57 @@ def test_model_picker_columns_align_with_long_prices(monkeypatch):
     assert all(len(line.plain) == 60 for line in narrow)
 
 
+def test_model_picker_only_prices_visible_rows_when_cropped(monkeypatch):
+    priced = []
+
+    def pricing(_provider, model):
+        priced.append(model)
+        return ("$1", "$0", "$2")
+
+    monkeypatch.setattr(model_catalog, "model_pricing_values", pricing)
+    models = [(f"model-{idx:03}", "Catalog") for idx in range(200)]
+
+    lines = settings_command._settings_model_choice_lines(
+        models,
+        "openrouter",
+        100,
+        False,
+        100,
+        max_lines=10,
+    )
+
+    rendered = "\n".join(line.plain for line in lines)
+    assert "model-100" in rendered
+    assert len(priced) < 10
+    assert "model-000" not in priced
+    assert "model-199" not in priced
+
+
+def test_model_pricing_values_are_cached(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        model_catalog,
+        "resolve_openrouter_model",
+        lambda _provider, model: calls.append(model) or None,
+    )
+    model_catalog.model_pricing_values.cache_clear()
+
+    assert model_catalog.model_pricing_values("openrouter", "model-1") == (
+        "n/a",
+        "n/a",
+        "n/a",
+    )
+    assert model_catalog.model_pricing_values("openrouter", "model-1") == (
+        "n/a",
+        "n/a",
+        "n/a",
+    )
+    assert calls == ["model-1"]
+
+    model_catalog.model_pricing_values.cache_clear()
+
+
 def test_settings_model_picker_appends_and_selects_current_provider_model(
     tmp_path,
     monkeypatch,
@@ -556,6 +607,98 @@ def test_settings_model_picker_does_not_append_model_from_another_provider(
     )
 
     assert edit["model_choices"] == [("gpt-5.5", "Flagship")]
+
+
+def test_auditor_model_picker_defaults_to_same_model_at_bottom(monkeypatch):
+    monkeypatch.setattr(
+        model_catalog,
+        "get_cached_model_choices",
+        lambda _config: [
+            ("gpt-5.5", "Flagship"),
+            ("gpt-5.4-mini", "Balanced"),
+        ],
+    )
+    monkeypatch.setattr(settings_command, "save_config", lambda _config: None)
+    config = {"provider": "openai", "model": "gpt-5.5", "auditor_model": ""}
+    row = {
+        "key": "auditor_model",
+        "kind": "text",
+        "label": "Auditor model",
+        "empty": "default",
+    }
+
+    edit = settings_command._settings_begin_edit(row, config)
+    rendered = "\n".join(
+        line.plain
+        for line in settings_command._settings_editor_lines(edit, config, 140)
+    )
+
+    assert settings_command._settings_value_text(row, config).plain == "default"
+    assert edit["model_choices"][-1] == ("default", "Default")
+    assert edit["selected_model_index"] == 2
+    assert "same model uses" not in rendered
+    assert "Use current model" not in rendered
+    assert "\u203a 3. default" in rendered
+    assert "uses active model (gpt-5.5)" in rendered
+    assert "default                                    n/a" not in rendered
+    assert "Auditor model number, name, or custom model:" in rendered
+    rendered_lines = settings_command._settings_editor_lines(edit, config, 140)
+    selected_default_line = next(
+        line for line in rendered_lines if "uses active model" in line.plain
+    )
+    assert any(span.style == "white" for span in selected_default_line.spans)
+    lines = rendered.splitlines()
+    header = next(line for line in lines if "Input" in line)
+    default_line_index = next(
+        index for index, line in enumerate(lines) if "default" in line
+    )
+    assert lines[default_line_index - 1] == ""
+    default_line = lines[default_line_index]
+    assert default_line.index("uses active model") == header.index("Input")
+
+    updated, message, style, done = settings_command._settings_commit_edit(
+        edit,
+        config,
+    )
+
+    assert done is True
+    assert style == "green"
+    assert message == "saved Auditor model: default"
+    assert updated["auditor_model"] == ""
+
+
+def test_auditor_model_picker_saves_selected_model(monkeypatch):
+    monkeypatch.setattr(
+        model_catalog,
+        "get_cached_model_choices",
+        lambda _config: [
+            ("gpt-5.5", "Flagship"),
+            ("gpt-5.4-mini", "Balanced"),
+        ],
+    )
+    monkeypatch.setattr(settings_command, "save_config", lambda _config: None)
+    config = {"provider": "openai", "model": "gpt-5.5", "auditor_model": ""}
+    edit = settings_command._settings_begin_edit(
+        {
+            "key": "auditor_model",
+            "kind": "text",
+            "label": "Auditor model",
+            "empty": "default",
+        },
+        config,
+    )
+
+    edit["selected_model_index"] = 1
+    updated, message, style, done = settings_command._settings_commit_edit(
+        edit,
+        config,
+    )
+
+    assert done is True
+    assert style == "green"
+    assert message == "saved Auditor model: gpt-5.4-mini"
+    assert updated["model"] == "gpt-5.5"
+    assert updated["auditor_model"] == "gpt-5.4-mini"
 
 
 def test_model_picker_arrows_select_rows_and_typing_activates_input(

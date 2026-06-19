@@ -147,8 +147,8 @@ def settings_rows(config: dict) -> list[dict]:
             "label": "Auditor model",
             "key": "auditor_model",
             "kind": "text",
-            "empty": "auto",
-            "desc": "empty uses the active model",
+            "empty": "default",
+            "desc": "use the active model unless overridden",
         },
         {
             "section": "runtime",

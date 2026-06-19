@@ -7,6 +7,7 @@ import json
 import re
 import threading
 import time
+from functools import lru_cache
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -70,6 +71,7 @@ def _write_cache(provider: str, models: list[CatalogModel]) -> None:
         temporary = path.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         temporary.replace(path)
+        model_pricing_values.cache_clear()
     except OSError:
         pass
 
@@ -602,6 +604,7 @@ def _format_price_rate(value: float) -> str:
     return f"${value:.6f}".rstrip("0").rstrip(".")
 
 
+@lru_cache(maxsize=4096)
 def model_pricing_values(
     provider: str | None,
     model: str | None,
@@ -1033,3 +1036,4 @@ def clear_memory_cache() -> None:
     """Clear process-local choices. Intended for tests and explicit refreshes."""
     with _CACHE_LOCK:
         _MEMORY_CHOICES.clear()
+    model_pricing_values.cache_clear()

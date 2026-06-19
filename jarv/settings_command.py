@@ -34,6 +34,14 @@ from .text_editor import (
 
 from .settings_refresher import _ModelCatalogRefresher
 
+
+AUDITOR_DEFAULT_MODEL_CHOICE = "default"
+
+
+def _settings_is_model_picker_key(key: str) -> bool:
+    return key in {"model", "auditor_model"}
+
+
 def _settings_service_tier_choices(config: dict) -> tuple[tuple[str, str], ...]:
     return settings_service_tier_choices(config)
 
@@ -130,6 +138,11 @@ def _settings_value_text(row: dict, config: dict, *, selected: bool = False) -> 
     if kind == "int":
         return Text(str(value), style="bold yellow" if selected else "yellow")
     if kind == "text":
+        if key == "auditor_model" and not value:
+            return Text(
+                row.get("empty", AUDITOR_DEFAULT_MODEL_CHOICE),
+                style="dim italic",
+            )
         if value:
             return Text(str(value), style="bold green" if selected else "green")
         return Text(row.get("empty", "empty"), style="dim italic")
@@ -317,18 +330,47 @@ def _settings_model_choices(
 def _settings_model_choices_with_current(
     config: dict,
     choices: list[tuple[str, str]],
+    *,
+    current_model: str | None = None,
 ) -> list[tuple[str, str]]:
     """Append the current model when it belongs to the active provider catalog."""
     from .model_catalog import cached_provider_has_model
 
     result = list(choices)
-    current = str(config.get("model") or "").strip()
+    current = str(
+        (config.get("model") if current_model is None else current_model) or ""
+    ).strip()
     if (
         current
         and all(name.lower() != current.lower() for name, _description in result)
         and cached_provider_has_model(config, current)
     ):
         result.append((current, ""))
+    return result
+
+
+def _settings_model_choices_for_key(
+    config: dict,
+    key: str,
+    choices: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    current_model = (
+        str(config.get("auditor_model") or "")
+        if key == "auditor_model"
+        else str(config.get("model") or "")
+    )
+    result = _settings_model_choices_with_current(
+        config,
+        choices,
+        current_model=current_model,
+    )
+    if key == "auditor_model":
+        result = [
+            (name, description)
+            for name, description in result
+            if name.lower() != AUDITOR_DEFAULT_MODEL_CHOICE
+        ]
+        result.append((AUDITOR_DEFAULT_MODEL_CHOICE, "Default"))
     return result
 
 
@@ -403,6 +445,18 @@ def _settings_resolve_model(
         if raw.lower() == name.lower():
             return name
     return raw
+
+
+def _settings_resolve_auditor_model(
+    config: dict,
+    choice: str,
+    *,
+    models: list[tuple[str, str]] | None = None,
+) -> str:
+    raw = choice.strip()
+    if raw.lower() in {"", "clear", AUDITOR_DEFAULT_MODEL_CHOICE}:
+        return ""
+    return _settings_resolve_model(config, raw, models=models)
 
 
 def _settings_model_apply_key(
@@ -715,19 +769,76 @@ def _settings_model_choice_lines(
     inner_width: int,
     *,
     max_lines: int | None = None,
+    active_model: str = "",
 ) -> list[Text]:
     if not models or (max_lines is not None and max_lines <= 0):
         return []
 
     from .model_catalog import model_pricing_values
 
+    model_entries = []
+    same_model_entries = []
+    for idx, (name, description) in enumerate(models, 1):
+        is_same_model = (
+            name.lower() == AUDITOR_DEFAULT_MODEL_CHOICE
+            and description == "Default"
+        )
+        if is_same_model:
+            same_model_entries.append((idx, name, description))
+            continue
+        model_entries.append((idx, name, description))
+
+    content_entries: list[tuple] = [
+        ("model", idx, name, description)
+        for idx, name, description in model_entries
+    ]
+    if same_model_entries:
+        if content_entries:
+            content_entries.append(("blank",))
+        content_entries.extend(
+            ("same", idx, name, description)
+            for idx, name, description in same_model_entries
+        )
+
+    visible_entries = content_entries
+    hidden_count = 0
+    if max_lines is not None:
+        full_line_count = (1 if model_entries else 0) + len(content_entries)
+        if full_line_count > max_lines:
+            visible_count = max(0, max_lines - 2)
+            selected_entry_index = next(
+                (
+                    index
+                    for index, entry in enumerate(content_entries)
+                    if entry[0] in {"model", "same"}
+                    and entry[1] - 1 == selected_index
+                ),
+                0,
+            )
+            start = min(
+                max(0, selected_entry_index - visible_count // 2),
+                max(0, len(content_entries) - visible_count),
+            )
+            visible_entries = content_entries[start:start + visible_count]
+            hidden_entries = (
+                content_entries[:start]
+                + content_entries[start + visible_count:]
+            )
+            hidden_count = sum(
+                1 for entry in hidden_entries if entry[0] in {"model", "same"}
+            )
+
     display_rows = []
-    for name, description in models:
+    for entry in visible_entries:
+        if entry[0] != "model":
+            continue
+        _kind, idx, name, description = entry
         input_price, cached_price, output_price = model_pricing_values(
             provider,
             name,
         )
         display_rows.append((
+            idx,
             name,
             input_price,
             cached_price,
@@ -737,10 +848,10 @@ def _settings_model_choice_lines(
 
     prefix_width = 7
     gap = "   "
-    input_width = max(len("Input"), *(len(row[1]) for row in display_rows))
-    cached_width = max(len("Cached"), *(len(row[2]) for row in display_rows))
-    output_width = max(len("Output"), *(len(row[3]) for row in display_rows))
-    tier_width = max(len("Tier"), *(len(row[4]) for row in display_rows))
+    input_width = max([len("Input")] + [len(row[2]) for row in display_rows])
+    cached_width = max([len("Cached")] + [len(row[3]) for row in display_rows])
+    output_width = max([len("Output")] + [len(row[4]) for row in display_rows])
+    tier_width = max([len("Tier")] + [len(row[5]) for row in display_rows])
     fixed_width = (
         prefix_width
         + len(gap) * 4
@@ -749,37 +860,81 @@ def _settings_model_choice_lines(
         + output_width
         + tier_width
     )
-    max_model_width = max(len(row[0]) for row in display_rows)
+    max_model_width = max(
+        [len(row[1]) for row in display_rows]
+        + [
+            len(entry[2])
+            for entry in visible_entries
+            if entry[0] == "same"
+        ]
+        + [len("Model")]
+    )
     model_width = min(
         max(36, max_model_width + 2),
         max(1, inner_width - fixed_width),
     )
 
-    header = (
-        " " * prefix_width
-        + f"{'Model':<{model_width}}{gap}"
-        + f"{'Input':>{input_width}}{gap}"
-        + f"{'Cached':>{cached_width}}{gap}"
-        + f"{'Output':>{output_width}}{gap}"
-        + f"{'Tier':<{tier_width}}"
-    )
-    lines = [
-        Text(
-            _clip_text(header, inner_width),
-            style="dim bold",
-            no_wrap=True,
-            overflow="crop",
+    lines: list[Text] = []
+    if display_rows:
+        header = (
+            " " * prefix_width
+            + f"{'Model':<{model_width}}{gap}"
+            + f"{'Input':>{input_width}}{gap}"
+            + f"{'Cached':>{cached_width}}{gap}"
+            + f"{'Output':>{output_width}}{gap}"
+            + f"{'Tier':<{tier_width}}"
         )
-    ]
+        lines.append(
+            Text(
+                _clip_text(header, inner_width),
+                style="dim bold",
+                no_wrap=True,
+                overflow="crop",
+            )
+        )
 
+    display_by_index = {row[0]: row for row in display_rows}
     rows: list[Text] = []
-    for idx, (
-        name,
-        input_price,
-        cached_price,
-        output_price,
-        tier,
-    ) in enumerate(display_rows, 1):
+    for entry in visible_entries:
+        kind = entry[0]
+        if kind == "blank":
+            rows.append(Text(""))
+            continue
+        if kind == "same":
+            _kind, idx, name, _description = entry
+            is_selected = idx - 1 == selected_index
+            is_bright = is_selected and not input_active
+            marker = "\u203a" if is_selected else " "
+            line = Text(no_wrap=True, overflow="crop")
+            line.append(
+                f"  {marker}{idx:>2}. ",
+                style="bold cyan" if is_bright else "dim",
+            )
+            line.append(
+                f"{_clip_text(name, model_width):<{model_width}}",
+                style="bold bright_white" if is_bright else "white",
+            )
+            line.append(gap, style="dim")
+            description = "uses active model"
+            if active_model:
+                description = f"{description} ({active_model})"
+            line.append(
+                description,
+                style="white" if is_bright else "dim",
+            )
+            line.truncate(inner_width, overflow="ellipsis")
+            rows.append(line)
+            continue
+
+        _kind, idx, _name, _description = entry
+        (
+            _idx,
+            name,
+            input_price,
+            cached_price,
+            output_price,
+            tier,
+        ) = display_by_index[idx]
         is_selected = idx - 1 == selected_index
         is_bright = is_selected and not input_active
         marker = "\u203a" if is_selected else " "
@@ -814,13 +969,11 @@ def _settings_model_choice_lines(
         )
         rows.append(line)
 
-    if max_lines is not None and len(lines) + len(rows) > max_lines:
-        visible_rows = max(0, max_lines - 2)
-        hidden = len(rows) - visible_rows
-        rows = rows[:visible_rows]
+    if hidden_count:
+        label = "choice" if hidden_count == 1 else "choices"
         rows.append(Text(
             _clip_text(
-                f"  ... {hidden} more models; type a number/name/custom",
+                f"  ... {hidden_count} more {label}; type a number/name/custom",
                 inner_width,
             ),
             style="dim",
@@ -992,13 +1145,19 @@ def _settings_begin_edit(row: dict, config: dict) -> dict:
         edit["discard_armed"] = False
     if key == "provider":
         edit["selected_provider"] = config.get("provider", "openai")
-    elif key == "model":
-        edit["model_choices"] = _settings_model_choices_with_current(
+    elif _settings_is_model_picker_key(key):
+        edit["model_choices"] = _settings_model_choices_for_key(
             config,
+            key,
             _settings_model_choices(config),
         )
         edit["catalog_provider"] = config.get("provider", "openai")
-        current_model = str(config.get("model") or "").lower()
+        if key == "auditor_model":
+            current_model = str(
+                config.get("auditor_model") or AUDITOR_DEFAULT_MODEL_CHOICE
+            ).lower()
+        else:
+            current_model = str(config.get("model") or "").lower()
         edit["selected_model_index"] = next(
             (
                 idx
@@ -1129,16 +1288,24 @@ def _settings_editor_lines(
         intro.append(Text(_clip_text("  Up/Down choose", inner_width), style="dim"))
         choice_items = []
         prompt = ""
-    elif key == "model":
+    elif _settings_is_model_picker_key(key):
         models = edit.get("model_choices")
         if not isinstance(models, list):
-            models = _settings_model_choices(config)
+            models = _settings_model_choices_for_key(
+                config,
+                key,
+                _settings_model_choices(config),
+            )
         if models:
             notice = str(edit.get("catalog_notice") or "")
             if notice:
                 intro.append(Text(_clip_text(f"  {notice}", inner_width), style="green"))
             choice_items = []
-            prompt = "Model number, name, or custom model"
+            prompt = (
+                "Auditor model number, name, or custom model"
+                if key == "auditor_model"
+                else "Model number, name, or custom model"
+            )
         else:
             intro.append(Text(_clip_text(f"  default for {provider_label}: {_settings_default_model(config)}", inner_width), style="dim"))
             choice_items = []
@@ -1170,7 +1337,7 @@ def _settings_editor_lines(
         line = Text(no_wrap=True, overflow="crop")
         warning_active = bool(edit.get("model_validation_warning"))
         input_active = (
-            (key != "model" or bool(edit.get("model_input_active")))
+            (not _settings_is_model_picker_key(key) or bool(edit.get("model_input_active")))
             and not warning_active
         )
         prompt_style = "bold bright_white" if input_active else "dim"
@@ -1197,7 +1364,7 @@ def _settings_editor_lines(
 
     if edit.get("error"):
         tail.append(Text(_clip_text(f"  {edit['error']}", inner_width), style="red"))
-    if key == "model" and edit.get("model_validation_warning"):
+    if _settings_is_model_picker_key(key) and edit.get("model_validation_warning"):
         suggestion = str(edit.get("model_validation_suggestion") or "")
         warning_selection = int(edit.get("model_warning_selection", 0))
         warning = (
@@ -1235,7 +1402,7 @@ def _settings_editor_lines(
             selected_provider=edit.get("selected_provider"),
             max_lines=choice_line_budget,
         )
-    elif key == "model" and models:
+    elif _settings_is_model_picker_key(key) and models:
         choices = _settings_model_choice_lines(
             models,
             provider,
@@ -1248,6 +1415,11 @@ def _settings_editor_lines(
             or bool(edit.get("model_validation_warning")),
             inner_width,
             max_lines=choice_line_budget,
+            active_model=(
+                str(config.get("model") or _settings_default_model(config))
+                if key == "auditor_model"
+                else ""
+            ),
         )
         if choice_line_budget is None or len(choices) < choice_line_budget:
             choices.append(Text(""))
@@ -1324,9 +1496,7 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
         save_config(config)
         return config, "saved API key", "green", True
 
-    if key == "model":
-        from .reasoning import reconcile_reasoning_effort
-
+    if _settings_is_model_picker_key(key):
         warning_model = str(edit.get("model_validation_warning") or "")
         if warning_model:
             actions = edit.get("model_warning_actions") or []
@@ -1349,10 +1519,17 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
             edit.pop("model_validation_suggestion", None)
             edit.pop("model_warning_actions", None)
             edit.pop("model_warning_selection", None)
-            config["model"] = model
-            reset_effort = reconcile_reasoning_effort(config)
+            if key == "model":
+                from .reasoning import reconcile_reasoning_effort
+
+                config["model"] = model
+                reset_effort = reconcile_reasoning_effort(config)
+            else:
+                config["auditor_model"] = model
+                reset_effort = None
             save_config(config)
-            message = f"saved Model: {model}"
+            display = model if model else AUDITOR_DEFAULT_MODEL_CHOICE
+            message = f"saved {row['label']}: {display}"
             if reset_effort is not None:
                 message += " (reasoning effort reset to default)"
             return config, message, "yellow", True
@@ -1372,15 +1549,22 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
                 ),
             )
             raw = models[selected][0]
-        model = _settings_resolve_model(
-            config,
-            raw,
-            models=models if isinstance(models, list) else None,
-        )
-        if not model.strip():
+        if key == "auditor_model":
+            model = _settings_resolve_auditor_model(
+                config,
+                raw,
+                models=models if isinstance(models, list) else None,
+            )
+        else:
+            model = _settings_resolve_model(
+                config,
+                raw,
+                models=models if isinstance(models, list) else None,
+            )
+        if key == "model" and not model.strip():
             edit["error"] = "Model must not be empty."
             return config, edit["error"], "red", False
-        if input_active:
+        if input_active and model:
             from .model_catalog import cached_provider_has_model
 
             listed_model = (
@@ -1413,10 +1597,17 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
                     "yellow",
                     False,
                 )
-        config["model"] = model
-        reset_effort = reconcile_reasoning_effort(config)
+        if key == "model":
+            from .reasoning import reconcile_reasoning_effort
+
+            config["model"] = model
+            reset_effort = reconcile_reasoning_effort(config)
+        else:
+            config["auditor_model"] = model
+            reset_effort = None
         save_config(config)
-        message = f"saved Model: {model}"
+        display = model if model else AUDITOR_DEFAULT_MODEL_CHOICE
+        message = f"saved {row['label']}: {display}"
         if reset_effort is not None:
             message += " (reasoning effort reset to default)"
         return config, message, "green", True

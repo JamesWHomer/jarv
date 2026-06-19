@@ -22,7 +22,7 @@ from .settings_command import (
     _settings_editor_lines,
     _settings_finish_reset,
     _settings_model_apply_key,
-    _settings_model_choices_with_current,
+    _settings_model_choices_for_key,
     _settings_model_update_notice,
     _settings_multiline_apply_key,
     _settings_provider_keys,
@@ -51,13 +51,14 @@ def run_settings_interactive(config: dict) -> None:
         current_edit = edit
         if (
             current_edit is not None
-            and current_edit["row"]["key"] == "model"
+            and current_edit["row"]["key"] in {"model", "auditor_model"}
             and current_edit.get("catalog_provider") == provider
             and current_edit.get("catalog_generation") == generation
         ):
             previous = list(current_edit.get("model_choices") or [])
-            displayed_choices = _settings_model_choices_with_current(
+            displayed_choices = _settings_model_choices_for_key(
                 config,
+                current_edit["row"]["key"],
                 choices,
             )
             selected_name = ""
@@ -382,10 +383,13 @@ def run_settings_interactive(config: dict) -> None:
                         provider_keys[current_idx],
                         delay=0.2,
                     )
-                elif edit["row"]["key"] == "model" and _settings_model_apply_key(
-                    edit,
-                    key,
-                    repeat_count,
+                elif (
+                    edit["row"]["key"] in {"model", "auditor_model"}
+                    and _settings_model_apply_key(
+                        edit,
+                        key,
+                        repeat_count,
+                    )
                 ):
                     flash = None
                 elif key == "ENTER":
@@ -436,7 +440,7 @@ def run_settings_interactive(config: dict) -> None:
                 quick = _settings_apply_quick(row, config)
                 if quick is None:
                     edit = _settings_begin_edit(row, config)
-                    if row["key"] == "model":
+                    if row["key"] in {"model", "auditor_model"}:
                         _request_catalog_refresh(
                             str(config.get("provider", "openai")),
                             target_edit=edit,
