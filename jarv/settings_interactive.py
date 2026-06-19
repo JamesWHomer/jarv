@@ -33,6 +33,11 @@ from .settings_command import (
     _settings_value_text,
 )
 
+def _settings_fullscreen_panel_width(terminal_width: int) -> int:
+    # Leave one spare column so WSL terminals don't auto-wrap full-width borders.
+    return max(1, terminal_width - 1)
+
+
 def run_settings_interactive(config: dict) -> None:
     rows = _settings_rows(config)
     selected = 0
@@ -176,7 +181,7 @@ def run_settings_interactive(config: dict) -> None:
     def _render_settings_panel(height: int) -> Panel:
         nonlocal selected
         term_w, _ = terminal_size(console=console)
-        panel_width = max(1, term_w)
+        panel_width = _settings_fullscreen_panel_width(term_w)
         inner_width = max(1, panel_width - 4)
         height = max(3, height)
         show_footer = edit is None and height >= 8
@@ -264,7 +269,7 @@ def run_settings_interactive(config: dict) -> None:
 
     def _render_editor_panel(height: int) -> Panel:
         term_w, _ = terminal_size(console=console)
-        panel_width = max(1, term_w)
+        panel_width = _settings_fullscreen_panel_width(term_w)
         inner_width = max(1, panel_width - 4)
         height = max(3, height)
         content_rows = max(1, height - 2)
@@ -295,7 +300,8 @@ def run_settings_interactive(config: dict) -> None:
         if edit is None:
             return _render_settings_panel(term_h)
 
-        inner_width = max(1, max(1, term_w) - 4)
+        panel_width = _settings_fullscreen_panel_width(term_w)
+        inner_width = max(1, panel_width - 4)
         desired_editor_height = _settings_desired_editor_height(
             edit,
             config,
