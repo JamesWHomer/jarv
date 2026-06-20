@@ -249,6 +249,184 @@ def _optional_arg(args: dict, name: str, default):
     return default if value is None else value
 
 
+@dataclass(frozen=True)
+class RunCommandPrepared:
+    cmd: str
+    head_chars: int
+    tail_chars: int
+    max_tool_output_chars: int
+
+
+def prepare_run_command(args: dict, config: dict) -> RunCommandPrepared | str:
+    """Validate run_command args and resolve the model output window."""
+    cmd = args.get("command")
+    if not isinstance(cmd, str) or not cmd.strip():
+        return "[tool argument error: command must be a non-empty string]"
+    try:
+        head_chars, tail_chars = resolve_command_output_window(
+            _optional_arg(args, "head_chars", COMMAND_OUTPUT_UNSET),
+            _optional_arg(args, "tail_chars", COMMAND_OUTPUT_UNSET),
+            config.get(
+                "max_tool_output_chars",
+                DEFAULT_CONFIG["max_tool_output_chars"],
+            ),
+        )
+    except ValueError as e:
+        return f"[tool argument error: {e}]"
+    return RunCommandPrepared(
+        cmd=cmd,
+        head_chars=head_chars,
+        tail_chars=tail_chars,
+        max_tool_output_chars=int(
+            config.get(
+                "max_tool_output_chars",
+                DEFAULT_CONFIG["max_tool_output_chars"],
+            )
+        ),
+    )
+
+
+def check_run_command(
+    prepared: RunCommandPrepared,
+    config: dict,
+    *,
+    safety_history: list | None = None,
+    usage_path: Path | None = None,
+    session_id: str | None = None,
+    cancellation_token: CancellationToken | None = None,
+    incognito: bool = False,
+) -> tuple[bool, str]:
+    """Run command-safety checks. Returns (allowed, denial_message)."""
+    safety_level = config.get("command_safety", "risky")
+    audit = config.get("audit", True)
+    return check_command(
+        prepared.cmd,
+        safety_level,
+        audit=audit,
+        config=config,
+        history=safety_history,
+        usage_path=None if incognito else usage_path,
+        session_id=session_id,
+        cancellation_token=cancellation_token,
+    )
+
+
+def execute_run_command(
+    prepared: RunCommandPrepared,
+    config: dict,
+    *,
+    cancellation_token: CancellationToken | None = None,
+    retained_store: RetainedOutputStore | None = None,
+) -> tuple[str, object, str | None]:
+    """Execute a prepared shell command and return model output plus shell metadata."""
+    result = execute_command(
+        prepared.cmd,
+        config.get("command_timeout", 60),
+        cancellation_token=cancellation_token,
+    )
+    output, output_id = format_run_command_output(
+        result,
+        prepared,
+        retained_store,
+    )
+    return output, result, output_id
+
+
+def format_run_command_output(
+    result,
+    prepared: RunCommandPrepared,
+    retained_store: RetainedOutputStore | None,
+) -> tuple[str, str | None]:
+    """Retain and window shell output for the model."""
+    return retain_command_output(
+        result.full_model_output(),
+        prepared.head_chars,
+        prepared.tail_chars,
+        retained_store,
+        prepared.max_tool_output_chars,
+    )
+
+
+def run_command_tool_output(
+    args: dict,
+    config: dict,
+    *,
+    safety_history: list | None = None,
+    usage_path: Path | None = None,
+    session_id: str | None = None,
+    cancellation_token: CancellationToken | None = None,
+    retained_store: RetainedOutputStore | None = None,
+    incognito: bool = False,
+) -> str:
+    """Validate, safety-check, execute, and retain output for run_command."""
+    prepared = prepare_run_command(args, config)
+    if isinstance(prepared, str):
+        return prepared
+    allowed, denial = check_run_command(
+        prepared,
+        config,
+        safety_history=safety_history,
+        usage_path=usage_path,
+        session_id=session_id,
+        cancellation_token=cancellation_token,
+        incognito=incognito,
+    )
+    if not allowed:
+        return denial
+    output, _, _ = execute_run_command(
+        prepared,
+        config,
+        cancellation_token=cancellation_token,
+        retained_store=retained_store,
+    )
+    return output
+
+
+def parse_spawn_children(args: dict) -> list | str:
+    """Return child specs or a model-visible error string."""
+    children = args.get("children")
+    if not isinstance(children, list) or not children:
+        return "[tool argument error: children must be a non-empty list]"
+    if len(children) > MAX_SPAWN_CHILDREN:
+        return (
+            "[tool argument error: children must contain at most "
+            f"{MAX_SPAWN_CHILDREN} entries]"
+        )
+    return children
+
+
+def spawn_tool_output(
+    node: AgentNode,
+    children: list,
+    store: ArtifactStore,
+    client,
+    config: dict,
+    *,
+    spawn_observer: "SpawnObserver | None" = None,
+    cancellation_token: CancellationToken | None = None,
+    retained_store: RetainedOutputStore | None = None,
+) -> str:
+    """Fan out spawn children and return the model-visible JSON status report."""
+    try:
+        results = spawn_batch(
+            node,
+            children,
+            store,
+            client,
+            config,
+            observer=spawn_observer,
+            usage_path=node.usage_path,
+            session_id=node.session_id,
+            cancellation_token=cancellation_token,
+            retained_store=retained_store,
+        )
+    except DepthExceeded as e:
+        return f"[error: {e}]"
+    except ValueError as e:
+        return f"[tool argument error: {e}]"
+    return json.dumps(results)
+
+
 def history_has_web_search_read_nudge(items: list[dict]) -> bool:
     for item in items:
         if not isinstance(item, dict):
@@ -405,53 +583,18 @@ def dispatch_tool(
         return f"[tool disabled: {name}]"
 
     if name == "run_command":
-        cmd = args.get("command")
-        if not isinstance(cmd, str) or not cmd.strip():
-            return "[tool argument error: command must be a non-empty string]"
-        try:
-            head_chars, tail_chars = resolve_command_output_window(
-                _optional_arg(args, "head_chars", COMMAND_OUTPUT_UNSET),
-                _optional_arg(args, "tail_chars", COMMAND_OUTPUT_UNSET),
-                config.get(
-                    "max_tool_output_chars",
-                    DEFAULT_CONFIG["max_tool_output_chars"],
-                ),
-            )
-        except ValueError as e:
-            return f"[tool argument error: {e}]"
-        safety_level = config.get("command_safety", "risky")
-        audit = config.get("audit", True)
-        auditor_history = [{"role": "user", "content": node.task}] if node.task else None
-        allowed, denial = check_command(
-            cmd,
-            safety_level,
-            audit=audit,
-            config=config,
-            history=auditor_history,
-            usage_path=None if node.incognito else node.usage_path,
+        return run_command_tool_output(
+            args,
+            config,
+            safety_history=(
+                [{"role": "user", "content": node.task}] if node.task else None
+            ),
+            usage_path=node.usage_path,
             session_id=node.session_id,
             cancellation_token=cancellation_token,
+            retained_store=retained_store,
+            incognito=node.incognito,
         )
-        if not allowed:
-            return denial
-        result = execute_command(
-            cmd,
-            config.get("command_timeout", 60),
-            cancellation_token=cancellation_token,
-        )
-        output, _ = retain_command_output(
-            result.full_model_output(),
-            head_chars,
-            tail_chars,
-            retained_store,
-            int(
-                config.get(
-                    "max_tool_output_chars",
-                    DEFAULT_CONFIG["max_tool_output_chars"],
-                )
-            ),
-        )
-        return output
 
     if name == "read":
         return dispatch_read_tool(
@@ -472,30 +615,19 @@ def dispatch_tool(
         )
 
     if name == "spawn":
-        children = args.get("children")
-        if not isinstance(children, list) or not children:
-            return "[tool argument error: children must be a non-empty list]"
-        if len(children) > MAX_SPAWN_CHILDREN:
-            return (
-                "[tool argument error: children must contain at most "
-                f"{MAX_SPAWN_CHILDREN} entries]"
-            )
-        try:
-            results = spawn_batch(
-                node,
-                children,
-                store,
-                client,
-                config,
-                observer=spawn_observer,
-                cancellation_token=cancellation_token,
-                retained_store=retained_store,
-            )
-        except DepthExceeded as e:
-            return f"[error: {e}]"
-        except ValueError as e:
-            return f"[tool argument error: {e}]"
-        return json.dumps(results)
+        children = parse_spawn_children(args)
+        if isinstance(children, str):
+            return children
+        return spawn_tool_output(
+            node,
+            children,
+            store,
+            client,
+            config,
+            spawn_observer=spawn_observer,
+            cancellation_token=cancellation_token,
+            retained_store=retained_store,
+        )
 
     return f"[unknown tool: {name}]"
 

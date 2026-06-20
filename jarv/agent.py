@@ -1,4 +1,3 @@
-import json
 import os
 import platform
 import sys
@@ -57,22 +56,19 @@ from .orchestrator import (
     RUN_COMMAND_TOOL,
     SPAWN_TOOL,
     AgentNode,
-    DepthExceeded,
     SpawnObserver,
     ToolExecutionHooks,
+    check_run_command,
+    execute_run_command,
     execute_tool_calls,
     filter_enabled_tools,
     history_has_web_search_read_nudge,
-    spawn_batch,
+    parse_spawn_children,
+    prepare_run_command,
+    spawn_tool_output,
 )
-from .safety import check_command
-from .shell import (
-    COMMAND_OUTPUT_UNSET,
-    command_result_renderable,
-    execute_command,
-    resolve_command_output_window,
-)
-from .read_tool import READ_TOOL, read_tool_for_config, retain_command_output
+from .shell import command_result_renderable
+from .read_tool import READ_TOOL, read_tool_for_config
 from .retained_outputs import (
     RetainedOutputStore,
     load_retained_output_store,
@@ -549,45 +545,18 @@ def _dispatch_run_command_with_ui(
     retained_store: RetainedOutputStore | None = None,
     ui=None,
 ) -> str:
-    cmd = args.get("command")
-    if not isinstance(cmd, str) or not cmd.strip():
-        msg = "[tool argument error: command must be a non-empty string]"
+    prepared = prepare_run_command(args, config)
+    if isinstance(prepared, str):
         if ui is not None:
-            _ui_call(ui, "show_error", msg)
+            _ui_call(ui, "show_error", prepared)
         else:
-            console.print(f"[red]{msg}[/red]")
-        return msg
+            console.print(f"[red]{prepared}[/red]")
+        return prepared
 
-    try:
-        head_chars, tail_chars = resolve_command_output_window(
-            (
-                COMMAND_OUTPUT_UNSET
-                if args.get("head_chars", COMMAND_OUTPUT_UNSET) is None
-                else args.get("head_chars", COMMAND_OUTPUT_UNSET)
-            ),
-            (
-                COMMAND_OUTPUT_UNSET
-                if args.get("tail_chars", COMMAND_OUTPUT_UNSET) is None
-                else args.get("tail_chars", COMMAND_OUTPUT_UNSET)
-            ),
-            config.get("max_tool_output_chars", DEFAULT_CONFIG["max_tool_output_chars"]),
-        )
-    except ValueError as e:
-        msg = f"[tool argument error: {e}]"
-        if ui is not None:
-            _ui_call(ui, "show_error", msg)
-        else:
-            console.print(f"[red]{msg}[/red]")
-        return msg
-
-    safety_level = config.get("command_safety", "risky")
-    audit = config.get("audit", True)
-    allowed, denial = check_command(
-        cmd,
-        safety_level,
-        audit=audit,
-        config=config,
-        history=history,
+    allowed, denial = check_run_command(
+        prepared,
+        config,
+        safety_history=history,
         usage_path=usage_path,
         session_id=session_id,
         cancellation_token=cancellation_token,
@@ -603,17 +572,23 @@ def _dispatch_run_command_with_ui(
         "tool_call_display",
         DEFAULT_CONFIG["tool_call_display"],
     )
-    metadata = f"model window {head_chars:,} / {tail_chars:,} chars"
+    metadata = f"model window {prepared.head_chars:,} / {prepared.tail_chars:,} chars"
     running_card = RunningCommandCard(
-        cmd,
+        prepared.cmd,
         metadata,
         display_mode,
         time.perf_counter(),
     )
 
-    def _result_card(result, *, cancelled: bool = False):
+    def _result_card(
+        result,
+        *,
+        cancelled: bool = False,
+        output: str = "",
+        output_id: str | None = None,
+    ):
         command_line = Text("> ", style="bold yellow")
-        command_line.append(cmd)
+        command_line.append(prepared.cmd)
         if cancelled:
             return (
                 "[cancelled]",
@@ -627,18 +602,6 @@ def _dispatch_run_command_with_ui(
                 ),
             )
         body_parts = [command_line, command_result_renderable(result)]
-        output, output_id = retain_command_output(
-            result.full_model_output(),
-            head_chars,
-            tail_chars,
-            retained_store,
-            int(
-                config.get(
-                    "max_tool_output_chars",
-                    DEFAULT_CONFIG["max_tool_output_chars"],
-                )
-            ),
-        )
         if output_id is not None:
             retained_line = Text("Retained command output: ", style="dim")
             retained_line.append(output_id, style="cyan")
@@ -654,19 +617,23 @@ def _dispatch_run_command_with_ui(
         )
         return output, card
 
+    def _run_command():
+        return execute_run_command(
+            prepared,
+            config,
+            cancellation_token=cancellation_token,
+            retained_store=retained_store,
+        )
+
     if ui is not None:
         _ui_call(ui, "show_tool_card", running_card)
         try:
-            result = execute_command(
-                cmd,
-                config.get("command_timeout", 60),
-                cancellation_token=cancellation_token,
-            )
+            output, result, output_id = _run_command()
         except (KeyboardInterrupt, TurnCancelled):
             _, card = _result_card(None, cancelled=True)
             _ui_call(ui, "show_tool_card", card)
             raise
-        output, card = _result_card(result)
+        output, card = _result_card(result, output=output, output_id=output_id)
         _ui_call(ui, "show_tool_card", card)
         return output
 
@@ -679,16 +646,12 @@ def _dispatch_run_command_with_ui(
     ) as live:
         live.refresh()
         try:
-            result = execute_command(
-                cmd,
-                config.get("command_timeout", 60),
-                cancellation_token=cancellation_token,
-            )
+            output, result, output_id = _run_command()
         except (KeyboardInterrupt, TurnCancelled):
             _, card = _result_card(None, cancelled=True)
             live.update(card, refresh=True)
             raise
-        output, card = _result_card(result)
+        output, card = _result_card(result, output=output, output_id=output_id)
         live.update(card, refresh=True)
     if display_mode == "print":
         console.print()
@@ -821,14 +784,13 @@ def _dispatch_spawn_with_ui(
     retained_store: RetainedOutputStore | None = None,
     ui=None,
 ) -> str:
-    children_raw = args.get("children")
-    if not isinstance(children_raw, list) or not children_raw:
-        msg = "[tool argument error: children must be a non-empty list]"
+    children_raw = parse_spawn_children(args)
+    if isinstance(children_raw, str):
         if ui is not None:
-            _ui_call(ui, "show_error", msg)
+            _ui_call(ui, "show_error", children_raw)
         else:
-            console.print(f"[red]{msg}[/red]")
-        return msg
+            console.print(f"[red]{children_raw}[/red]")
+        return children_raw
 
     top_labels = [c.get("label", "?") for c in children_raw if isinstance(c, dict)]
     # state per label: {status, depth, tldr?, reason?}
@@ -913,21 +875,22 @@ def _dispatch_spawn_with_ui(
                 ),
             )
 
+    def _run_spawn() -> str:
+        return spawn_tool_output(
+            root_node,
+            children_raw,
+            store,
+            client,
+            config,
+            spawn_observer=observer,
+            cancellation_token=cancellation_token,
+            retained_store=retained_store,
+        )
+
     if ui is not None:
         _push_spawn_panel()
         try:
-            results = spawn_batch(
-                root_node,
-                children_raw,
-                store,
-                client,
-                config,
-                observer=observer,
-                usage_path=root_node.usage_path,
-                session_id=root_node.session_id,
-                cancellation_token=cancellation_token,
-                retained_store=retained_store,
-            )
+            output = _run_spawn()
         except (KeyboardInterrupt, TurnCancelled):
             with lock:
                 for state in states.values():
@@ -936,16 +899,11 @@ def _dispatch_spawn_with_ui(
                         state["reason"] = "cancelled"
             _push_spawn_panel()
             raise
-        except DepthExceeded as e:
-            output = f"[error: {e}]"
-            _ui_call(ui, "show_error", output)
-            return output
-        except ValueError as e:
-            output = f"[tool argument error: {e}]"
+        if output.startswith("[error:") or output.startswith("[tool argument error:"):
             _ui_call(ui, "show_error", output)
             return output
         _push_spawn_panel()
-        return json.dumps(results)
+        return output
 
     with track_live_display(), Live(
         SpawnPanel(),
@@ -956,18 +914,7 @@ def _dispatch_spawn_with_ui(
         vertical_overflow="visible",
     ) as live:
         try:
-            results = spawn_batch(
-                root_node,
-                children_raw,
-                store,
-                client,
-                config,
-                observer=observer,
-                usage_path=root_node.usage_path,
-                session_id=root_node.session_id,
-                cancellation_token=cancellation_token,
-                retained_store=retained_store,
-            )
+            output = _run_spawn()
         except (KeyboardInterrupt, TurnCancelled):
             with lock:
                 for state in states.values():
@@ -976,16 +923,10 @@ def _dispatch_spawn_with_ui(
                         state["reason"] = "cancelled"
             live.update(SpawnPanel())
             raise
-        except DepthExceeded as e:
-            output = f"[error: {e}]"
+        if output.startswith("[error:") or output.startswith("[tool argument error:"):
             live.update(Text(output, style="red"))
             return output
-        except ValueError as e:
-            output = f"[tool argument error: {e}]"
-            console.print(f"[red]{output}[/red]")
-            return output
         live.update(SpawnPanel())
-        output = json.dumps(results)
 
     if config.get(
         "tool_call_display",
@@ -1052,18 +993,30 @@ def run_agent(
             stream_live.stop()
             stream_live = None
 
-    def _save_turn_state() -> None:
+    def _persist_session_state(*, clear_redo: bool = False) -> None:
         if incognito:
             return
         if session_context is not None:
-            redo_path = redo_file_for(session_context.history_file)
-            if redo_path.exists():
-                redo_path.unlink()
+            if clear_redo:
+                redo_path = redo_file_for(session_context.history_file)
+                if redo_path.exists():
+                    redo_path.unlink()
             save_history(history, session_context.history_file)
         if artifact_store is not None and artifact_file is not None:
             save_artifact_store(artifact_store, artifact_file)
         if retained_store is not None and reads_file is not None:
             save_retained_output_store(retained_store, reads_file)
+
+    def _save_turn_state() -> None:
+        _persist_session_state(clear_redo=True)
+
+    def _flush_error_state() -> None:
+        if pending_status_history_items:
+            history.extend(pending_status_history_items)
+            pending_status_history_items.clear()
+        if reply_text and not tool_calls:
+            history.append({"role": "assistant", "content": reply_text, **metadata})
+        _persist_session_state()
 
     def _checkpoint_cancelled_turn() -> None:
         if pending_status_history_items:
@@ -1615,37 +1568,15 @@ def run_agent(
         if session_context is not None:
             _checkpoint_cancelled_turn()
         return AgentRunResult(cancelled=True, prompt=query)
-    except ProviderError as e:
+    except (ProviderError, Exception) as e:
+        label = "API error" if isinstance(e, ProviderError) else "Unexpected error"
+        message = f"{label}: {e}"
         if ui is not None:
-            _ui_call(ui, "show_error", f"API error: {e}")
+            _ui_call(ui, "show_error", message)
         else:
-            console.print(f"[red]API error:[/red] {escape(str(e))}")
-        if pending_status_history_items:
-            history.extend(pending_status_history_items)
-            pending_status_history_items.clear()
-        if reply_text and not tool_calls:
-            history.append({"role": "assistant", "content": reply_text, **metadata})
-        if not incognito and session_context is not None:
-            save_history(history, session_context.history_file)
-        if not incognito and artifact_store is not None and artifact_file is not None:
-            save_artifact_store(artifact_store, artifact_file)
-        if not incognito and retained_store is not None and reads_file is not None:
-            save_retained_output_store(retained_store, reads_file)
-        return AgentRunResult(error=str(e))
-    except Exception as e:
-        if ui is not None:
-            _ui_call(ui, "show_error", f"Unexpected error: {e}")
-        else:
-            console.print(f"[red]Unexpected error:[/red] {escape(str(e))}")
-        if pending_status_history_items:
-            history.extend(pending_status_history_items)
-            pending_status_history_items.clear()
-        if not incognito and session_context is not None:
-            save_history(history, session_context.history_file)
-        if not incognito and artifact_store is not None and artifact_file is not None:
-            save_artifact_store(artifact_store, artifact_file)
-        if not incognito and retained_store is not None and reads_file is not None:
-            save_retained_output_store(retained_store, reads_file)
+            style = "red"
+            console.print(f"[{style}]{label}:[/{style}] {escape(str(e))}")
+        _flush_error_state()
         return AgentRunResult(error=str(e))
     finally:
         sigint_cancel_scope.__exit__(None, None, None)
