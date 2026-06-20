@@ -59,13 +59,11 @@ from .orchestrator import (
     AgentNode,
     DepthExceeded,
     SpawnObserver,
-    append_web_search_read_nudge,
-    dispatch_parallel_safe_tool_batch,
+    ToolExecutionHooks,
+    execute_tool_calls,
     filter_enabled_tools,
     history_has_web_search_read_nudge,
     spawn_batch,
-    tool_enabled,
-    tool_call_is_parallel_safe,
 )
 from .safety import check_command
 from .shell import (
@@ -73,7 +71,6 @@ from .shell import (
     command_result_renderable,
     execute_command,
     resolve_command_output_window,
-    truncate_model_output,
 )
 from .read_tool import READ_TOOL, read_tool_for_config, retain_command_output
 from .retained_outputs import (
@@ -613,6 +610,50 @@ def _dispatch_run_command_with_ui(
         display_mode,
         time.perf_counter(),
     )
+
+    def _result_card(result, *, cancelled: bool = False):
+        command_line = Text("> ", style="bold yellow")
+        command_line.append(cmd)
+        if cancelled:
+            return (
+                "[cancelled]",
+                tool_card(
+                    "run_command",
+                    Group(command_line, Text("Cancelled", style="bold red")),
+                    metadata=metadata,
+                    display_mode=display_mode,
+                    status="cancelled",
+                    status_style="red",
+                ),
+            )
+        body_parts = [command_line, command_result_renderable(result)]
+        output, output_id = retain_command_output(
+            result.full_model_output(),
+            head_chars,
+            tail_chars,
+            retained_store,
+            int(
+                config.get(
+                    "max_tool_output_chars",
+                    DEFAULT_CONFIG["max_tool_output_chars"],
+                )
+            ),
+        )
+        if output_id is not None:
+            retained_line = Text("Retained command output: ", style="dim")
+            retained_line.append(output_id, style="cyan")
+            body_parts.append(retained_line)
+        succeeded = not result.timed_out and result.exit_code in (None, 0)
+        card = tool_card(
+            "run_command",
+            Group(*body_parts),
+            metadata=metadata,
+            display_mode=display_mode,
+            status="done" if succeeded else "failed",
+            status_style="green" if succeeded else "red",
+        )
+        return output, card
+
     if ui is not None:
         _ui_call(ui, "show_tool_card", running_card)
         try:
@@ -622,71 +663,21 @@ def _dispatch_run_command_with_ui(
                 cancellation_token=cancellation_token,
             )
         except (KeyboardInterrupt, TurnCancelled):
-            cancelled_line = Text("> ", style="bold yellow")
-            cancelled_line.append(cmd)
-            _ui_call(
-                ui,
-                "show_tool_card",
-                tool_card(
-                    "run_command",
-                    Group(cancelled_line, Text("Cancelled", style="bold red")),
-                    metadata=metadata,
-                    display_mode=display_mode,
-                    status="cancelled",
-                    status_style="red",
-                ),
-            )
+            _, card = _result_card(None, cancelled=True)
+            _ui_call(ui, "show_tool_card", card)
             raise
-
-        command_line = Text("> ", style="bold yellow")
-        command_line.append(cmd)
-        body_parts = [command_line, command_result_renderable(result)]
-        output, output_id = retain_command_output(
-            result.full_model_output(),
-            head_chars,
-            tail_chars,
-            retained_store,
-            int(
-                config.get(
-                    "max_tool_output_chars",
-                    DEFAULT_CONFIG["max_tool_output_chars"],
-                )
-            ),
-        )
-        if output_id is not None:
-            retained_line = Text("Retained command output: ", style="dim")
-            retained_line.append(output_id, style="cyan")
-            body_parts.append(retained_line)
-        _ui_call(
-            ui,
-            "show_tool_card",
-            tool_card(
-                "run_command",
-                Group(*body_parts),
-                metadata=metadata,
-                display_mode=display_mode,
-                status=(
-                    "done"
-                    if not result.timed_out and result.exit_code in (None, 0)
-                    else "failed"
-                ),
-                status_style=(
-                    "green"
-                    if not result.timed_out and result.exit_code in (None, 0)
-                    else "red"
-                ),
-            ),
-        )
+        output, card = _result_card(result)
+        _ui_call(ui, "show_tool_card", card)
         return output
 
-    live = Live(
+    with track_live_display(), Live(
         running_card,
         refresh_per_second=4,
         console=console,
         auto_refresh=True,
         transient=False,
-    )
-    with track_live_display(), live:
+    ) as live:
+        live.refresh()
         try:
             result = execute_command(
                 cmd,
@@ -694,59 +685,11 @@ def _dispatch_run_command_with_ui(
                 cancellation_token=cancellation_token,
             )
         except (KeyboardInterrupt, TurnCancelled):
-            cancelled_line = Text("> ", style="bold yellow")
-            cancelled_line.append(cmd)
-            live.update(
-                tool_card(
-                    "run_command",
-                    Group(cancelled_line, Text("Cancelled", style="bold red")),
-                    metadata=metadata,
-                    display_mode=display_mode,
-                    status="cancelled",
-                    status_style="red",
-                ),
-                refresh=True,
-            )
+            _, card = _result_card(None, cancelled=True)
+            live.update(card, refresh=True)
             raise
-
-        command_line = Text("> ", style="bold yellow")
-        command_line.append(cmd)
-        body_parts = [command_line, command_result_renderable(result)]
-        output, output_id = retain_command_output(
-            result.full_model_output(),
-            head_chars,
-            tail_chars,
-            retained_store,
-            int(
-                config.get(
-                    "max_tool_output_chars",
-                    DEFAULT_CONFIG["max_tool_output_chars"],
-                )
-            ),
-        )
-        if output_id is not None:
-            retained_line = Text("Retained command output: ", style="dim")
-            retained_line.append(output_id, style="cyan")
-            body_parts.append(retained_line)
-        live.update(
-            tool_card(
-                "run_command",
-                Group(*body_parts),
-                metadata=metadata,
-                display_mode=display_mode,
-                status=(
-                    "done"
-                    if not result.timed_out and result.exit_code in (None, 0)
-                    else "failed"
-                ),
-                status_style=(
-                    "green"
-                    if not result.timed_out and result.exit_code in (None, 0)
-                    else "red"
-                ),
-            ),
-            refresh=True,
-        )
+        output, card = _result_card(result)
+        live.update(card, refresh=True)
     if display_mode == "print":
         console.print()
     return output
@@ -1559,144 +1502,94 @@ def run_agent(
                     )
                     active_tool_call = None
 
-                item_index = 0
-                while item_index < len(tool_calls):
-                    item = tool_calls[item_index]
-                    if tool_call_is_parallel_safe(item.name):
-                        group_end = item_index
-                        while (
-                            group_end < len(tool_calls)
-                            and tool_call_is_parallel_safe(tool_calls[group_end].name)
-                        ):
-                            group_end += 1
-                        group = tool_calls[item_index:group_end]
-                        active_tool_call = group[0]
-                        results = dispatch_parallel_safe_tool_batch(
-                            group,
-                            node=root_node,
-                            store=artifact_store,
-                            client=client,
-                            config=config,
-                            cancellation_token=cancellation_token,
-                            retained_store=retained_store,
-                        )
-                        for safe_item, result in zip(group, results):
-                            output = result.output
-                            if safe_item.name != "read":
-                                output = truncate_model_output(
-                                    output,
-                                    config.get(
-                                        "max_tool_output_chars",
-                                        DEFAULT_CONFIG["max_tool_output_chars"],
-                                    ),
-                                )
-                            if safe_item.name == "read" and result.args is not None:
-                                read_path = Text(
-                                    str(result.args.get("input", "")),
-                                    no_wrap=True,
-                                    overflow="ellipsis",
-                                )
-                                read_meta = Text(
-                                    f"offset {result.args.get('offset', 0)!r}  \u2022  "
-                                    f"size {result.args.get('size', 'default')!r}",
-                                    style="dim",
-                                )
-                                _print_tool_card(
-                                    tool_card(
-                                        "read",
-                                        Group(read_path, read_meta),
-                                        display_mode=config.get(
-                                            "tool_call_display",
-                                            DEFAULT_CONFIG["tool_call_display"],
-                                        ),
-                                    ),
-                                    config,
-                                    ui=ui,
-                                )
-                            elif (
-                                safe_item.name == "web_search"
-                                and result.args is not None
-                            ):
-                                query = Text(str(result.args.get("query", "")))
-                                _print_tool_card(
-                                    tool_card(
-                                        "web_search",
-                                        query,
-                                        metadata="DuckDuckGo",
-                                        display_mode=config.get(
-                                            "tool_call_display",
-                                            DEFAULT_CONFIG["tool_call_display"],
-                                        ),
-                                    ),
-                                    config,
-                                    ui=ui,
-                                )
-                                if not web_search_read_nudge_sent:
-                                    output = append_web_search_read_nudge(output)
-                                    web_search_read_nudge_sent = True
-                            append_tool_result(safe_item, output)
-                        active_tool_call = None
-                        item_index = group_end
-                        continue
-
-                    if not tool_enabled(config, item.name):
-                        append_tool_result(
-                            item,
-                            f"[tool disabled: {item.name}]",
-                        )
-                        item_index += 1
-                        continue
-                    active_tool_call = item
-                    try:
-                        args = json.loads(item.arguments or "{}")
-                    except json.JSONDecodeError as e:
-                        output = f"[tool argument error: invalid JSON: {e}]"
-                        if ui is not None:
-                            _ui_call(ui, "show_error", output)
-                        else:
-                            console.print(f"[red]{output}[/red]")
+                def _on_tool_error(message: str) -> None:
+                    if ui is not None:
+                        _ui_call(ui, "show_error", message)
                     else:
-                        if item.name == "run_command":
-                            output = _dispatch_run_command_with_ui(
-                                args,
-                                config,
-                                history,
-                                usage_path=usage_path,
-                                session_id=session_context.session_id,
-                                cancellation_token=cancellation_token,
-                                retained_store=retained_store,
-                                ui=ui,
-                            )
-                        elif item.name == "spawn":
-                            output = _dispatch_spawn_with_ui(
-                                args,
-                                root_node,
-                                artifact_store,
-                                client,
-                                config,
-                                cancellation_token=cancellation_token,
-                                retained_store=retained_store,
-                                ui=ui,
-                            )
-                        elif item.name == "ask_user":
-                            output = _dispatch_ask_user(args, config, ui=ui)
-                        else:
-                            output = f"[unknown tool: {item.name}]"
-                            if ui is not None:
-                                _ui_call(ui, "show_error", output)
-                            else:
-                                console.print(f"[red]{output}[/red]")
+                        console.print(f"[red]{message}[/red]")
 
-                    if item.name not in {"run_command", "read"}:
-                        output = truncate_model_output(
-                            output,
-                            config.get(
-                                "max_tool_output_chars",
-                                DEFAULT_CONFIG["max_tool_output_chars"],
+                def _on_parallel_read(_item, read_args: dict) -> None:
+                    read_path = Text(
+                        str(read_args.get("input", "")),
+                        no_wrap=True,
+                        overflow="ellipsis",
+                    )
+                    read_meta = Text(
+                        f"offset {read_args.get('offset', 0)!r}  \u2022  "
+                        f"size {read_args.get('size', 'default')!r}",
+                        style="dim",
+                    )
+                    _print_tool_card(
+                        tool_card(
+                            "read",
+                            Group(read_path, read_meta),
+                            display_mode=config.get(
+                                "tool_call_display",
+                                DEFAULT_CONFIG["tool_call_display"],
                             ),
-                        )
-                    append_tool_result(item, output)
-                    item_index += 1
+                        ),
+                        config,
+                        ui=ui,
+                    )
+
+                def _on_parallel_web_search(_item, search_args: dict) -> None:
+                    query = Text(str(search_args.get("query", "")))
+                    _print_tool_card(
+                        tool_card(
+                            "web_search",
+                            query,
+                            metadata="DuckDuckGo",
+                            display_mode=config.get(
+                                "tool_call_display",
+                                DEFAULT_CONFIG["tool_call_display"],
+                            ),
+                        ),
+                        config,
+                        ui=ui,
+                    )
+
+                tool_hooks = ToolExecutionHooks(
+                    on_parallel_read=_on_parallel_read,
+                    on_parallel_web_search=_on_parallel_web_search,
+                    run_command=lambda args: _dispatch_run_command_with_ui(
+                        args,
+                        config,
+                        history,
+                        usage_path=usage_path,
+                        session_id=session_context.session_id,
+                        cancellation_token=cancellation_token,
+                        retained_store=retained_store,
+                        ui=ui,
+                    ),
+                    run_spawn=lambda args: _dispatch_spawn_with_ui(
+                        args,
+                        root_node,
+                        artifact_store,
+                        client,
+                        config,
+                        cancellation_token=cancellation_token,
+                        retained_store=retained_store,
+                        ui=ui,
+                    ),
+                    run_ask_user=lambda args: _dispatch_ask_user(args, config, ui=ui),
+                    on_tool_error=_on_tool_error,
+                )
+
+                active_tool_call = tool_calls[0] if tool_calls else None
+                exec_result = execute_tool_calls(
+                    tool_calls,
+                    node=root_node,
+                    store=artifact_store,
+                    client=client,
+                    config=config,
+                    append_tool_result=append_tool_result,
+                    hooks=tool_hooks,
+                    cancellation_token=cancellation_token,
+                    retained_store=retained_store,
+                    web_search_read_nudge_sent=web_search_read_nudge_sent,
+                )
+                web_search_read_nudge_sent = exec_result.web_search_read_nudge_sent
+                active_tool_call = None
                 kwargs["input"] = trim_turn_input(
                     kwargs["input"] + new_input_items,
                     model=config["model"],

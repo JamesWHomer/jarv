@@ -222,6 +222,24 @@ class ToolBatchResult:
     output: ToolOutput
 
 
+@dataclass
+class ToolExecutionHooks:
+    """Optional root-agent UI hooks; subagents leave these unset and use dispatch_tool."""
+
+    on_parallel_read: Callable[[object, dict], None] | None = None
+    on_parallel_web_search: Callable[[object, dict], None] | None = None
+    run_command: Callable[[dict], str] | None = None
+    run_spawn: Callable[[dict], str] | None = None
+    run_ask_user: Callable[[dict], str] | None = None
+    on_tool_error: Callable[[str], None] | None = None
+
+
+@dataclass
+class ToolExecutionResult:
+    finished: tuple[str, str] | None = None
+    web_search_read_nudge_sent: bool = False
+
+
 def tool_call_is_parallel_safe(name: str) -> bool:
     return name in PARALLEL_SAFE_TOOL_NAMES
 
@@ -378,16 +396,11 @@ def dispatch_tool(
     store: ArtifactStore,
     client,
     config: dict,
-    on_run_command: Callable[[str], str] | None = None,
     spawn_observer: "SpawnObserver | None" = None,
     cancellation_token: CancellationToken | None = None,
     retained_store: RetainedOutputStore | None = None,
 ) -> ToolOutput:
-    """Execute a non-finish tool call and return the model-visible output string.
-
-    `on_run_command` lets the root agent override run_command rendering with
-    its rich UI. Subagents pass None and use the silent default.
-    """
+    """Execute a non-finish tool call and return the model-visible output string."""
     if name in TOOL_NAMES and not tool_enabled(config, name):
         return f"[tool disabled: {name}]"
 
@@ -421,20 +434,6 @@ def dispatch_tool(
         )
         if not allowed:
             return denial
-        if on_run_command is not None:
-            output, _ = retain_command_output(
-                on_run_command(cmd),
-                head_chars,
-                tail_chars,
-                retained_store,
-                int(
-                    config.get(
-                        "max_tool_output_chars",
-                        DEFAULT_CONFIG["max_tool_output_chars"],
-                    )
-                ),
-            )
-            return output
         result = execute_command(
             cmd,
             config.get("command_timeout", 60),
@@ -499,6 +498,132 @@ def dispatch_tool(
         return json.dumps(results)
 
     return f"[unknown tool: {name}]"
+
+
+def _max_tool_output_chars(config: dict) -> int:
+    return int(
+        config.get(
+            "max_tool_output_chars",
+            DEFAULT_CONFIG["max_tool_output_chars"],
+        )
+    )
+
+
+def _maybe_truncate_tool_output(name: str, output: ToolOutput, config: dict) -> ToolOutput:
+    if name in {"run_command", "read"}:
+        return output
+    return truncate_model_output(output, _max_tool_output_chars(config))
+
+
+def execute_tool_calls(
+    tool_calls: list,
+    *,
+    node: AgentNode,
+    store: ArtifactStore,
+    client,
+    config: dict,
+    append_tool_result: Callable[[object, ToolOutput], None],
+    hooks: ToolExecutionHooks | None = None,
+    spawn_observer: "SpawnObserver | None" = None,
+    cancellation_token: CancellationToken | None = None,
+    retained_store: RetainedOutputStore | None = None,
+    web_search_read_nudge_sent: bool = False,
+) -> ToolExecutionResult:
+    """Run a model tool-call batch, grouping parallel-safe tools when possible."""
+    hooks = hooks or ToolExecutionHooks()
+    result = ToolExecutionResult(web_search_read_nudge_sent=web_search_read_nudge_sent)
+
+    item_index = 0
+    while item_index < len(tool_calls):
+        item = tool_calls[item_index]
+        if tool_call_is_parallel_safe(item.name):
+            group_end = item_index
+            while (
+                group_end < len(tool_calls)
+                and tool_call_is_parallel_safe(tool_calls[group_end].name)
+            ):
+                group_end += 1
+            group = tool_calls[item_index:group_end]
+            batch_results = dispatch_parallel_safe_tool_batch(
+                group,
+                node=node,
+                store=store,
+                client=client,
+                config=config,
+                spawn_observer=spawn_observer,
+                cancellation_token=cancellation_token,
+                retained_store=retained_store,
+            )
+            for safe_item, batch_result in zip(group, batch_results):
+                output = batch_result.output
+                if safe_item.name == "read" and batch_result.args is not None:
+                    if hooks.on_parallel_read is not None:
+                        hooks.on_parallel_read(safe_item, batch_result.args)
+                elif safe_item.name == "web_search" and batch_result.args is not None:
+                    if hooks.on_parallel_web_search is not None:
+                        hooks.on_parallel_web_search(safe_item, batch_result.args)
+                    if not result.web_search_read_nudge_sent:
+                        output = append_web_search_read_nudge(output)
+                        result.web_search_read_nudge_sent = True
+                output = _maybe_truncate_tool_output(safe_item.name, output, config)
+                append_tool_result(safe_item, output)
+            item_index = group_end
+            continue
+
+        if item.name in TOOL_NAMES and not tool_enabled(config, item.name):
+            append_tool_result(item, f"[tool disabled: {item.name}]")
+            item_index += 1
+            continue
+
+        try:
+            args = json.loads(item.arguments or "{}")
+        except json.JSONDecodeError as e:
+            output = f"[tool argument error: invalid JSON: {e}]"
+            if hooks.on_tool_error is not None:
+                hooks.on_tool_error(output)
+            append_tool_result(item, output)
+            item_index += 1
+            continue
+
+        if item.name == "finish":
+            longform = args.get("longform")
+            tldr = args.get("tldr")
+            if not isinstance(longform, str) or not isinstance(tldr, str):
+                append_tool_result(item, "[finish requires string longform and tldr]")
+            else:
+                result.finished = (longform, tldr)
+                return result
+            item_index += 1
+            continue
+
+        if item.name == "run_command" and hooks.run_command is not None:
+            output = hooks.run_command(args)
+        elif item.name == "spawn" and hooks.run_spawn is not None:
+            output = hooks.run_spawn(args)
+        elif item.name == "ask_user" and hooks.run_ask_user is not None:
+            output = hooks.run_ask_user(args)
+        else:
+            output = dispatch_tool(
+                item.name,
+                args,
+                node,
+                store,
+                client,
+                config,
+                spawn_observer=spawn_observer,
+                cancellation_token=cancellation_token,
+                retained_store=retained_store,
+            )
+
+        if hooks.on_tool_error is not None and isinstance(output, str):
+            if output.startswith("[unknown tool:") or output.startswith("[tool argument error:"):
+                hooks.on_tool_error(output)
+
+        output = _maybe_truncate_tool_output(item.name, output, config)
+        append_tool_result(item, output)
+        item_index += 1
+
+    return result
 
 
 _FINISH_NUDGE = (
@@ -638,78 +763,21 @@ def run_subagent_loop(
         def append_tool_result(item, output: ToolOutput) -> None:
             append_tool_result_input_items(new_input, item, output)
 
-        item_index = 0
-        while item_index < len(tool_calls):
-            item = tool_calls[item_index]
-            if tool_call_is_parallel_safe(item.name):
-                group_end = item_index
-                while (
-                    group_end < len(tool_calls)
-                    and tool_call_is_parallel_safe(tool_calls[group_end].name)
-                ):
-                    group_end += 1
-                group = tool_calls[item_index:group_end]
-                results = dispatch_parallel_safe_tool_batch(
-                    group,
-                    node=node,
-                    store=store,
-                    client=client,
-                    config=config,
-                    spawn_observer=spawn_observer,
-                    cancellation_token=cancellation_token,
-                    retained_store=retained_store,
-                )
-                for safe_item, result in zip(group, results):
-                    output = result.output
-                    if safe_item.name != "read":
-                        output = truncate_model_output(
-                            output,
-                            config.get(
-                                "max_tool_output_chars",
-                                DEFAULT_CONFIG["max_tool_output_chars"],
-                            ),
-                        )
-                    if (
-                        safe_item.name == "web_search"
-                        and result.args is not None
-                        and not web_search_read_nudge_sent
-                    ):
-                        output = append_web_search_read_nudge(output)
-                        web_search_read_nudge_sent = True
-                    append_tool_result(safe_item, output)
-                item_index = group_end
-                continue
-
-            try:
-                args = json.loads(item.arguments or "{}")
-            except json.JSONDecodeError as e:
-                output = f"[tool argument error: invalid JSON: {e}]"
-            else:
-                if item.name == "finish":
-                    longform = args.get("longform")
-                    tldr = args.get("tldr")
-                    if not isinstance(longform, str) or not isinstance(tldr, str):
-                        output = "[finish requires string longform and tldr]"
-                    else:
-                        return longform, tldr
-                else:
-                    output = dispatch_tool(
-                        item.name, args, node, store, client, config,
-                        spawn_observer=spawn_observer,
-                        cancellation_token=cancellation_token,
-                        retained_store=retained_store,
-                    )
-
-            if item.name != "run_command":
-                output = truncate_model_output(
-                    output,
-                    config.get(
-                        "max_tool_output_chars",
-                        DEFAULT_CONFIG["max_tool_output_chars"],
-                    ),
-                )
-            append_tool_result(item, output)
-            item_index += 1
+        exec_result = execute_tool_calls(
+            tool_calls,
+            node=node,
+            store=store,
+            client=client,
+            config=config,
+            append_tool_result=append_tool_result,
+            spawn_observer=spawn_observer,
+            cancellation_token=cancellation_token,
+            retained_store=retained_store,
+            web_search_read_nudge_sent=web_search_read_nudge_sent,
+        )
+        web_search_read_nudge_sent = exec_result.web_search_read_nudge_sent
+        if exec_result.finished is not None:
+            return exec_result.finished
 
         kwargs["input"] = trim_turn_input(
             kwargs["input"] + new_input,
