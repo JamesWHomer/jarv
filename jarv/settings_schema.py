@@ -2,18 +2,25 @@
 
 from __future__ import annotations
 
-from .config import TOOL_CALL_DISPLAY_CHOICES, TOOL_NAMES
-
-
-SETTINGS_SAFETY_CHOICES = (
-    ("risky", "flag risky"),
-    ("all", "confirm all"),
-    ("none", "no prompts"),
+from .config_schema import (
+    COMMAND_SAFETY_CHOICES,
+    READ_ONLY_COMMAND_DISPLAY_CHOICES,
+    TOOL_CALL_DISPLAY_CHOICES,
+    TOOL_NAMES,
 )
 
-SETTINGS_READ_ONLY_DISPLAY_CHOICES = (
-    ("fullscreen", "fullscreen"),
-    ("print", "print"),
+SETTINGS_SAFETY_CHOICES = tuple(
+    (value, label)
+    for value, label in (
+        ("risky", "flag risky"),
+        ("all", "confirm all"),
+        ("none", "no prompts"),
+    )
+    if value in COMMAND_SAFETY_CHOICES
+)
+
+SETTINGS_READ_ONLY_DISPLAY_CHOICES = tuple(
+    (value, value) for value in READ_ONLY_COMMAND_DISPLAY_CHOICES
 )
 
 SETTINGS_TOOL_CALL_DISPLAY_CHOICES = tuple(
