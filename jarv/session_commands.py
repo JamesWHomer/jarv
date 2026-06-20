@@ -2,21 +2,26 @@
 
 import sys
 
-from rich import box
 from rich.console import Group
-from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
-from .command_input import _read_key_with_repeats, mouse_capture
 from .display import (
     console,
     flatten_headings,
     jarv_panel,
-    refresh_on_resize,
     section_rule,
     terminal_size,
+)
+from .tui_layout import append_bottom_footer
+from .tui_overlay import (
+    ScrollOverlayState,
+    apply_scroll_keys,
+    body_content_rows,
+    clamp_scroll_offset,
+    run_scroll_live,
+    scroll_position_hint,
 )
 from .history import (
     SESSIONS_DIR,
@@ -140,8 +145,8 @@ def cmd_history() -> None:
         console.print(jarv_panel(Group(*parts), title="history", subtitle=f"{exchanges} exchange(s)"))
         return
 
-    offset = 0
     visual_cache: dict[int, tuple[list[Text], list[int]]] = {}
+    state = ScrollOverlayState()
 
     def _visual(width: int) -> tuple[list[Text], list[int]]:
         width = max(1, width)
@@ -159,113 +164,80 @@ def cmd_history() -> None:
         _, anchors = _visual(width)
         return anchors
 
-    def _body_rows() -> int:
-        _, term_h = terminal_size(console=console)
-        show_footer = term_h >= 6
-        return max(1, term_h - 2 - (2 if show_footer else 0))  # panel border + footer
-
-    def _max_offset(width: int) -> int:
-        return max(0, len(_lines(width)) - _body_rows())
-
     def _jump_to_message(delta: int) -> None:
-        nonlocal offset
-        term_w, _ = terminal_size(console=console)
+        term_w, term_h = terminal_size(console=console)
         width = max(1, term_w - 4)
         anchors = _anchors(width)
         if not anchors:
             return
         if delta < 0:
-            candidates = [anchor for anchor in anchors if anchor < offset]
+            candidates = [anchor for anchor in anchors if anchor < state.offset]
             target = candidates[-1] if candidates else anchors[0]
         else:
-            candidates = [anchor for anchor in anchors if anchor > offset]
+            candidates = [anchor for anchor in anchors if anchor > state.offset]
             target = candidates[0] if candidates else anchors[-1]
-        offset = min(_max_offset(width), max(0, target))
+        body_rows, _ = body_content_rows(term_h)
+        state.offset = clamp_scroll_offset(target, len(_lines(width)), body_rows)
 
     def _render() -> Panel:
-        nonlocal offset
         term_w, term_h = terminal_size(console=console)
         panel_width = max(1, term_w)
-        show_footer = term_h >= 6
-        body = _body_rows()
+        body_rows, show_footer = body_content_rows(term_h)
         inner_width = max(1, panel_width - 4)
         lines = _lines(inner_width)
         total = len(lines)
-        max_off = max(0, total - body)
-        offset = max(0, min(offset, max_off))
-        start = offset
-        end = min(total, start + body)
+        state.offset = clamp_scroll_offset(state.offset, total, body_rows)
+        start = state.offset
+        end = min(total, start + body_rows)
 
         parts: list = []
-        for i in range(start, end):
-            parts.append(lines[i])
+        for index in range(start, end):
+            parts.append(lines[index])
         if not lines:
             parts.append(Text("  (empty)", style="dim"))
 
         if show_footer:
-            target_rows_before_footer = max(0, term_h - 2 - 2)
-            while len(parts) < target_rows_before_footer:
-                parts.append(Text(""))
-            position = f"{start + 1}–{end} of {total}" if total else "0"
-            parts.append(Text(""))
-            parts.append(
+            position = scroll_position_hint(start, end, total)
+            append_bottom_footer(
+                parts,
+                term_h,
                 Text(
                     f"←→ chat/reply   ↑↓ scroll   PgUp/PgDn   Home/End   q exit   ·   {position}",
                     style="dim italic",
                     no_wrap=True,
                     overflow="crop",
-                )
+                ),
             )
 
-        return Panel(
+        return jarv_panel(
             Group(*parts),
-            title="[bold bright_white]jarv ▸ history[/bold bright_white]",
-            title_align="left",
-            subtitle=f"[dim]{exchanges} exchange(s)[/dim]",
-            subtitle_align="right",
-            border_style="cyan",
-            box=box.ROUNDED,
+            "history",
+            subtitle=f"{exchanges} exchange(s)",
             padding=(0, 1),
             width=panel_width,
             height=term_h,
         )
 
-    with Live(
-        get_renderable=_render,
-        console=console,
-        screen=True,
-        auto_refresh=False,
-        transient=False,
-        vertical_overflow="crop",
-    ) as live, refresh_on_resize(live), mouse_capture():
-        while True:
-            live.refresh()
-            try:
-                key, repeat_count = _read_key_with_repeats()
-            except KeyboardInterrupt:
-                break
-            term_w, _ = terminal_size(console=console)
-            width = max(1, term_w - 4)
-            total = len(_lines(width))
-            page = max(1, _body_rows() - 1)
-            max_off = max(0, total - _body_rows())
-            if key == "ESC":
-                break
-            elif key == "UP":
-                offset = max(0, offset - repeat_count)
-            elif key == "DOWN":
-                offset = min(max_off, offset + repeat_count)
-            elif key == "LEFT":
-                for _ in range(repeat_count):
-                    _jump_to_message(-1)
-            elif key == "RIGHT":
-                for _ in range(repeat_count):
-                    _jump_to_message(1)
-            elif key == "PAGEUP":
-                offset = max(0, offset - (page * repeat_count))
-            elif key == "PAGEDOWN":
-                offset = min(max_off, offset + (page * repeat_count))
-            elif key == "HOME":
-                offset = 0
-            elif key == "END":
-                offset = max_off
+    def _on_key(key: str, repeat_count: int, scroll_state: ScrollOverlayState) -> bool:
+        if key == "LEFT":
+            for _ in range(repeat_count):
+                _jump_to_message(-1)
+            return False
+        if key == "RIGHT":
+            for _ in range(repeat_count):
+                _jump_to_message(1)
+            return False
+        term_w, term_h = terminal_size(console=console)
+        width = max(1, term_w - 4)
+        total = len(_lines(width))
+        body_rows, _ = body_content_rows(term_h)
+        scroll_state.offset = apply_scroll_keys(
+            key,
+            repeat_count,
+            offset=scroll_state.offset,
+            total=total,
+            body_rows=body_rows,
+        )
+        return False
+
+    run_scroll_live(_render, _on_key, state=state, close_keys=frozenset({"ESC"}))

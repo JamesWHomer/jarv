@@ -27,6 +27,12 @@ from .history import (
 from .session_render import _history_visual_lines, _session_row_widths
 from .session_store import archive_session_files, delete_session_files, unarchive_session_files
 from .tui_layout import append_bottom_footer, clip_text
+from .tui_overlay import (
+    apply_scroll_keys,
+    body_content_rows,
+    clamp_scroll_offset,
+    scroll_position_hint,
+)
 
 def _short_session_id(sid: str) -> str:
     """Return the shortest unambiguous prefix hint for display (type prefix + 6 hash chars)."""
@@ -410,18 +416,13 @@ def cmd_sessions(args: list | None = None) -> None:
         term_w, term_h = terminal_size(console=console)
         panel_width = max(1, term_w)
         inner_width = max(1, panel_width - 4)
-        show_footer = term_h >= 6
-        # Header (1 row) + footer (2 rows: blank + controls) inside the panel border (2 rows).
-        body_rows = max(1, term_h - 2 - 1 - (2 if show_footer else 0))
+        body_rows, show_footer = body_content_rows(term_h)
+        body_rows = max(1, body_rows - 1)
 
         sid = preview_sid or ""
         all_lines = _preview_lines(sid, inner_width)
         total = len(all_lines)
-        max_off = max(0, total - body_rows)
-        if preview_offset > max_off:
-            preview_offset = max_off
-        if preview_offset < 0:
-            preview_offset = 0
+        preview_offset = clamp_scroll_offset(preview_offset, total, body_rows)
         start = preview_offset
         end = min(total, start + body_rows)
 
@@ -438,14 +439,14 @@ def cmd_sessions(args: list | None = None) -> None:
                 overflow="crop",
             )
         )
-        for i in range(start, end):
-            parts.append(all_lines[i])
+        for index in range(start, end):
+            parts.append(all_lines[index])
         if total == 0:
             parts.append(Text(_truncate("  (empty)", inner_width), style="dim"))
 
         if show_footer:
-            position = f"{start + 1}–{end} of {total}" if total else "0"
-            _append_bottom_footer(
+            position = scroll_position_hint(start, end, total)
+            append_bottom_footer(
                 parts,
                 term_h,
                 Text(
@@ -459,14 +460,10 @@ def cmd_sessions(args: list | None = None) -> None:
                 ),
             )
 
-        return Panel(
+        return jarv_panel(
             Group(*parts),
-            title="[bold bright_white]jarv ▸ preview[/bold bright_white]",
-            title_align="left",
-            subtitle=f"[dim]{short_id}[/dim]" if short_id else None,
-            subtitle_align="right",
-            border_style="cyan",
-            box=box.ROUNDED,
+            "preview",
+            subtitle=short_id or None,
             padding=(0, 1),
             width=panel_width,
             height=term_h,
@@ -854,19 +851,19 @@ def cmd_sessions(args: list | None = None) -> None:
                         preview_sid = visible_now[pos]["sid"]
                         selected_sid = preview_sid
                         preview_offset = 0
-                elif key == "UP":
-                    preview_offset = max(0, preview_offset - repeat_count)
-                elif key == "DOWN":
-                    preview_offset += repeat_count
-                elif key == "PAGEUP":
-                    preview_offset = max(0, preview_offset - (_max_vis() * repeat_count))
-                elif key == "PAGEDOWN":
-                    preview_offset += _max_vis() * repeat_count
-                elif key == "HOME":
-                    preview_offset = 0
-                elif key == "END":
-                    term_w, _ = terminal_size(console=console)
-                    preview_offset = max(0, len(_preview_lines(preview_sid, max(1, term_w - 4))) - 1)
+                elif key in ("UP", "DOWN", "PAGEUP", "PAGEDOWN", "HOME", "END"):
+                    term_w, term_h = terminal_size(console=console)
+                    inner_width = max(1, term_w - 4)
+                    total = len(_preview_lines(preview_sid, inner_width))
+                    body_rows, _ = body_content_rows(term_h)
+                    body_rows = max(1, body_rows - 1)
+                    preview_offset = apply_scroll_keys(
+                        key,
+                        repeat_count,
+                        offset=preview_offset,
+                        total=total,
+                        body_rows=body_rows,
+                    )
                 elif key == "ENTER":
                     row = next((r for r in rows if r["sid"] == preview_sid), None)
                     if row is not None:

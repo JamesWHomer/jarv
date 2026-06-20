@@ -100,7 +100,15 @@ def terminal_size(*, console: Console = console) -> tuple[int, int]:
     return max(1, size.width), max(1, size.height)
 
 
-def jarv_panel(body: RenderableType, title: str, subtitle: str | None = None, padding: tuple = (1, 2)) -> Panel:
+def jarv_panel(
+    body: RenderableType,
+    title: str,
+    subtitle: str | None = None,
+    *,
+    padding: tuple[int, int] = (1, 2),
+    width: int | None = None,
+    height: int | None = None,
+) -> Panel:
     """Return a Panel using the shared jarv aesthetic."""
     return Panel(
         body,
@@ -111,6 +119,8 @@ def jarv_panel(body: RenderableType, title: str, subtitle: str | None = None, pa
         border_style=PANEL_BORDER_STYLE,
         box=box.ROUNDED,
         padding=padding,
+        width=width,
+        height=height,
     )
 
 
