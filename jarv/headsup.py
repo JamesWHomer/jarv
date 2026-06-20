@@ -24,8 +24,9 @@ from .command_input import (
     _key_available,
     _read_key,
     _read_key_with_repeats,
-    mouse_capture,
+    disable_mouse_capture,
     requeue_key,
+    strip_sgr_mouse_sequences,
 )
 from .command_registry import parse_command_alias
 from .agent_ui import (
@@ -96,6 +97,18 @@ _HEADSUP_REPEATABLE_KEYS = frozenset({
     "MOUSE_WHEEL_PAGEUP",
     "MOUSE_WHEEL_PAGEDOWN",
 })
+_SGR_MOUSE_TEXT_LOOKBACK = 64
+
+
+def _sanitize_editor_key(key: str) -> str:
+    if not isinstance(key, TextInput):
+        return key
+    text = strip_sgr_mouse_sequences(str(key))
+    if not text:
+        return "OTHER"
+    if text == key:
+        return key
+    return TextInput(text)
 
 
 @dataclass
@@ -173,6 +186,7 @@ class HeadsupAgentUI:
             self._response_status_index,
             thought_complete_indicator(status_text),
         )
+        self._response_status_index = None
 
     def start_tool_activity(self, start_time: float) -> None:
         self._tool_started_at = start_time
@@ -197,6 +211,7 @@ class HeadsupAgentUI:
             self._tool_status_index,
             tool_complete_indicator(status_text),
         )
+        self._tool_status_index = None
 
     def append_stream_delta(self, delta: str) -> None:
         self._stream_text += delta
@@ -392,86 +407,84 @@ class HeadsupApp:
 
     def run(self) -> None:
         self._sync_initial_transcript_from_history()
-        with Live(
-            get_renderable=self.render,
-            console=self.console,
-            screen=True,
-            auto_refresh=False,
-            transient=False,
-            vertical_overflow="crop",
-        ) as live, refresh_on_resize(live, on_change=self.refresh), mouse_capture():
-            self.live = live
-            self._foreground_input_active = True
-            try:
-                while True:
-                    self.refresh()
-                    try:
-                        key, repeat = _read_key_with_repeats(
-                            text_mode=True,
-                            batch_text=True,
-                            repeatable=_HEADSUP_REPEATABLE_KEYS,
-                            translate_mouse_wheel=False,
-                        )
-                    except KeyboardInterrupt:
-                        if self._handle_prompt_dismiss():
-                            break
-                        continue
+        disable_mouse_capture()
+        try:
+            with Live(
+                get_renderable=self.render,
+                console=self.console,
+                screen=True,
+                auto_refresh=False,
+                transient=False,
+                vertical_overflow="crop",
+            ) as live, refresh_on_resize(live, on_change=self.refresh):
+                self.live = live
+                self._foreground_input_active = True
+                try:
+                    while True:
+                        self.refresh()
+                        try:
+                            key, repeat = _read_key_with_repeats(
+                                text_mode=True,
+                                batch_text=True,
+                                repeatable=_HEADSUP_REPEATABLE_KEYS,
+                                translate_mouse_wheel=False,
+                            )
+                        except KeyboardInterrupt:
+                            if self._handle_prompt_dismiss():
+                                break
+                            continue
 
-                    if key == "ENTER":
-                        if self._answer_request is not None:
-                            self._complete_answer()
-                            continue
-                        query = str(self.editor.get("buffer", "")).strip()
-                        self._record_prompt_history(query)
-                        initialize_text_editor(self.editor, "")
-                        self._clear_prompt_notice()
-                        self._exit_armed = False
-                        if self._handle_query(query) == "exit":
-                            break
-                    elif key == "ESC":
-                        if self._answer_request is not None:
-                            self._cancel_answer()
-                            continue
-                        if self._handle_prompt_dismiss():
-                            break
-                    elif key == "PAGEUP":
-                        self._scroll_transcript(5 * repeat)
-                    elif key == "PAGEDOWN":
-                        self._scroll_transcript(-5 * repeat)
-                    elif key == "MOUSE_WHEEL_UP":
-                        self._scroll_transcript(3 * repeat)
-                    elif key == "MOUSE_WHEEL_DOWN":
-                        self._scroll_transcript(-3 * repeat)
-                    elif key == "MOUSE_WHEEL_PAGEUP":
-                        self._scroll_transcript(5 * repeat)
-                    elif key == "MOUSE_WHEEL_PAGEDOWN":
-                        self._scroll_transcript(-5 * repeat)
-                    elif key in {"UP", "DOWN"} and self._answer_request is None:
-                        if self._navigate_prompt_history(key, repeat):
-                            self.scroll_offset = 0
+                        if key == "ENTER":
+                            if self._answer_request is not None:
+                                self._complete_answer()
+                                continue
+                            query = str(self.editor.get("buffer", "")).strip()
+                            self._record_prompt_history(query)
+                            initialize_text_editor(self.editor, "")
                             self._clear_prompt_notice()
                             self._exit_armed = False
-                    else:
-                        changed = apply_text_editor_key(
-                            self.editor,
-                            key,
-                            repeat,
-                            content_width=1,
-                            allow_newlines=False,
-                        )
-                        if changed or isinstance(key, TextInput):
-                            if self._answer_request is None:
-                                self._reset_prompt_history_navigation()
-                            self.scroll_offset = 0
-                            self._clear_prompt_notice()
-                            self._exit_armed = False
-            finally:
-                if self._answer_request is not None:
-                    self._cancel_answer()
-                self._foreground_input_active = False
-                self._cancel_active_turn(clear_queue=True)
-                self._wait_for_agent_idle(timeout=5.0)
-                self.live = None
+                            if self._handle_query(query) == "exit":
+                                break
+                        elif key == "ESC":
+                            if self._answer_request is not None:
+                                self._cancel_answer()
+                                continue
+                            if self._handle_prompt_dismiss():
+                                break
+                        elif key == "PAGEUP":
+                            self._scroll_transcript(5 * repeat)
+                        elif key == "PAGEDOWN":
+                            self._scroll_transcript(-5 * repeat)
+                        elif key == "MOUSE_WHEEL_UP":
+                            self._scroll_transcript(3 * repeat)
+                        elif key == "MOUSE_WHEEL_DOWN":
+                            self._scroll_transcript(-3 * repeat)
+                        elif key == "MOUSE_WHEEL_PAGEUP":
+                            self._scroll_transcript(5 * repeat)
+                        elif key == "MOUSE_WHEEL_PAGEDOWN":
+                            self._scroll_transcript(-5 * repeat)
+                        elif key in {"UP", "DOWN"} and self._answer_request is None:
+                            if self._navigate_prompt_history(key, repeat):
+                                self.scroll_offset = 0
+                                self._clear_prompt_notice()
+                                self._exit_armed = False
+                        else:
+                            changed, user_text = self._apply_editor_key(key, repeat)
+                            if changed or user_text:
+                                if self._answer_request is None:
+                                    self._reset_prompt_history_navigation()
+                                self.scroll_offset = 0
+                                self._clear_prompt_notice()
+                                self._exit_armed = False
+                finally:
+                    if self._answer_request is not None:
+                        self._cancel_answer()
+                    self._foreground_input_active = False
+                    self._cancel_active_turn(clear_queue=True)
+                    self._wait_for_agent_idle(timeout=5.0)
+                    self.live = None
+        finally:
+            disable_mouse_capture()
 
     def render(self) -> RenderableType:
         term_w, term_h = terminal_size(console=self.console)
@@ -629,16 +642,34 @@ class HeadsupApp:
                         self._cancel_token.cancel()
                         raise TurnCancelled
                     return "[no response]"
-                apply_text_editor_key(
-                    self.editor,
-                    key,
-                    repeat,
-                    content_width=1,
-                    allow_newlines=False,
-                )
+                self._apply_editor_key(key, repeat)
         finally:
             self._resume_esc_listener()
             self.editor = previous
+
+    def _apply_editor_key(self, key: str, repeat: int) -> tuple[bool, bool]:
+        if isinstance(key, TextInput):
+            value = str(self.editor.get("buffer", ""))
+            cursor = max(0, min(int(self.editor.get("cursor", len(value))), len(value)))
+            start = max(0, cursor - _SGR_MOUSE_TEXT_LOOKBACK)
+            existing_tail = value[start:cursor]
+            combined = existing_tail + str(key)
+            stripped = strip_sgr_mouse_sequences(combined)
+            if stripped != combined:
+                self.editor["buffer"] = value[:start] + stripped + value[cursor:]
+                self.editor["cursor"] = start + len(stripped)
+                self.editor["preferred_visual_column"] = None
+                return stripped != existing_tail, bool(stripped)
+
+        key = _sanitize_editor_key(key)
+        changed = apply_text_editor_key(
+            self.editor,
+            key,
+            repeat,
+            content_width=1,
+            allow_newlines=False,
+        )
+        return changed, isinstance(key, TextInput)
 
     def bind_cancel_token(self, token: CancellationToken) -> None:
         self.unbind_cancel_token()
@@ -967,16 +998,18 @@ class HeadsupApp:
     def _captured_console_output(self):
         live = self.live
         self._refresh_suspended += 1
+        render_hook_suspended = False
         try:
-            with self._preserve_alt_screen():
-                if live is not None:
-                    live.stop()
-                try:
-                    with self.console.capture() as capture:
-                        yield capture
-                finally:
-                    if live is not None:
-                        live.start(refresh=True)
+            render_hooks = getattr(self.console, "_render_hooks", None)
+            if live is not None and render_hooks and render_hooks[-1] is live:
+                self.console.pop_render_hook()
+                render_hook_suspended = True
+            try:
+                with self.console.capture() as capture:
+                    yield capture
+            finally:
+                if render_hook_suspended and live is not None:
+                    self.console.push_render_hook(live)
         finally:
             self._refresh_suspended = max(0, self._refresh_suspended - 1)
             self.refresh()

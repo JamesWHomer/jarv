@@ -123,12 +123,15 @@ def test_mouse_capture_enables_windows_vt_and_mouse_modes(monkeypatch):
     monkeypatch.setattr(command_input.sys, "platform", "win32")
     monkeypatch.setattr(command_input.sys, "stdout", stdout)
     monkeypatch.setitem(sys.modules, "ctypes", fake_ctypes)
+    command_input._MOUSE_CAPTURE_ACTIVE_DEPTH = 0
     command_input._WINDOWS_MOUSE_CAPTURE_DEPTH = 0
 
     with command_input.mouse_capture():
+        assert command_input._MOUSE_CAPTURE_ACTIVE_DEPTH == 1
         assert command_input._WINDOWS_MOUSE_CAPTURE_DEPTH == 1
 
     assert stdout.writes == [
+        command_input.MOUSE_CAPTURE_DISABLE,
         command_input.MOUSE_CAPTURE_ENABLE,
         command_input.MOUSE_CAPTURE_DISABLE,
     ]
@@ -140,7 +143,15 @@ def test_mouse_capture_enables_windows_vt_and_mouse_modes(monkeypatch):
     assert input_mode & 0x0200
     assert not input_mode & 0x0040
     assert output_mode & 0x0004
+    assert command_input._MOUSE_CAPTURE_ACTIVE_DEPTH == 0
     assert command_input._WINDOWS_MOUSE_CAPTURE_DEPTH == 0
+
+
+def test_mouse_capture_disables_mouse_motion_tracking():
+    assert "\x1b[?1002l" in command_input.MOUSE_CAPTURE_ENABLE
+    assert "\x1b[?1003l" in command_input.MOUSE_CAPTURE_ENABLE
+    assert "\x1b[?1002l" in command_input.MOUSE_CAPTURE_DISABLE
+    assert "\x1b[?1003l" in command_input.MOUSE_CAPTURE_DISABLE
 
 
 def test_windows_console_mouse_wheel_record_returns_mouse_token(monkeypatch):
@@ -172,6 +183,54 @@ def test_windows_console_mouse_wheel_record_returns_mouse_token(monkeypatch):
             == "MOUSE_WHEEL_UP"
         )
     finally:
+        command_input._WINDOWS_MOUSE_CAPTURE_DEPTH = 0
+
+
+def test_windows_sgr_mouse_motion_sequence_is_ignored(monkeypatch):
+    chars = deque("\x1b[<32;27;29M")
+
+    fake_msvcrt = SimpleNamespace(
+        getwch=chars.popleft,
+        kbhit=lambda: bool(chars),
+    )
+
+    command_input._PENDING_KEYS.clear()
+    monkeypatch.setattr(command_input.sys, "platform", "win32")
+    monkeypatch.setenv("WT_SESSION", "test")
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    command_input._MOUSE_CAPTURE_ACTIVE_DEPTH = 1
+    command_input._WINDOWS_MOUSE_CAPTURE_DEPTH = 1
+
+    try:
+        assert command_input._read_key(text_mode=True) == "OTHER"
+        assert not chars
+        assert not command_input._PENDING_KEYS
+    finally:
+        command_input._MOUSE_CAPTURE_ACTIVE_DEPTH = 0
+        command_input._WINDOWS_MOUSE_CAPTURE_DEPTH = 0
+
+
+def test_windows_orphaned_sgr_mouse_motion_sequence_is_ignored(monkeypatch):
+    chars = deque("[<32;27;29M")
+
+    fake_msvcrt = SimpleNamespace(
+        getwch=chars.popleft,
+        kbhit=lambda: bool(chars),
+    )
+
+    command_input._PENDING_KEYS.clear()
+    monkeypatch.setattr(command_input.sys, "platform", "win32")
+    monkeypatch.setenv("WT_SESSION", "test")
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    command_input._MOUSE_CAPTURE_ACTIVE_DEPTH = 0
+    command_input._WINDOWS_MOUSE_CAPTURE_DEPTH = 0
+
+    try:
+        assert command_input._read_key(text_mode=True) == "OTHER"
+        assert not chars
+        assert not command_input._PENDING_KEYS
+    finally:
+        command_input._MOUSE_CAPTURE_ACTIVE_DEPTH = 0
         command_input._WINDOWS_MOUSE_CAPTURE_DEPTH = 0
 
 
@@ -211,6 +270,36 @@ def test_read_key_with_repeats_batches_queued_text(monkeypatch):
         batch_text=True,
     ) == (command_input.TextInput("openai/gpt-5.5"), 1)
     assert list(command_input._PENDING_KEYS) == ["ENTER"]
+    command_input._PENDING_KEYS.clear()
+
+
+def test_read_key_with_repeats_drops_batched_sgr_mouse_text(monkeypatch):
+    command_input._PENDING_KEYS.clear()
+    keys = [*"[<35;62;15M"]
+
+    monkeypatch.setattr(command_input, "_read_key", lambda text_mode=False: keys.pop(0))
+    monkeypatch.setattr(command_input, "_key_available", lambda: bool(keys))
+
+    assert command_input._read_key_with_repeats(
+        text_mode=True,
+        batch_text=True,
+    ) == ("OTHER", 1)
+    assert not command_input._PENDING_KEYS
+    command_input._PENDING_KEYS.clear()
+
+
+def test_read_key_with_repeats_strips_embedded_sgr_mouse_text(monkeypatch):
+    command_input._PENDING_KEYS.clear()
+    keys = [*"hi[<35;62;15Mthere"]
+
+    monkeypatch.setattr(command_input, "_read_key", lambda text_mode=False: keys.pop(0))
+    monkeypatch.setattr(command_input, "_key_available", lambda: bool(keys))
+
+    assert command_input._read_key_with_repeats(
+        text_mode=True,
+        batch_text=True,
+    ) == (command_input.TextInput("hithere"), 1)
+    assert not command_input._PENDING_KEYS
     command_input._PENDING_KEYS.clear()
 
 

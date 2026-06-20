@@ -1,8 +1,10 @@
 """Keyboard input helpers shared by interactive command screens."""
 
+import atexit
 import os
 import re
 import sys
+import time
 from collections import deque
 from collections.abc import Iterable
 from contextlib import contextmanager
@@ -10,8 +12,8 @@ from contextlib import contextmanager
 from rich.cells import cell_len, get_character_cell_size
 
 
-MOUSE_CAPTURE_ENABLE = "\x1b[?1006h\x1b[?1000h\x1b[?1007l"
-MOUSE_CAPTURE_DISABLE = "\x1b[?1000l\x1b[?1006l\x1b[?1007h"
+MOUSE_CAPTURE_ENABLE = "\x1b[?1002l\x1b[?1003l\x1b[?1006h\x1b[?1000h\x1b[?1007l"
+MOUSE_CAPTURE_DISABLE = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1007h"
 CURSOR_HIDE = "\x1b[?25l"
 CURSOR_SHOW = "\x1b[?25h"
 ANSI_RESET = "\x1b[0m"
@@ -24,8 +26,11 @@ _MOUSE_WHEEL_KEYS = {
     3: "MOUSE_WHEEL_PAGEDOWN",
 }
 _POSIX_INPUT_POLL_INTERVAL = 0.1
+_WINDOWS_ESCAPE_SEQUENCE_TIMEOUT = 0.03
 _LAST_TERMINAL_SIZE: tuple[int, int] | None = None
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_SGR_MOUSE_TEXT_RE = re.compile(r"(?:\x1b)?\[<\d+;\d+;\d+[Mm]")
+_MOUSE_CAPTURE_ACTIVE_DEPTH = 0
 _WINDOWS_MOUSE_CAPTURE_DEPTH = 0
 
 
@@ -36,18 +41,35 @@ class TextInput(str):
 @contextmanager
 def mouse_capture():
     """Capture terminal mouse input while a full-screen view is active."""
+    global _MOUSE_CAPTURE_ACTIVE_DEPTH
+
     if not sys.stdout.isatty():
         yield
         return
 
     with _windows_virtual_terminal_input():
-        sys.stdout.write(MOUSE_CAPTURE_ENABLE)
-        sys.stdout.flush()
+        if _MOUSE_CAPTURE_ACTIVE_DEPTH == 0:
+            disable_mouse_capture()
+            sys.stdout.write(MOUSE_CAPTURE_ENABLE)
+            sys.stdout.flush()
+        _MOUSE_CAPTURE_ACTIVE_DEPTH += 1
         try:
             yield
         finally:
-            sys.stdout.write(MOUSE_CAPTURE_DISABLE)
-            sys.stdout.flush()
+            _MOUSE_CAPTURE_ACTIVE_DEPTH = max(0, _MOUSE_CAPTURE_ACTIVE_DEPTH - 1)
+            if _MOUSE_CAPTURE_ACTIVE_DEPTH == 0:
+                disable_mouse_capture()
+
+
+def disable_mouse_capture() -> None:
+    """Best-effort reset for terminal mouse reporting modes."""
+    if not sys.stdout.isatty():
+        return
+    sys.stdout.write(MOUSE_CAPTURE_DISABLE)
+    sys.stdout.flush()
+
+
+atexit.register(disable_mouse_capture)
 
 
 @contextmanager
@@ -138,6 +160,16 @@ def _read_windows_until_any(msvcrt, chars: set[str]) -> str:
         data += ch
         if ch in chars:
             return data
+
+
+def _read_windows_available_char(msvcrt, *, timeout: float = 0.0) -> str | None:
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        if _windows_key_available():
+            return msvcrt.getwch()
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.001)
 
 
 def _windows_key_from_virtual_key(
@@ -360,6 +392,11 @@ def requeue_key(key: str) -> None:
     _PENDING_KEYS.appendleft(key)
 
 
+def strip_sgr_mouse_sequences(text: str) -> str:
+    """Remove printable SGR mouse reports that leaked past ESC handling."""
+    return _SGR_MOUSE_TEXT_RE.sub("", text)
+
+
 def _read_key_with_repeats(
     text_mode: bool = False,
     *,
@@ -402,7 +439,10 @@ def _read_key_with_repeats(
                 continue
             _PENDING_KEYS.appendleft(next_key)
             break
-        return TextInput("".join(inserted)), 1
+        text = strip_sgr_mouse_sequences("".join(inserted))
+        if not text:
+            return "OTHER", 1
+        return TextInput(text), 1
 
     repeatable_keys = frozenset(repeatable)
     if key not in repeatable_keys or max_count <= 1:
@@ -453,10 +493,19 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
         if ch == "\t":
             return "TAB"
         if ch == "\x1b":
-            if _windows_key_available():
-                ch2 = msvcrt.getwch()
-                if ch2 == "[" and _windows_key_available():
-                    ch3 = msvcrt.getwch()
+            ch2 = _read_windows_available_char(
+                msvcrt,
+                timeout=_WINDOWS_ESCAPE_SEQUENCE_TIMEOUT,
+            )
+            if ch2 is not None:
+                if ch2 == "[":
+                    ch3 = _read_windows_available_char(
+                        msvcrt,
+                        timeout=_WINDOWS_ESCAPE_SEQUENCE_TIMEOUT,
+                    )
+                    if ch3 is None:
+                        _PENDING_KEYS.appendleft("[")
+                        return "ESC"
                     if ch3 == "<":
                         return _parse_sgr_mouse(
                             _read_windows_until_any(msvcrt, {"M", "m"}),
@@ -469,7 +518,20 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
                         "H": "HOME", "F": "END",
                         "5": "PAGEUP", "6": "PAGEDOWN", "3": "DELETE",
                     }.get(ch3, "OTHER")
+                _PENDING_KEYS.appendleft(ch2)
             return "ESC"
+        if ch == "[":
+            ch2 = _read_windows_available_char(
+                msvcrt,
+                timeout=_WINDOWS_ESCAPE_SEQUENCE_TIMEOUT,
+            )
+            if ch2 == "<":
+                return _parse_sgr_mouse(
+                    _read_windows_until_any(msvcrt, {"M", "m"}),
+                    translate_wheel=translate_mouse_wheel,
+                )
+            if ch2 is not None:
+                _PENDING_KEYS.appendleft(ch2)
         if not text_mode and ch in ("q", "Q"):
             return "ESC"
         if ch == "\x06":

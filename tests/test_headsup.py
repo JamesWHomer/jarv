@@ -410,6 +410,42 @@ class HeadsupTests(unittest.TestCase):
             tool_complete_indicator("Prepared 2 actions in 0.1 seconds.").plain,
         )
 
+    def test_render_places_completed_status_in_transcript_order(self):
+        app, test_console, output = self._app(width=80)
+        app.add_user_message("Hello")
+        app.upsert_status(None, thought_complete_indicator("Thought for 1.0 seconds."))
+
+        rendered = self._rendered_text(app, test_console, output, width=80, height=12)
+
+        self.assertLess(rendered.index("Hello"), rendered.index("Thought for 1.0 seconds."))
+        self.assertEqual(
+            rendered.count("Thought for 1.0 seconds."),
+            1,
+        )
+
+    def test_later_status_phases_do_not_overwrite_completed_statuses(self):
+        app, _test_console, _output = self._app()
+        ui = HeadsupAgentUI(app)
+
+        ui.complete_response_phase("Thought for 4.4 seconds.")
+        ui.complete_tool_phase("Prepared 3 actions in 0.1 seconds.")
+        app.add_tool(Text("Command card"))
+        ui.complete_response_phase("Thought for 0.8 seconds.")
+        ui.complete_tool_phase("Wrote question in 0.3 seconds.")
+
+        rendered = self._entry_text(app)
+        expected = [
+            "Thought for 4.4 seconds.",
+            "Prepared 3 actions in 0.1 seconds.",
+            "Command card",
+            "Thought for 0.8 seconds.",
+            "Wrote question in 0.3 seconds.",
+        ]
+        positions = [rendered.index(text) for text in expected]
+        self.assertEqual(positions, sorted(positions))
+        for text in expected:
+            self.assertEqual(rendered.count(text), 1)
+
     def test_sync_transcript_from_history_includes_status_records(self):
         app, _test_console, _output = self._app()
         history = [
@@ -441,13 +477,15 @@ class HeadsupTests(unittest.TestCase):
 
         self.assertIn("2s", app.entries[ui._response_status_index].renderable.plain)
 
+        status_index = ui._response_status_index
         ui.complete_response_phase("Thought for 2.0 seconds.")
-        completed = app.entries[ui._response_status_index].renderable.plain
+        completed = app.entries[status_index].renderable.plain
 
         with patch("jarv.headsup.time.perf_counter", return_value=5.0):
             self.assertFalse(ui._refresh_wait_statuses())
 
-        self.assertEqual(app.entries[ui._response_status_index].renderable.plain, completed)
+        self.assertIsNone(ui._response_status_index)
+        self.assertEqual(app.entries[status_index].renderable.plain, completed)
 
     def test_unbind_cancel_token_stops_wait_status_refreshes(self):
         app, _test_console, _output = self._app()
@@ -565,11 +603,12 @@ class HeadsupTests(unittest.TestCase):
         with (
             patch("jarv.headsup.Live", FakeLive),
             patch("jarv.headsup.refresh_on_resize", noop_context),
-            patch("jarv.headsup.mouse_capture", noop_context),
+            patch("jarv.headsup.disable_mouse_capture") as disable_mouse_capture,
             patch("jarv.headsup._read_key_with_repeats", side_effect=lambda **kwargs: keys.pop(0)),
         ):
             app.run()
 
+        self.assertEqual(disable_mouse_capture.call_count, 2)
         self.assertNotEqual(getattr(app._prompt_notice, "plain", None), "Press Esc or Ctrl+C again to exit.")
         self.assertNotIn("Press Esc or Ctrl+C again to exit.", self._entry_text(app))
         self.assertEqual(run_agent_calls[0][0], "hi")
@@ -619,13 +658,42 @@ class HeadsupTests(unittest.TestCase):
         with (
             patch("jarv.headsup.Live", FakeLive),
             patch("jarv.headsup.refresh_on_resize", noop_context),
-            patch("jarv.headsup.mouse_capture", noop_context),
+            patch("jarv.headsup.disable_mouse_capture") as disable_mouse_capture,
             patch("jarv.headsup._read_key_with_repeats", side_effect=lambda **kwargs: keys.pop(0)),
         ):
             app.run()
 
+        self.assertEqual(disable_mouse_capture.call_count, 2)
         self.assertEqual(app.scroll_offset, 6)
         self.assertIsNone(app._prompt_history_index)
+
+    def test_sgr_mouse_text_fragment_does_not_enter_prompt(self):
+        app, _test_console, _output = self._app()
+
+        changed, user_text = app._apply_editor_key(TextInput("[<35;62;15M"), 1)
+
+        self.assertFalse(changed)
+        self.assertFalse(user_text)
+        self.assertEqual(app.editor["buffer"], "")
+
+    def test_sgr_mouse_text_fragment_is_stripped_from_batched_prompt_text(self):
+        app, _test_console, _output = self._app()
+
+        changed, user_text = app._apply_editor_key(TextInput("hi[<35;62;15Mthere"), 1)
+
+        self.assertTrue(changed)
+        self.assertTrue(user_text)
+        self.assertEqual(app.editor["buffer"], "hithere")
+
+    def test_split_sgr_mouse_text_fragment_is_removed_from_prompt(self):
+        app, _test_console, _output = self._app()
+        initialize_text_editor(app.editor, "[")
+
+        changed, user_text = app._apply_editor_key(TextInput("<35;62;15M"), 1)
+
+        self.assertTrue(changed)
+        self.assertFalse(user_text)
+        self.assertEqual(app.editor["buffer"], "")
 
     def test_prompt_history_loads_user_messages_from_synced_history(self):
         app, _test_console, _output = self._app()
@@ -808,8 +876,8 @@ class HeadsupTests(unittest.TestCase):
                         )
                     )
                 else:
-                    self.assertEqual(calls[0], "stop")
-                    self.assertIn(("start", True), calls)
+                    self.assertNotIn("stop", calls)
+                    self.assertNotIn(("start", True), calls)
                     self.assertTrue(
                         any(
                             getattr(entry.renderable, "plain", "").strip() == f"handled {command}"
@@ -842,9 +910,32 @@ class HeadsupTests(unittest.TestCase):
         app._run_slash("/set", ["model", "test-model"])
 
         rendered = self._entry_text(app)
-        self.assertEqual(calls[:2], ["stop", ("start", True)])
+        self.assertNotIn("stop", calls)
+        self.assertNotIn(("start", True), calls)
         self.assertIn("command output", rendered)
         self.assertNotIn("live frame should not be captured", rendered)
+
+    def test_quick_slash_command_suspends_live_render_hook_only(self):
+        calls = []
+
+        class FakeLive:
+            def refresh(self):
+                calls.append("refresh")
+
+        def handle_slash(command, rest, config, client, args, hint):
+            app.console.print("command output")
+            return config, client
+
+        app, _test_console, _output = self._app()
+        app.handle_slash = handle_slash
+        app.live = FakeLive()
+        app.console.push_render_hook(app.live)
+
+        app._run_slash("/set", ["model", "test-model"])
+
+        self.assertEqual(app.console._render_hooks[-1], app.live)
+        self.assertIn("command output", self._entry_text(app))
+        self.assertIn("refresh", calls)
 
     def test_new_refreshes_session_context_and_clears_visible_transcript(self):
         app, test_console, output = self._app()
