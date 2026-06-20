@@ -39,7 +39,7 @@ from .shell import (
     truncate_model_output,
 )
 from .tool_outputs import ToolOutput
-from .turn_loop import collect_stream_response
+from .turn_loop import collect_stream_response, run_tool_execution_round
 from .turn_records import (
     append_reasoning_input_items,
     append_tool_result_input_items,
@@ -889,35 +889,29 @@ def run_subagent_loop(
             kwargs["input"] = kwargs["input"] + [{"role": "user", "content": _FINISH_TRUNCATION_NUDGE}]
             continue
 
-        new_input: list[dict] = []
-        append_reasoning_input_items(new_input, reasoning_items)
-
-        def append_tool_result(item, output: ToolOutput) -> None:
-            append_tool_result_input_items(new_input, item, output)
-
-        exec_result = execute_tool_calls(
-            tool_calls,
-            node=node,
-            store=store,
-            client=client,
-            config=config,
-            append_tool_result=append_tool_result,
-            spawn_observer=spawn_observer,
-            cancellation_token=cancellation_token,
-            retained_store=retained_store,
-            web_search_read_nudge_sent=web_search_read_nudge_sent,
-        )
-        web_search_read_nudge_sent = exec_result.web_search_read_nudge_sent
-        if exec_result.finished is not None:
-            return exec_result.finished
-
-        kwargs["input"] = trim_turn_input(
-            kwargs["input"] + new_input,
+        kwargs["input"], exec_result = run_tool_execution_round(
+            kwargs["input"],
+            stream_result,
             model=config["model"],
             config=config,
             instructions=kwargs["instructions"],
             tools=kwargs["tools"],
+            execute_tool_calls_fn=lambda new_input, append_tool_result: execute_tool_calls(
+                tool_calls,
+                node=node,
+                store=store,
+                client=client,
+                config=config,
+                append_tool_result=append_tool_result,
+                spawn_observer=spawn_observer,
+                cancellation_token=cancellation_token,
+                retained_store=retained_store,
+                web_search_read_nudge_sent=web_search_read_nudge_sent,
+            ),
         )
+        web_search_read_nudge_sent = exec_result.web_search_read_nudge_sent
+        if exec_result.finished is not None:
+            return exec_result.finished
 
 
 class SpawnObserver:

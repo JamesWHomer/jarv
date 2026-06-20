@@ -1,9 +1,9 @@
-"""Single source of truth for jarv configuration keys, defaults, and validation."""
+"""Single source of truth for jarv configuration keys, defaults, validation, and UI metadata."""
 
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -21,6 +21,20 @@ LEGACY_READ_ONLY_COMMAND_DISPLAY_CHOICES = ("auto", "inline")
 TOOL_CALL_DISPLAY_CHOICES = ("fullscreen", "print", "auto")
 COMMAND_SAFETY_CHOICES = ("risky", "all", "none")
 
+SETTINGS_SAFETY_CHOICES = (
+    ("risky", "flag risky"),
+    ("all", "confirm all"),
+    ("none", "no prompts"),
+)
+
+SETTINGS_TOOL_LABELS = {
+    "run_command": ("Run commands", "execute shell commands"),
+    "web_search": ("Web search", "search the web"),
+    "read": ("Read", "read files, URLs, artifacts, and retained output"),
+    "spawn": ("Subagents", "fan out work to parallel subagents"),
+    "ask_user": ("Ask user", "pause to request clarification"),
+}
+
 
 @dataclass(frozen=True)
 class ConfigField:
@@ -28,52 +42,78 @@ class ConfigField:
     default: Any
     validator: str = "any"
     choices: tuple[str, ...] = ()
+    label: str = ""
+    section: str = ""
+    desc: str = ""
+    ui_kind: str = ""
+    about: str = ""
+    empty: str = ""
+    multiline: bool = False
+    settings_choices: tuple[tuple[str, str], ...] = field(default_factory=tuple)
 
 
 CONFIG_FIELDS: tuple[ConfigField, ...] = (
-    ConfigField("provider", "openai"),
-    ConfigField("api_key", ""),
+    ConfigField("provider", "openai", label="Provider", section="account", desc="choose an API provider", ui_kind="setup", about="API provider. Options: openai, openrouter, anthropic, gemini, groq, deepseek, together, fireworks, ollama, lm_studio, vllm. Default: `openai`."),
+    ConfigField("api_key", "", label="API key", section="account", desc="store or replace the active provider key", ui_kind="setup", about="API key. Can also be provided via provider-specific env vars (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.)."),
     ConfigField("api_keys", {}),
-    ConfigField("base_url", ""),
-    ConfigField("model", "gpt-5.4-mini"),
+    ConfigField("base_url", "", label="Base URL", section="account", desc="optional custom endpoint", ui_kind="text", empty="provider default", about="Custom API base URL. Overrides the provider's default endpoint."),
+    ConfigField("model", "gpt-5.4-mini", label="Model", section="behaviour", desc="pick from the provider presets or enter a model", ui_kind="setup", about="Model name."),
     ConfigField("service_tiers", {}, validator="service_tiers"),
-    ConfigField("reasoning_effort", ""),
-    ConfigField("max_history", 40, validator="positive_int"),
-    ConfigField("context_budget_ratio", 0.75, validator="ratio"),
-    ConfigField("context_compaction_threshold", 0.85, validator="ratio"),
-    ConfigField("context_output_reserve_ratio", 0.15, validator="ratio"),
-    ConfigField("context_window_fallback", 128_000, validator="positive_int"),
-    ConfigField("max_stdin_chars", 200_000, validator="positive_int"),
-    ConfigField("max_tool_output_chars", 20_000, validator="positive_int"),
-    ConfigField("disabled_tools", [], validator="disabled_tools"),
-    ConfigField("command_timeout", 60, validator="positive_int"),
-    ConfigField("web_timeout", 15, validator="positive_int"),
+    ConfigField("reasoning_effort", "", label="Reasoning effort", section="behaviour", desc="model-supported reasoning effort", ui_kind="choice", about="Model-supported reasoning effort. Empty uses the provider/model default; `none` explicitly disables reasoning only where supported."),
+    ConfigField("max_history", 40, validator="positive_int", label="History limit", section="runtime", desc="recent stored items sent as context", ui_kind="int", about="Maximum stored history items included as model context (item cap before token trimming). It does not delete saved history."),
+    ConfigField("context_budget_ratio", 0.75, validator="ratio", about="Share of the context window used for input."),
+    ConfigField("context_compaction_threshold", 0.85, validator="ratio", about="Fill ratio that triggers history compaction."),
+    ConfigField("context_output_reserve_ratio", 0.15, validator="ratio", about="Context window share reserved for model output."),
+    ConfigField("context_window_fallback", 128_000, validator="positive_int", about="Context window when model metadata is unknown."),
+    ConfigField("max_stdin_chars", 200_000, validator="positive_int", label="Stdin limit", section="runtime", desc="piped stdin chars attached to one-shot prompts", ui_kind="int", about="Maximum piped stdin characters attached to a one-shot prompt."),
+    ConfigField("max_tool_output_chars", 20_000, validator="positive_int", label="Tool output limit", section="runtime", desc="tool output chars returned to the model", ui_kind="int", about="Maximum generic tool output characters returned to the model and the default combined head/tail budget for `run_command`."),
+    ConfigField("disabled_tools", [], validator="disabled_tools", about="Tool names omitted from root agents and subagents. Use `/settings` to toggle `run_command`, `web_search`, `read`, `spawn`, and `ask_user`."),
+    ConfigField("command_timeout", 60, validator="positive_int", label="Command timeout", section="runtime", desc="seconds before shell commands are killed", ui_kind="int", about="Seconds before a shell command is killed."),
+    ConfigField("web_timeout", 15, validator="positive_int", label="Web timeout", section="runtime", desc="seconds before web requests are cancelled", ui_kind="int", about="Seconds before a web search or URL read is killed."),
     ConfigField(
         "command_safety",
         "risky",
         validator="choices",
         choices=COMMAND_SAFETY_CHOICES,
+        label="Command approval",
+        section="command review",
+        desc="default: flag only risky commands",
+        ui_kind="choice",
+        settings_choices=SETTINGS_SAFETY_CHOICES,
+        about="Command confirmation level. `all` = confirm every command, `risky` = confirm only dangerous commands, `none` = no confirmation.",
     ),
-    ConfigField("audit", True, validator="bool"),
-    ConfigField("auditor_auto_approve", True, validator="bool"),
-    ConfigField("auditor_model", ""),
-    ConfigField("system_prompt", DEFAULT_SYSTEM_PROMPT),
-    ConfigField("max_subagent_depth", 4, validator="non_negative_int"),
-    ConfigField("subagent_thread_pool_max_workers", 8, validator="positive_int"),
-    ConfigField("check_updates", True, validator="bool"),
+    ConfigField("audit", True, validator="bool", label="Auditor", section="command review", desc="LLM reviews flagged commands first", ui_kind="bool", about="When `true`, flagged commands are sent to a fast LLM auditor (uses extra tokens)."),
+    ConfigField("auditor_auto_approve", True, validator="bool", label="Audit auto-accept", section="command review", desc="auto-run commands the auditor marks safe", ui_kind="bool", about="When `true`, the auditor auto-approves commands it deems safe. When `false`, the auditor only shows a recommendation."),
+    ConfigField("auditor_model", "", label="Auditor model", section="command review", desc="use the active model unless overridden", ui_kind="text", empty="default", about="Model used for the auditor. Empty = use the active model."),
+    ConfigField("system_prompt", DEFAULT_SYSTEM_PROMPT, label="System prompt", section="behaviour", desc="instructions sent before each request", ui_kind="text", multiline=True, about="Instructions sent to the model before each request."),
+    ConfigField("max_subagent_depth", 4, validator="non_negative_int", label="Max depth", section="subagents", desc="maximum nested spawn depth", ui_kind="int", about="Maximum recursion depth for `spawn` (root is 0)."),
+    ConfigField("subagent_thread_pool_max_workers", 8, validator="positive_int", label="Parallel workers", section="subagents", desc="subagents per spawn batch", ui_kind="int", about="Max parallel children in one `spawn` batch."),
+    ConfigField("check_updates", True, validator="bool", label="Update checks", section="updates", desc="background check on one-shot runs", ui_kind="bool", about="When `true`, a one-shot `jarv <question>` run fires a non-blocking background update check."),
     ConfigField(
         "read_only_command_display",
         "fullscreen",
         validator="choices",
         choices=READ_ONLY_COMMAND_DISPLAY_CHOICES,
+        label="Read-only commands",
+        section="display",
+        desc="fullscreen temporary view or permanent print output",
+        ui_kind="choice",
+        settings_choices=tuple((value, value) for value in READ_ONLY_COMMAND_DISPLAY_CHOICES),
+        about="How `/help`, `/about`, `/usage`, and `/config` are displayed in an interactive terminal.",
     ),
     ConfigField(
         "tool_call_display",
         "auto",
         validator="choices",
         choices=TOOL_CALL_DISPLAY_CHOICES,
+        label="Tool calls",
+        section="display",
+        desc="resize-safe print layout or bordered fullscreen cards",
+        ui_kind="choice",
+        settings_choices=tuple((value, value) for value in TOOL_CALL_DISPLAY_CHOICES),
+        about="How agent tool calls are rendered.",
     ),
-    ConfigField("print_usage_after_agent", False, validator="bool"),
+    ConfigField("print_usage_after_agent", False, validator="bool", label="Print usage", section="display", desc="print token totals after completed agent runs", ui_kind="bool", about="When `true`, print a compact token usage line after each completed agent run."),
 )
 
 CONFIG_FIELD_BY_KEY = {field.key: field for field in CONFIG_FIELDS}
@@ -81,6 +121,32 @@ CONFIG_FIELD_BY_KEY = {field.key: field for field in CONFIG_FIELDS}
 
 def build_default_config() -> dict:
     return {field.key: copy.deepcopy(field.default) for field in CONFIG_FIELDS}
+
+
+def config_about_lines(config: dict | None = None) -> list[str]:
+    """Return /about documentation lines for documented config keys."""
+    config = config or build_default_config()
+    lines: list[str] = []
+    for field in CONFIG_FIELDS:
+        if not field.about:
+            continue
+        default = config.get(field.key, field.default)
+        if field.key == "model":
+            default_repr = f"`{default}`"
+        elif isinstance(default, str) and default:
+            default_repr = f"`{default}`"
+        elif isinstance(default, bool):
+            default_repr = "`true`" if default else "`false`"
+        else:
+            default_repr = f"`{default!r}`"
+        line = f"- `{field.key}` - {field.about}"
+        if field.key not in ("api_key", "api_keys", "system_prompt"):
+            line += f" Default: {default_repr}."
+        lines.append(line)
+    lines.append(
+        "- `service_tiers` - Per-provider processing tier. Values are `standard`, `flex`, or `priority`; missing providers use `standard`."
+    )
+    return lines
 
 
 def validate_config_fields(

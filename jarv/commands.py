@@ -13,6 +13,7 @@ from rich.text import Text
 
 from . import __version__
 from .config import CONFIG_DIR, CONFIG_FILE, DEFAULT_CONFIG, load_config, save_config, validate_config
+from .config_schema import config_about_lines
 from .display import console, flatten_headings, status_line
 from .history import (
     SESSIONS_DIR,
@@ -264,33 +265,7 @@ Config file: `{CONFIG_FILE}`
 
 Keys:
 
-- `provider` - API provider. Options: openai, openrouter, anthropic, gemini, groq, deepseek, together, fireworks, ollama, lm_studio, vllm. Default: `openai`.
-- `api_key` - API key. Can also be provided via provider-specific env vars (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.).
-- `base_url` - Custom API base URL. Overrides the provider's default endpoint.
-- `model` - Model name. Default: `{DEFAULT_CONFIG['model']}`.
-- `service_tiers` - Per-provider processing tier. Values are `standard`, `flex`, or `priority`; missing providers use `standard`.
-- `reasoning_effort` - Model-supported reasoning effort. Empty uses the provider/model default; `none` explicitly disables reasoning only where supported.
-- `max_history` - Maximum stored history items included as model context (item cap before token trimming). It does not delete saved history. Stored items include user messages, assistant messages, reasoning items, function calls, and function call outputs. Default: `{DEFAULT_CONFIG['max_history']}`.
-- `context_budget_ratio` - Share of the context window used for input. Default: `{DEFAULT_CONFIG['context_budget_ratio']}`.
-- `context_compaction_threshold` - Fill ratio that triggers history compaction. Default: `{DEFAULT_CONFIG['context_compaction_threshold']}`.
-- `context_output_reserve_ratio` - Context window share reserved for model output. Default: `{DEFAULT_CONFIG['context_output_reserve_ratio']}`.
-- `context_window_fallback` - Context window when model metadata is unknown. Default: `{DEFAULT_CONFIG['context_window_fallback']}`.
-- `max_stdin_chars` - Maximum piped stdin characters attached to a one-shot prompt. Default: `{DEFAULT_CONFIG['max_stdin_chars']}`.
-- `max_tool_output_chars` - Maximum generic tool output characters returned to the model and the default combined head/tail budget for `run_command`. Default: `{DEFAULT_CONFIG['max_tool_output_chars']}`.
-- `disabled_tools` - Tool names omitted from root agents and subagents. Use `/settings` to toggle `run_command`, `web_search`, `read`, `spawn`, and `ask_user`. Default: `[]`.
-- `command_timeout` - Seconds before a shell command is killed. Default: `{DEFAULT_CONFIG['command_timeout']}`.
-- `web_timeout` - Seconds before a web search or URL read is killed. Default: `{DEFAULT_CONFIG['web_timeout']}`.
-- `command_safety` - Command confirmation level. `all` = confirm every command, `risky` = confirm only dangerous commands (destructive ops, privilege escalation, network exfil, etc.), `none` = no confirmation. Default: `risky`.
-- `audit` - When `true`, flagged commands are sent to a fast LLM auditor (uses extra tokens). The auditor's verdict appears inside the safety panel. Works with both `risky` and `all` safety levels. Default: `true`.
-- `auditor_auto_approve` - When `true`, the auditor auto-approves commands it deems safe. When `false`, the auditor only shows a recommendation and the user always decides. Default: `true`.
-- `auditor_model` - Model used for the auditor. Empty = use the active model. Default: empty.
-- `system_prompt` - Instructions sent to the model before each request.
-- `max_subagent_depth` - Maximum recursion depth for `spawn` (root is 0). Default: `{DEFAULT_CONFIG['max_subagent_depth']}`.
-- `subagent_thread_pool_max_workers` - Max parallel children in one `spawn` batch. Default: `{DEFAULT_CONFIG['subagent_thread_pool_max_workers']}`.
-- `check_updates` - When `true`, a one-shot `jarv <question>` run fires a non-blocking background check against the active install channel (GitHub Releases for standalone builds, PyPI for Python installs). If a new version is found it is flagged locally and shown at the start of the next run. Default: `true`. Set to `false` to disable entirely. Heads-up mode (`jarv` with no args) and slash commands do not run this check.
-- `read_only_command_display` - How `/help`, `/about`, `/usage`, and `/config` are displayed in an interactive terminal. `fullscreen` uses a temporary alternate-screen view, compact when content fits and scrollable when it does not. `print` preserves permanent terminal output. Default: `fullscreen`.
-- `tool_call_display` - How agent tool calls are rendered. `auto` uses resize-safe `print` mode for one-shot runs and bordered `fullscreen` cards in heads-up mode. Explicit `print` and `fullscreen` modes override that choice. Default: `auto`.
-- `print_usage_after_agent` - When `true`, print a compact token usage line after each completed agent run. Default: `false`.
+{chr(10).join(config_about_lines(DEFAULT_CONFIG))}
 - `/usage` stores request-level provider and processing-tier cost provenance. Provider-reported cost is preferred; otherwise OpenRouter catalog pricing is marked estimated, while unknown and contract-priced requests remain explicit. System-wide views read future usage from `{CONFIG_DIR / "usage.json"}`.
 
 If the config file does not exist, jarv creates it and exits so you can add an API key.

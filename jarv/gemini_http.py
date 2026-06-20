@@ -9,11 +9,19 @@ from typing import Any
 from urllib.parse import quote
 
 from .cancellation import CancellationToken
+from .history_convert import (
+    append_grouped,
+    convert_tools,
+    iter_history_segments,
+    parse_json_arguments,
+)
 from .http_transport import (
     ProviderHTTPError,
     create_client as create_http_client,
     iter_sse_json,
+    open_stream_response,
     request_json,
+    request_json_response,
     response_error,
     send_with_retries,
 )
@@ -71,12 +79,7 @@ def list_models(client, *, max_retries: int = 0) -> dict:
 
 
 def _append_content(contents: list[dict], role: str, parts: list[dict]) -> None:
-    if not parts:
-        return
-    if contents and contents[-1]["role"] == role:
-        contents[-1]["parts"].extend(parts)
-    else:
-        contents.append({"role": role, "parts": parts})
+    append_grouped(contents, role, parts, content_key="parts")
 
 
 def _json_value(value: Any) -> Any:
@@ -120,20 +123,18 @@ def to_contents(input_items: list[dict]) -> list[dict]:
     contents: list[dict] = []
     call_names: dict[str, str] = {}
     call_ids: dict[str, str] = {}
-    i = 0
-    while i < len(input_items):
-        item = input_items[i]
-        role = item.get("role")
-        typ = item.get("type")
-        if role in ("user", "assistant"):
+    for segment in iter_history_segments(input_items):
+        kind = segment[0]
+        if kind == "message":
+            _, role, item = segment
             _append_content(
                 contents,
                 "model" if role == "assistant" else "user",
                 [{"text": str(item.get("content") or "")}],
             )
-            i += 1
             continue
-        if typ == "reasoning":
+        if kind == "reasoning":
+            item = segment[1]
             provider_content = item.get("provider_content")
             if isinstance(provider_content, list):
                 _append_content(
@@ -141,12 +142,11 @@ def to_contents(input_items: list[dict]) -> list[dict]:
                     "model",
                     [dict(part) for part in provider_content if isinstance(part, dict)],
                 )
-            i += 1
             continue
-        if typ == "function_call":
+        if kind == "function_calls":
+            calls = segment[1]
             parts = []
-            while i < len(input_items) and input_items[i].get("type") == "function_call":
-                call = input_items[i]
+            for call in calls:
                 call_id = str(call.get("call_id") or call.get("id") or "")
                 name = str(call.get("name") or "")
                 call_names[call_id] = name
@@ -171,16 +171,12 @@ def to_contents(input_items: list[dict]) -> list[dict]:
                             **({"id": call_id} if call_id else {}),
                         }
                     })
-                i += 1
             _append_content(contents, "model", parts)
             continue
-        if typ == "function_call_output":
+        if kind == "function_outputs":
+            outputs = segment[1]
             parts = []
-            while (
-                i < len(input_items)
-                and input_items[i].get("type") == "function_call_output"
-            ):
-                result = input_items[i]
+            for result in outputs:
                 output = result.get("output")
                 if isinstance(output, list):
                     response_body, response_parts = to_gemini_function_response_parts(output)
@@ -196,26 +192,21 @@ def to_contents(input_items: list[dict]) -> list[dict]:
                 if response_parts:
                     response["parts"] = response_parts
                 parts.append({"functionResponse": response})
-                i += 1
             _append_content(contents, "user", parts)
-            continue
-        i += 1
     return contents
 
 
 def to_tools(tools: list[dict]) -> list[dict]:
-    declarations = []
-    for tool in tools:
-        function = tool.get("function") if isinstance(tool.get("function"), dict) else tool
-        if tool.get("type") != "function" or not function.get("name"):
-            continue
-        declarations.append({
+    declarations = convert_tools(
+        tools,
+        convert_one=lambda _tool, function: {
             "name": function["name"],
             "description": function.get("description", ""),
             "parameters": _to_gemini_schema(
                 function.get("parameters", {"type": "object"})
             ),
-        })
+        },
+    )
     return [{"functionDeclarations": declarations}] if declarations else []
 
 
@@ -350,27 +341,15 @@ def stream_content(
     cancellation_token: CancellationToken | None = None,
     max_retries: int = 2,
 ) -> Iterator[dict]:
-    response = send_with_retries(
+    response, unregister = open_stream_response(
         client,
         "POST",
         _path(model, ":streamGenerateContent"),
+        provider="Gemini",
         json_body=payload,
         params={"alt": "sse"},
-        stream=True,
         cancellation_token=cancellation_token,
         max_retries=max_retries,
-    )
-    if response.status_code >= 400:
-        try:
-            response.read()
-            data = response.json()
-        except Exception:
-            data = None
-        response.close()
-        raise response_error("Gemini", response, data)
-    unregister = (
-        cancellation_token.register(response.close)
-        if cancellation_token is not None else lambda: None
     )
     final: dict[str, Any] = {"candidates": [], "usageMetadata": {}}
     served_tier = response.headers.get("x-gemini-service-tier")

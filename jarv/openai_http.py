@@ -10,6 +10,7 @@ from .http_transport import (
     ProviderHTTPError,
     create_client as create_http_client,
     iter_sse_json,
+    open_stream_response,
     request_json,
     response_error,
     send_with_retries,
@@ -98,27 +99,14 @@ def stream_response(
     cancellation_token: CancellationToken | None = None,
     max_retries: int = 2,
 ) -> Iterator[dict]:
-    response = send_with_retries(
+    response, unregister = open_stream_response(
         client,
         "POST",
         "/responses",
+        provider="OpenAI",
         json_body=payload,
-        stream=True,
         cancellation_token=cancellation_token,
         max_retries=max_retries,
-    )
-    if response.status_code >= 400:
-        try:
-            response.read()
-            data = response.json()
-        except Exception:
-            data = None
-        response.close()
-        raise response_error("OpenAI", response, data)
-
-    unregister = (
-        cancellation_token.register(response.close)
-        if cancellation_token is not None else lambda: None
     )
     try:
         for event_name, event in iter_sse_json("OpenAI", response):
@@ -210,26 +198,14 @@ def stream_chat(
     cancellation_token: CancellationToken | None = None,
     max_retries: int = 2,
 ) -> Iterator[dict]:
-    response = send_with_retries(
+    response, unregister = open_stream_response(
         client,
         "POST",
         "/chat/completions",
+        provider="OpenAI-compatible",
         json_body=payload,
-        stream=True,
         cancellation_token=cancellation_token,
         max_retries=max_retries,
-    )
-    if response.status_code >= 400:
-        try:
-            response.read()
-            data = response.json()
-        except Exception:
-            data = None
-        response.close()
-        raise response_error("OpenAI-compatible", response, data)
-    unregister = (
-        cancellation_token.register(response.close)
-        if cancellation_token is not None else lambda: None
     )
     try:
         for _event_name, chunk in iter_sse_json("OpenAI-compatible", response):

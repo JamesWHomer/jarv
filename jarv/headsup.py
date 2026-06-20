@@ -28,7 +28,7 @@ from .command_input import (
     requeue_key,
 )
 from .command_registry import parse_command_alias
-from .agent import (
+from .agent_ui import (
     _THINKING_FRAMES,
     response_wait_label,
     thought_complete_indicator,

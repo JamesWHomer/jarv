@@ -197,7 +197,7 @@ def _normalize_gemini_models(payload: dict) -> list[CatalogModel]:
 
 def discover_models(config: dict) -> list[CatalogModel]:
     """Fetch and normalize the current provider's visible model catalog."""
-    from .provider import create_client, get_backend
+    from .provider_registry import create_client, get_backend, list_models as registry_list_models
 
     provider = str(config.get("provider", "openai"))
     if provider not in LOCAL_PROVIDERS and not resolve_api_key(config):
@@ -216,18 +216,13 @@ def discover_models(config: dict) -> list[CatalogModel]:
     client = create_client(catalog_config)
     try:
         backend = get_backend(catalog_config)
+        data = registry_list_models(client, backend)
         if backend in ("responses", "openai_compat"):
-            from .openai_http import list_models
-
-            return _normalize_openai_models(list_models(client))
+            return _normalize_openai_models(data)
         if backend == "anthropic":
-            from .anthropic_http import list_models
-
-            return _normalize_anthropic_models(list_models(client))
+            return _normalize_anthropic_models(data)
         if backend == "gemini":
-            from .gemini_http import list_models
-
-            return _normalize_gemini_models(list_models(client))
+            return _normalize_gemini_models(data)
         return []
     finally:
         client.close()

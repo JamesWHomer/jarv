@@ -17,7 +17,7 @@ from .config import DEFAULT_CONFIG
 
 
 DUCKDUCKGO_HTML_URL = "https://html.duckduckgo.com/html/"
-PDF_MAGIC = b"%PDF-"
+from .pdf_extract import PDF_MAGIC, is_pdf_bytes, is_pdf_media_type
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_REDIRECTS = 5
 DEFAULT_SEARCH_RESULTS = 5
@@ -463,7 +463,7 @@ def _request_bytes(
                     max_response_bytes > MAX_RESPONSE_BYTES
                     and (
                         _is_textual_media_type(media_type)
-                        or _is_pdf_media_type(media_type)
+                        or is_pdf_media_type(media_type)
                     )
                 ):
                     effective_max_bytes = MAX_RESPONSE_BYTES
@@ -544,10 +544,6 @@ def _is_textual_media_type(media_type: str) -> bool:
         or media_type.endswith("+json")
         or media_type.endswith("+xml")
     )
-
-
-def _is_pdf_media_type(media_type: str) -> bool:
-    return media_type == "application/pdf"
 
 
 def search_web(

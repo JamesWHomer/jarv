@@ -84,7 +84,7 @@ def _next_visible_history_item(history: list, start_index: int) -> dict | None:
     return None
 
 
-def _tool_call_renderable(item: dict, output: str = ""):
+def _tool_call_renderable(item: dict, output: str = "", *, display_mode: str = "fullscreen"):
     name = str(item.get("name") or "unknown")
     args, raw_arguments = _tool_call_arguments(item)
     failed = (
@@ -113,7 +113,7 @@ def _tool_call_renderable(item: dict, output: str = ""):
             metadata=metadata,
             status=status,
             status_style=status_style,
-            display_mode="fullscreen",
+            display_mode=display_mode,
         )
 
     if name == "read" and args is not None:
@@ -136,7 +136,7 @@ def _tool_call_renderable(item: dict, output: str = ""):
             metadata="DuckDuckGo",
             status=status,
             status_style=status_style,
-            display_mode="fullscreen",
+            display_mode=display_mode,
         )
     elif name == "ask_user" and args is not None:
         parts: list = [Markdown(flatten_headings(str(args.get("question", ""))))]
@@ -180,7 +180,20 @@ def _tool_call_renderable(item: dict, output: str = ""):
         body,
         status=status,
         status_style=status_style,
-        display_mode="fullscreen",
+        display_mode=display_mode,
+    )
+
+
+def tool_call_card(item: dict, output: str = "", *, display_mode: str = "fullscreen"):
+    """Render a tool call as a Rich card (shared by history and live UI)."""
+    return _tool_call_renderable(item, output, display_mode=display_mode)
+
+
+def tool_call_card_from_args(name: str, args: dict, *, display_mode: str = "fullscreen"):
+    """Render a live tool card from parsed tool arguments."""
+    return tool_call_card(
+        {"name": name, "arguments": json.dumps(args, ensure_ascii=True)},
+        display_mode=display_mode,
     )
 
 

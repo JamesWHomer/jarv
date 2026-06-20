@@ -74,22 +74,16 @@ def _auditor_client_key(backend: str, config: dict, info: dict | None = None) ->
 
 
 def _get_auditor_client(backend: str, config: dict, info: dict | None = None):
+    from .provider_registry import create_client
+
     key = _auditor_client_key(backend, config, info)
     with _AUDITOR_CLIENTS_LOCK:
         client = _AUDITOR_CLIENTS.get(key)
         if client is None:
-            if backend == "anthropic":
-                from .anthropic_http import create_client
-
-                client = create_client(config, key[2])
-            elif backend == "gemini":
-                from .gemini_http import create_client
-
-                client = create_client(config, key[2])
-            else:
-                from .openai_http import create_client
-
-                client = create_client(config, key[2], key[3] or None)
+            probe = dict(config)
+            if backend in ("responses", "openai_compat") and info:
+                probe["base_url"] = info.get("base_url") or probe.get("base_url")
+            client = create_client(probe)
             _AUDITOR_CLIENTS[key] = client
         return client
 

@@ -8,8 +8,10 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Iterator
 
+from .history_convert import iter_history_segments, parse_json_arguments
 from .provider_catalog import KEY_PATTERNS, LOCAL_PROVIDERS, PROVIDERS
 from .provider_auth import resolve_api_key
+from .provider_registry import ProviderError, create_client, get_backend
 from .response_items import responses_input_id
 from .tool_schemas import strict_openai_tools
 from .tool_outputs import to_chat_tool_content
@@ -58,10 +60,6 @@ class ReasoningStarted:
 @dataclass
 class StreamDone:
     response: Any
-
-
-class ProviderError(Exception):
-    pass
 
 
 class RetryableStreamError(ProviderError):
@@ -259,66 +257,17 @@ def _events_from_recovered_response(
 # Helpers
 # ---------------------------------------------------------------------------
 
-def get_backend(config: dict) -> str:
-    provider_name = config.get("provider", "openai")
-    info = PROVIDERS.get(provider_name)
-    if info:
-        return info["backend"]
-    if config.get("base_url"):
-        return "openai_compat"
-    return "responses"
-
-
-def create_client(config: dict):
-    backend = get_backend(config)
-    api_key = resolve_api_key(config)
-
-    if backend in ("responses", "openai_compat"):
-        from .openai_http import create_client as create_openai_client
-
-        base_url = config.get("base_url")
-        if not base_url:
-            provider_name = config.get("provider", "openai")
-            info = PROVIDERS.get(provider_name, {})
-            base_url = info.get("base_url")
-        return create_openai_client(config, api_key, base_url)
-
-    if backend == "anthropic":
-        from .anthropic_http import create_client as create_anthropic_client
-
-        return create_anthropic_client(config, api_key)
-
-    if backend == "gemini":
-        from .gemini_http import create_client as create_gemini_client
-
-        return create_gemini_client(config, api_key)
-
-    raise ProviderError(f"Unknown backend: {backend}")
-
-
-# ---------------------------------------------------------------------------
-# Input format conversion (Responses API → Chat Completions messages)
-# ---------------------------------------------------------------------------
-
 def _to_chat_messages(instructions: str, input_items: list) -> list[dict]:
     messages: list[dict] = [{"role": "system", "content": instructions}]
-    i = 0
-    while i < len(input_items):
-        item = input_items[i]
-        role = item.get("role")
-        typ = item.get("type")
-
-        if role in ("user", "assistant"):
+    for segment in iter_history_segments(input_items):
+        kind = segment[0]
+        if kind == "message":
+            _, role, item = segment
             messages.append({"role": role, "content": item.get("content", "") or ""})
-            i += 1
-
-        elif typ == "reasoning":
-            i += 1
-
-        elif typ == "function_call":
+        elif kind == "function_calls":
+            calls = segment[1]
             tool_calls = []
-            while i < len(input_items) and input_items[i].get("type") == "function_call":
-                fc = input_items[i]
+            for fc in calls:
                 tool_calls.append({
                     "id": fc.get("call_id", fc.get("id", "")),
                     "type": "function",
@@ -327,23 +276,14 @@ def _to_chat_messages(instructions: str, input_items: list) -> list[dict]:
                         "arguments": fc.get("arguments", "{}"),
                     },
                 })
-                i += 1
             messages.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
-            while i < len(input_items) and input_items[i].get("type") == "function_call_output":
-                fco = input_items[i]
+        elif kind == "function_outputs":
+            for fco in segment[1]:
                 messages.append({
                     "role": "tool",
                     "tool_call_id": fco["call_id"],
                     "content": to_chat_tool_content(fco.get("output")),
                 })
-                i += 1
-
-        elif typ == "function_call_output":
-            i += 1
-
-        else:
-            i += 1
-
     return messages
 
 
@@ -646,6 +586,63 @@ def _stream_chat_completions(
 
 
 # ---------------------------------------------------------------------------
+# Backend: Anthropic / Gemini intermediate event mapping
+# ---------------------------------------------------------------------------
+
+def _map_dict_stream_events(
+    events: Iterator,
+    *,
+    combine_tool_start_done: bool = False,
+) -> Iterator:
+    """Map Anthropic/Gemini HTTP dict events to normalized provider dataclasses."""
+    reasoning_parts: list[dict] = []
+    for event in events:
+        event_type = event.get("type")
+        if event_type == "text_delta":
+            yield TextDelta(str(event.get("delta") or ""))
+        elif event_type == "reasoning_started":
+            yield ReasoningStarted(id=str(event.get("id") or ""))
+        elif event_type == "reasoning_part":
+            content = event.get("provider_content")
+            if isinstance(content, list):
+                reasoning_parts.extend(content)
+        elif event_type == "reasoning_done":
+            yield ReasoningDone(
+                id=str(event.get("id") or ""),
+                summary=[],
+                provider_content=(
+                    reasoning_parts if combine_tool_start_done else event.get("provider_content")
+                ),
+            )
+            if combine_tool_start_done:
+                reasoning_parts = []
+        elif event_type == "tool_call_started":
+            call_id = str(event.get("id") or "")
+            yield ToolCallStarted(
+                id=call_id,
+                call_id=call_id,
+                name=str(event.get("name") or ""),
+            )
+        elif event_type == "tool_call":
+            call_id = str(event.get("id") or f"call_{uuid.uuid4().hex[:12]}")
+            if combine_tool_start_done:
+                yield ToolCallStarted(
+                    id=call_id,
+                    call_id=call_id,
+                    name=str(event.get("name") or ""),
+                )
+            yield ToolCallDone(
+                id=call_id,
+                call_id=call_id,
+                name=str(event.get("name") or ""),
+                arguments=str(event.get("arguments") or "{}"),
+                provider_content=event.get("provider_content"),
+            )
+        elif event_type == "done":
+            yield StreamDone(response=event.get("response"))
+
+
+# ---------------------------------------------------------------------------
 # Backend: Anthropic Messages over direct HTTP
 # ---------------------------------------------------------------------------
 
@@ -672,34 +669,7 @@ def _stream_anthropic(
         cancellation_token=cancellation_token,
         max_retries=int(config.get("anthropic_max_retries", 2)),
     ):
-        event_type = event.get("type")
-        if event_type == "text_delta":
-            yield TextDelta(str(event.get("delta") or ""))
-        elif event_type == "reasoning_started":
-            yield ReasoningStarted(id=str(event.get("id") or ""))
-        elif event_type == "reasoning_done":
-            yield ReasoningDone(
-                id=str(event.get("id") or ""),
-                summary=[],
-                provider_content=event.get("provider_content"),
-            )
-        elif event_type == "tool_call_started":
-            call_id = str(event.get("id") or "")
-            yield ToolCallStarted(
-                id=call_id,
-                call_id=call_id,
-                name=str(event.get("name") or ""),
-            )
-        elif event_type == "tool_call":
-            call_id = str(event.get("id") or f"call_{uuid.uuid4().hex[:12]}")
-            yield ToolCallDone(
-                id=call_id,
-                call_id=call_id,
-                name=str(event.get("name") or ""),
-                arguments=str(event.get("arguments") or "{}"),
-            )
-        elif event_type == "done":
-            yield StreamDone(response=event.get("response"))
+        yield from _map_dict_stream_events([event])
 
 
 # ---------------------------------------------------------------------------
@@ -712,52 +682,23 @@ def _stream_gemini(
 ) -> Iterator:
     from .gemini_http import build_payload, stream_content
 
-    reasoning_parts: list[dict] = []
-    for event in stream_content(
-        client,
-        model,
-        build_payload(
-            config,
+    yield from _map_dict_stream_events(
+        stream_content(
+            client,
             model,
-            instructions,
-            tools,
-            input_items,
-            reasoning=reasoning,
+            build_payload(
+                config,
+                model,
+                instructions,
+                tools,
+                input_items,
+                reasoning=reasoning,
+            ),
+            cancellation_token=cancellation_token,
+            max_retries=int(config.get("gemini_max_retries", 2)),
         ),
-        cancellation_token=cancellation_token,
-        max_retries=int(config.get("gemini_max_retries", 2)),
-    ):
-        event_type = event.get("type")
-        if event_type == "text_delta":
-            yield TextDelta(str(event.get("delta") or ""))
-        elif event_type == "reasoning_started":
-            yield ReasoningStarted(id=str(event.get("id") or ""))
-        elif event_type == "reasoning_part":
-            content = event.get("provider_content")
-            if isinstance(content, list):
-                reasoning_parts.extend(content)
-        elif event_type == "reasoning_done":
-            yield ReasoningDone(
-                id=str(event.get("id") or ""),
-                summary=[],
-                provider_content=reasoning_parts,
-            )
-        elif event_type == "tool_call":
-            call_id = str(event.get("id") or f"call_{uuid.uuid4().hex[:12]}")
-            yield ToolCallStarted(
-                id=call_id,
-                call_id=call_id,
-                name=str(event.get("name") or ""),
-            )
-            yield ToolCallDone(
-                id=call_id,
-                call_id=call_id,
-                name=str(event.get("name") or ""),
-                arguments=str(event.get("arguments") or "{}"),
-                provider_content=event.get("provider_content"),
-            )
-        elif event_type == "done":
-            yield StreamDone(response=event.get("response"))
+        combine_tool_start_done=True,
+    )
 
 
 # ---------------------------------------------------------------------------

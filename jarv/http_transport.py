@@ -199,3 +199,73 @@ def iter_sse_json(provider: str, response) -> Iterator[tuple[str, dict[str, Any]
             raise ProviderHTTPError(provider, f"invalid SSE JSON: {exc}") from exc
         if isinstance(data, dict):
             yield event_name or str(data.get("type") or ""), data
+
+
+def open_stream_response(
+    client,
+    method: str,
+    path: str,
+    *,
+    provider: str,
+    json_body: dict | None = None,
+    params: dict | None = None,
+    cancellation_token: CancellationToken | None = None,
+    max_retries: int = 2,
+):
+    """POST (or other method) a streaming request and validate the HTTP status."""
+    response = send_with_retries(
+        client,
+        method,
+        path,
+        json_body=json_body,
+        params=params,
+        stream=True,
+        cancellation_token=cancellation_token,
+        max_retries=max_retries,
+    )
+    if response.status_code >= 400:
+        try:
+            response.read()
+            data = response.json()
+        except Exception:
+            data = None
+        response.close()
+        raise response_error(provider, response, data)
+    unregister = (
+        cancellation_token.register(response.close)
+        if cancellation_token is not None else lambda: None
+    )
+    return response, unregister
+
+
+def request_json_response(
+    provider: str,
+    client,
+    method: str,
+    path: str,
+    *,
+    json_body: dict | None = None,
+    params: dict | None = None,
+    cancellation_token: CancellationToken | None = None,
+    max_retries: int = 2,
+) -> dict:
+    """Send a non-streaming JSON request and return the parsed body."""
+    response = send_with_retries(
+        client,
+        method,
+        path,
+        json_body=json_body,
+        params=params,
+        stream=False,
+        cancellation_token=cancellation_token,
+        max_retries=max_retries,
+    )
+    try:
+        if response.status_code >= 400:
+            raise response_error(provider, response)
+        data = response.json()
+        if not isinstance(data, dict):
+            raise ProviderHTTPError(provider, "response was not a JSON object")
+        return data
+    finally:
+        response.close()

@@ -7,10 +7,20 @@ from collections.abc import Iterator
 from typing import Any
 
 from .cancellation import CancellationToken
+from .history_convert import (
+    append_grouped,
+    convert_tools,
+    iter_history_segments,
+    parse_json_arguments,
+)
 from .http_transport import (
     ProviderHTTPError,
+    create_client as create_http_client,
     iter_sse_json,
+    open_stream_response,
     request_json,
+    request_json_response,
+    response_error,
     send_with_retries,
 )
 from .tool_outputs import to_anthropic_tool_result_content
@@ -53,23 +63,16 @@ class AnthropicHTTPError(ProviderHTTPError):
 
 
 def create_client(config: dict, api_key: str):
-    """Create a persistent httpx client for Anthropic."""
-    import httpx
-
-    base_url = config.get("base_url") or ANTHROPIC_API_URL
-    timeout = httpx.Timeout(
-        float(config.get("anthropic_timeout", 600)),
-        connect=float(config.get("anthropic_connect_timeout", 10)),
-    )
-    return httpx.Client(
-        base_url=base_url.rstrip("/"),
-        headers={
+    return create_http_client(
+        config.get("base_url") or ANTHROPIC_API_URL,
+        {
             "x-api-key": api_key,
             "anthropic-version": ANTHROPIC_VERSION,
             "content-type": "application/json",
             "user-agent": "jarv",
         },
-        timeout=timeout,
+        timeout=float(config.get("anthropic_timeout", 600)),
+        connect_timeout=float(config.get("anthropic_connect_timeout", 10)),
     )
 
 
@@ -102,44 +105,28 @@ def list_models(client, *, max_retries: int = 0) -> dict:
 
 
 def _append_message(messages: list[dict], role: str, blocks: list[dict]) -> None:
-    if not blocks:
-        return
-    if messages and messages[-1]["role"] == role:
-        existing = messages[-1]["content"]
-        if isinstance(existing, list):
-            existing.extend(blocks)
-            return
-    messages.append({"role": role, "content": blocks})
+    append_grouped(messages, role, blocks)
 
 
 def _tool_input(arguments: Any) -> Any:
-    if not isinstance(arguments, str):
-        return arguments if arguments is not None else {}
-    try:
-        return json.loads(arguments or "{}")
-    except json.JSONDecodeError:
-        return {}
+    return parse_json_arguments(arguments)
 
 
 def to_messages(input_items: list[dict]) -> list[dict]:
     """Convert Jarv's Responses-style history to Anthropic content blocks."""
     messages: list[dict] = []
-    i = 0
-    while i < len(input_items):
-        item = input_items[i]
-        role = item.get("role")
-        typ = item.get("type")
-
-        if role in ("user", "assistant"):
+    for segment in iter_history_segments(input_items):
+        kind = segment[0]
+        if kind == "message":
+            _, role, item = segment
             _append_message(
                 messages,
                 role,
                 [{"type": "text", "text": str(item.get("content") or "")}],
             )
-            i += 1
             continue
-
-        if typ == "reasoning":
+        if kind == "reasoning":
+            item = segment[1]
             provider_content = item.get("provider_content")
             if isinstance(provider_content, list):
                 blocks = [
@@ -149,13 +136,11 @@ def to_messages(input_items: list[dict]) -> list[dict]:
                     and block.get("type") in ("thinking", "redacted_thinking")
                 ]
                 _append_message(messages, "assistant", blocks)
-            i += 1
             continue
-
-        if typ == "function_call":
+        if kind == "function_calls":
+            calls = segment[1]
             blocks = []
-            while i < len(input_items) and input_items[i].get("type") == "function_call":
-                call = input_items[i]
+            for call in calls:
                 call_id = str(call.get("call_id") or call.get("id") or "")
                 blocks.append({
                     "type": "tool_use",
@@ -163,37 +148,23 @@ def to_messages(input_items: list[dict]) -> list[dict]:
                     "name": str(call.get("name") or ""),
                     "input": _tool_input(call.get("arguments")),
                 })
-                i += 1
             _append_message(messages, "assistant", blocks)
             continue
-
-        if typ == "function_call_output":
+        if kind == "function_outputs":
+            outputs = segment[1]
             blocks = []
-            while (
-                i < len(input_items)
-                and input_items[i].get("type") == "function_call_output"
-            ):
-                result = input_items[i]
+            for result in outputs:
                 blocks.append({
                     "type": "tool_result",
                     "tool_use_id": str(result.get("call_id") or ""),
                     "content": to_anthropic_tool_result_content(result.get("output")),
                 })
-                i += 1
             _append_message(messages, "user", blocks)
-            continue
-
-        i += 1
-
     return messages
 
 
 def to_tools(tools: list[dict]) -> list[dict]:
-    result = []
-    for tool in tools:
-        function = tool.get("function") if isinstance(tool.get("function"), dict) else tool
-        if tool.get("type") != "function" or not function.get("name"):
-            continue
+    def convert_one(tool: dict, function: dict) -> dict:
         converted = {
             "name": function["name"],
             "description": function.get("description", ""),
@@ -202,8 +173,9 @@ def to_tools(tools: list[dict]) -> list[dict]:
         }
         if tool.get("cache_control"):
             converted["cache_control"] = tool["cache_control"]
-        result.append(converted)
-    return result
+        return converted
+
+    return convert_tools(tools, convert_one=convert_one)
 
 
 def _mark_last_block_cached(content: Any) -> list[dict]:
@@ -323,31 +295,6 @@ def build_payload(
     return sanitize_json_value(payload)
 
 
-def _response_error(response, data: dict | None = None) -> AnthropicHTTPError:
-    if data is None:
-        try:
-            data = response.json()
-        except Exception:
-            data = {}
-    error = data.get("error") if isinstance(data, dict) else None
-    error = error if isinstance(error, dict) else {}
-    try:
-        response_text = response.text
-    except Exception:
-        response_text = ""
-    message = str(error.get("message") or response_text or "request failed")
-    return AnthropicHTTPError(
-        message,
-        status_code=getattr(response, "status_code", None),
-        error_type=str(error.get("type") or "") or None,
-        request_id=(
-            response.headers.get("request-id")
-            or response.headers.get("x-request-id")
-            or (str(data.get("request_id")) if isinstance(data, dict) and data.get("request_id") else None)
-        ),
-    )
-
-
 def _provider_error(exc: ProviderHTTPError) -> AnthropicHTTPError:
     message = str(exc)
     prefix = "Anthropic API error"
@@ -361,6 +308,11 @@ def _provider_error(exc: ProviderHTTPError) -> AnthropicHTTPError:
     )
 
 
+def _response_error(response, data: dict | None = None) -> AnthropicHTTPError:
+    exc = response_error("Anthropic", response, data)
+    return _provider_error(exc)
+
+
 def create_message(
     client,
     payload: dict,
@@ -369,24 +321,16 @@ def create_message(
     max_retries: int = 2,
 ) -> dict:
     """Create one non-streaming Anthropic message."""
-    response = send_with_retries(
+    data = request_json_response(
+        "Anthropic",
         client,
         "POST",
         "/v1/messages",
         json_body=payload,
-        stream=False,
         cancellation_token=cancellation_token,
         max_retries=max_retries,
     )
-    try:
-        if response.status_code >= 400:
-            raise _response_error(response)
-        data = response.json()
-        if not isinstance(data, dict):
-            raise AnthropicHTTPError("response was not a JSON object")
-        return normalize_response(data)
-    finally:
-        response.close()
+    return normalize_response(data)
 
 
 def iter_sse(response) -> Iterator[tuple[str, dict]]:
@@ -436,28 +380,18 @@ def stream_message(
     max_retries: int = 2,
 ) -> Iterator[dict]:
     """Yield normalized protocol events from an Anthropic SSE message."""
-    response = send_with_retries(
-        client,
-        "POST",
-        "/v1/messages",
-        json_body=payload,
-        stream=True,
-        cancellation_token=cancellation_token,
-        max_retries=max_retries,
-    )
-    if response.status_code >= 400:
-        try:
-            response.read()
-            data = response.json()
-        except Exception:
-            data = None
-        response.close()
-        raise _response_error(response, data)
-
-    unregister = (
-        cancellation_token.register(response.close)
-        if cancellation_token is not None else lambda: None
-    )
+    try:
+        response, unregister = open_stream_response(
+            client,
+            "POST",
+            "/v1/messages",
+            provider="Anthropic",
+            json_body=payload,
+            cancellation_token=cancellation_token,
+            max_retries=max_retries,
+        )
+    except ProviderHTTPError as exc:
+        raise _provider_error(exc) from exc
     message: dict[str, Any] = {"content": [], "usage": {}}
     blocks: dict[int, dict] = {}
     try:

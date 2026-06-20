@@ -10,7 +10,7 @@ from .artifacts import ArtifactStore
 from .cancellation import CancellationToken, TurnCancelled
 from .config import DEFAULT_CONFIG
 from .model_catalog import get_image_output_capability
-from .pdf_extract import PdfExtractionError, extract_pdf_text, is_pdf_bytes
+from .pdf_extract import PdfExtractionError, extract_pdf_text, is_pdf_bytes, is_pdf_media_type
 from .retained_outputs import RetainedOutputStore
 from .shell import truncate_command_output
 from .tool_outputs import ToolOutput, image_data_url
@@ -193,10 +193,6 @@ def _image_media_type_from_suffix(value: str) -> str | None:
     return _IMAGE_EXTENSION_MEDIA_TYPES.get(suffix)
 
 
-def _is_pdf_media_type(value: str | None) -> bool:
-    return _normalized_media_type(value) == "application/pdf"
-
-
 def _is_pdf_path(value: str) -> bool:
     return Path(urlsplit(value).path or value).suffix.lower() == ".pdf"
 
@@ -307,7 +303,7 @@ def _resolve_source(
             f"Final URL: {web_bytes.final_url}",
             f"Content-Type: {web_bytes.media_type or 'unknown'}",
         )
-        if _is_pdf_media_type(web_bytes.media_type) or is_pdf_bytes(web_bytes.body):
+        if is_pdf_media_type(web_bytes.media_type) or is_pdf_bytes(web_bytes.body):
             if len(web_bytes.body) > MAX_RESPONSE_BYTES:
                 return f"[read error: response exceeds {MAX_RESPONSE_BYTES} byte limit]"
             return _source_from_pdf(

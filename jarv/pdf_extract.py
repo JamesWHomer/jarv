@@ -27,6 +27,12 @@ def is_pdf_bytes(data: bytes) -> bool:
     return data.startswith(PDF_MAGIC)
 
 
+def is_pdf_media_type(value: str | None) -> bool:
+    if not value:
+        return False
+    return value.split(";", 1)[0].strip().lower() == "application/pdf"
+
+
 def _load_pdf_reader_class() -> Any:
     global _PDF_READER_CLASS
     if _PDF_READER_CLASS is not None:

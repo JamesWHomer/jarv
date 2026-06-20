@@ -1,10 +1,11 @@
-"""Shared stream collection for root and subagent turns."""
+"""Shared stream collection and tool-round helpers for root and subagent turns."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
+from .context_budget import trim_turn_input
 from .provider import (
     ReasoningDone,
     ReasoningStarted,
@@ -14,6 +15,7 @@ from .provider import (
     ToolCallDone,
     response_output_text,
 )
+from .turn_records import append_reasoning_input_items, append_tool_result_input_items
 
 
 @dataclass
@@ -72,3 +74,42 @@ def collect_stream_response(
                 on_attempt_end(result, retry_stream)
         if on_retry is not None:
             on_retry()
+
+
+def run_tool_execution_round(
+    input_items: list,
+    stream_result: StreamCollection,
+    *,
+    model: str,
+    config: dict,
+    instructions: str,
+    tools: list,
+    execute_tool_calls_fn: Callable[[list, Callable], Any],
+    reasoning_kwargs: dict | None = None,
+    tool_result_kwargs: dict | None = None,
+) -> tuple[list, Any]:
+    """Append reasoning/tool results and trim input — shared root/subagent tool round."""
+    new_input: list = []
+    append_reasoning_input_items(
+        new_input,
+        stream_result.reasoning_items,
+        **(reasoning_kwargs or {}),
+    )
+
+    def append_tool_result(item, output) -> None:
+        append_tool_result_input_items(
+            new_input,
+            item,
+            output,
+            **(tool_result_kwargs or {}),
+        )
+
+    exec_result = execute_tool_calls_fn(new_input, append_tool_result)
+    trimmed = trim_turn_input(
+        input_items + new_input,
+        model=model,
+        config=config,
+        instructions=instructions,
+        tools=tools,
+    )
+    return trimmed, exec_result
