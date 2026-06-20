@@ -27,6 +27,7 @@ from .command_input import (
     mouse_capture,
     requeue_key,
 )
+from .command_registry import parse_command_alias
 from .agent import (
     _THINKING_FRAMES,
     response_wait_label,
@@ -71,25 +72,6 @@ _FULLSCREEN_SLASH_COMMANDS = frozenset({
     "/setup",
     "/usage",
 })
-
-_COMMAND_TAKES_REST = {
-    "setup": True,
-    "help": False,
-    "about": False,
-    "update": False,
-    "new": False,
-    "archive": False,
-    "session": True,
-    "sessions": True,
-    "history": False,
-    "usage": True,
-    "set": True,
-    "unset": True,
-    "config": False,
-    "settings": False,
-    "undo": True,
-    "redo": True,
-}
 
 _COMMAND_CONFIRM_YES = frozenset({"1", "c", "cmd", "command", "run", "y", "yes"})
 _SESSION_SWITCHING_SLASH_COMMANDS = frozenset({
@@ -760,13 +742,7 @@ class HeadsupApp:
         return None
 
     def _command_alias(self, first_word: str, rest: list[str]) -> tuple[str, list[str]] | None:
-        name = first_word.lower()
-        takes_rest = _COMMAND_TAKES_REST.get(name)
-        if takes_rest is None:
-            return None
-        if not takes_rest and rest:
-            return None
-        return f"/{name}", rest
+        return parse_command_alias(first_word, rest)
 
     def _confirm_command_alias(self, command: str, rest: list[str], full_input: str) -> bool:
         command_text = " ".join([command] + rest)

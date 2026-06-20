@@ -5,30 +5,14 @@ import sys
 import threading
 
 from . import __version__
+from .command_registry import (
+    CONFIG_MUTATING_COMMANDS,
+    build_dispatch,
+    command_takes_rest,
+)
 from .config import load_config, validate_config
 
 STDIN_LABEL = "Input from stdin"
-
-_CONFIG_MUTATING_COMMANDS = frozenset({"/set", "/unset", "/settings", "/setup"})
-
-_COMMAND_TAKES_REST = {
-    "setup": True,
-    "help": False,
-    "about": False,
-    "update": False,
-    "new": False,
-    "archive": False,
-    "session": True,
-    "sessions": True,
-    "history": False,
-    "usage": True,
-    "set": True,
-    "unset": True,
-    "config": False,
-    "settings": False,
-    "undo": True,
-    "redo": True,
-}
 
 
 def _console():
@@ -61,40 +45,7 @@ def _setup_nudge() -> None:
 
 
 def _lazy_commands():
-    from .commands import (
-        cmd_archive,
-        cmd_new,
-        cmd_config,
-        cmd_history,
-        cmd_redo,
-        cmd_sessions,
-        cmd_settings,
-        cmd_set,
-        cmd_undo,
-        cmd_unset,
-        cmd_update,
-        cmd_usage,
-        print_about,
-        print_help,
-    )
-    return {
-        "/setup":    (cmd_setup, False, True),
-        "/help":     (print_help, False, False),
-        "/about":    (print_about, False, False),
-        "/update":   (cmd_update, True, False),
-        "/new":      (cmd_new, True, False),
-        "/archive":  (cmd_archive, True, False),
-        "/session":  (cmd_sessions, True, True),
-        "/sessions": (cmd_sessions, True, True),
-        "/history":  (cmd_history, True, False),
-        "/usage":    (cmd_usage, False, True),
-        "/set":      (cmd_set, True, True),
-        "/unset":    (cmd_unset, True, True),
-        "/config":   (cmd_config, False, False),
-        "/settings": (cmd_settings, True, False),
-        "/undo":     (cmd_undo, True, True),
-        "/redo":     (cmd_redo, True, True),
-    }
+    return build_dispatch()
 
 
 def _run_slash_command(command: str, rest: list[str]) -> bool:
@@ -172,7 +123,7 @@ def _handle_heads_up_slash_command(
         if unknown_help_hint:
             console.print("[dim]Run [bold]/help[/bold] for a list of commands.[/dim]")
         return config, client
-    if args is not None and command in _CONFIG_MUTATING_COMMANDS:
+    if args is not None and command in CONFIG_MUTATING_COMMANDS:
         return _reload_heads_up_runtime(config, client, args)
     return config, client
 
@@ -188,7 +139,7 @@ def _maybe_command(first_word: str, rest: list[str]) -> tuple[bool, str, list[st
     None if they want to treat it as a regular message.
     """
     name = first_word.lower()
-    takes_rest = _COMMAND_TAKES_REST.get(name)
+    takes_rest = command_takes_rest(name)
     if takes_rest is None:
         return None
 
