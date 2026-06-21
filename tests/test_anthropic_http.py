@@ -8,6 +8,7 @@ from jarv.anthropic_http import (
     create_message,
     stream_message,
 )
+from jarv.orchestrator import RUN_COMMAND_TOOL, SPAWN_TOOL
 from jarv.provider import (
     ReasoningDone,
     ReasoningStarted,
@@ -164,6 +165,61 @@ def test_anthropic_omits_custom_input_examples():
 
     assert payload["tools"][0]["strict"] is True
     assert "input_examples" not in payload["tools"][0]
+
+
+def test_anthropic_tool_schema_omits_integer_bounds_without_mutating_tool():
+    payload = build_payload(
+        {"anthropic_prompt_caching": False},
+        "claude-sonnet-4-6",
+        "system",
+        [RUN_COMMAND_TOOL],
+        [{"role": "user", "content": "hi"}],
+    )
+
+    properties = payload["tools"][0]["input_schema"]["properties"]
+    head_chars = properties["head_chars"]
+    tail_chars = properties["tail_chars"]
+
+    assert head_chars["type"] == "integer"
+    assert "minimum" not in head_chars
+    assert "maximum" not in head_chars
+    assert tail_chars["type"] == "integer"
+    assert "minimum" not in tail_chars
+    assert "maximum" not in tail_chars
+    assert RUN_COMMAND_TOOL["parameters"]["properties"]["head_chars"]["minimum"] == 0
+    assert RUN_COMMAND_TOOL["parameters"]["properties"]["head_chars"]["maximum"] == 200000
+
+
+def test_anthropic_tool_schema_omits_array_and_string_constraints():
+    payload = build_payload(
+        {"anthropic_prompt_caching": False},
+        "claude-sonnet-4-6",
+        "system",
+        [SPAWN_TOOL],
+        [{"role": "user", "content": "hi"}],
+    )
+
+    schema = payload["tools"][0]["input_schema"]
+    children = schema["properties"]["children"]
+    child = children["items"]
+    label = child["properties"]["label"]
+    task = child["properties"]["task"]
+    deps = child["properties"]["deps"]
+
+    assert "additionalProperties" not in schema
+    assert children["type"] == "array"
+    assert "minItems" not in children
+    assert "maxItems" not in children
+    assert "additionalProperties" not in child
+    assert label["type"] == "string"
+    assert "minLength" not in label
+    assert "maxLength" not in label
+    assert task["type"] == "string"
+    assert "minLength" not in task
+    assert "maxLength" not in task
+    assert deps["type"] == "array"
+    assert "maxItems" not in deps
+    assert SPAWN_TOOL["parameters"]["properties"]["children"]["maxItems"] == 16
 
 
 def test_build_payload_applies_prompt_caching_breakpoints():

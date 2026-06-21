@@ -92,7 +92,7 @@ class HeadsupTests(unittest.TestCase):
         app, test_console, output = self._app(width=80)
 
         rendered = self._rendered_text(app, test_console, output, width=80, height=24)
-        self.assertIn("your always-on terminal copilot", rendered)
+        self.assertIn("type a message to begin", rendered)
         self.assertIn("\u2588", rendered)
         self.assertNotIn("Heads-up mode. Type /help for commands.", rendered)
 
@@ -100,7 +100,7 @@ class HeadsupTests(unittest.TestCase):
         self.assertTrue(app._idle_anim_stop.is_set())
 
         rendered_after = self._rendered_text(app, test_console, output, width=80, height=24)
-        self.assertNotIn("your always-on terminal copilot", rendered_after)
+        self.assertNotIn("type a message to begin", rendered_after)
         self.assertIn("first message", rendered_after)
         self.assertIn("Heads-up mode. Type /help for commands.", rendered_after)
 
@@ -894,12 +894,22 @@ class HeadsupTests(unittest.TestCase):
                 else:
                     self.assertNotIn("stop", calls)
                     self.assertNotIn(("start", True), calls)
-                    self.assertTrue(
-                        any(
-                            getattr(entry.renderable, "plain", "").strip() == f"handled {command}"
-                            for entry in app.entries
+                    if command == "/new":
+                        self.assertFalse(
+                            any(
+                                getattr(entry.renderable, "plain", "").strip()
+                                == f"handled {command}"
+                                for entry in app.entries
+                            )
                         )
-                    )
+                    else:
+                        self.assertTrue(
+                            any(
+                                getattr(entry.renderable, "plain", "").strip()
+                                == f"handled {command}"
+                                for entry in app.entries
+                            )
+                        )
 
     def test_quick_slash_command_does_not_capture_live_frame(self):
         calls = []
@@ -954,7 +964,7 @@ class HeadsupTests(unittest.TestCase):
         self.assertIn("refresh", calls)
 
     def test_new_refreshes_session_context_and_clears_visible_transcript(self):
-        app, test_console, output = self._app()
+        app, test_console, output = self._app(width=80)
         old_context = SimpleNamespace(
             session_id="old-session",
             history_file=Path("history-old.json"),
@@ -981,13 +991,86 @@ class HeadsupTests(unittest.TestCase):
             app._run_slash("/new", [])
 
         rendered = self._entry_text(app)
-        screen = self._rendered_text(app, test_console, output)
+        screen = self._rendered_text(app, test_console, output, height=24)
         self.assertEqual(app.session_context.session_id, "new-session")
         self.assertEqual(app.usage_path, Path("usage-new.json"))
         self.assertNotIn("new session ready", rendered)
-        self.assertIn("new session ready", screen)
+        self.assertNotIn("new session ready", screen)
+        self.assertNotIn("Heads-up mode. Type /help for commands.", screen)
+        self.assertIn("\u2588", screen)
         self.assertNotIn("old visible message", rendered)
         self.assertNotIn("old visible reply", rendered)
+        self.assertFalse(app._idle_anim_stop.is_set())
+
+    def test_new_restarts_idle_animation_thread_in_active_headsup(self):
+        app, _test_console, _output = self._app()
+        old_context = SimpleNamespace(
+            session_id="old-session",
+            history_file=Path("history-old.json"),
+        )
+        new_context = SimpleNamespace(
+            session_id="new-session",
+            history_file=Path("history-new.json"),
+        )
+        app.session_context = old_context
+        app.usage_path = Path("usage-old.json")
+        app.live = self._FakeLive()
+        app._foreground_input_active = True
+        app.add_user_message("old visible message")
+        self.assertTrue(app._idle_anim_stop.is_set())
+
+        def handle_slash(command, rest, config, client, args, hint):
+            app.console.print("new session ready")
+            return config, client
+
+        app.handle_slash = handle_slash
+
+        with (
+            patch("jarv.headsup.prepare_session_context", return_value=new_context),
+            patch("jarv.headsup.load_history", return_value=[]),
+        ):
+            try:
+                app._run_slash("/new", [])
+                self.assertTrue(
+                    self._wait_for(
+                        lambda: app._idle_anim_thread is not None
+                        and app._idle_anim_thread.is_alive()
+                    )
+                )
+                self.assertFalse(app._idle_anim_stop.is_set())
+            finally:
+                app._idle_anim_stop.set()
+                thread = app._idle_anim_thread
+                if thread is not None:
+                    thread.join(timeout=0.5)
+                app._foreground_input_active = False
+
+    def test_new_on_already_empty_session_still_shows_intro(self):
+        app, test_console, output = self._app(width=80)
+        context = SimpleNamespace(
+            session_id="current-session",
+            history_file=Path("history-current.json"),
+        )
+        app.session_context = context
+        app.usage_path = Path("usage-current.json")
+
+        def handle_slash(command, rest, config, client, args, hint):
+            app.console.print("Already on a new session.")
+            return config, client
+
+        app.handle_slash = handle_slash
+
+        with (
+            patch("jarv.headsup.prepare_session_context", return_value=context),
+            patch("jarv.headsup.load_history", return_value=[]),
+        ):
+            app._run_slash("/new", [])
+
+        screen = self._rendered_text(app, test_console, output, height=24)
+        self.assertNotIn("Already on a new session.", screen)
+        self.assertNotIn("Heads-up mode. Type /help for commands.", screen)
+        self.assertIn("\u2588", screen)
+        self.assertFalse(app._idle_anim_stop.is_set())
 
     def test_undo_syncs_visible_transcript_from_updated_history(self):
         app, _test_console, _output = self._app()

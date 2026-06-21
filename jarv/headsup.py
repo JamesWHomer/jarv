@@ -614,15 +614,28 @@ class HeadsupApp:
         self._idle_anim_thread = thread
         thread.start()
 
+    def _restart_idle_animation(self) -> None:
+        thread = self._idle_anim_thread
+        self._idle_anim_stop.set()
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=0.2)
+        self._idle_anim_thread = None
+        self._idle_anim_started_at = time.perf_counter()
+        self._idle_anim_stop.clear()
+        if self._foreground_input_active:
+            self._start_idle_animation()
+
     def _idle_animation_loop(self) -> None:
         # ~14 fps; the wait() both paces the loop and exits promptly on stop.
+        current = threading.current_thread()
         while not self._idle_anim_stop.wait(1 / 14):
             if not self._foreground_input_active:
                 continue
             if not self._idle_animation_active():
                 break
             self.refresh()
-        self._idle_anim_thread = None
+        if self._idle_anim_thread is current:
+            self._idle_anim_thread = None
 
     def add_user_message(self, query: str) -> None:
         line = Text()
@@ -1115,6 +1128,12 @@ class HeadsupApp:
         if command in _HISTORY_SYNC_SLASH_COMMANDS:
             self._refresh_session_context()
             self._sync_transcript_from_history(notice)
+            return True
+        if command == "/new":
+            self._refresh_session_context()
+            self._sync_transcript_from_history()
+            self._restart_idle_animation()
+            self.set_prompt_notice(None)
             return True
         if command in _SESSION_SWITCHING_SLASH_COMMANDS:
             changed = self._refresh_session_context()

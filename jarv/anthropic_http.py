@@ -23,6 +23,7 @@ from .http_transport import (
     response_error,
     send_with_retries,
 )
+from .tool_schemas import anthropic_tool_schema
 from .tool_outputs import to_anthropic_tool_result_content
 from .unicode_safety import sanitize_json_value
 
@@ -168,7 +169,9 @@ def to_tools(tools: list[dict]) -> list[dict]:
         converted = {
             "name": function["name"],
             "description": function.get("description", ""),
-            "input_schema": function.get("parameters", {"type": "object"}),
+            "input_schema": anthropic_tool_schema(
+                function.get("parameters", {"type": "object"})
+            ),
             "strict": bool(function.get("strict", True)),
         }
         if tool.get("cache_control"):

@@ -61,6 +61,36 @@ def _openai_strict_schema(schema: Any) -> Any:
     return out
 
 
+_ANTHROPIC_UNSUPPORTED_SCHEMA_KEYS = {
+    "additionalProperties",
+    "exclusiveMaximum",
+    "exclusiveMinimum",
+    "maximum",
+    "maxItems",
+    "maxLength",
+    "minimum",
+    "minItems",
+    "minLength",
+    "multipleOf",
+    "pattern",
+    "uniqueItems",
+}
+
+
+def anthropic_tool_schema(schema: Any) -> Any:
+    """Return an Anthropic-compatible copy of a tool input schema."""
+    if isinstance(schema, list):
+        return [anthropic_tool_schema(item) for item in schema]
+    if not isinstance(schema, dict):
+        return deepcopy(schema)
+
+    return {
+        key: anthropic_tool_schema(value)
+        for key, value in schema.items()
+        if key not in _ANTHROPIC_UNSUPPORTED_SCHEMA_KEYS
+    }
+
+
 def strict_openai_tools(tools: list[dict]) -> list[dict]:
     """Return tools in OpenAI strict schema form without mutating callers."""
     strict_tools = []

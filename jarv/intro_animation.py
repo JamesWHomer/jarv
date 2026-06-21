@@ -1,6 +1,6 @@
 """Idle intro animation for heads-up mode.
 
-Renders a self-contained, colourful welcome animation into the empty
+Renders a self-contained, minimalistic welcome animation into the empty
 transcript area of heads-up mode until the user sends their first message.
 
 The public entry point :func:`render_intro` is pure: it takes the available
@@ -11,12 +11,10 @@ zero startup cost to heads-up mode.
 
 The composition, back to front:
 
-* a parallax, drifting, twinkling starfield;
-* occasional shooting stars that streak past and dive behind the wordmark;
-* a staged entrance (logo wipes in -> wave grows -> tagline/hint type in);
-* the ``JARV`` block wordmark with a sweeping rainbow gradient, a soft glow
-  aura, and intermittent sparkle glints;
-* an animated equalizer wave bar, a shimmering tagline, and a pulsing hint.
+* a quiet, static starfield that gently twinkles across the whole canvas;
+* the ``JARV`` block wordmark with a smooth colour gradient and a soft sheen
+  that sweeps across it;
+* a slim animated wave bar and a single pulsing hint line.
 """
 
 from __future__ import annotations
@@ -68,28 +66,19 @@ _GLYPH_GAP = 2
 _LOGO_W = len(_LOGO_ORDER) * _GLYPH_W + (len(_LOGO_ORDER) - 1) * _GLYPH_GAP
 
 _WAVE_BLOCKS = "▁▂▃▄▅▆▇█"
-# All width-1 across common terminals; kept deliberately ASCII-friendly.
+# All width-1 across common terminals.
 _STAR_CHARS = ("·", "·", "·", "•", "⋆", "*", "+")
-_GLOW_CHAR = "░"
 
-_TAGLINE = "your always-on terminal copilot"
 _HINT_WIDE = "type a message to begin   ·   /help for commands"
 _HINT_NARROW = "type to begin · /help"
 
-_TAG_BASE = (86, 166, 214)
-_TAG_HILITE = (236, 246, 255)
-_TYPE_COLOR = (120, 200, 235)
-_CARET_COLOR = (236, 246, 255)
 _WHITE = (236, 246, 255)
 
 # Entrance stage windows, in seconds.
 _LOGO_IN = (0.0, 1.1)
-_WAVE_IN = (0.7, 1.5)
-_TAG_IN = (1.35, 2.15)
-_HINT_IN = (1.9, 2.7)
+_WAVE_IN = (0.7, 1.6)
+_HINT_IN = (1.4, 2.2)
 _WIPE_EDGE = 6.0
-
-_N_COMETS = 3
 
 
 def _hex(r: int, g: int, b: int) -> str:
@@ -129,40 +118,23 @@ def _stage(t: float, span: tuple[float, float]) -> float:
 
 @lru_cache(maxsize=16)
 def _starfield(width: int, height: int):
-    """Deterministic star layout for a given size (cached, never mutated).
+    """Deterministic, static star layout for a given size (cached, never mutated).
 
-    Each star carries a ``depth`` in ``[0, 1]`` driving parallax drift speed and
-    brightness, so nearer stars sweep faster and shine brighter.
+    Each star carries a twinkle phase/speed so it pulses in place; there is no
+    drift, so the field stays put while individual stars flicker on and off.
     """
     rng = random.Random((width * 73856093) ^ (height * 19349663))
-    count = max(6, (width * height) // 24)
+    count = max(5, (width * height) // 44)
     stars = []
     for _ in range(count):
-        x = rng.uniform(0, width)
+        x = rng.randrange(width)
         y = rng.randrange(height)
         phase = rng.uniform(0.0, math.tau)
-        speed = rng.uniform(1.2, 3.6)
-        depth = rng.random() ** 1.5
+        speed = rng.uniform(0.35, 0.95)
         char = rng.choice(_STAR_CHARS)
         tint = rng.uniform(0.0, 1.0)
-        stars.append((x, y, phase, speed, depth, char, tint))
+        stars.append((x, y, phase, speed, char, tint))
     return tuple(stars)
-
-
-@lru_cache(maxsize=16)
-def _comets(width: int, height: int):
-    """Deterministic shooting-star schedule for a given size."""
-    rng = random.Random((width * 2654435761) ^ (height * 40503))
-    comets = []
-    for _ in range(_N_COMETS):
-        y_start = rng.randrange(0, max(1, height // 2))
-        y_end = y_start + rng.randrange(max(2, height // 3), max(3, height))
-        period = rng.uniform(7.0, 13.0)
-        offset = rng.uniform(0.0, 1.0)
-        active = rng.uniform(0.1, 0.18)
-        length = rng.randint(4, 7)
-        comets.append((y_start, y_end, period, offset, active, length))
-    return tuple(comets)
 
 
 def _place(chars, colors, y: int, x: int, ch: str, color: str | None) -> None:
@@ -182,54 +154,37 @@ def _place_text(chars, colors, y: int, text: str, color_fn, *, center_len: int |
         _place(chars, colors, y, x0 + i, ch, _hex(*col) if isinstance(col, tuple) else col)
 
 
-def _clear_band(chars, colors, y0: int, y1: int) -> None:
+def _clear_box(chars, colors, y0: int, y1: int, x0: int, x1: int) -> None:
     width = len(chars[0])
     for y in range(max(0, y0), min(len(chars), y1)):
-        for x in range(width):
+        for x in range(max(0, x0), min(width, x1)):
             chars[y][x] = " "
             colors[y][x] = None
 
 
 def _draw_starfield(chars, colors, t: float, height: int, width: int) -> None:
-    for (x0, y, phase, speed, depth, char, tint) in _starfield(width, height):
-        twinkle = 0.5 + 0.5 * math.sin(t * speed + phase)
-        b = twinkle * (0.4 + 0.6 * depth)
-        if b < 0.16:
+    for (x, y, phase, speed, char, tint) in _starfield(width, height):
+        # Slow, deep twinkle. Brightness ramps up from zero at the threshold so
+        # stars fade in and out gradually instead of popping into existence; the
+        # slow part of the sine near the trough keeps the fades long and gentle.
+        b = 0.5 + 0.5 * math.sin(t * speed + phase)
+        if b < 0.15:
             continue
-        drift = 0.4 + depth * 2.4
-        x = int((x0 - t * drift) % width)
-        val = int(55 + 185 * b)
+        norm = (b - 0.15) / 0.85
+        val = int(235 * norm)
+        if val < 6:
+            continue
         r = int(val * (0.5 + 0.28 * tint))
-        g = int(val * (0.68 + 0.20 * tint))
+        g = int(val * (0.68 + 0.22 * tint))
         _place(chars, colors, y, x, char, _hex(r, g, val))
-
-
-def _draw_comets(chars, colors, t: float, height: int, width: int) -> None:
-    span = width + 12
-    for (y_start, y_end, period, offset, active, length) in _comets(width, height):
-        phase = ((t / period) + offset) % 1.0
-        if phase >= active:
-            continue
-        lp = phase / active
-        hx = -length + lp * span
-        hy = y_start + lp * (y_end - y_start)
-        dx = span
-        dy = y_end - y_start
-        mag = math.hypot(dx, dy) or 1.0
-        ux, uy = dx / mag, dy / mag
-        for i in range(length):
-            px = int(round(hx - ux * i))
-            py = int(round(hy - uy * i))
-            f = 1.0 - i / length
-            color = _mix((36, 54, 86), _WHITE, f * f)
-            ch = "*" if i == 0 else ("·" if i > length // 2 else "•")
-            _place(chars, colors, py, px, ch, _hex(*color))
 
 
 def _draw_logo(chars, colors, top: int, t: float, width: int, reveal: float) -> None:
     col_start = (width - _LOGO_W) // 2
     wipe_pos = _ease_out(reveal) * (_LOGO_W + _WIPE_EDGE)
     settled = reveal >= 1.0
+    # A soft highlight that sweeps left-to-right across the wordmark.
+    sheen = (t * 6.0) % (_LOGO_W + 26.0) - 13.0
     for gi, letter in enumerate(_LOGO_ORDER):
         glyph = _LOGO[letter]
         gx = gi * (_GLYPH_W + _GLYPH_GAP)
@@ -242,42 +197,17 @@ def _draw_logo(chars, colors, top: int, t: float, width: int, reveal: float) -> 
                 dist = wipe_pos - abs_cx
                 if dist <= 0:
                     continue
-                hue = (abs_cx / _LOGO_W) * 0.85 + t * 0.13 + ry * 0.02
-                val = 0.78 + 0.22 * math.sin(t * 2.6 + abs_cx * 0.22)
-                rgb = _hsv_rgb(hue, 0.88, val)
+                # Smooth, slowly drifting gradient across the width.
+                hue = (abs_cx / _LOGO_W) * 0.74 + 0.55 + t * 0.045
+                rgb = _hsv_rgb(hue, 0.8, 0.92)
                 lead = max(0.0, 1.0 - dist / _WIPE_EDGE)
                 if lead > 0:
-                    rgb = _mix(rgb, _WHITE, lead * 0.85)
+                    rgb = _mix(rgb, _WHITE, lead * 0.9)
                 elif settled:
-                    glint = math.sin(t * 3.0 + abs_cx * 12.9 + ry * 7.3)
-                    if glint > 0.972:
-                        rgb = _mix(rgb, _WHITE, (glint - 0.972) / 0.028)
+                    s = 1.0 - abs(abs_cx - sheen) / 3.5
+                    if s > 0:
+                        rgb = _mix(rgb, _WHITE, s * 0.45)
                 _place(chars, colors, top + ry, col_start + abs_cx, "█", _hex(*rgb))
-
-
-def _draw_glow(chars, colors, top: int, t: float, width: int) -> None:
-    col_start = (width - _LOGO_W) // 2
-    y0, y1 = top - 1, top + _LOGO_H
-    x0, x1 = col_start - 1, col_start + _LOGO_W
-    for y in range(y0, y1 + 1):
-        if not (0 <= y < len(chars)):
-            continue
-        for x in range(x0, x1 + 1):
-            if not (0 <= x < width) or chars[y][x] != " ":
-                continue
-            near = False
-            for dy in (-1, 0, 1):
-                for dx in (-1, 0, 1):
-                    ny, nx = y + dy, x + dx
-                    if 0 <= ny < len(chars) and 0 <= nx < width and chars[ny][nx] == "█":
-                        near = True
-                        break
-                if near:
-                    break
-            if near:
-                hue = ((x - col_start) / _LOGO_W) * 0.85 + t * 0.13
-                pulse = 0.16 + 0.07 * math.sin(t * 2.2 + x * 0.3)
-                _place(chars, colors, y, x, _GLOW_CHAR, _hsv_hex(hue, 0.65, pulse + 0.12))
 
 
 def _draw_wave(chars, colors, y: int, t: float, width: int, grow: float) -> None:
@@ -287,24 +217,15 @@ def _draw_wave(chars, colors, y: int, t: float, width: int, grow: float) -> None
     for c in range(_LOGO_W):
         if abs(c - center) > reach:
             continue
-        level = (math.sin(c * 0.36 + t * 3.3) + 1.0) / 2.0
+        level = (math.sin(c * 0.36 + t * 2.6) + 1.0) / 2.0
         idx = int(level * (len(_WAVE_BLOCKS) - 1))
-        hue = (c / _LOGO_W) * 0.85 + t * 0.13
-        _place(chars, colors, y, col_start + c, _WAVE_BLOCKS[idx], _hsv_hex(hue, 0.7, 0.5 + 0.32 * level))
-
-
-def _tag_color_fn(t: float, length: int):
-    hl = (t * 9.0) % (length + 16) - 8.0
-
-    def fn(i: int, ch: str):
-        return _mix(_TAG_BASE, _TAG_HILITE, 1.0 - abs(i - hl) / 5.0)
-
-    return fn
+        hue = (c / _LOGO_W) * 0.74 + 0.55 + t * 0.045
+        _place(chars, colors, y, col_start + c, _WAVE_BLOCKS[idx], _hsv_hex(hue, 0.62, 0.4 + 0.28 * level))
 
 
 def _hint_color_fn(t: float):
-    pulse = 0.5 + 0.5 * math.sin(t * 1.6)
-    color = _mix((70, 86, 104), (150, 176, 198), pulse)
+    pulse = 0.5 + 0.5 * math.sin(t * 1.5)
+    color = _mix((68, 84, 102), (148, 174, 196), pulse)
 
     def fn(i: int, ch: str):
         return color
@@ -324,7 +245,7 @@ def _draw_typed_line(chars, colors, y: int, full: str, t: float, stage: float, b
     text = shown + _caret(t)
 
     def fn(i: int, ch: str):
-        return _CARET_COLOR if ch == "▌" else base_color
+        return _WHITE if ch == "▌" else base_color
 
     _place_text(chars, colors, y, text, fn, center_len=len(full) + 1)
 
@@ -364,51 +285,51 @@ def render_intro(width: int, height: int, elapsed: float) -> list[Text] | None:
     chars = [[" "] * width for _ in range(height)]
     colors: list[list[str | None]] = [[None] * width for _ in range(height)]
 
+    # Stars fill the whole canvas; the wordmark and hint are drawn on top, with
+    # only their tight bounding boxes cleared so stars remain at the sides.
     _draw_starfield(chars, colors, t, height, width)
-    _draw_comets(chars, colors, t, height, width)
 
     big = width >= _LOGO_W + 2 and height >= 11
     hint = _HINT_WIDE if width >= len(_HINT_WIDE) else _HINT_NARROW
 
     if big:
-        block_h = _LOGO_H + 1 + 1 + 1 + 1 + 1 + 1  # logo, gap, wave, gap, tag, gap, hint
+        block_h = _LOGO_H + 1 + 1 + 1 + 1  # logo, gap, wave, gap, hint
         top = max(0, (height - block_h) // 2)
-        _clear_band(chars, colors, top - 1, top + block_h + 1)
+        col_start = (width - _LOGO_W) // 2
 
+        _clear_box(chars, colors, top, top + _LOGO_H, col_start, col_start + _LOGO_W)
         _draw_logo(chars, colors, top, t, width, _stage(t, _LOGO_IN))
-        _draw_glow(chars, colors, top, t, width)
 
         wave_y = top + _LOGO_H + 1
         _draw_wave(chars, colors, wave_y, t, width, _stage(t, _WAVE_IN))
 
-        tag_y = wave_y + 2
+        hint_y = wave_y + 2
+        hx = (width - len(hint)) // 2
+        _clear_box(chars, colors, hint_y, hint_y + 1, hx - 1, hx + len(hint) + 1)
         _draw_typed_line(
-            chars, colors, tag_y, _TAGLINE, t, _stage(t, _TAG_IN),
-            _TYPE_COLOR, _tag_color_fn(t, len(_TAGLINE)),
-        )
-        _draw_typed_line(
-            chars, colors, tag_y + 2, hint, t, _stage(t, _HINT_IN),
+            chars, colors, hint_y, hint, t, _stage(t, _HINT_IN),
             (110, 140, 165), _hint_color_fn(t),
         )
     else:
         title = "J A R V"
-        block_h = 5
+        block_h = 3
         top = max(0, (height - block_h) // 2)
-        _clear_band(chars, colors, top - 1, top + block_h + 1)
+        tx = (width - len(title)) // 2
+        _clear_box(chars, colors, top, top + 1, tx - 1, tx + len(title) + 1)
 
         reveal = _ease_out(_stage(t, _LOGO_IN))
 
         def title_fn(i: int, ch: str):
-            return _hsv_rgb(i / max(1, len(title)) * 0.8 + t * 0.2, 0.9, 0.95)
+            return _hsv_rgb(i / max(1, len(title)) * 0.74 + 0.55 + t * 0.045, 0.8, 0.95)
 
         shown = title[: max(0, int(reveal * len(title)))] if reveal < 1.0 else title
         _place_text(chars, colors, top, shown, title_fn, center_len=len(title))
+
+        hint_y = top + 2
+        hx = (width - len(hint)) // 2
+        _clear_box(chars, colors, hint_y, hint_y + 1, hx - 1, hx + len(hint) + 1)
         _draw_typed_line(
-            chars, colors, top + 2, _TAGLINE, t, _stage(t, _TAG_IN),
-            _TYPE_COLOR, _tag_color_fn(t, len(_TAGLINE)),
-        )
-        _draw_typed_line(
-            chars, colors, top + 4, hint, t, _stage(t, _HINT_IN),
+            chars, colors, hint_y, hint, t, _stage(t, _HINT_IN),
             (110, 140, 165), _hint_color_fn(t),
         )
 
