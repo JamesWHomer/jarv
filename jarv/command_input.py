@@ -27,11 +27,18 @@ _MOUSE_WHEEL_KEYS = {
 }
 _POSIX_INPUT_POLL_INTERVAL = 0.1
 _WINDOWS_ESCAPE_SEQUENCE_TIMEOUT = 0.03
+_WINDOWS_CAPTURED_ESCAPE_SEQUENCE_TIMEOUT = 0.12
 _LAST_TERMINAL_SIZE: tuple[int, int] | None = None
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _SGR_MOUSE_TEXT_RE = re.compile(r"(?:\x1b)?\[<\d+;\d+;\d+[Mm]")
 _MOUSE_CAPTURE_ACTIVE_DEPTH = 0
 _WINDOWS_MOUSE_CAPTURE_DEPTH = 0
+_WINDOWS_ENABLE_ECHO_INPUT = 0x0004
+_WINDOWS_ENABLE_EXTENDED_FLAGS = 0x0080
+_WINDOWS_ENABLE_LINE_INPUT = 0x0002
+_WINDOWS_ENABLE_MOUSE_INPUT = 0x0010
+_WINDOWS_ENABLE_QUICK_EDIT_MODE = 0x0040
+_WINDOWS_ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
 
 
 class TextInput(str):
@@ -44,7 +51,8 @@ def mouse_capture():
     global _MOUSE_CAPTURE_ACTIVE_DEPTH
 
     if not sys.stdout.isatty():
-        yield
+        with _windows_virtual_terminal_input():
+            yield
         return
 
     with _windows_virtual_terminal_input():
@@ -107,13 +115,23 @@ def _windows_virtual_terminal_input():
     input_changed = False
     output_changed = False
     if has_input_mode:
-        # Enable VT input for Windows Terminal and mouse records for conhost.
-        enabled_input_mode = (original_input_mode | 0x0010 | 0x0080 | 0x0200) & ~0x0040
+        # Full-screen input must be unbuffered. Keep keyboard input as console
+        # records; forcing VT input makes arrows look like ESC+[B in some
+        # Windows terminals, so Esc can be mistaken for "exit".
+        enabled_input_mode = (
+            original_input_mode
+            | _WINDOWS_ENABLE_MOUSE_INPUT
+            | _WINDOWS_ENABLE_EXTENDED_FLAGS
+        ) & ~(
+            _WINDOWS_ENABLE_QUICK_EDIT_MODE
+            | _WINDOWS_ENABLE_LINE_INPUT
+            | _WINDOWS_ENABLE_ECHO_INPUT
+        )
         input_changed = enabled_input_mode != original_input_mode and bool(
             kernel32.SetConsoleMode(input_handle, enabled_input_mode)
         )
     if has_output_mode:
-        enabled_output_mode = original_output_mode | 0x0004
+        enabled_output_mode = original_output_mode | _WINDOWS_ENABLE_VIRTUAL_TERMINAL_PROCESSING
         output_changed = enabled_output_mode != original_output_mode and bool(
             kernel32.SetConsoleMode(output_handle, enabled_output_mode)
         )
@@ -172,6 +190,12 @@ def _read_windows_available_char(msvcrt, *, timeout: float = 0.0) -> str | None:
         time.sleep(0.001)
 
 
+def _windows_escape_sequence_timeout() -> float:
+    if _WINDOWS_MOUSE_CAPTURE_DEPTH:
+        return _WINDOWS_CAPTURED_ESCAPE_SEQUENCE_TIMEOUT
+    return _WINDOWS_ESCAPE_SEQUENCE_TIMEOUT
+
+
 def _windows_key_from_virtual_key(
     virtual_key: int,
     char: str,
@@ -224,8 +248,6 @@ def _read_windows_console_input_key(
     translate_mouse_wheel: bool,
 ) -> str | None:
     if sys.platform != "win32" or not _WINDOWS_MOUSE_CAPTURE_DEPTH:
-        return None
-    if os.environ.get("WT_SESSION"):
         return None
 
     try:
@@ -493,15 +515,16 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
         if ch == "\t":
             return "TAB"
         if ch == "\x1b":
+            sequence_timeout = _windows_escape_sequence_timeout()
             ch2 = _read_windows_available_char(
                 msvcrt,
-                timeout=_WINDOWS_ESCAPE_SEQUENCE_TIMEOUT,
+                timeout=sequence_timeout,
             )
             if ch2 is not None:
                 if ch2 == "[":
                     ch3 = _read_windows_available_char(
                         msvcrt,
-                        timeout=_WINDOWS_ESCAPE_SEQUENCE_TIMEOUT,
+                        timeout=sequence_timeout,
                     )
                     if ch3 is None:
                         _PENDING_KEYS.appendleft("[")
