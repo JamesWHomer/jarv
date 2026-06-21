@@ -884,6 +884,11 @@ def cmd_sessions(args: list | None = None) -> None:
                         break
                 continue
 
+            if key == "ESC" and arm_delete_sid is not None:
+                arm_delete_sid = None
+                flash = None
+                continue
+
             if key != "d":
                 arm_delete_sid = None
             flash = None
