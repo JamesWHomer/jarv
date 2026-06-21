@@ -11,6 +11,7 @@ from rich.console import Console
 from rich.text import Text
 
 from jarv.agent import thought_complete_indicator, tool_complete_indicator
+from jarv.agent_ui import RunningCommandCard
 from jarv.cancellation import CancellationToken, TurnCancelled
 from jarv.command_input import TextInput
 from jarv.headsup import HeadsupAgentUI, HeadsupApp
@@ -502,6 +503,37 @@ class HeadsupTests(unittest.TestCase):
 
         self.assertIsNone(ui._response_status_index)
         self.assertEqual(app.entries[status_index].renderable.plain, completed)
+
+    def test_running_command_card_keeps_headsup_refresh_active(self):
+        app, _test_console, _output = self._app()
+        ui = HeadsupAgentUI(app)
+        refresh_count = 0
+
+        class FakeLive:
+            def refresh(self):
+                nonlocal refresh_count
+                refresh_count += 1
+
+        app.live = FakeLive()
+
+        ui.show_tool_card(
+            RunningCommandCard(
+                "Start-Sleep -Seconds 10",
+                "",
+                "fullscreen",
+                time.perf_counter(),
+            )
+        )
+        refreshes_after_show = refresh_count
+
+        self.assertTrue(ui._refresh_wait_statuses())
+        self.assertGreater(refresh_count, refreshes_after_show)
+
+        ui.show_tool_card(Text("done"))
+        refreshes_after_done = refresh_count
+
+        self.assertFalse(ui._refresh_wait_statuses())
+        self.assertEqual(refresh_count, refreshes_after_done)
 
     def test_unbind_cancel_token_stops_wait_status_refreshes(self):
         app, _test_console, _output = self._app()

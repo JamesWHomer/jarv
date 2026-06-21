@@ -152,6 +152,7 @@ class HeadsupAgentUI:
         self._tool_waiting = False
         self._ticker_lock = threading.Lock()
         self._ticker_thread: threading.Thread | None = None
+        self._animated_live_tool_keys: set[str] = set()
 
     def start_turn(self, query: str, _config: dict) -> None:
         self._stream_text = ""
@@ -163,6 +164,7 @@ class HeadsupAgentUI:
         self._tool_names = ()
         self._response_waiting = False
         self._tool_waiting = False
+        self._animated_live_tool_keys.clear()
         self.app.add_user_message(query)
 
     def start_response_wait(self, start_time: float) -> None:
@@ -249,12 +251,15 @@ class HeadsupAgentUI:
         if live_kind == "RunningCommandCard":
             self.app.upsert_live_tool(live_kind, renderable)
             self._tool_live_kind = live_kind
+            self._animated_live_tool_keys.add(live_kind)
+            self._ensure_ticker()
             return
         if live_kind == "SpawnPanel":
             self.app.upsert_live_tool(live_kind, renderable)
             return
         if self._tool_live_kind is not None:
             self.app.replace_live_tool(self._tool_live_kind, renderable)
+            self._animated_live_tool_keys.discard(self._tool_live_kind)
             self._tool_live_kind = None
             return
         self.app.add_tool(renderable)
@@ -300,6 +305,7 @@ class HeadsupAgentUI:
     def unbind_cancel_token(self) -> None:
         self._response_waiting = False
         self._tool_waiting = False
+        self._animated_live_tool_keys.clear()
         self.app.unbind_cancel_token()
 
     def _response_wait_text(self) -> Text:
@@ -349,6 +355,9 @@ class HeadsupAgentUI:
                 self._tool_status_index,
                 self._tool_wait_text(),
             )
+        if self._animated_live_tool_keys:
+            active = True
+            self.app.refresh()
         return active
 
 
