@@ -66,8 +66,22 @@ _GLYPH_GAP = 2
 _LOGO_W = len(_LOGO_ORDER) * _GLYPH_W + (len(_LOGO_ORDER) - 1) * _GLYPH_GAP
 
 _WAVE_BLOCKS = "▁▂▃▄▅▆▇█"
-# All width-1 across common terminals.
-_STAR_CHARS = ("·", "·", "·", "•", "⋆", "*", "+")
+# Floor for the waveform's centre-weighted envelope: the edges keep this much of
+# their amplitude so the wave reaches the full logo width instead of fading out.
+_WAVE_EDGE_FLOOR = 0.55
+# Star glyphs grouped by depth tier; all width-1 across common terminals. The
+# glyph now tracks the star's magnitude (dust → mid → bright) instead of being
+# chosen at random, so size reads as apparent brightness rather than noise.
+_STAR_DUST = "·"
+_STAR_MID = ("•", "+", "⋆")
+_STAR_BRIGHT = ("*", "✦")
+# Per tier: (twinkle amplitude, peak brightness factor). Dust fades fully in and
+# out; bright accents only shimmer slightly so they read as steady anchor stars.
+_STAR_TIERS = (
+    (0.50, 0.62),  # 0 — faint dust
+    (0.34, 0.86),  # 1 — mid stars
+    (0.16, 1.00),  # 2 — rare bright accents
+)
 
 _HINT_WIDE = "type a message to begin   ·   /help for commands"
 _HINT_NARROW = "type to begin · /help"
@@ -122,18 +136,41 @@ def _starfield(width: int, height: int):
 
     Each star carries a twinkle phase/speed so it pulses in place; there is no
     drift, so the field stays put while individual stars flicker on and off.
+
+    Placement is edge-biased (a soft vignette) so the centre stays sparse and
+    frames the wordmark, and a small fixed number of bright accent stars are
+    promoted to the top tier so they stay scarce regardless of canvas size.
     """
     rng = random.Random((width * 73856093) ^ (height * 19349663))
-    count = max(5, (width * height) // 44)
+    count = max(6, (width * height) // 42)
+    n_bright = min(6, max(3, count // 45))
+    cx = (width - 1) / 2.0
+    cy = (height - 1) / 2.0
+    norm = math.hypot(cx, cy) or 1.0
     stars = []
-    for _ in range(count):
-        x = rng.randrange(width)
-        y = rng.randrange(height)
+    for i in range(count):
+        # Reject-sample toward the edges: acceptance probability rises with
+        # distance from centre, thinning the field behind the logo.
+        x = y = 0
+        for _ in range(8):
+            x = rng.randrange(width)
+            y = rng.randrange(height)
+            dist = math.hypot(x - cx, y - cy) / norm
+            if rng.random() <= 0.12 + 0.88 * dist ** 1.6:
+                break
         phase = rng.uniform(0.0, math.tau)
         speed = rng.uniform(0.35, 0.95)
-        char = rng.choice(_STAR_CHARS)
         tint = rng.uniform(0.0, 1.0)
-        stars.append((x, y, phase, speed, char, tint))
+        if i < n_bright:
+            tier = 2
+            char = rng.choice(_STAR_BRIGHT)
+        elif rng.random() < 0.24:
+            tier = 1
+            char = rng.choice(_STAR_MID)
+        else:
+            tier = 0
+            char = _STAR_DUST
+        stars.append((x, y, phase, speed, char, tint, tier))
     return tuple(stars)
 
 
@@ -163,15 +200,13 @@ def _clear_box(chars, colors, y0: int, y1: int, x0: int, x1: int) -> None:
 
 
 def _draw_starfield(chars, colors, t: float, height: int, width: int) -> None:
-    for (x, y, phase, speed, char, tint) in _starfield(width, height):
-        # Slow, deep twinkle. Brightness ramps up from zero at the threshold so
-        # stars fade in and out gradually instead of popping into existence; the
-        # slow part of the sine near the trough keeps the fades long and gentle.
-        b = 0.5 + 0.5 * math.sin(t * speed + phase)
-        if b < 0.15:
-            continue
-        norm = (b - 0.15) / 0.85
-        val = int(235 * norm)
+    for (x, y, phase, speed, char, tint, tier) in _starfield(width, height):
+        amp, peak = _STAR_TIERS[tier]
+        # Twinkle around a tier-dependent baseline: faint dust swings all the way
+        # to black and back (long, gentle fades), while bright accents oscillate
+        # only slightly so they sit steady against the field.
+        osc = (1.0 - amp) + amp * math.sin(t * speed + phase)
+        val = int(235 * peak * osc)
         if val < 6:
             continue
         r = int(val * (0.5 + 0.28 * tint))
@@ -213,11 +248,19 @@ def _draw_logo(chars, colors, top: int, t: float, width: int, reveal: float) -> 
 def _draw_wave(chars, colors, y: int, t: float, width: int, grow: float) -> None:
     col_start = (width - _LOGO_W) // 2
     center = (_LOGO_W - 1) / 2.0
-    reach = grow * (_LOGO_W / 2.0) + 0.5
+    half = _LOGO_W / 2.0
+    reach = grow * half + 0.5
     for c in range(_LOGO_W):
         if abs(c - center) > reach:
             continue
-        level = (math.sin(c * 0.36 + t * 2.6) + 1.0) / 2.0
+        # Raised-cosine envelope with a floor: the scrolling sine swells under the
+        # wordmark's centre but the edges keep a healthy amplitude (rather than
+        # taper to an invisible baseline), so the wave fills the full logo width
+        # and still reads as a centred pulse echoing the wordmark.
+        env = _WAVE_EDGE_FLOOR + (1.0 - _WAVE_EDGE_FLOOR) * (
+            0.5 + 0.5 * math.cos(math.pi * (c - center) / half)
+        )
+        level = (math.sin(c * 0.36 + t * 2.6) + 1.0) / 2.0 * env
         idx = int(level * (len(_WAVE_BLOCKS) - 1))
         hue = (c / _LOGO_W) * 0.74 + 0.55 + t * 0.045
         _place(chars, colors, y, col_start + c, _WAVE_BLOCKS[idx], _hsv_hex(hue, 0.62, 0.4 + 0.28 * level))
@@ -296,11 +339,12 @@ def render_intro(width: int, height: int, elapsed: float) -> list[Text] | None:
         block_h = _LOGO_H + 1 + 1 + 1 + 1  # logo, gap, wave, gap, hint
         top = max(0, (height - block_h) // 2)
         col_start = (width - _LOGO_W) // 2
-
-        _clear_box(chars, colors, top, top + _LOGO_H, col_start, col_start + _LOGO_W)
-        _draw_logo(chars, colors, top, t, width, _stage(t, _LOGO_IN))
-
         wave_y = top + _LOGO_H + 1
+
+        # Carve a padded halo around the wordmark + waveform so the twinkling
+        # field never crowds the glyph edges, then draw the brand on top.
+        _clear_box(chars, colors, top - 1, wave_y + 2, col_start - 2, col_start + _LOGO_W + 2)
+        _draw_logo(chars, colors, top, t, width, _stage(t, _LOGO_IN))
         _draw_wave(chars, colors, wave_y, t, width, _stage(t, _WAVE_IN))
 
         hint_y = wave_y + 2
