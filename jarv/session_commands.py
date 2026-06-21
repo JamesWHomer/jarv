@@ -1,28 +1,11 @@
 """Session, archive, and history command screens."""
 
+from __future__ import annotations
+
+import importlib
 import sys
 
-from rich.console import Group
-from rich.markdown import Markdown
-from rich.panel import Panel
-from rich.text import Text
-
-from .display import (
-    console,
-    flatten_headings,
-    jarv_panel,
-    section_rule,
-    terminal_size,
-)
-from .tui_layout import append_bottom_footer
-from .tui_overlay import (
-    ScrollOverlayState,
-    apply_scroll_keys,
-    body_content_rows,
-    clamp_scroll_offset,
-    run_scroll_live,
-    scroll_position_hint,
-)
+from .display import console
 from .history import (
     SESSIONS_DIR,
     forget_current_session,
@@ -31,16 +14,24 @@ from .history import (
 )
 from .config import CONFIG_DIR
 from . import session_store as _session_store
-from .session_browser import cmd_sessions as _browser_cmd_sessions
-from .session_render import (
-    _history_visual_lines,
-    _history_visual_lines_and_anchors,
-    _session_row_widths,
-    _status_renderable,
-    _tool_call_output,
-    _tool_call_renderable,
-)
 ARCHIVE_DIR = CONFIG_DIR / "archive"
+
+_SESSION_RENDER_EXPORTS = {
+    "_history_visual_lines",
+    "_history_visual_lines_and_anchors",
+    "_session_row_widths",
+    "_status_renderable",
+    "_tool_call_output",
+    "_tool_call_renderable",
+}
+
+
+def __getattr__(name: str):
+    if name not in _SESSION_RENDER_EXPORTS:
+        raise AttributeError(name)
+    value = getattr(importlib.import_module("jarv.session_render"), name)
+    globals()[name] = value
+    return value
 
 
 def _sync_session_store_paths() -> None:
@@ -64,6 +55,8 @@ def delete_session_files(history_path) -> None:
 
 
 def cmd_sessions(args: list | None = None) -> None:
+    from .session_browser import cmd_sessions as _browser_cmd_sessions
+
     return _browser_cmd_sessions(args)
 
 def cmd_archive() -> None:
@@ -85,8 +78,29 @@ def cmd_history() -> None:
     session_context = prepare_session_context()
     history = load_history(session_context.history_file)
     if not history:
-        console.print("[dim]○ No history yet.[/dim]")
+        console.print("[dim]\u25cb No history yet.[/dim]")
         return
+    from rich.console import Group
+    from rich.markdown import Markdown
+    from rich.panel import Panel
+    from rich.text import Text
+
+    from .display import flatten_headings, jarv_panel, section_rule, terminal_size
+    from .session_render import (
+        _history_visual_lines_and_anchors,
+        _status_renderable,
+        _tool_call_output,
+        _tool_call_renderable,
+    )
+    from .tui_layout import append_bottom_footer
+    from .tui_overlay import (
+        ScrollOverlayState,
+        apply_scroll_keys,
+        body_content_rows,
+        clamp_scroll_offset,
+        run_scroll_live,
+        scroll_position_hint,
+    )
 
     exchanges = sum(1 for m in history if isinstance(m, dict) and m.get("role") == "user")
 

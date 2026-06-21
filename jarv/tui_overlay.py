@@ -12,7 +12,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from .command_input import _read_key_with_repeats, mouse_capture
-from .display import console, jarv_panel, refresh_on_resize, terminal_size
+from .display import console, jarv_panel, mark_first_paint, refresh_on_resize, terminal_size
 from .tui_layout import append_bottom_footer
 
 
@@ -107,6 +107,7 @@ def run_scroll_live(
             live.refresh()
 
     with live, refresh_on_resize_fn(live, on_change=_on_resize), mouse_capture_fn():
+        mark_first_paint("scroll-overlay")
         while True:
             live.refresh()
             try:

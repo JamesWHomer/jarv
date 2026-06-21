@@ -67,8 +67,6 @@ from .orchestrator import (
     prepare_run_command,
     spawn_tool_output,
 )
-from .session_render import tool_call_card_from_args
-from .shell import command_result_renderable
 from .read_tool import read_tool_for_config
 from .retained_outputs import (
     RetainedOutputStore,
@@ -91,7 +89,6 @@ from .usage import (
     usage_cost_summary,
     usage_file_for,
 )
-from .provider_catalog import configured_service_tier
 from .web import WEB_SEARCH_TOOL
 
 
@@ -116,6 +113,7 @@ def resolve_tool_call_display(config: dict, *, heads_up: bool) -> str:
     return str(mode)
 
 
+from . import agent_ui as _agent_ui
 from .agent_ui import (
     InPlaceLive,
     ResponseWaitIndicator,
@@ -123,13 +121,13 @@ from .agent_ui import (
     StreamingMarkdownPreview,
     TailMarkdown,
     ToolActivityIndicator,
-    _dispatch_ask_user,
-    _dispatch_run_command_with_ui,
-    _dispatch_spawn_with_ui,
+    _dispatch_ask_user as _agent_ui_dispatch_ask_user,
+    _dispatch_run_command_with_ui as _agent_ui_dispatch_run_command_with_ui,
+    _dispatch_spawn_with_ui as _agent_ui_dispatch_spawn_with_ui,
     _format_agent_usage_line,
-    _print_agent_usage_if_enabled,
-    _print_tool_card,
-    _start_response_wait_indicator,
+    _print_agent_usage_if_enabled as _agent_ui_print_agent_usage_if_enabled,
+    _print_tool_card as _agent_ui_print_tool_card,
+    _start_response_wait_indicator as _agent_ui_start_response_wait_indicator,
     _ui_call,
     get_system_info,
     response_start_status,
@@ -141,6 +139,8 @@ from .agent_ui import (
 )
 from .context_budget import build_input
 from .response_items import to_response_input_item
+from .safety import check_command
+from .shell import execute_command
 
 
 @dataclass(frozen=True)
@@ -148,6 +148,94 @@ class AgentRunResult:
     cancelled: bool = False
     prompt: str | None = None
     error: str | None = None
+
+
+def _agent_check_run_command(prepared, config: dict, **kwargs):
+    safety_level = config.get("command_safety", "risky")
+    audit = config.get("audit", True)
+    return check_command(
+        prepared.cmd,
+        safety_level,
+        audit=audit,
+        config=config,
+        history=kwargs.get("safety_history"),
+        usage_path=kwargs.get("usage_path"),
+        session_id=kwargs.get("session_id"),
+        cancellation_token=kwargs.get("cancellation_token"),
+    )
+
+
+def _agent_execute_run_command(
+    prepared,
+    config: dict,
+    *,
+    cancellation_token=None,
+    retained_store=None,
+):
+    from .orchestrator import format_run_command_output
+
+    result = execute_command(
+        prepared.cmd,
+        config.get("command_timeout", 60),
+        cancellation_token=cancellation_token,
+    )
+    output, output_id = format_run_command_output(result, prepared, retained_store)
+    return output, result, output_id
+
+
+def _with_agent_ui_globals(fn, *args, command_hooks: bool = False, **kwargs):
+    previous = _agent_ui.console
+    previous_live = _agent_ui.Live
+    previous_read_editable_line = _agent_ui.read_editable_line
+    previous_check = _agent_ui.check_run_command
+    previous_execute = _agent_ui.execute_run_command
+    _agent_ui.console = console
+    _agent_ui.Live = Live
+    _agent_ui.read_editable_line = read_editable_line
+    if command_hooks:
+        _agent_ui.check_run_command = _agent_check_run_command
+        _agent_ui.execute_run_command = _agent_execute_run_command
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        _agent_ui.console = previous
+        _agent_ui.Live = previous_live
+        _agent_ui.read_editable_line = previous_read_editable_line
+        _agent_ui.check_run_command = previous_check
+        _agent_ui.execute_run_command = previous_execute
+
+
+def _print_tool_card(renderable, config: dict, ui=None) -> None:
+    return _with_agent_ui_globals(_agent_ui_print_tool_card, renderable, config, ui=ui)
+
+
+def _dispatch_run_command_with_ui(*args, **kwargs):
+    return _with_agent_ui_globals(
+        _agent_ui_dispatch_run_command_with_ui,
+        *args,
+        command_hooks=True,
+        **kwargs,
+    )
+
+
+def _dispatch_spawn_with_ui(*args, **kwargs):
+    return _with_agent_ui_globals(_agent_ui_dispatch_spawn_with_ui, *args, **kwargs)
+
+
+def _dispatch_ask_user(*args, **kwargs):
+    return _with_agent_ui_globals(_agent_ui_dispatch_ask_user, *args, **kwargs)
+
+
+def _print_agent_usage_if_enabled(*args, **kwargs):
+    return _with_agent_ui_globals(_agent_ui_print_agent_usage_if_enabled, *args, **kwargs)
+
+
+def _start_response_wait_indicator(*args, **kwargs):
+    return _with_agent_ui_globals(
+        _agent_ui_start_response_wait_indicator,
+        *args,
+        **kwargs,
+    )
 
 
 def run_agent(
@@ -623,6 +711,8 @@ def run_agent(
             got_text = stream_result.got_text
             final_response = stream_result.final_response
             if not incognito:
+                from .provider_catalog import configured_service_tier
+
                 record_response_usage(
                     usage_path,
                     session_context.session_id,
@@ -645,6 +735,8 @@ def run_agent(
                     print(reply_text)
 
             if tool_calls:
+                from .session_render import tool_call_card_from_args
+
                 if config.get(
                     "tool_call_display",
                     DEFAULT_CONFIG["tool_call_display"],

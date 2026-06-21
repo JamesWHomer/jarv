@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 from dataclasses import dataclass
 from typing import Callable
 
@@ -36,6 +37,25 @@ CONFIG_MUTATING_COMMANDS = frozenset(
     f"/{name}" for name, meta in COMMANDS.items() if meta.mutates_config
 )
 
+HANDLER_SPECS: dict[str, tuple[str, str]] = {
+    "setup": ("jarv.cli", "cmd_setup"),
+    "help": ("jarv.commands", "print_help"),
+    "about": ("jarv.commands", "print_about"),
+    "update": ("jarv.commands", "cmd_update"),
+    "new": ("jarv.commands", "cmd_new"),
+    "archive": ("jarv.commands", "cmd_archive"),
+    "session": ("jarv.commands", "cmd_sessions"),
+    "sessions": ("jarv.commands", "cmd_sessions"),
+    "history": ("jarv.commands", "cmd_history"),
+    "usage": ("jarv.commands", "cmd_usage"),
+    "set": ("jarv.commands", "cmd_set"),
+    "unset": ("jarv.commands", "cmd_unset"),
+    "config": ("jarv.commands", "cmd_config"),
+    "settings": ("jarv.commands", "cmd_settings"),
+    "undo": ("jarv.commands", "cmd_undo"),
+    "redo": ("jarv.commands", "cmd_redo"),
+}
+
 
 def slash_name(name: str) -> str:
     return f"/{name.lower().lstrip('/')}"
@@ -61,41 +81,20 @@ def parse_command_alias(
 
 
 def load_handlers() -> dict[str, Callable]:
-    from .cli import cmd_setup
-    from .commands import (
-        cmd_archive,
-        cmd_config,
-        cmd_history,
-        cmd_new,
-        cmd_redo,
-        cmd_sessions,
-        cmd_set,
-        cmd_undo,
-        cmd_unset,
-        cmd_update,
-        cmd_usage,
-        print_about,
-        print_help,
-    )
-    from .settings_command import cmd_settings
+    def lazy_handler(module_name: str, attribute: str) -> Callable:
+        def handler(*args, **kwargs):
+            module = importlib.import_module(module_name)
+            target = getattr(module, attribute)
+            return target(*args, **kwargs)
+
+        handler.__name__ = attribute
+        handler.__qualname__ = attribute
+        handler.__module__ = module_name
+        return handler
 
     return {
-        "setup": cmd_setup,
-        "help": print_help,
-        "about": print_about,
-        "update": cmd_update,
-        "new": cmd_new,
-        "archive": cmd_archive,
-        "session": cmd_sessions,
-        "sessions": cmd_sessions,
-        "history": cmd_history,
-        "usage": cmd_usage,
-        "set": cmd_set,
-        "unset": cmd_unset,
-        "config": cmd_config,
-        "settings": cmd_settings,
-        "undo": cmd_undo,
-        "redo": cmd_redo,
+        name: lazy_handler(module_name, attribute)
+        for name, (module_name, attribute) in HANDLER_SPECS.items()
     }
 
 

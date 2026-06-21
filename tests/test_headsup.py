@@ -94,7 +94,7 @@ class HeadsupTests(unittest.TestCase):
             test_console.print(app.render())
 
         rendered = output.getvalue()
-        self.assertIn("jarv \u25b8 heads up", rendered)
+        self.assertIn("jarv \u25b8 heads-up", rendered)
 
     def test_render_shows_provider_model_top_right_and_bottom_usage_status(self):
         app, test_console, output = self._app(width=80)
@@ -117,7 +117,7 @@ class HeadsupTests(unittest.TestCase):
             test_console.print(app.render())
 
         lines = output.getvalue().splitlines()
-        self.assertIn("jarv \u25b8 heads up", lines[0])
+        self.assertIn("jarv \u25b8 heads-up", lines[0])
         self.assertIn("openai / test-model", lines[0])
         self.assertNotIn("openai / test-model", lines[-1])
         self.assertIn("cost $0.123", lines[-1])

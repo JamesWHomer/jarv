@@ -10,7 +10,7 @@ from rich.text import Text
 
 from .command_input import _read_key_with_repeats, mouse_capture
 from .config import CONFIG_FILE, DEFAULT_CONFIG, save_config
-from .display import console, refresh_on_resize, terminal_size
+from .display import console, mark_first_paint, refresh_on_resize, terminal_size
 from .settings_refresher import _ModelCatalogRefresher
 from .tui_layout import append_bottom_footer
 from .text_editor import apply_text_editor_key
@@ -336,6 +336,7 @@ def run_settings_interactive(config: dict) -> None:
         transient=False,
         vertical_overflow="crop",
     ) as live, refresh_on_resize(live, on_change=_refresh_live), mouse_capture():
+        mark_first_paint("settings")
         live_holder.append(live)
         while True:
             _refresh_live()

@@ -1,46 +1,72 @@
+from __future__ import annotations
+
+import importlib
 import importlib.metadata
 import json
-import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-from rich.console import Group
-from rich.markdown import Markdown
-from rich.table import Table
-from rich.text import Text
-
 from . import __version__
-from .config import CONFIG_DIR, CONFIG_FILE, DEFAULT_CONFIG, load_config, save_config, validate_config
-from .config_schema import config_about_lines
-from .display import console, flatten_headings, status_line
-from .history import (
-    SESSIONS_DIR,
-    SESSIONS_FILE,
-    forget_current_session,
-    load_history,
-    prepare_session_context,
-)
-from .read_only_display import show_read_only_command
-from .command_input import _read_key
-from .session_commands import (
-    archive_session_files,
-    cmd_archive,
-    cmd_history,
-    cmd_sessions,
-    delete_session_files,
-    unarchive_session_files,
-)
-from .settings_command import cmd_settings
-from .undo_commands import cmd_redo, cmd_undo
-from .update_check import (
-    UPDATE_CHECK_INTERVAL_HOURS,
-    UPDATE_FLAG_FILE,
-    _fetch_latest_pypi_release,
-    _is_newer_version,
-)
-from .usage_command import cmd_usage
+from .config import CONFIG_DIR, CONFIG_FILE
+from .display import console, status_line
+
+UPDATE_CHECK_INTERVAL_HOURS = 24
+UPDATE_FLAG_FILE = CONFIG_DIR / "update_available.txt"
+SESSIONS_FILE = CONFIG_DIR / "sessions.json"
+SESSIONS_DIR = CONFIG_DIR / "sessions"
+
+_FACADE_SPECS = {
+    "archive_session_files": ("jarv.session_commands", "archive_session_files"),
+    "cmd_archive": ("jarv.session_commands", "cmd_archive"),
+    "cmd_history": ("jarv.session_commands", "cmd_history"),
+    "cmd_sessions": ("jarv.session_commands", "cmd_sessions"),
+    "delete_session_files": ("jarv.session_commands", "delete_session_files"),
+    "unarchive_session_files": ("jarv.session_commands", "unarchive_session_files"),
+    "cmd_settings": ("jarv.settings_command", "cmd_settings"),
+    "cmd_redo": ("jarv.undo_commands", "cmd_redo"),
+    "cmd_undo": ("jarv.undo_commands", "cmd_undo"),
+    "cmd_usage": ("jarv.usage_command", "cmd_usage"),
+}
+
+
+def __getattr__(name: str):
+    spec = _FACADE_SPECS.get(name)
+    if spec is None:
+        raise AttributeError(name)
+    module_name, attribute = spec
+    value = getattr(importlib.import_module(module_name), attribute)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(_FACADE_SPECS))
+
+
+def _fetch_latest_pypi_release() -> tuple[str, str] | None:
+    from .update_check import _fetch_latest_pypi_release as fetch
+
+    return fetch()
+
+
+def _is_newer_version(candidate: str, current: str) -> bool:
+    from .update_check import _is_newer_version as is_newer
+
+    return is_newer(candidate, current)
+
+
+def show_read_only_command(*args, **kwargs):
+    from .read_only_display import show_read_only_command as show
+
+    return show(*args, **kwargs)
+
+
+def load_config() -> dict:
+    from .config import load_config as load
+
+    return load()
 
 
 def coerce_value(value: str):
@@ -69,6 +95,8 @@ def _mask_config_value(key: str, value) -> str:
 
 
 def cmd_set(args: list) -> None:
+    from .config import DEFAULT_CONFIG, load_config, save_config, validate_config
+
     if len(args) < 2:
         console.print(status_line("✗", "jarv /set <key> <value>", prefix_style="bold red", message_style="dim"))
         console.print(f"  [dim]Keys: {', '.join(DEFAULT_CONFIG.keys())}[/dim]")
@@ -95,6 +123,8 @@ def cmd_set(args: list) -> None:
 
 
 def cmd_unset(args: list) -> None:
+    from .config import DEFAULT_CONFIG, load_config, save_config, validate_config
+
     if not args:
         console.print(status_line("✗", "jarv /unset <key>", prefix_style="bold red", message_style="dim"))
         return
@@ -124,6 +154,10 @@ def cmd_unset(args: list) -> None:
 
 
 def _help_body() -> Group:
+    from rich.console import Group
+    from rich.table import Table
+    from rich.text import Text
+
     help_table = Table(box=None, show_header=True, padding=(0, 2), pad_edge=False, width=91)
     help_table.add_column("COMMAND / FLAG", header_style="bold", no_wrap=True, width=37)
     help_table.add_column("DESCRIPTION", header_style="bold", style="white", width=52)
@@ -203,6 +237,13 @@ def print_help(*, mode: str | None = None, include_setup_nudge: bool = True) -> 
 
 
 def _about_body() -> Markdown:
+    from rich.markdown import Markdown
+
+    from .config import DEFAULT_CONFIG
+    from .config_schema import config_about_lines
+    from .display import flatten_headings
+    from .history import SESSIONS_DIR, SESSIONS_FILE
+
     about = f"""jarv is a command-line AI assistant that supports multiple AI providers including OpenAI, Anthropic, Google Gemini, OpenRouter, Groq, DeepSeek, and more.
 
 ## Basic usage
@@ -528,6 +569,8 @@ def cmd_update() -> int:
 
 
 def cmd_new() -> None:
+    from .history import forget_current_session, load_history, prepare_session_context
+
     session_context = prepare_session_context()
     history = load_history(session_context.history_file)
     if not history:
@@ -538,6 +581,10 @@ def cmd_new() -> None:
 
 
 def cmd_config() -> None:
+    from rich.console import Group
+    from rich.table import Table
+    from rich.text import Text
+
     config = load_config()
     table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
     table.add_column("Key", style="bold cyan", no_wrap=True)

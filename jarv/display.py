@@ -1,6 +1,7 @@
 import os
 import re
 import signal
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -16,6 +17,7 @@ from rich.text import Text
 console = Console()
 
 _live_display_depth = threading.local()
+_first_paint_marks: set[str] = set()
 
 PANEL_BORDER_STYLE = "cyan"
 ACCENT_STYLE = "bold cyan"
@@ -98,6 +100,16 @@ def terminal_size(*, console: Console = console) -> tuple[int, int]:
 
     size = console.size
     return max(1, size.width), max(1, size.height)
+
+
+def mark_first_paint(label: str) -> None:
+    """Emit a benchmark timestamp when first-paint instrumentation is enabled."""
+    if os.environ.get("JARV_BENCH_FIRST_PAINT") != "1":
+        return
+    if label in _first_paint_marks:
+        return
+    _first_paint_marks.add(label)
+    print(f"JARV_FIRST_PAINT {label} {time.time_ns()}", file=sys.stderr, flush=True)
 
 
 def jarv_panel(

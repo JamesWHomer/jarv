@@ -41,6 +41,7 @@ from .display import (
     TITLE_STYLE,
     console,
     flatten_headings,
+    mark_first_paint,
     refresh_on_resize,
     rendered_text_lines,
     terminal_size,
@@ -417,6 +418,7 @@ class HeadsupApp:
                 transient=False,
                 vertical_overflow="crop",
             ) as live, refresh_on_resize(live, on_change=self.refresh):
+                mark_first_paint("headsup")
                 self.live = live
                 self._foreground_input_active = True
                 try:
@@ -535,7 +537,7 @@ class HeadsupApp:
         )
 
     def _panel_title(self, model_status: str, panel_width: int) -> Text:
-        left = "jarv \u25b8 heads up"
+        left = "jarv \u25b8 heads-up"
         title_width = max(1, panel_width - 5)
         title = Text(no_wrap=True, overflow="crop")
         title.append(left, style=TITLE_STYLE)
