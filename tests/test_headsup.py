@@ -97,9 +97,18 @@ class HeadsupTests(unittest.TestCase):
         self.assertIn("\u2588", rendered)
         self.assertNotIn("Heads-up mode. Type /help for commands.", rendered)
 
-        app.add_user_message("first message")
-        self.assertTrue(app._idle_anim_stop.is_set())
+        # With a live foreground display the intro hands off via a brief,
+        # non-blocking dissolve outro before the transcript takes over.
+        app._foreground_input_active = True
+        try:
+            app.add_user_message("first message")
+            self.assertTrue(app._idle_anim_stop.is_set())
+            self.assertGreater(app._outro_started_at, 0.0)
+        finally:
+            app._foreground_input_active = False
 
+        # Once the outro finishes, the transcript fully takes over.
+        app._outro_started_at = 0.0
         rendered_after = self._rendered_text(app, test_console, output, width=80, height=24)
         self.assertNotIn("type a message to begin", rendered_after)
         self.assertIn("first message", rendered_after)

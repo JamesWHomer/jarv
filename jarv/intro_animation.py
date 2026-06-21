@@ -89,6 +89,7 @@ _HINT_NARROW = "type to begin · /help"
 _WHITE = (236, 246, 255)
 
 # Entrance stage windows, in seconds.
+_STARS_IN = (0.0, 1.8)
 _LOGO_IN = (0.0, 1.1)
 _WAVE_IN = (0.7, 1.6)
 _HINT_IN = (1.4, 2.2)
@@ -97,6 +98,10 @@ _WIPE_EDGE = 6.0
 
 def _hex(r: int, g: int, b: int) -> str:
     return f"#{max(0, min(255, int(r))):02x}{max(0, min(255, int(g))):02x}{max(0, min(255, int(b))):02x}"
+
+
+def _parse_hex(color: str) -> tuple[int, int, int]:
+    return int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
 
 
 def _hsv_rgb(h: float, s: float, v: float) -> tuple[int, int, int]:
@@ -199,14 +204,62 @@ def _clear_box(chars, colors, y0: int, y1: int, x0: int, x1: int) -> None:
             colors[y][x] = None
 
 
-def _draw_starfield(chars, colors, t: float, height: int, width: int) -> None:
+def _exit_noise(x: int, y: int) -> float:
+    """Stable per-cell value in [0, 1) used to stagger the dissolve order."""
+    h = (x * 73856093) ^ (y * 19349663)
+    h ^= h >> 13
+    return (h & 0xFFFF) / 0xFFFF
+
+
+def _apply_exit(chars, colors, e: float, width: int, height: int) -> None:
+    """Dissolve the rendered frame as ``e`` runs 0 -> 1.
+
+    Each painted cell holds at full brightness until a dissolve wave (advancing
+    through per-cell noise space) reaches it, then fades over a short band and
+    clears -- so the wordmark, wave and stars disperse organically into the dark
+    rather than blinking off all at once. A mild global dim pulls the whole
+    composition back as it goes, keeping the hand-off to the transcript smooth.
+    """
+    e = max(0.0, min(1.0, e))
+    # Smoothstep so the dissolve eases in and out instead of marching linearly.
+    wave = e * e * (3.0 - 2.0 * e)
+    band = 0.22
+    global_dim = 1.0 - 0.4 * wave
+    for y in range(height):
+        row_c = chars[y]
+        row_col = colors[y]
+        for x in range(width):
+            col = row_col[x]
+            if col is None:
+                continue
+            ahead = _exit_noise(x, y) - wave
+            if ahead <= 0.0:
+                row_c[x] = " "
+                row_col[x] = None
+                continue
+            fade = min(1.0, ahead / band) * global_dim
+            r, g, b = _parse_hex(col)
+            row_col[x] = _hex(r * fade, g * fade, b * fade)
+
+
+def _draw_starfield(chars, colors, t: float, height: int, width: int, entrance: float = 1.0) -> None:
+    staggered = entrance < 1.0
     for (x, y, phase, speed, char, tint, tier) in _starfield(width, height):
         amp, peak = _STAR_TIERS[tier]
         # Twinkle around a tier-dependent baseline: faint dust swings all the way
         # to black and back (long, gentle fades), while bright accents oscillate
         # only slightly so they sit steady against the field.
         osc = (1.0 - amp) + amp * math.sin(t * speed + phase)
-        val = int(235 * peak * osc)
+        val = 235.0 * peak * osc
+        if staggered:
+            # Each star gets a stable, position-derived appearance delay so the
+            # field kindles in scattered over the entrance window instead of all
+            # blinking on at once. Once its delay passes it eases up over a short
+            # ramp -- so stars twinkle into existence rather than popping in.
+            appear = _exit_noise(x, y) * 0.74
+            ramp = max(0.0, min(1.0, (entrance - appear) / 0.26))
+            val *= ramp * ramp * (3.0 - 2.0 * ramp)
+        val = int(val)
         if val < 6:
             continue
         r = int(val * (0.5 + 0.28 * tint))
@@ -315,14 +368,19 @@ def _rows_to_text(chars, colors, width: int, height: int) -> list[Text]:
     return lines
 
 
-def render_intro(width: int, height: int, elapsed: float) -> list[Text] | None:
+def render_intro(width: int, height: int, elapsed: float, exit: float = 0.0) -> list[Text] | None:
     """Render the idle intro animation as ``height`` Rich ``Text`` rows.
 
     Returns ``None`` when the area is too small to draw anything meaningful,
     signalling the caller to fall back to blank padding.
+
+    ``exit`` runs from 0 (fully present) to 1 (fully gone) to play a quick
+    dissolve when the user dismisses the intro by sending their first message.
     """
     if width < 18 or height < 5:
         return None
+    if exit >= 1.0:
+        return [Text("") for _ in range(height)]
 
     t = elapsed
     chars = [[" "] * width for _ in range(height)]
@@ -330,7 +388,7 @@ def render_intro(width: int, height: int, elapsed: float) -> list[Text] | None:
 
     # Stars fill the whole canvas; the wordmark and hint are drawn on top, with
     # only their tight bounding boxes cleared so stars remain at the sides.
-    _draw_starfield(chars, colors, t, height, width)
+    _draw_starfield(chars, colors, t, height, width, _ease_out(_stage(t, _STARS_IN)))
 
     big = width >= _LOGO_W + 2 and height >= 11
     hint = _HINT_WIDE if width >= len(_HINT_WIDE) else _HINT_NARROW
@@ -376,5 +434,8 @@ def render_intro(width: int, height: int, elapsed: float) -> list[Text] | None:
             chars, colors, hint_y, hint, t, _stage(t, _HINT_IN),
             (110, 140, 165), _hint_color_fn(t),
         )
+
+    if exit > 0.0:
+        _apply_exit(chars, colors, exit, width, height)
 
     return _rows_to_text(chars, colors, width, height)

@@ -101,6 +101,10 @@ _HEADSUP_REPEATABLE_KEYS = frozenset({
 })
 _SGR_MOUSE_TEXT_LOOKBACK = 64
 
+# Length of the quick, non-blocking dissolve that plays when the idle intro is
+# dismissed by the user's first message.
+_OUTRO_DURATION = 0.4
+
 
 def _sanitize_editor_key(key: str) -> str:
     if not isinstance(key, TextInput):
@@ -397,6 +401,7 @@ class HeadsupApp:
         self._idle_anim_started_at = 0.0
         self._idle_anim_stop = threading.Event()
         self._idle_anim_thread: threading.Thread | None = None
+        self._outro_started_at = 0.0
         self._agent_busy = False
         self._agent_thread: threading.Thread | None = None
         self._queued_queries: deque[str] = deque()
@@ -526,15 +531,26 @@ class HeadsupApp:
                 and self._answer_request is None
                 and all(entry.kind == "notice" for entry in self.entries)
             )
+            outro_started_at = self._outro_started_at
 
+        intro = None
         if show_intro:
             intro = render_intro(
                 inner_width,
                 transcript_rows,
                 time.perf_counter() - self._idle_anim_started_at,
             )
-            if intro is not None:
-                visible = intro
+        elif outro_started_at:
+            exit_progress = (time.perf_counter() - outro_started_at) / _OUTRO_DURATION
+            if exit_progress < 1.0:
+                intro = render_intro(
+                    inner_width,
+                    transcript_rows,
+                    time.perf_counter() - self._idle_anim_started_at,
+                    exit=exit_progress,
+                )
+        if intro is not None:
+            visible = intro
 
         while len(visible) < transcript_rows:
             visible.insert(0, Text(""))
@@ -629,10 +645,47 @@ class HeadsupApp:
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=0.2)
         self._idle_anim_thread = None
+        self._outro_started_at = 0.0
         self._idle_anim_started_at = time.perf_counter()
         self._idle_anim_stop.clear()
         if self._foreground_input_active:
             self._start_idle_animation()
+
+    def _dismiss_intro(self) -> None:
+        """Tear down the idle intro, playing a quick outro if it's on screen.
+
+        Called the first time real transcript content lands. If the intro is
+        currently visible we kick off a short, non-blocking dissolve before the
+        transcript takes over; otherwise we just mark it dismissed.
+        """
+        if self._idle_anim_stop.is_set():
+            return
+        was_visible = self._idle_animation_active()
+        self._idle_anim_stop.set()
+        if was_visible and self._foreground_input_active:
+            self._outro_started_at = time.perf_counter()
+            self._start_outro_animation()
+
+    def _start_outro_animation(self) -> None:
+        if not self._foreground_input_active:
+            return
+        thread = threading.Thread(
+            target=self._outro_animation_loop,
+            name="headsup-intro-outro",
+            daemon=True,
+        )
+        thread.start()
+
+    def _outro_animation_loop(self) -> None:
+        # ~30 fps for the brief dissolve, then land on the cleared frame.
+        deadline = self._outro_started_at + _OUTRO_DURATION
+        while time.perf_counter() < deadline:
+            if not self._foreground_input_active:
+                return
+            self.refresh()
+            time.sleep(1 / 30)
+        self._outro_started_at = 0.0
+        self.refresh()
 
     def _idle_animation_loop(self) -> None:
         # ~14 fps; the wait() both paces the loop and exits promptly on stop.
@@ -1287,7 +1340,7 @@ class HeadsupApp:
 
     def _append(self, kind: str, renderable: RenderableType, *, spacer_before: bool = False) -> None:
         if kind != "notice":
-            self._idle_anim_stop.set()
+            self._dismiss_intro()
         with self.lock:
             self.entries.append(TranscriptEntry(kind, renderable, spacer_before=spacer_before))
             self.scroll_offset = 0
@@ -1295,7 +1348,7 @@ class HeadsupApp:
 
     def _upsert(self, index: int | None, kind: str, renderable: RenderableType) -> int:
         if kind != "notice":
-            self._idle_anim_stop.set()
+            self._dismiss_intro()
         with self.lock:
             if index is not None and 0 <= index < len(self.entries):
                 self.entries[index] = TranscriptEntry(kind, renderable)
