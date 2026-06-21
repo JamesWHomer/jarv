@@ -48,6 +48,7 @@ from .display import (
     tool_card,
 )
 from .history import forget_current_session, load_history, prepare_session_context
+from .intro_animation import render_intro
 from .session_render import (
     _history_content_to_str,
     _status_renderable,
@@ -384,6 +385,9 @@ class HeadsupApp:
         self._live_tool_index: dict[str, int] = {}
         self._refresh_suspended = 0
         self._foreground_input_active = False
+        self._idle_anim_started_at = 0.0
+        self._idle_anim_stop = threading.Event()
+        self._idle_anim_thread: threading.Thread | None = None
         self._agent_busy = False
         self._agent_thread: threading.Thread | None = None
         self._queued_queries: deque[str] = deque()
@@ -421,6 +425,7 @@ class HeadsupApp:
                 mark_first_paint("headsup")
                 self.live = live
                 self._foreground_input_active = True
+                self._start_idle_animation()
                 try:
                     while True:
                         self.refresh()
@@ -479,6 +484,7 @@ class HeadsupApp:
                                 self._clear_prompt_notice()
                                 self._exit_armed = False
                 finally:
+                    self._idle_anim_stop.set()
                     if self._answer_request is not None:
                         self._cancel_answer()
                     self._foreground_input_active = False
@@ -505,6 +511,21 @@ class HeadsupApp:
             end = len(transcript) - self.scroll_offset
             start = max(0, end - transcript_rows)
             visible = list(transcript[start:end])
+            show_intro = (
+                not self._idle_anim_stop.is_set()
+                and self.scroll_offset == 0
+                and self._answer_request is None
+                and all(entry.kind == "notice" for entry in self.entries)
+            )
+
+        if show_intro:
+            intro = render_intro(
+                inner_width,
+                transcript_rows,
+                time.perf_counter() - self._idle_anim_started_at,
+            )
+            if intro is not None:
+                visible = intro
 
         while len(visible) < transcript_rows:
             visible.insert(0, Text(""))
@@ -567,6 +588,41 @@ class HeadsupApp:
         if self.live is not None:
             with self.lock:
                 self.live.refresh()
+
+    def _idle_animation_active(self) -> bool:
+        if self._idle_anim_stop.is_set():
+            return False
+        if self.scroll_offset:
+            return False
+        with self.lock:
+            if self._answer_request is not None:
+                return False
+            return all(entry.kind == "notice" for entry in self.entries)
+
+    def _start_idle_animation(self) -> None:
+        if self._idle_anim_thread is not None:
+            return
+        if not self._idle_animation_active():
+            return
+        self._idle_anim_started_at = time.perf_counter()
+        self._idle_anim_stop.clear()
+        thread = threading.Thread(
+            target=self._idle_animation_loop,
+            name="headsup-intro-anim",
+            daemon=True,
+        )
+        self._idle_anim_thread = thread
+        thread.start()
+
+    def _idle_animation_loop(self) -> None:
+        # ~14 fps; the wait() both paces the loop and exits promptly on stop.
+        while not self._idle_anim_stop.wait(1 / 14):
+            if not self._foreground_input_active:
+                continue
+            if not self._idle_animation_active():
+                break
+            self.refresh()
+        self._idle_anim_thread = None
 
     def add_user_message(self, query: str) -> None:
         line = Text()
@@ -1202,12 +1258,16 @@ class HeadsupApp:
         self.scroll_offset = max(0, self.scroll_offset + delta)
 
     def _append(self, kind: str, renderable: RenderableType, *, spacer_before: bool = False) -> None:
+        if kind != "notice":
+            self._idle_anim_stop.set()
         with self.lock:
             self.entries.append(TranscriptEntry(kind, renderable, spacer_before=spacer_before))
             self.scroll_offset = 0
         self.refresh()
 
     def _upsert(self, index: int | None, kind: str, renderable: RenderableType) -> int:
+        if kind != "notice":
+            self._idle_anim_stop.set()
         with self.lock:
             if index is not None and 0 <= index < len(self.entries):
                 self.entries[index] = TranscriptEntry(kind, renderable)

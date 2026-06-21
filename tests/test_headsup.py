@@ -88,6 +88,22 @@ class HeadsupTests(unittest.TestCase):
         self.assertIn("Enter send", rendered)
         self.assertIn("reply body", rendered)
 
+    def test_intro_animation_shows_on_fresh_session_and_clears_after_first_message(self):
+        app, test_console, output = self._app(width=80)
+
+        rendered = self._rendered_text(app, test_console, output, width=80, height=24)
+        self.assertIn("your always-on terminal copilot", rendered)
+        self.assertIn("\u2588", rendered)
+        self.assertNotIn("Heads-up mode. Type /help for commands.", rendered)
+
+        app.add_user_message("first message")
+        self.assertTrue(app._idle_anim_stop.is_set())
+
+        rendered_after = self._rendered_text(app, test_console, output, width=80, height=24)
+        self.assertNotIn("your always-on terminal copilot", rendered_after)
+        self.assertIn("first message", rendered_after)
+        self.assertIn("Heads-up mode. Type /help for commands.", rendered_after)
+
     def test_top_title_styles_jarv_like_settings_menu(self):
         app, test_console, output = self._app(width=80)
         with patch("jarv.headsup.terminal_size", return_value=(80, 12)):
