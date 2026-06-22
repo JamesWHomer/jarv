@@ -527,7 +527,10 @@ class HeadsupApp:
         term_w = max(20, term_w)
         term_h = max(8, term_h)
         panel_width = _panel_width(term_w)
-        inner_width = max(1, panel_width - 4)
+        model_status = f"{self.config.get('provider', 'openai')} / {self.config.get('model', DEFAULT_CONFIG['model'])}"
+        title = self._panel_title(model_status, panel_width)
+        rendered_panel_width = self._rendered_panel_width(term_w, panel_width, title)
+        inner_width = max(1, rendered_panel_width - 4)
         body_height = max(3, term_h - 2)
         max_prompt_rows = min(8, max(1, body_height - 2), max(3, term_h // 3))
 
@@ -579,11 +582,10 @@ class HeadsupApp:
             parts.append(Text(""))
         parts.append(footer)
         parts.extend(prompt_lines)
-        model_status = f"{self.config.get('provider', 'openai')} / {self.config.get('model', DEFAULT_CONFIG['model'])}"
         subtitle = self._panel_subtitle(inner_width)
         return Panel(
             Group(*parts),
-            title=self._panel_title(model_status, panel_width),
+            title=title,
             title_align="left",
             subtitle=subtitle,
             subtitle_align="right",
@@ -618,6 +620,10 @@ class HeadsupApp:
         subtitle.append_text(self._usage_status(width))
         subtitle.truncate(max(1, width), overflow="ellipsis")
         return subtitle
+
+    def _rendered_panel_width(self, term_w: int, panel_width: int, title: Text) -> int:
+        # Rich may expand a panel to fit the title plus its side rules and padding.
+        return min(term_w, max(panel_width, cell_len(title.plain) + 6))
 
     def refresh(self) -> None:
         if self._refresh_suspended:
@@ -809,7 +815,11 @@ class HeadsupApp:
     def _current_prompt_edit_width(self) -> int:
         term_w, _term_h = terminal_size(console=self.console)
         term_w = max(20, term_w)
-        return self._prompt_edit_width(max(1, _panel_width(term_w) - 4))
+        panel_width = _panel_width(term_w)
+        model_status = f"{self.config.get('provider', 'openai')} / {self.config.get('model', DEFAULT_CONFIG['model'])}"
+        title = self._panel_title(model_status, panel_width)
+        rendered_panel_width = self._rendered_panel_width(term_w, panel_width, title)
+        return self._prompt_edit_width(max(1, rendered_panel_width - 4))
 
     def _apply_editor_key(self, key: str, repeat: int) -> tuple[bool, bool]:
         if isinstance(key, TextInput):
@@ -1410,10 +1420,13 @@ class HeadsupApp:
 
     def _prompt_label(self) -> str:
         request = self._answer_request
-        return str(request.get("label") if request is not None else "jarv> ")
+        return str(request.get("label") if request is not None else "")
 
     def _prompt_edit_width(self, width: int) -> int:
-        return max(1, width - cell_len(self._prompt_label()))
+        label = self._prompt_label()
+        if label:
+            return max(1, width - cell_len(label))
+        return max(1, width - 4)
 
     def _prompt_lines(self, width: int, *, max_lines: int) -> list[Text]:
         label = self._prompt_label()
@@ -1421,12 +1434,15 @@ class HeadsupApp:
         rendered, _cursor_idx, _start = render_visual_line_window(
             self.editor,
             edit_width,
-            max_lines=max_lines,
-            text_style="bright_white",
+            max_lines=max(1, max_lines - (0 if label else 2)),
+            text_style="white",
             cursor_style="reverse",
         )
         if not rendered:
             rendered = [Text(" ", style="reverse")]
+        if not label:
+            return self._prompt_input_box_lines(rendered, width, max_lines=max_lines)
+
         line = Text(label, style="bold cyan", no_wrap=True, overflow="crop")
         line.append_text(rendered[0])
         lines = [line]
@@ -1436,6 +1452,30 @@ class HeadsupApp:
             wrapped.append_text(visual_line)
             lines.append(wrapped)
         return lines[:max(1, max_lines)]
+
+    def _prompt_input_box_lines(self, rendered: list[Text], width: int, *, max_lines: int) -> list[Text]:
+        border_style = "dim cyan"
+        field_width = max(1, width - 2)
+        content_width = max(1, width - 4)
+        has_horizontal_padding = width >= 4
+        top = Text("\u256d" + "\u2500" * field_width + "\u256e", style=border_style, no_wrap=True)
+        bottom = Text("\u2570" + "\u2500" * field_width + "\u256f", style=border_style, no_wrap=True)
+        rows: list[Text] = [top]
+        for visual_line in rendered[:max(1, max_lines - 2)]:
+            line = Text(no_wrap=True, overflow="crop")
+            line.append("\u2502", style=border_style)
+            if has_horizontal_padding:
+                line.append(" ")
+            line.append_text(visual_line)
+            padding = max(0, content_width - cell_len(visual_line.plain))
+            if padding:
+                line.append(" " * padding)
+            if has_horizontal_padding:
+                line.append(" ")
+            line.append("\u2502", style=border_style)
+            rows.append(line)
+        rows.append(bottom)
+        return rows[:max(1, max_lines)]
 
     def _footer_line(self, width: int) -> Text:
         with self.lock:
