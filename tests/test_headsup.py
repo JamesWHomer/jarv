@@ -113,6 +113,31 @@ class HeadsupTests(unittest.TestCase):
 
         self.assertLessEqual(max(cell_len(line) for line in rendered.splitlines()), 79)
 
+    def test_render_erases_stale_right_edge_in_terminal_frames(self):
+        ready = threading.Event()
+        ready.set()
+        output = io.StringIO()
+        test_console = Console(
+            file=output,
+            force_terminal=True,
+            color_system=None,
+            width=80,
+        )
+        app = HeadsupApp(
+            {"provider": "openai", "model": "test-model"},
+            client=object(),
+            args=None,
+            agent_loader=({"module": SimpleNamespace()}, ready),
+            handle_slash=lambda command, rest, config, client, args, hint: (config, client),
+            maybe_command=lambda _first, _rest: None,
+            render_console=test_console,
+        )
+
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)):
+            test_console.print(app.render())
+
+        self.assertIn("\x1b[0K", output.getvalue())
+
     def test_prompt_box_styles_typed_text_white(self):
         app, _test_console, _output = self._app()
         initialize_text_editor(app.editor, "typed")
