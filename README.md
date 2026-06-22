@@ -85,7 +85,7 @@ Flags override config values for a single run and work in both one-shot and head
 | `--provider PROVIDER` | | Override the provider (`openai`, `anthropic`, `gemini`, etc.) |
 | `--model MODEL` | `-m` | Override the model (e.g. `gpt-5.4-mini`) |
 | `--effort EFFORT` | `-e` | Override reasoning effort with a value supported by the selected model |
-| `--timeout SECONDS` | | Override command timeout in seconds |
+| `--timeout SECONDS` | | Override shell command timeout/check-in seconds |
 | `--system PROMPT` | `-s` | Override the system prompt |
 | `--new` | | Start a fresh session (ignore prior history, but still save) |
 | `--incognito` | | Don't load or save session history |
@@ -118,7 +118,7 @@ On Windows, commands run through PowerShell. On other platforms, they run throug
 
 `run_command` accepts optional `head_chars` and `tail_chars` parameters that control how much of the beginning and end of command output is returned to the model. Omitted values split `max_tool_output_chars` between the two sides. Explicit values override that configured limit for the command. When output is longer than the requested head and tail, Jarv retains the full result under a session-scoped `cmd_<id>` and reports the exact omitted offset and size so the model can retrieve it with `read`.
 
-If a command stays alive after its output goes idle, Jarv treats it as waiting for stdin. The next assistant response is sent to that process instead of printed as chat, and Jarv repeats that loop until the command exits or is cancelled. Each interaction is shown as its own command card with the stdin sent and only the new stdout/stderr since the previous interaction. Jarv also sends only that new output back to the model; it does not accumulate interactive output into later command results or transcripts.
+If a command stays alive after its output goes idle, Jarv treats it as waiting for stdin. The next assistant response is sent to that process instead of printed as chat, and Jarv repeats that loop until the command exits or is cancelled. Each interaction is shown as its own command card with the stdin sent and only the new stdout/stderr since the previous interaction. Jarv also sends only that new output back to the model; it does not accumulate interactive output into later command results or transcripts. During this interactive loop, `command_timeout` is a check-in interval: if the process keeps running past it, Jarv asks the model what to do next and reports elapsed/idle time instead of killing the process.
 
 In the terminal, command output uses at most one-third of the screen height. Truncated output is biased roughly 2:1 toward the first lines, followed by the omitted-middle count and the final lines. Jarv also shows the resolved `head_chars` and `tail_chars` for each command.
 
@@ -219,7 +219,7 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 | `max_stdin_chars` | `200000` | Maximum piped stdin characters attached to a one-shot prompt. |
 | `max_tool_output_chars` | `20000` | Maximum generic tool output characters returned to the model. It also supplies the default head/tail budget for `run_command`. |
 | `disabled_tools` | `[]` | Tool names omitted from root agents and subagents. Configure these from the Tools section in `/settings`. |
-| `command_timeout` | `60` | Seconds before a shell command is killed. |
+| `command_timeout` | `60` | Seconds before non-interactive shell commands are killed, or before interactive commands check in again. |
 | `web_timeout` | `15` | Seconds before a web search or URL read is killed. |
 | `command_safety` | `"risky"` | Command confirmation level: `all` (confirm every command), `risky` (confirm dangerous commands only), `none` (no confirmation). |
 | `audit` | `true` | LLM auditor for flagged commands. |

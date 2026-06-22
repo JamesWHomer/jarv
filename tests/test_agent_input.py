@@ -14,6 +14,7 @@ from jarv.agent import (
     _dispatch_run_command_with_ui,
     _parse_terminal_control,
     _print_tool_card,
+    _run_command_waiting_prompt,
     _terminal_action_display,
     build_input,
     _format_agent_usage_line,
@@ -1092,6 +1093,27 @@ class AgentInputTests(unittest.TestCase):
 
         self.assertEqual(action, "stdin_raw")
         self.assertEqual(payload, "\t")
+
+    def test_interactive_check_in_prompt_reports_elapsed_time(self):
+        snapshot = InteractiveCommandSnapshot(
+            "python busy.py",
+            "tick\n",
+            "",
+            None,
+            elapsed_seconds=65.2,
+            idle_seconds=0.4,
+            check_in=True,
+            check_in_after=60.0,
+        )
+
+        prompt = _run_command_waiting_prompt(snapshot)
+
+        self.assertIn("[interactive command still running]", prompt)
+        self.assertIn("command_timeout check-in", prompt)
+        self.assertIn("was not killed", prompt)
+        self.assertIn("Elapsed: 65s", prompt)
+        self.assertIn("Time since last output: 0.4s", prompt)
+        self.assertIn("tick", prompt)
 
     def test_root_batches_consecutive_reads_and_preserves_call_order(self):
         with TemporaryDirectory() as tmp:

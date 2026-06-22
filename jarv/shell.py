@@ -66,6 +66,10 @@ class InteractiveCommandSnapshot:
     stdin_closed: bool = False
     stdout_start: int = 0
     stderr_start: int = 0
+    elapsed_seconds: float = 0.0
+    idle_seconds: float = 0.0
+    check_in: bool = False
+    check_in_after: float | None = None
 
     def to_command_result(self) -> CommandResult:
         return CommandResult(
@@ -104,6 +108,7 @@ class InteractiveCommandProcess:
         self._stderr_consumed = 0
         self._lock = threading.Lock()
         self._last_output_at = time.monotonic()
+        self._started_at = self._last_output_at
         self._stdin_closed = False
         self._stdout_thread = threading.Thread(
             target=self._read_stream,
@@ -168,12 +173,21 @@ class InteractiveCommandProcess:
         except Exception:
             return
 
-    def snapshot(self, *, consume: bool = False) -> InteractiveCommandSnapshot:
+    def snapshot(
+        self,
+        *,
+        consume: bool = False,
+        check_in: bool = False,
+        check_in_after: float | None = None,
+    ) -> InteractiveCommandSnapshot:
+        now = time.monotonic()
         with self._lock:
             stdout = "".join(self._stdout_parts)
             stderr = "".join(self._stderr_parts)
             stdout_start = self._stdout_consumed
             stderr_start = self._stderr_consumed
+            elapsed_seconds = now - self._started_at
+            idle_seconds = now - self._last_output_at
             if consume:
                 self._stdout_consumed = len(stdout)
                 self._stderr_consumed = len(stderr)
@@ -186,6 +200,10 @@ class InteractiveCommandProcess:
             stdin_closed=self._stdin_closed,
             stdout_start=stdout_start,
             stderr_start=stderr_start,
+            elapsed_seconds=elapsed_seconds,
+            idle_seconds=idle_seconds,
+            check_in=check_in,
+            check_in_after=check_in_after,
         )
 
     @property
@@ -204,9 +222,12 @@ class InteractiveCommandProcess:
         idle_seconds: float = 0.5,
         first_output_grace_seconds: float = 2.0,
         wait_seconds: float | None = None,
+        check_in_seconds: float | None = None,
         cancellation_token: CancellationToken | None = None,
     ) -> InteractiveCommandSnapshot:
         start = time.monotonic()
+        if check_in_seconds is not None and check_in_seconds <= 0:
+            check_in_seconds = None
         with self._lock:
             last_output_at_start = self._last_output_at
         saw_output_during_wait = False
@@ -226,6 +247,12 @@ class InteractiveCommandProcess:
                 idle_for = now - self._last_output_at
             if wait_seconds is not None and now - start >= wait_seconds:
                 return self.snapshot(consume=True)
+            if check_in_seconds is not None and now - start >= check_in_seconds:
+                return self.snapshot(
+                    consume=True,
+                    check_in=True,
+                    check_in_after=check_in_seconds,
+                )
             if (
                 wait_seconds is None
                 and not saw_output_during_wait

@@ -68,7 +68,7 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
     ConfigField("max_stdin_chars", 200_000, validator="positive_int", label="Stdin limit", section="runtime", desc="piped stdin chars attached to one-shot prompts", ui_kind="int", about="Maximum piped stdin characters attached to a one-shot prompt."),
     ConfigField("max_tool_output_chars", 20_000, validator="positive_int", label="Tool output limit", section="runtime", desc="tool output chars returned to the model", ui_kind="int", about="Maximum generic tool output characters returned to the model and the default combined head/tail budget for `run_command`."),
     ConfigField("disabled_tools", [], validator="disabled_tools", about="Tool names omitted from root agents and subagents. Use `/settings` to toggle `run_command`, `web_search`, `read`, `spawn`, and `ask_user`."),
-    ConfigField("command_timeout", 60, validator="positive_int", label="Command timeout", section="runtime", desc="seconds before shell commands are killed", ui_kind="int", about="Seconds before a shell command is killed."),
+    ConfigField("command_timeout", 60, validator="positive_int", label="Command timeout", section="runtime", desc="kill non-interactive commands; check in during interactive commands", ui_kind="int", about="Seconds before a non-interactive shell command is killed, or before an interactive command asks the model what to do next."),
     ConfigField("web_timeout", 15, validator="positive_int", label="Web timeout", section="runtime", desc="seconds before web requests are cancelled", ui_kind="int", about="Seconds before a web search or URL read is killed."),
     ConfigField(
         "command_safety",
