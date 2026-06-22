@@ -644,8 +644,11 @@ class HeadsupApp:
 
     def _panel_title(self, model_status: str, panel_width: int) -> Text:
         left = "jarv \u25b8 heads-up"
-        title_width = max(1, panel_width - 5)
+        # Rich reserves six cells around panel titles. Keeping the title inside
+        # that budget prevents Rich from expanding past our WSL wrap guard.
+        title_width = max(1, panel_width - 6)
         title = Text(no_wrap=True, overflow="crop")
+        left = clip_text(left, title_width)
         title.append(left, style=TITLE_STYLE)
         remaining = title_width - cell_len(left)
         if remaining <= 1:
@@ -668,8 +671,9 @@ class HeadsupApp:
         return subtitle
 
     def _rendered_panel_width(self, term_w: int, panel_width: int, title: Text) -> int:
-        # Rich may expand a panel to fit the title plus its side rules and padding.
-        return min(term_w, max(panel_width, cell_len(title.plain) + 6))
+        # _panel_title clips to the title budget, so Rich should honor the
+        # explicit width and leave the spare terminal column unused.
+        return panel_width
 
     def refresh(self) -> None:
         if self._refresh_suspended:
