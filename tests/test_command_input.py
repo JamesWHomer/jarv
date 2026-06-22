@@ -392,6 +392,21 @@ def test_read_key_with_repeats_batches_queued_text(monkeypatch):
     command_input._PENDING_KEYS.clear()
 
 
+def test_read_key_with_repeats_batches_pasted_lines_without_bracketed_paste(monkeypatch):
+    command_input._PENDING_KEYS.clear()
+    keys = [*"first", "ENTER", *"second", "ENTER"]
+
+    monkeypatch.setattr(command_input, "_read_key", lambda text_mode=False: keys.pop(0))
+    monkeypatch.setattr(command_input, "_key_available", lambda: bool(keys))
+
+    assert command_input._read_key_with_repeats(
+        text_mode=True,
+        batch_text=True,
+    ) == (command_input.TextInput("first\nsecond"), 1)
+    assert list(command_input._PENDING_KEYS) == ["ENTER"]
+    command_input._PENDING_KEYS.clear()
+
+
 def test_read_key_with_repeats_drops_batched_sgr_mouse_text(monkeypatch):
     command_input._PENDING_KEYS.clear()
     keys = [*"[<35;62;15M"]
@@ -441,6 +456,15 @@ def test_read_key_maps_posix_delete(monkeypatch):
     stdin = _install_posix_input(monkeypatch, "\x1b[3~")
 
     assert command_input._read_key(text_mode=True) == "DELETE"
+    assert stdin.remaining == ""
+
+
+def test_read_key_maps_posix_bracketed_paste_to_text_input(monkeypatch):
+    stdin = _install_posix_input(monkeypatch, "\x1b[200~first\nsecond\x1b[201~")
+
+    key = command_input._read_key(text_mode=True)
+
+    assert key == command_input.TextInput("first\nsecond")
     assert stdin.remaining == ""
 
 

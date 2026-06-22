@@ -92,6 +92,31 @@ def render_visual_lines(
     return rendered, active_row
 
 
+def render_visual_line_window(
+    state: dict,
+    content_width: int,
+    *,
+    max_lines: int | None = None,
+    indent: str = "",
+    masked: bool = False,
+    text_style: str = "green",
+    cursor_style: str = "reverse",
+) -> tuple[list[Text], int, int]:
+    lines, cursor_idx = render_visual_lines(
+        state,
+        content_width,
+        indent=indent,
+        masked=masked,
+        text_style=text_style,
+        cursor_style=cursor_style,
+    )
+    if max_lines is None:
+        return lines, cursor_idx, 0
+    visible_count = max(1, max_lines)
+    start = max(0, min(cursor_idx - visible_count + 1, len(lines) - visible_count))
+    return lines[start : start + visible_count], cursor_idx - start, start
+
+
 def render_single_line(
     state: dict,
     width: int,
@@ -206,11 +231,22 @@ def apply_text_editor_key(
         state["buffer"] = value[:cursor] + "\n" + value[cursor:]
         state["cursor"] = cursor + 1
         changed = True
+    elif isinstance(key, TextInput):
+        inserted = str(key).replace("\r\n", "\n").replace("\r", "\n")
+        if not allow_newlines:
+            inserted = inserted.replace("\n", " ")
+        if inserted and all(
+            char == "\n" or char == "\t" or char.isprintable()
+            for char in inserted
+        ):
+            state["buffer"] = value[:cursor] + inserted + value[cursor:]
+            state["cursor"] = cursor + len(inserted)
+            changed = True
     elif (
         isinstance(key, str)
         and key
-        and (len(key) == 1 or isinstance(key, TextInput))
-        and all(char.isprintable() for char in key)
+        and len(key) == 1
+        and key.isprintable()
     ):
         state["buffer"] = value[:cursor] + key + value[cursor:]
         state["cursor"] = cursor + len(key)

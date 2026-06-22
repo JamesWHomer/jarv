@@ -24,6 +24,7 @@ from .command_input import (
     _key_available,
     _read_key,
     _read_key_with_repeats,
+    bracketed_paste,
     disable_mouse_capture,
     requeue_key,
     strip_sgr_mouse_sequences,
@@ -55,8 +56,8 @@ from .session_render import (
     _tool_call_output,
     _tool_call_renderable,
 )
-from .text_editor import apply_text_editor_key, initialize_text_editor, render_single_line
-from .tui_layout import append_bottom_footer, clip_text
+from .text_editor import apply_text_editor_key, initialize_text_editor, render_visual_line_window
+from .tui_layout import clip_text
 from .usage import format_cost, known_context_window, load_usage, usage_cost_summary, usage_file_for
 
 
@@ -436,7 +437,7 @@ class HeadsupApp:
                 auto_refresh=False,
                 transient=False,
                 vertical_overflow="crop",
-            ) as live, refresh_on_resize(live, on_change=self.refresh):
+            ) as live, refresh_on_resize(live, on_change=self.refresh), bracketed_paste():
                 mark_first_paint("headsup")
                 self.live = live
                 self._foreground_input_active = True
@@ -461,7 +462,13 @@ class HeadsupApp:
                             if self._answer_request is not None:
                                 self._complete_answer()
                                 continue
-                            query = str(self.editor.get("buffer", "")).strip()
+                            raw_query = str(self.editor.get("buffer", ""))
+                            query = raw_query.strip("\r\n")
+                            if not query.strip():
+                                initialize_text_editor(self.editor, "")
+                                self._clear_prompt_notice()
+                                self._exit_armed = False
+                                continue
                             self._record_prompt_history(query)
                             initialize_text_editor(self.editor, "")
                             self._clear_prompt_notice()
@@ -486,7 +493,11 @@ class HeadsupApp:
                             self._scroll_transcript(5 * repeat)
                         elif key == "MOUSE_WHEEL_PAGEDOWN":
                             self._scroll_transcript(-5 * repeat)
-                        elif key in {"UP", "DOWN"} and self._answer_request is None:
+                        elif (
+                            key in {"UP", "DOWN"}
+                            and self._answer_request is None
+                            and not self._prompt_has_multiline_draft()
+                        ):
                             if self._navigate_prompt_history(key, repeat):
                                 self.scroll_offset = 0
                                 self._clear_prompt_notice()
@@ -518,10 +529,12 @@ class HeadsupApp:
         panel_width = _panel_width(term_w)
         inner_width = max(1, panel_width - 4)
         body_height = max(3, term_h - 2)
-        prompt_rows = 3
-        transcript_rows = max(1, body_height - prompt_rows)
+        max_prompt_rows = min(8, max(1, body_height - 2), max(3, term_h // 3))
 
         with self.lock:
+            prompt_lines = self._prompt_lines(inner_width, max_lines=max_prompt_rows)
+            footer = self._footer_line(inner_width)
+            transcript_rows = max(1, body_height - len(prompt_lines) - 1)
             transcript = self._transcript_lines(inner_width)
             max_scroll = max(0, len(transcript) - transcript_rows)
             self.scroll_offset = max(0, min(self.scroll_offset, max_scroll))
@@ -558,18 +571,14 @@ class HeadsupApp:
         while len(visible) < transcript_rows:
             visible.insert(0, Text(""))
 
-        footer = self._footer_line(inner_width)
-        prompt = self._prompt_line(inner_width)
         parts: list[RenderableType] = visible
-        append_bottom_footer(
-            parts,
-            body_height,
-            prompt,
-            border_rows=0,
-            footer_rows=2,
-            crop=True,
-        )
-        parts[-2] = footer
+        target_rows_before_footer = max(0, body_height - 1 - len(prompt_lines))
+        if len(parts) > target_rows_before_footer:
+            del parts[target_rows_before_footer:]
+        while len(parts) < target_rows_before_footer:
+            parts.append(Text(""))
+        parts.append(footer)
+        parts.extend(prompt_lines)
         model_status = f"{self.config.get('provider', 'openai')} / {self.config.get('model', DEFAULT_CONFIG['model'])}"
         subtitle = self._panel_subtitle(inner_width)
         return Panel(
@@ -797,6 +806,11 @@ class HeadsupApp:
                 self._answer_request_completed = {}
                 self._answer_condition.notify_all()
 
+    def _current_prompt_edit_width(self) -> int:
+        term_w, _term_h = terminal_size(console=self.console)
+        term_w = max(20, term_w)
+        return self._prompt_edit_width(max(1, _panel_width(term_w) - 4))
+
     def _apply_editor_key(self, key: str, repeat: int) -> tuple[bool, bool]:
         if isinstance(key, TextInput):
             value = str(self.editor.get("buffer", ""))
@@ -812,12 +826,14 @@ class HeadsupApp:
                 return stripped != existing_tail, bool(stripped)
 
         key = _sanitize_editor_key(key)
+        if key == "CTRL_N":
+            key = "ENTER"
         changed = apply_text_editor_key(
             self.editor,
             key,
             repeat,
-            content_width=1,
-            allow_newlines=False,
+            content_width=self._current_prompt_edit_width(),
+            allow_newlines=True,
         )
         return changed, isinstance(key, TextInput)
 
@@ -892,6 +908,9 @@ class HeadsupApp:
             return None
         if query.lower() in {"exit", "quit"}:
             return "exit"
+        if "\n" in query:
+            self._run_agent_query(query)
+            return None
 
         parts = query.split()
         if len(parts) > 1 and parts[0].lower() == "jarv" and parts[1].startswith("/"):
@@ -1324,6 +1343,9 @@ class HeadsupApp:
         self._prompt_history_index = None
         self._prompt_history_draft = ""
 
+    def _prompt_has_multiline_draft(self) -> bool:
+        return "\n" in str(self.editor.get("buffer", ""))
+
     def _navigate_prompt_history(self, key: str, repeat: int) -> bool:
         if not self._prompt_history:
             return False
@@ -1386,20 +1408,34 @@ class HeadsupApp:
             lines.extend(rendered or [Text("")])
         return lines or [Text("")]
 
-    def _prompt_line(self, width: int) -> Text:
+    def _prompt_label(self) -> str:
         request = self._answer_request
-        label = str(request.get("label") if request is not None else "jarv> ")
-        line = Text(label, style="bold cyan", no_wrap=True, overflow="crop")
-        edit_width = max(1, width - len(label))
-        line.append_text(
-            render_single_line(
-                self.editor,
-                edit_width,
-                text_style="bright_white",
-                cursor_style="reverse",
-            )
+        return str(request.get("label") if request is not None else "jarv> ")
+
+    def _prompt_edit_width(self, width: int) -> int:
+        return max(1, width - cell_len(self._prompt_label()))
+
+    def _prompt_lines(self, width: int, *, max_lines: int) -> list[Text]:
+        label = self._prompt_label()
+        edit_width = self._prompt_edit_width(width)
+        rendered, _cursor_idx, _start = render_visual_line_window(
+            self.editor,
+            edit_width,
+            max_lines=max_lines,
+            text_style="bright_white",
+            cursor_style="reverse",
         )
-        return line
+        if not rendered:
+            rendered = [Text(" ", style="reverse")]
+        line = Text(label, style="bold cyan", no_wrap=True, overflow="crop")
+        line.append_text(rendered[0])
+        lines = [line]
+        continuation = " " * cell_len(label)
+        for visual_line in rendered[1:]:
+            wrapped = Text(continuation, style="dim")
+            wrapped.append_text(visual_line)
+            lines.append(wrapped)
+        return lines[:max(1, max_lines)]
 
     def _footer_line(self, width: int) -> Text:
         with self.lock:
@@ -1420,13 +1456,13 @@ class HeadsupApp:
         if exit_armed:
             value = "Esc/Ctrl+C exit   Any other key continue"
         elif answering:
-            value = "Enter answer   Esc no response/cancel"
+            value = "Enter answer   Ctrl+N newline   Esc no response/cancel"
         elif has_draft:
-            value = "Enter send   Esc/Ctrl+C clear draft   Wheel/PgUp/PgDn scroll"
+            value = "Enter send   Ctrl+N newline   Esc/Ctrl+C clear draft   Wheel/PgUp/PgDn scroll"
         elif cancelling:
-            value = "Enter send   Esc/Ctrl+C cancel turn   Wheel/PgUp/PgDn scroll"
+            value = "Enter send   Ctrl+N newline   Esc/Ctrl+C cancel turn   Wheel/PgUp/PgDn scroll"
         else:
-            value = "Enter send   Esc/Ctrl+C clear/exit/cancel   Wheel/PgUp/PgDn scroll   /exit quit"
+            value = "Enter send   Ctrl+N newline   Esc/Ctrl+C clear/exit/cancel   Wheel/PgUp/PgDn scroll   /exit quit"
         return Text(
             clip_text(value, width),
             style="dim italic",
