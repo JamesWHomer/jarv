@@ -96,7 +96,7 @@ class HeadsupTests(unittest.TestCase):
 
         rendered = self._rendered_text(app, test_console, output, width=150, height=24)
         lines = rendered.splitlines()
-        top_idx = next(idx for idx, line in enumerate(lines) if "\u256d" in line)
+        top_idx = next(idx for idx, line in enumerate(lines) if line.startswith("\u2502 \u256d"))
 
         self.assertTrue(lines[top_idx].startswith("\u2502 \u256d"))
         self.assertTrue(lines[top_idx].endswith("\u256e \u2502"))
