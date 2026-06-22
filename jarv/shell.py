@@ -2,6 +2,7 @@ import os
 import platform
 import signal
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 
@@ -53,6 +54,227 @@ class CommandResult:
         elif self.exit_code not in (None, 0):
             parts.append(f"[exit code {self.exit_code}]")
         return "\n".join(parts) if parts else "(no output)"
+
+
+@dataclass
+class InteractiveCommandSnapshot:
+    command: str
+    stdout: str
+    stderr: str
+    exit_code: int | None
+    exited: bool = False
+    stdin_closed: bool = False
+    stdout_start: int = 0
+    stderr_start: int = 0
+
+    def to_command_result(self) -> CommandResult:
+        return CommandResult(
+            self.command,
+            self.stdout,
+            self.stderr,
+            self.exit_code,
+        )
+
+    @property
+    def stdout_delta(self) -> str:
+        return self.stdout[self.stdout_start:]
+
+    @property
+    def stderr_delta(self) -> str:
+        return self.stderr[self.stderr_start:]
+
+    def to_delta_command_result(self) -> CommandResult:
+        return CommandResult(
+            self.command,
+            self.stdout_delta,
+            self.stderr_delta,
+            self.exit_code,
+        )
+
+
+class InteractiveCommandProcess:
+    """A command process whose stdin can be driven across model turns."""
+
+    def __init__(self, command: str, proc: subprocess.Popen):
+        self.command = command
+        self.proc = proc
+        self._stdout_parts: list[str] = []
+        self._stderr_parts: list[str] = []
+        self._stdout_consumed = 0
+        self._stderr_consumed = 0
+        self._lock = threading.Lock()
+        self._last_output_at = time.monotonic()
+        self._stdin_closed = False
+        self._stdout_thread = threading.Thread(
+            target=self._read_stream,
+            args=(proc.stdout, self._stdout_parts),
+            daemon=True,
+        )
+        self._stderr_thread = threading.Thread(
+            target=self._read_stream,
+            args=(proc.stderr, self._stderr_parts),
+            daemon=True,
+        )
+        self._stdout_thread.start()
+        self._stderr_thread.start()
+
+    @classmethod
+    def start(cls, command: str) -> "InteractiveCommandProcess":
+        if platform.system() == "Windows":
+            shell_command = [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                command,
+            ]
+            proc = subprocess.Popen(
+                shell_command,
+                shell=False,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+            )
+        else:
+            proc = subprocess.Popen(
+                command,
+                shell=True,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                preexec_fn=os.setsid,
+            )
+        return cls(command, proc)
+
+    def _read_stream(self, stream, target: list[str]) -> None:
+        if stream is None:
+            return
+        try:
+            while True:
+                chunk = stream.read(1)
+                if chunk == "":
+                    return
+                with self._lock:
+                    target.append(chunk)
+                    self._last_output_at = time.monotonic()
+        except Exception:
+            return
+
+    def snapshot(self, *, consume: bool = False) -> InteractiveCommandSnapshot:
+        with self._lock:
+            stdout = "".join(self._stdout_parts)
+            stderr = "".join(self._stderr_parts)
+            stdout_start = self._stdout_consumed
+            stderr_start = self._stderr_consumed
+            if consume:
+                self._stdout_consumed = len(stdout)
+                self._stderr_consumed = len(stderr)
+        return InteractiveCommandSnapshot(
+            self.command,
+            stdout,
+            stderr,
+            self.proc.poll(),
+            exited=self.proc.poll() is not None,
+            stdin_closed=self._stdin_closed,
+            stdout_start=stdout_start,
+            stderr_start=stderr_start,
+        )
+
+    @property
+    def stdout(self) -> str:
+        with self._lock:
+            return "".join(self._stdout_parts)
+
+    @property
+    def stderr(self) -> str:
+        with self._lock:
+            return "".join(self._stderr_parts)
+
+    def wait_until_idle(
+        self,
+        *,
+        idle_seconds: float = 0.5,
+        first_output_grace_seconds: float = 2.0,
+        wait_seconds: float | None = None,
+        cancellation_token: CancellationToken | None = None,
+    ) -> InteractiveCommandSnapshot:
+        start = time.monotonic()
+        with self._lock:
+            last_output_at_start = self._last_output_at
+        saw_output_during_wait = False
+        while True:
+            if cancellation_token is not None:
+                cancellation_token.throw_if_cancelled()
+            if self.proc.poll() is not None:
+                self._stdout_thread.join(timeout=0.2)
+                self._stderr_thread.join(timeout=0.2)
+                return self.snapshot(consume=True)
+            now = time.monotonic()
+            with self._lock:
+                saw_output_during_wait = (
+                    saw_output_during_wait
+                    or self._last_output_at > last_output_at_start
+                )
+                idle_for = now - self._last_output_at
+            if wait_seconds is not None and now - start >= wait_seconds:
+                return self.snapshot(consume=True)
+            if (
+                wait_seconds is None
+                and not saw_output_during_wait
+                and now - start < first_output_grace_seconds
+            ):
+                time.sleep(0.02)
+                continue
+            if idle_for >= idle_seconds and (
+                wait_seconds is None or saw_output_during_wait
+            ):
+                return self.snapshot(consume=True)
+            time.sleep(0.02)
+
+    def write_stdin(self, text: str) -> None:
+        if self._stdin_closed or self.proc.stdin is None:
+            return
+        try:
+            self.proc.stdin.write(text)
+            self.proc.stdin.flush()
+        except (BrokenPipeError, OSError, ValueError):
+            self._stdin_closed = True
+
+    def close_stdin(self) -> None:
+        if self._stdin_closed or self.proc.stdin is None:
+            return
+        try:
+            self.proc.stdin.close()
+        except OSError:
+            pass
+        self._stdin_closed = True
+
+    def interrupt(self) -> None:
+        if self.proc.poll() is not None:
+            return
+        if platform.system() == "Windows":
+            try:
+                self.proc.send_signal(signal.CTRL_BREAK_EVENT)
+                return
+            except Exception:
+                _kill_process_tree(self.proc)
+                return
+        try:
+            os.killpg(self.proc.pid, signal.SIGINT)
+        except Exception:
+            self.proc.send_signal(signal.SIGINT)
+
+    def kill_tree(self) -> None:
+        if self.proc.poll() is None:
+            _kill_process_tree(self.proc)
 
 
 def resolve_command_output_window(
