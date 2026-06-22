@@ -169,7 +169,7 @@ def _help_body() -> Group:
     groups = [
         [
             ("jarv", "Start heads-up mode", "bold cyan"),
-            ("jarv <prompt>", "Ask once, then exit", "bold cyan"),
+            ("jarv <prompt>", "Ask once; can run interactive commands", "bold cyan"),
             ("command | jarv <instruction>", "Attach piped input to a one-shot prompt", "bold cyan"),
             ("git diff | jarv review this", "Review a patch from stdin", "bold cyan"),
         ],
@@ -281,7 +281,7 @@ Run `jarv` with no prompt to start an interactive session. Type a prompt and pre
 3. Loads recent conversation history from that session's history file.
 4. Sends your query, recent history, the configured system prompt, and system info to the configured provider backend (OpenAI Responses, Anthropic Messages, Gemini, or an OpenAI-compatible API).
 5. Streams the assistant response in the terminal.
-6. When the model issues tool calls, jarv runs the matching handler and feeds results back into the model (for `run_command`, that means showing the command, running it, printing stdout/stderr/exit status, and returning the requested output head and tail).
+6. When the model issues tool calls, jarv runs the matching handler and feeds results back into the model. For `run_command`, jarv shows the command, runs it, prints stdout/stderr/exit status, and returns the requested output head and tail. If the command stays alive after output goes idle, jarv temporarily switches that command into an interactive stdin loop.
 7. Saves the full session history. On future prompts, `max_history` limits only the recent history items sent back as model context.
 
 ## Tools and shell commands
@@ -295,6 +295,8 @@ Run `jarv` with no prompt to start an interactive session. Type a prompt and pre
 - Shell commands run only when the model calls `run_command`.
 - On Windows, `run_command` uses PowerShell.
 - On other platforms, `run_command` uses the system shell.
+- If a command is still running and appears to be waiting for input, jarv asks the model for terminal input instead of printing the assistant response as chat. Plain text is sent with Enter; the interactive prompt also exposes temporary controls such as wait, interrupt, EOF, Enter, Tab, Escape, and arrow keys only while they are relevant.
+- Interactive command output is delta-only. Each terminal input/output step is displayed separately, and jarv sends only the new stdout/stderr since the previous interaction back to the model.
 - Command output shown in the terminal uses at most one-third of the screen height, biased roughly 2:1 toward the first lines, with the omitted middle count displayed. The UI also shows the resolved `head_chars` and `tail_chars` returned to the model. Truncated model output is retained under a session-scoped ID for later `read` calls.
 - Commands are killed after `command_timeout` seconds.
 - Web requests are killed after `web_timeout` seconds. Text and PDF responses are limited to 2 MiB.
