@@ -1,5 +1,6 @@
 import io
 import json
+import sys
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,7 +12,9 @@ from rich.console import Console
 from jarv.agent import (
     _dispatch_ask_user,
     _dispatch_run_command_with_ui,
+    _parse_terminal_control,
     _print_tool_card,
+    _terminal_action_display,
     build_input,
     _format_agent_usage_line,
     response_start_status,
@@ -27,7 +30,7 @@ from jarv.config import DEFAULT_CONFIG
 from jarv.display import tool_card
 from jarv.history import SessionContext, load_history, save_history
 from jarv.history import redo_file_for
-from jarv.orchestrator import WEB_SEARCH_READ_NUDGE
+from jarv.orchestrator import RunCommandDispatchResult, WEB_SEARCH_READ_NUDGE
 from jarv.provider import (
     ReasoningStarted,
     RetryableStreamError,
@@ -36,7 +39,7 @@ from jarv.provider import (
     ToolCallDone,
     ToolCallStarted,
 )
-from jarv.shell import CommandResult
+from jarv.shell import CommandResult, InteractiveCommandSnapshot
 
 
 class AgentInputTests(unittest.TestCase):
@@ -133,25 +136,22 @@ class AgentInputTests(unittest.TestCase):
         )
         config = {**DEFAULT_CONFIG, "tool_call_display": "fullscreen"}
 
-        def execute_after_display(command, *_args, **_kwargs):
-            rendered = stream.getvalue()
-            self.assertIn(command, rendered)
-            self.assertIn("running 0s", rendered)
-            return CommandResult(command, "done", "", 0)
-
         with (
             patch("jarv.agent.console", test_console),
             patch("jarv.agent.check_command", return_value=(True, "")),
-            patch("jarv.agent.execute_command", side_effect=execute_after_display),
         ):
-            _dispatch_run_command_with_ui(
-                {"command": "Start-Sleep -Seconds 10"},
+            result = _dispatch_run_command_with_ui(
+                {"command": "Read-Host 'Name'"},
                 config,
             )
 
         output = stream.getvalue()
-        self.assertIn("done", output)
-        self.assertIn("exit 0", output)
+        self.assertIn("Read-Host 'Name'", output)
+        self.assertIn("running 0s", output)
+        self.assertIn("waiting", output)
+        self.assertIsInstance(result, RunCommandDispatchResult)
+        self.assertIsNotNone(result.pending_command)
+        result.pending_command.process.interrupt()
 
     def test_response_wait_label_is_neutral_without_reasoning(self):
         self.assertEqual(response_wait_label(has_reasoning=False), "Waiting")
@@ -926,10 +926,11 @@ class AgentInputTests(unittest.TestCase):
                         id="fc_1",
                         call_id="call_1",
                         name="run_command",
-                        arguments=(
-                            '{"command": "echo output", '
-                            '"head_chars": 30, "tail_chars": 30}'
-                        ),
+                        arguments=json.dumps({
+                            "command": "echo output",
+                            "head_chars": 30,
+                            "tail_chars": 30,
+                        }),
                     )
                 else:
                     captured_output["value"] = next(
@@ -942,17 +943,31 @@ class AgentInputTests(unittest.TestCase):
                 yield StreamDone(response=None)
 
             config = {**DEFAULT_CONFIG, "max_tool_output_chars": 10}
-            command_result = CommandResult(
-                "echo output",
-                "a" * 40 + "MIDDLE" + "z" * 40,
-                "",
-                0,
-            )
+            class FakeInteractiveProcess:
+                def kill_tree(self):
+                    pass
+
+                def wait_until_idle(self, **_kwargs):
+                    return InteractiveCommandSnapshot(
+                        "echo output",
+                        "a" * 40 + "MIDDLE" + "z" * 40,
+                        "",
+                        0,
+                        exited=True,
+                    )
+
             with (
                 patch("jarv.agent.prepare_session_context", return_value=context),
                 patch("jarv.agent.stream_response", side_effect=fake_stream_response),
                 patch("jarv.agent.check_command", return_value=(True, "")),
-                patch("jarv.agent.execute_command", return_value=command_result),
+                patch(
+                    "jarv.agent.InteractiveCommandProcess.start",
+                    return_value=FakeInteractiveProcess(),
+                ),
+                patch(
+                    "jarv.agent.console",
+                    new=Console(file=io.StringIO(), force_terminal=False, color_system=None),
+                ),
                 patch("jarv.agent.sys.stdout", new=io.StringIO()),
             ):
                 run_agent("run it", config, client=object(), incognito=True)
@@ -964,6 +979,119 @@ class AgentInputTests(unittest.TestCase):
         self.assertTrue(output.endswith("z" * 30))
         self.assertIn("26 characters omitted from the middle", output)
         self.assertNotIn("truncated to 10 characters", output)
+
+    def test_run_command_interactive_loop_sends_model_text_to_stdin(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = root / "menu.py"
+            script.write_text(
+                "\n".join([
+                    "print('1. One')",
+                    "print('3. Three')",
+                    "print('Choose:', flush=True)",
+                    "choice = input()",
+                    "print('Name:', flush=True)",
+                    "name = input()",
+                    "print(f'choice={choice} name={name}', flush=True)",
+                ]),
+                encoding="utf-8",
+            )
+            history_file = root / "history.json"
+            context = SessionContext(
+                session_id="session-id",
+                session_label="test session",
+                history_file=history_file,
+                now=datetime(2026, 5, 21, tzinfo=timezone.utc),
+            )
+            command = f'& "{sys.executable}" "{script}"'
+            stream_count = 0
+            final_prompt = {}
+            waiting_prompts = []
+            tool_counts = []
+            console_output = io.StringIO()
+
+            def fake_stream_response(*args, **_kwargs):
+                nonlocal stream_count
+                stream_count += 1
+                tool_counts.append(len(args[4]))
+                if stream_count == 1:
+                    yield ToolCallDone(
+                        id="fc_1",
+                        call_id="call_1",
+                        name="run_command",
+                        arguments=json.dumps({"command": command}),
+                    )
+                elif stream_count == 2:
+                    yield TextDelta("3<WAIT><WAIT><WAIT 2s><EOF>Ran it.")
+                elif stream_count == 3:
+                    waiting_prompts.append(args[5][-1]["content"])
+                    yield TextDelta("Ada")
+                else:
+                    final_prompt["value"] = args[5][-1]["content"]
+                    yield TextDelta("done")
+                yield StreamDone(response=None)
+
+            with (
+                patch("jarv.agent.prepare_session_context", return_value=context),
+                patch("jarv.agent.stream_response", side_effect=fake_stream_response),
+                patch("jarv.agent.check_command", return_value=(True, "")),
+                patch(
+                    "jarv.agent.console",
+                    new=Console(file=console_output, force_terminal=False, color_system=None),
+                ),
+                patch("jarv.agent.sys.stdout", new=io.StringIO()),
+            ):
+                result = run_agent("run menu", DEFAULT_CONFIG, client=object())
+            saved_text = "\n".join(
+                item.get("content", "")
+                for item in load_history(history_file)
+                if isinstance(item, dict)
+            )
+
+        self.assertIsNone(result.error)
+        self.assertGreater(tool_counts[0], 0)
+        self.assertEqual(tool_counts[1:3], [0, 0])
+        self.assertIn("Name:", waiting_prompts[0])
+        self.assertNotIn("1. One", waiting_prompts[0])
+        self.assertIn("[interactive command exited]", final_prompt["value"])
+        self.assertIn("choice=3 name=Ada", final_prompt["value"])
+        self.assertNotIn("1. One", final_prompt["value"])
+        self.assertIn("[terminal input sent]", saved_text)
+        self.assertIn("3", saved_text)
+        self.assertIn("Ada", saved_text)
+        self.assertIn("choice=3 name=Ada", saved_text)
+        rendered = console_output.getvalue()
+        self.assertIn("stdin> 3", rendered)
+        self.assertNotIn("3<WAIT>", rendered)
+        self.assertIn("stdin> Ada", rendered)
+        self.assertIn("choice=3 name=Ada", rendered)
+
+    def test_terminal_controls_include_raw_keys_and_ctrl_d_alias(self):
+        cases = [
+            ("<CTRL_D>", "eof", None, "<EOF>"),
+            ("<ESC>", "stdin_raw", "\x1b", "<ESC>"),
+            ("<TAB>", "stdin_raw", "\t", "<TAB>"),
+            ("<UP>", "stdin_raw", "\x1b[A", "<UP>"),
+            ("<DOWN>", "stdin_raw", "\x1b[B", "<DOWN>"),
+            ("<LEFT>", "stdin_raw", "\x1b[D", "<LEFT>"),
+            ("<RIGHT>", "stdin_raw", "\x1b[C", "<RIGHT>"),
+        ]
+
+        for text, expected_action, expected_payload, expected_display in cases:
+            with self.subTest(text=text):
+                action, payload = _parse_terminal_control(text)
+                self.assertEqual(action, expected_action)
+                self.assertEqual(payload, expected_payload)
+                self.assertEqual(
+                    _terminal_action_display(action, payload),
+                    expected_display,
+                )
+
+    def test_terminal_control_parser_uses_only_first_action(self):
+        action, payload = _parse_terminal_control("<TAB><ENTER>")
+
+        self.assertEqual(action, "stdin_raw")
+        self.assertEqual(payload, "\t")
 
     def test_root_batches_consecutive_reads_and_preserves_call_order(self):
         with TemporaryDirectory() as tmp:

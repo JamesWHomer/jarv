@@ -34,6 +34,7 @@ from .retained_outputs import RetainedOutputStore
 from .shell import (
     COMMAND_OUTPUT_UNSET,
     MAX_COMMAND_OUTPUT_WINDOW_CHARS,
+    InteractiveCommandProcess,
     execute_command,
     resolve_command_output_window,
     truncate_model_output,
@@ -57,7 +58,10 @@ MAX_SPAWN_TASK_CHARS = 50_000
 RUN_COMMAND_TOOL = {
     "type": "function",
     "name": "run_command",
-    "description": "Run a shell command and return its output.",
+    "description": (
+        "Run a shell command and return its output. If the process waits for stdin, "
+        "Jarv may continue it interactively."
+    ),
     "parameters": {
         "type": "object",
         "properties": {
@@ -238,6 +242,22 @@ class ToolExecutionHooks:
 class ToolExecutionResult:
     finished: tuple[str, str] | None = None
     web_search_read_nudge_sent: bool = False
+    pending_command: "PendingRunCommand | None" = None
+
+
+@dataclass
+class PendingRunCommand:
+    process: InteractiveCommandProcess
+    prepared: "RunCommandPrepared"
+    call_id: str
+    retained_store: RetainedOutputStore | None = None
+    unregister_cancel: object | None = None
+
+
+@dataclass
+class RunCommandDispatchResult:
+    output: str
+    pending_command: PendingRunCommand | None = None
 
 
 def tool_call_is_parallel_safe(name: str) -> bool:
@@ -730,6 +750,11 @@ def execute_tool_calls(
 
         if item.name == "run_command" and hooks.run_command is not None:
             output = hooks.run_command(args)
+            if isinstance(output, RunCommandDispatchResult):
+                result.pending_command = output.pending_command
+                if result.pending_command is not None and not result.pending_command.call_id:
+                    result.pending_command.call_id = str(item.call_id)
+                output = output.output
         elif item.name == "spawn" and hooks.run_spawn is not None:
             output = hooks.run_spawn(args)
         elif item.name == "ask_user" and hooks.run_ask_user is not None:
@@ -753,6 +778,8 @@ def execute_tool_calls(
 
         output = _maybe_truncate_tool_output(item.name, output, config)
         append_tool_result(item, output)
+        if result.pending_command is not None:
+            return result
         item_index += 1
 
     return result
