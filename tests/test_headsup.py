@@ -106,12 +106,25 @@ class HeadsupTests(unittest.TestCase):
         self.assertTrue(lines[top_idx + 2].startswith("\u2502 \u2570"))
         self.assertTrue(lines[top_idx + 2].endswith("\u256f \u2502"))
 
-    def test_render_leaves_wrap_guard_column_for_wsl(self):
+    def test_render_leaves_wrap_guard_columns_for_wsl(self):
         app, test_console, output = self._app(width=80)
 
         rendered = self._rendered_text(app, test_console, output, width=80, height=24)
 
-        self.assertLessEqual(max(cell_len(line) for line in rendered.splitlines()), 79)
+        self.assertLessEqual(max(cell_len(line) for line in rendered.splitlines()), 78)
+
+    def test_render_long_prompt_keeps_wrap_guard_columns_for_wsl(self):
+        app, test_console, output = self._app(width=80)
+        initialize_text_editor(
+            app.editor,
+            "this draft is long enough to wrap and previously left stale right borders in WSL",
+        )
+
+        rendered = self._rendered_text(app, test_console, output, width=80, height=24)
+
+        self.assertLessEqual(max(cell_len(line) for line in rendered.splitlines()), 78)
+        self.assertIn("\u256d", rendered)
+        self.assertIn("\u256f", rendered)
 
     def test_render_erases_stale_right_edge_in_terminal_frames(self):
         ready = threading.Event()

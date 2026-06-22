@@ -398,7 +398,7 @@ def _parse_sgr_mouse(sequence: str, *, translate_wheel: bool = True) -> str:
 
 
 def _terminal_size() -> tuple[int, int] | None:
-    for stream in (0, 1, 2):
+    for stream in (1, 2, 0):
         try:
             size = os.get_terminal_size(stream)
         except OSError:
