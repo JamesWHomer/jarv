@@ -606,6 +606,12 @@ def cmd_config() -> None:
         table.add_row(k, val)
 
     body = Group(table)
-    show_read_only_command(body, title="config", subtitle=str(CONFIG_FILE), config=config)
+    show_read_only_command(
+        body,
+        title="config",
+        subtitle=str(CONFIG_FILE),
+        config=config,
+        fill_screen=True,
+    )
 
 

@@ -145,7 +145,7 @@ def test_mouse_capture_enables_windows_vt_and_mouse_modes(monkeypatch):
     assert input_mode & 0x0001
     assert not input_mode & 0x0002
     assert not input_mode & 0x0004
-    assert not input_mode & 0x0040
+    assert input_mode & 0x0040
     assert output_mode & 0x0004
     assert command_input._MOUSE_CAPTURE_ACTIVE_DEPTH == 0
     assert command_input._WINDOWS_MOUSE_CAPTURE_DEPTH == 0

@@ -398,6 +398,7 @@ class HeadsupApp:
         self._live_tool_index: dict[str, int] = {}
         self._refresh_suspended = 0
         self._foreground_input_active = False
+        self._foreground_input_thread: threading.Thread | None = None
         self._idle_anim_started_at = 0.0
         self._idle_anim_stop = threading.Event()
         self._idle_anim_thread: threading.Thread | None = None
@@ -439,6 +440,7 @@ class HeadsupApp:
                 mark_first_paint("headsup")
                 self.live = live
                 self._foreground_input_active = True
+                self._foreground_input_thread = threading.current_thread()
                 self._start_idle_animation()
                 try:
                     while True:
@@ -502,6 +504,7 @@ class HeadsupApp:
                     if self._answer_request is not None:
                         self._cancel_answer()
                     self._foreground_input_active = False
+                    self._foreground_input_thread = None
                     self._cancel_active_turn(clear_queue=True)
                     self._wait_for_agent_idle(timeout=5.0)
                     self.live = None
@@ -748,6 +751,8 @@ class HeadsupApp:
 
     def read_answer(self, label: str, *, echo_answer: bool = True) -> str:
         if self._foreground_input_active:
+            if self._foreground_input_thread is threading.current_thread():
+                return self._read_answer_direct(label, echo_answer=echo_answer)
             return self._read_answer_from_foreground(label, echo_answer=echo_answer)
         return self._read_answer_direct(label, echo_answer=echo_answer)
 
@@ -755,6 +760,14 @@ class HeadsupApp:
         previous = dict(self.editor)
         initialize_text_editor(self.editor, "")
         self._pause_esc_listener()
+        with self.lock:
+            self._answer_request = {
+                "label": label,
+                "answer": None,
+                "cancelled": False,
+                "previous": previous,
+                "echo_answer": echo_answer,
+            }
         try:
             while True:
                 self.refresh()
@@ -779,6 +792,10 @@ class HeadsupApp:
         finally:
             self._resume_esc_listener()
             self.editor = previous
+            with self._answer_condition:
+                self._answer_request = None
+                self._answer_request_completed = {}
+                self._answer_condition.notify_all()
 
     def _apply_editor_key(self, key: str, repeat: int) -> tuple[bool, bool]:
         if isinstance(key, TextInput):

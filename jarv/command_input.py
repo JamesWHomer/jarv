@@ -123,8 +123,7 @@ def _windows_virtual_terminal_input():
             | _WINDOWS_ENABLE_MOUSE_INPUT
             | _WINDOWS_ENABLE_EXTENDED_FLAGS
         ) & ~(
-            _WINDOWS_ENABLE_QUICK_EDIT_MODE
-            | _WINDOWS_ENABLE_LINE_INPUT
+            _WINDOWS_ENABLE_LINE_INPUT
             | _WINDOWS_ENABLE_ECHO_INPUT
         )
         input_changed = enabled_input_mode != original_input_mode and bool(
