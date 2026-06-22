@@ -211,11 +211,43 @@ def _print_tool_card(renderable, config: dict, ui=None) -> None:
     return _with_agent_ui_globals(_agent_ui_print_tool_card, renderable, config, ui=ui)
 
 
+def _format_elapsed_seconds(seconds: float | int | None) -> str:
+    try:
+        value = max(0.0, float(seconds or 0.0))
+    except (TypeError, ValueError):
+        value = 0.0
+    if value < 10:
+        return f"{value:.1f}s"
+    return f"{value:.0f}s"
+
+
+def _interactive_check_in_seconds(config: dict) -> float | None:
+    try:
+        seconds = float(config.get("command_timeout", 60))
+    except (TypeError, ValueError):
+        return 60.0
+    return seconds if seconds > 0 else None
+
+
 def _run_command_waiting_prompt(snapshot) -> str:
     result = snapshot.to_delta_command_result()
+    status_lines = []
+    if getattr(snapshot, "check_in", False):
+        status_lines.extend([
+            "Status: command_timeout check-in; the process is still running and was not killed.",
+            f"Elapsed: {_format_elapsed_seconds(getattr(snapshot, 'elapsed_seconds', 0.0))}",
+            f"Time since last output: {_format_elapsed_seconds(getattr(snapshot, 'idle_seconds', 0.0))}",
+        ])
+    header = (
+        "[interactive command still running]\n"
+        if getattr(snapshot, "check_in", False)
+        else "[interactive command waiting for terminal input]\n"
+    )
+    status_text = "\n".join(status_lines) + "\n\n" if status_lines else ""
     return (
-        "[interactive command waiting for terminal input]\n"
+        f"{header}"
         f"Command: {snapshot.command}\n\n"
+        f"{status_text}"
         "New command output since last interaction:\n"
         "```text\n"
         f"{result.full_model_output()}\n"
@@ -366,6 +398,18 @@ def _interactive_command_card(
         body_parts.append(stdin_line)
     result = snapshot.to_delta_command_result()
     if status == "waiting":
+        if getattr(snapshot, "check_in", False):
+            body_parts.append(Text(
+                "command_timeout check-in; process still running",
+                style="dim",
+            ))
+            body_parts.append(Text(
+                "elapsed "
+                f"{_format_elapsed_seconds(getattr(snapshot, 'elapsed_seconds', 0.0))}"
+                " | idle "
+                f"{_format_elapsed_seconds(getattr(snapshot, 'idle_seconds', 0.0))}",
+                style="dim",
+            ))
         body_parts.append(Text(result.full_model_output()))
         body_parts.append(Text("Waiting for terminal input", style="dim"))
     else:
@@ -435,37 +479,45 @@ def _continue_interactive_command(
     pending: PendingRunCommand,
     terminal_reply: str,
     *,
+    config: dict,
     cancellation_token=None,
 ):
     action, payload = _parse_terminal_control(terminal_reply)
     action_display = _terminal_action_display(action, payload)
+    check_in_seconds = _interactive_check_in_seconds(config)
     if action == "stdin":
         pending.process.write_stdin(str(payload))
         snapshot = pending.process.wait_until_idle(
+            check_in_seconds=check_in_seconds,
             cancellation_token=cancellation_token,
         )
     elif action == "stdin_raw":
         pending.process.write_stdin(str(payload or ""))
         snapshot = pending.process.wait_until_idle(
+            check_in_seconds=check_in_seconds,
             cancellation_token=cancellation_token,
         )
     elif action == "wait":
         snapshot = pending.process.wait_until_idle(
             wait_seconds=payload if isinstance(payload, float) else 0.5,
+            check_in_seconds=check_in_seconds,
             cancellation_token=cancellation_token,
         )
     elif action == "ctrl_c":
         pending.process.interrupt()
         snapshot = pending.process.wait_until_idle(
+            check_in_seconds=check_in_seconds,
             cancellation_token=cancellation_token,
         )
     elif action == "eof":
         pending.process.close_stdin()
         snapshot = pending.process.wait_until_idle(
+            check_in_seconds=check_in_seconds,
             cancellation_token=cancellation_token,
         )
     else:
         snapshot = pending.process.wait_until_idle(
+            check_in_seconds=check_in_seconds,
             cancellation_token=cancellation_token,
         )
     return snapshot, action_display
@@ -524,7 +576,10 @@ def _dispatch_run_command_with_ui(
                 cancellation_token.register(process.kill_tree)
                 if cancellation_token is not None else None
             )
-            snapshot = process.wait_until_idle(cancellation_token=cancellation_token)
+            snapshot = process.wait_until_idle(
+                check_in_seconds=_interactive_check_in_seconds(config),
+                cancellation_token=cancellation_token,
+            )
         else:
             with track_live_display(), Live(
                 running_card,
@@ -538,7 +593,10 @@ def _dispatch_run_command_with_ui(
                     cancellation_token.register(process.kill_tree)
                     if cancellation_token is not None else None
                 )
-                snapshot = process.wait_until_idle(cancellation_token=cancellation_token)
+                snapshot = process.wait_until_idle(
+                    check_in_seconds=_interactive_check_in_seconds(config),
+                    cancellation_token=cancellation_token,
+                )
                 live.update(
                     _interactive_command_card(
                         prepared,
@@ -1140,6 +1198,7 @@ def run_agent(
                 snapshot, terminal_action = _continue_interactive_command(
                     pending_interactive_command,
                     terminal_reply,
+                    config=config,
                     cancellation_token=cancellation_token,
                 )
                 history.append({

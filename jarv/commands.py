@@ -177,7 +177,7 @@ def _help_body() -> Group:
             ("--provider <provider>", "Override the provider", "bold yellow"),
             ("-m, --model <model>", "Override the model", "bold yellow"),
             ("-e, --effort <effort>", "Override reasoning effort", "bold yellow"),
-            ("--timeout <seconds>", "Override shell command timeout", "bold yellow"),
+            ("--timeout <seconds>", "Override command timeout/check-in", "bold yellow"),
             ("-s, --system <prompt>", "Override the system prompt", "bold yellow"),
             ("--new", "Start with a fresh session", "bold yellow"),
             ("--incognito", "Do not load or save session history", "bold yellow"),
@@ -296,9 +296,10 @@ Run `jarv` with no prompt to start an interactive session. Type a prompt and pre
 - On Windows, `run_command` uses PowerShell.
 - On other platforms, `run_command` uses the system shell.
 - If a command is still running and appears to be waiting for input, jarv asks the model for terminal input instead of printing the assistant response as chat. Plain text is sent with Enter; the interactive prompt also exposes temporary controls such as wait, interrupt, EOF, Enter, Tab, Escape, and arrow keys only while they are relevant.
+- During the interactive loop, `command_timeout` is a check-in interval. If the command keeps running past it, jarv asks the model what to do next and includes elapsed/idle time instead of killing the process.
 - Interactive command output is delta-only. Each terminal input/output step is displayed separately, and jarv sends only the new stdout/stderr since the previous interaction back to the model.
 - Command output shown in the terminal uses at most one-third of the screen height, biased roughly 2:1 toward the first lines, with the omitted middle count displayed. The UI also shows the resolved `head_chars` and `tail_chars` returned to the model. Truncated model output is retained under a session-scoped ID for later `read` calls.
-- Commands are killed after `command_timeout` seconds.
+- Non-interactive command execution is killed after `command_timeout` seconds.
 - Web requests are killed after `web_timeout` seconds. Text and PDF responses are limited to 2 MiB.
 - Interrupted commands/process trees are terminated when possible.
 

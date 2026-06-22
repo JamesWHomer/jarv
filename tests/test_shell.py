@@ -1,12 +1,17 @@
 import unittest
+import platform
 import subprocess
+import sys
 import threading
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from jarv.cancellation import CancellationToken, TurnCancelled
 from jarv.shell import (
     COMMAND_OUTPUT_UNSET,
     CommandResult,
+    InteractiveCommandProcess,
     compact_command_output,
     execute_command,
     resolve_command_output_window,
@@ -136,5 +141,36 @@ class ShellOutputLimitTests(unittest.TestCase):
             timer.cancel()
 
         self.assertTrue(killed.is_set())
+
+    def test_interactive_process_check_in_does_not_kill_busy_command(self):
+        with TemporaryDirectory() as tmp:
+            script = Path(tmp) / "busy.py"
+            script.write_text(
+                "\n".join([
+                    "import time",
+                    "for i in range(50):",
+                    "    print(f'tick {i}', flush=True)",
+                    "    time.sleep(0.05)",
+                ]),
+                encoding="utf-8",
+            )
+            if platform.system() == "Windows":
+                command = f'& "{sys.executable}" "{script}"'
+            else:
+                command = f'"{sys.executable}" "{script}"'
+            process = InteractiveCommandProcess.start(command)
+            try:
+                snapshot = process.wait_until_idle(
+                    idle_seconds=1.0,
+                    first_output_grace_seconds=0.0,
+                    check_in_seconds=1.0,
+                )
+            finally:
+                process.kill_tree()
+
+        self.assertFalse(snapshot.exited)
+        self.assertTrue(snapshot.check_in)
+        self.assertGreaterEqual(snapshot.elapsed_seconds, 0.8)
+        self.assertIn("tick", snapshot.stdout_delta)
 if __name__ == "__main__":
     unittest.main()
