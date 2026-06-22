@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from rich.cells import cell_len
 from rich.console import Console
 from rich.text import Text
 
@@ -104,6 +105,13 @@ class HeadsupTests(unittest.TestCase):
         self.assertTrue(lines[top_idx + 1].endswith("\u2502 \u2502"))
         self.assertTrue(lines[top_idx + 2].startswith("\u2502 \u2570"))
         self.assertTrue(lines[top_idx + 2].endswith("\u256f \u2502"))
+
+    def test_render_leaves_wrap_guard_column_for_wsl(self):
+        app, test_console, output = self._app(width=80)
+
+        rendered = self._rendered_text(app, test_console, output, width=80, height=24)
+
+        self.assertLessEqual(max(cell_len(line) for line in rendered.splitlines()), 79)
 
     def test_prompt_box_styles_typed_text_white(self):
         app, _test_console, _output = self._app()
