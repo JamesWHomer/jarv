@@ -83,11 +83,38 @@ class HeadsupTests(unittest.TestCase):
 
         rendered = output.getvalue()
         self.assertIn("jarv", rendered)
-        self.assertIn("jarv>", rendered)
+        self.assertNotIn("jarv>", rendered)
+        self.assertIn("\u256d", rendered)
+        self.assertIn("\u256f", rendered)
         self.assertIn("\u203a ", rendered)
         self.assertIn("hello from a narrow terminal", rendered)
         self.assertIn("Enter send", rendered)
         self.assertIn("reply body", rendered)
+
+    def test_render_prompt_box_uses_even_panel_padding(self):
+        app, test_console, output = self._app(width=150)
+
+        rendered = self._rendered_text(app, test_console, output, width=150, height=24)
+        lines = rendered.splitlines()
+        top_idx = next(idx for idx, line in enumerate(lines) if "\u256d" in line)
+
+        self.assertTrue(lines[top_idx].startswith("\u2502 \u256d"))
+        self.assertTrue(lines[top_idx].endswith("\u256e \u2502"))
+        self.assertTrue(lines[top_idx + 1].startswith("\u2502 \u2502"))
+        self.assertTrue(lines[top_idx + 1].endswith("\u2502 \u2502"))
+        self.assertTrue(lines[top_idx + 2].startswith("\u2502 \u2570"))
+        self.assertTrue(lines[top_idx + 2].endswith("\u256f \u2502"))
+
+    def test_prompt_box_styles_typed_text_white(self):
+        app, _test_console, _output = self._app()
+        initialize_text_editor(app.editor, "typed")
+
+        lines = app._prompt_lines(40, max_lines=3)
+        spans = [(span.start, span.end, str(span.style)) for span in lines[1].spans]
+        self.assertFalse(str(lines[1].style))
+        self.assertIn((0, 1, "dim cyan"), spans)
+        self.assertIn((2, 7, "white"), spans)
+        self.assertIn((39, 40, "dim cyan"), spans)
 
     def test_intro_animation_shows_on_fresh_session_and_clears_after_first_message(self):
         app, test_console, output = self._app(width=80)
@@ -722,8 +749,10 @@ class HeadsupTests(unittest.TestCase):
         self.assertEqual(app.editor["buffer"], "first\nsecond")
 
         lines = app._prompt_lines(40, max_lines=4)
-        self.assertEqual(lines[0].plain, "jarv> first")
-        self.assertEqual(lines[1].plain, "      second ")
+        self.assertEqual(lines[0].plain, "\u256d" + "\u2500" * 38 + "\u256e")
+        self.assertEqual(lines[1].plain, "\u2502 first" + " " * 32 + "\u2502")
+        self.assertEqual(lines[2].plain, "\u2502 second " + " " * 30 + "\u2502")
+        self.assertEqual(lines[3].plain, "\u2570" + "\u2500" * 38 + "\u256f")
 
     def test_multiline_prompt_arrows_move_between_editor_rows(self):
         app, _test_console, _output = self._app()
