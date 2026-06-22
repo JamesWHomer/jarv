@@ -13,9 +13,11 @@ from typing import Callable
 from rich import box
 from rich.cells import cell_len
 from rich.console import Console, Group, RenderableType
+from rich.control import Control, ControlType
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.segment import Segment
 from rich.text import Text
 
 from .cancellation import CancellationToken, TurnCancelled
@@ -107,6 +109,29 @@ _SGR_MOUSE_TEXT_LOOKBACK = 64
 # dismissed by the user's first message.
 _OUTRO_DURATION = 0.4
 _USAGE_STATUS_CACHE_TTL = 0.5
+_ERASE_TO_END_OF_LINE = Control((ControlType.ERASE_IN_LINE, 0)).segment
+
+
+class _EraseTrailingColumns:
+    """Render a frame without padding into WSL's auto-wrap column."""
+
+    def __init__(self, renderable: RenderableType):
+        self.renderable = renderable
+
+    def __rich_console__(self, console: Console, options):
+        lines = console.render_lines(
+            self.renderable,
+            options,
+            pad=False,
+            new_lines=False,
+        )
+        newline = Segment.line()
+        for index, line in enumerate(lines):
+            yield from line
+            if console.is_terminal:
+                yield _ERASE_TO_END_OF_LINE
+            if index != len(lines) - 1:
+                yield newline
 
 
 def _sanitize_editor_key(key: str) -> str:
@@ -629,7 +654,7 @@ class HeadsupApp:
         parts.append(footer)
         parts.extend(prompt_lines)
         subtitle = self._panel_subtitle(inner_width)
-        return Panel(
+        panel = Panel(
             Group(*parts),
             title=title,
             title_align="left",
@@ -641,6 +666,7 @@ class HeadsupApp:
             width=panel_width,
             height=term_h,
         )
+        return _EraseTrailingColumns(panel)
 
     def _panel_title(self, model_status: str, panel_width: int) -> Text:
         left = "jarv \u25b8 heads-up"
