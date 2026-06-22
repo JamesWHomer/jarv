@@ -573,6 +573,26 @@ class HeadsupTests(unittest.TestCase):
 
         self.assertEqual(calls, [("/set", ["model", "test-model"], True)])
 
+    def test_bare_command_alias_reads_choice_on_foreground_input_thread(self):
+        calls = []
+        app, _test_console, _output = self._app()
+        app._foreground_input_active = True
+        app._foreground_input_thread = threading.current_thread()
+        app.maybe_command = lambda _first, _rest: (_ for _ in ()).throw(AssertionError("legacy prompt used"))
+
+        def handle_slash(command, rest, config, client, args, hint):
+            calls.append((command, rest, hint))
+            return config, client
+
+        app.handle_slash = handle_slash
+        keys = ["1", "ENTER"]
+
+        with patch("jarv.headsup._read_key_with_repeats", side_effect=lambda **kwargs: (keys.pop(0), 1)):
+            app._handle_query("config")
+
+        self.assertEqual(calls, [("/config", [], True)])
+        self.assertIsNone(app._answer_request)
+
     def test_declined_bare_command_alias_sends_message(self):
         run_agent_calls = []
         app, _test_console, _output = self._app()

@@ -1492,17 +1492,19 @@ def _settings_desired_editor_height(
     terminal_height: int,
 ) -> int:
     max_content_lines = max(1, terminal_height - 2)
+    row = edit["row"]
+    max_lines = None if row.get("multiline") else max_content_lines
     content_height = len(
         _settings_editor_lines(
             edit,
             config,
             inner_width,
-            max_lines=max_content_lines,
+            max_lines=max_lines,
             price_models=False,
         )
     )
-    minimum = 7 if edit["row"].get("multiline") else 3
-    return max(minimum, min(content_height + 2, terminal_height))
+    minimum = 7 if row.get("multiline") else 3
+    return min(terminal_height, max(minimum, content_height + 2))
 
 
 def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, bool]:

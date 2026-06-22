@@ -104,6 +104,18 @@ def test_system_prompt_controls_are_pinned_to_editor_bottom():
     assert any(not line.plain for line in lines[3:-1])
 
 
+def test_short_system_prompt_editor_requests_compact_height():
+    config = {**DEFAULT_CONFIG, "system_prompt": "short"}
+    edit = settings_command._settings_begin_edit(_system_prompt_row(config), config)
+
+    assert settings_command._settings_desired_editor_height(
+        edit,
+        config,
+        76,
+        32,
+    ) == 7
+
+
 def test_system_prompt_cursor_uses_reverse_video_at_wrap_boundary():
     config = {**DEFAULT_CONFIG, "system_prompt": "abcdefgh"}
     edit = settings_command._settings_begin_edit(_system_prompt_row(config), config)
