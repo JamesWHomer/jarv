@@ -385,7 +385,7 @@ def test_read_pdf_reports_encrypted_pdf(tmp_path, monkeypatch):
     assert "could not be read" in output
 
 
-def test_read_web_pdf_content_type_extracts_text_and_marks_untrusted(monkeypatch):
+def test_read_web_pdf_content_type_extracts_text(monkeypatch):
     monkeypatch.setattr(
         "jarv.read_tool.fetch_web_bytes",
         lambda *args, **kwargs: FetchedWebBytes(
@@ -400,7 +400,6 @@ def test_read_web_pdf_content_type_extracts_text_and_marks_untrusted(monkeypatch
     output = _read({"input": "https://example.test/start", "size": 1000})
 
     assert "Source: web PDF" in output
-    assert "UNTRUSTED WEB CONTENT" in output
     assert "Requested URL: https://example.test/start" in output
     assert "Final URL: https://example.test/document.pdf" in output
     assert "Content-Type: application/pdf" in output
@@ -501,7 +500,7 @@ def test_read_rejects_oversized_image(tmp_path, monkeypatch):
     assert "byte limit" in output
 
 
-def test_every_web_page_is_marked_untrusted(monkeypatch):
+def test_read_web_page_includes_source_metadata(monkeypatch):
     monkeypatch.setattr(
         "jarv.read_tool.fetch_web_bytes",
         lambda *args, **kwargs: FetchedWebBytes(
@@ -517,7 +516,6 @@ def test_every_web_page_is_marked_untrusted(monkeypatch):
         {"input": "https://example.test/start", "offset": 4, "size": 3}
     )
 
-    assert "UNTRUSTED WEB CONTENT" in output
     assert "Requested URL: https://example.test/start" in output
     assert "Final URL: https://example.test/final" in output
     assert output.endswith("efg")

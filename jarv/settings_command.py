@@ -29,6 +29,7 @@ from .text_editor import (
     apply_text_editor_key,
     initialize_text_editor,
     render_single_line,
+    render_visual_line_window,
     render_visual_lines,
 )
 
@@ -1266,7 +1267,7 @@ def _settings_multiline_editor_lines(
         Text(_clip_text(f"  {_settings_multiline_status(edit)}", inner_width), style="dim"),
         Text(""),
     ]
-    body, cursor_idx = _settings_multiline_visual_lines(edit, inner_width)
+    body, _cursor_idx = _settings_multiline_visual_lines(edit, inner_width)
     tail: list[Text] = []
     if edit.get("discard_armed"):
         tail.append(_settings_discard_warning(inner_width))
@@ -1284,8 +1285,12 @@ def _settings_multiline_editor_lines(
         return intro + body + tail
 
     body_budget = max(1, max_lines - len(intro) - len(tail))
-    start = max(0, min(cursor_idx - body_budget + 1, len(body) - body_budget))
-    visible_body = body[start : start + body_budget]
+    visible_body, _visible_cursor_idx, _start = render_visual_line_window(
+        edit,
+        max(1, inner_width - 4),
+        max_lines=body_budget,
+        indent="  ",
+    )
     lines = intro + visible_body
     while len(lines) < max_lines - len(tail):
         lines.append(Text(""))

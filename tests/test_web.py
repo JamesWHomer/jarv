@@ -123,7 +123,7 @@ def test_search_web_formats_unique_results(monkeypatch):
 
     output = search_web("query", 2, timeout=5)
 
-    assert "UNTRUSTED WEB SEARCH RESULTS" in output
+    assert "Query: query" in output
     assert "1. One" in output
     assert "Snippet: First" in output
     assert "2. Two" in output

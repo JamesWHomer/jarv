@@ -14,6 +14,8 @@ from rich.cells import cell_len, get_character_cell_size
 
 MOUSE_CAPTURE_ENABLE = "\x1b[?1002l\x1b[?1003l\x1b[?1006h\x1b[?1000h\x1b[?1007l"
 MOUSE_CAPTURE_DISABLE = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1007h"
+BRACKETED_PASTE_ENABLE = "\x1b[?2004h"
+BRACKETED_PASTE_DISABLE = "\x1b[?2004l"
 CURSOR_HIDE = "\x1b[?25l"
 CURSOR_SHOW = "\x1b[?25h"
 ANSI_RESET = "\x1b[0m"
@@ -78,6 +80,21 @@ def disable_mouse_capture() -> None:
 
 
 atexit.register(disable_mouse_capture)
+
+
+@contextmanager
+def bracketed_paste():
+    """Ask terminals to wrap pasted text so editable views can preserve it."""
+    if not sys.stdout.isatty():
+        yield
+        return
+    sys.stdout.write(BRACKETED_PASTE_ENABLE)
+    sys.stdout.flush()
+    try:
+        yield
+    finally:
+        sys.stdout.write(BRACKETED_PASTE_DISABLE)
+        sys.stdout.flush()
 
 
 @contextmanager
@@ -157,6 +174,17 @@ def _read_until_any(chars: set[str]) -> str:
             return data
 
 
+def _read_until_sequence(sequence: str) -> str:
+    data = ""
+    while True:
+        ch = sys.stdin.read(1)
+        if not ch:
+            return data
+        data += ch
+        if data.endswith(sequence):
+            return data[: -len(sequence)]
+
+
 def _windows_key_available() -> bool:
     if sys.platform != "win32":
         return False
@@ -177,6 +205,17 @@ def _read_windows_until_any(msvcrt, chars: set[str]) -> str:
         data += ch
         if ch in chars:
             return data
+
+
+def _read_windows_until_sequence(msvcrt, sequence: str) -> str:
+    data = ""
+    while True:
+        ch = msvcrt.getwch()
+        if not ch:
+            return data
+        data += ch
+        if data.endswith(sequence):
+            return data[: -len(sequence)]
 
 
 def _read_windows_available_char(msvcrt, *, timeout: float = 0.0) -> str | None:
@@ -203,6 +242,8 @@ def _windows_key_from_virtual_key(
 ) -> str | None:
     if char == "\r":
         return "ENTER"
+    if char == "\n":
+        return "CTRL_N"
     if char == "\t":
         return "TAB"
     if char == "\x1b":
@@ -418,6 +459,14 @@ def strip_sgr_mouse_sequences(text: str) -> str:
     return _SGR_MOUSE_TEXT_RE.sub("", text)
 
 
+def _is_batched_text_key(key: str) -> bool:
+    return (
+        isinstance(key, str)
+        and len(key) == 1
+        and (key.isprintable() or key == "\t")
+    )
+
+
 def _read_key_with_repeats(
     text_mode: bool = False,
     *,
@@ -444,20 +493,20 @@ def _read_key_with_repeats(
     if (
         batch_text
         and text_mode
-        and isinstance(key, str)
-        and len(key) == 1
-        and key.isprintable()
+        and _is_batched_text_key(key)
     ):
         inserted = [key]
         while len(inserted) < max_count and _key_available():
             next_key = read_key()
-            if (
-                isinstance(next_key, str)
-                and len(next_key) == 1
-                and next_key.isprintable()
-            ):
+            if _is_batched_text_key(next_key):
                 inserted.append(next_key)
                 continue
+            if next_key == "ENTER" and _key_available():
+                after_enter = read_key()
+                if _is_batched_text_key(after_enter):
+                    inserted.extend(("\n", after_enter))
+                    continue
+                _PENDING_KEYS.appendleft(after_enter)
             _PENDING_KEYS.appendleft(next_key)
             break
         text = strip_sgr_mouse_sequences("".join(inserted))
@@ -483,7 +532,7 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
     """Read a single keypress and return a normalised token.
 
     Returns one of: UP, DOWN, LEFT, RIGHT, HOME, END, PAGEUP, PAGEDOWN,
-    ENTER, ESC, TAB, CTRL_F, CTRL_S, BACKSPACE, DELETE, or the raw character. Raises KeyboardInterrupt on
+    ENTER, ESC, TAB, CTRL_F, CTRL_N, CTRL_S, BACKSPACE, DELETE, or the raw character. Raises KeyboardInterrupt on
     Ctrl-C.  When ``text_mode`` is True, the convenience q/Q → ESC mapping is
     disabled so a search query can include those letters. When
     ``translate_mouse_wheel`` is False, SGR wheel input returns MOUSE_WHEEL_*
@@ -511,6 +560,8 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
             }.get(second, "OTHER")
         if ch == "\r":
             return "ENTER"
+        if ch == "\n":
+            return "CTRL_N"
         if ch == "\t":
             return "TAB"
         if ch == "\x1b":
@@ -533,6 +584,15 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
                             _read_windows_until_any(msvcrt, {"M", "m"}),
                             translate_wheel=translate_mouse_wheel,
                         )
+                    if ch3 == "2":
+                        sequence = ch3 + _read_windows_until_any(msvcrt, {"~"})
+                        if sequence == "200~":
+                            return TextInput(
+                                strip_sgr_mouse_sequences(
+                                    _read_windows_until_sequence(msvcrt, "\x1b[201~")
+                                )
+                            )
+                        return "OTHER"
                     if ch3 in ("5", "6", "3") and _windows_key_available():
                         msvcrt.getwch()  # consume trailing ~
                     return {
@@ -584,6 +644,15 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
                             _read_until_any({"M", "m"}),
                             translate_wheel=translate_mouse_wheel,
                         )
+                    if ch3 == "2":
+                        sequence = ch3 + _read_until_any({"~"})
+                        if sequence == "200~":
+                            return TextInput(
+                                strip_sgr_mouse_sequences(
+                                    _read_until_sequence("\x1b[201~")
+                                )
+                            )
+                        return "OTHER"
                     if ch3 in ("5", "6"):
                         sys.stdin.read(1)  # consume trailing ~
                     if ch3 == "3":
@@ -594,8 +663,10 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
                         "5": "PAGEUP", "6": "PAGEDOWN", "3": "DELETE",
                     }.get(ch3, "OTHER")
                 return "ESC"
-            if ch in ("\r", "\n"):
+            if ch == "\r":
                 return "ENTER"
+            if ch == "\n":
+                return "CTRL_N"
             if ch == "\t":
                 return "TAB"
             if not text_mode and ch in ("q", "Q"):

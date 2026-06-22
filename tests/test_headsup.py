@@ -711,6 +711,43 @@ class HeadsupTests(unittest.TestCase):
         self.assertEqual(app.editor["buffer"], "draft")
         self.assertIsNone(app._prompt_history_index)
 
+    def test_prompt_accepts_multiline_paste_and_renders_rows(self):
+        app, _test_console, _output = self._app()
+
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)):
+            changed, user_text = app._apply_editor_key(TextInput("first\nsecond"), 1)
+
+        self.assertTrue(changed)
+        self.assertTrue(user_text)
+        self.assertEqual(app.editor["buffer"], "first\nsecond")
+
+        lines = app._prompt_lines(40, max_lines=4)
+        self.assertEqual(lines[0].plain, "jarv> first")
+        self.assertEqual(lines[1].plain, "      second ")
+
+    def test_multiline_prompt_arrows_move_between_editor_rows(self):
+        app, _test_console, _output = self._app()
+        initialize_text_editor(app.editor, "first\nsecond", multiline=True)
+        app.editor["cursor"] = 0
+
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)):
+            changed, user_text = app._apply_editor_key("DOWN", 1)
+
+        self.assertFalse(changed)
+        self.assertFalse(user_text)
+        self.assertEqual(app.editor["cursor"], len("first\n"))
+        self.assertTrue(app._prompt_has_multiline_draft())
+
+    def test_multiline_query_bypasses_command_detection(self):
+        app, _test_console, _output = self._app()
+        calls = []
+        app._run_agent_query = calls.append
+
+        result = app._handle_query("/help\nexplain this text")
+
+        self.assertIsNone(result)
+        self.assertEqual(calls, ["/help\nexplain this text"])
+
     def test_mouse_wheel_scrolls_transcript_without_prompt_history_navigation(self):
         class FakeLive:
             def __init__(self, *args, **kwargs):
