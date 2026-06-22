@@ -24,7 +24,7 @@ def noop_context(*_args, **_kwargs):
 
 
 class HeadsupTests(unittest.TestCase):
-    def _app(self, *, width=50, args=None):
+    def _app(self, *, width=50, args=None, config=None):
         ready = threading.Event()
         ready.set()
         output = io.StringIO()
@@ -35,7 +35,7 @@ class HeadsupTests(unittest.TestCase):
             width=width,
         )
         app = HeadsupApp(
-            {"provider": "openai", "model": "test-model"},
+            config or {"provider": "openai", "model": "test-model"},
             client=object(),
             args=args,
             agent_loader=({"module": SimpleNamespace()}, ready),
@@ -149,8 +149,11 @@ class HeadsupTests(unittest.TestCase):
         rendered = output.getvalue()
         self.assertIn("jarv \u25b8 heads-up", rendered)
 
-    def test_render_shows_provider_model_top_right_and_bottom_usage_status(self):
-        app, test_console, output = self._app(width=80)
+    def test_render_shows_provider_model_effort_top_right_and_bottom_usage_status(self):
+        app, test_console, output = self._app(
+            width=80,
+            config={"provider": "openai", "model": "test-model", "reasoning_effort": "medium"},
+        )
         usage = {
             "totals": {
                 "provider_cost_usd": 0.123,
@@ -171,9 +174,10 @@ class HeadsupTests(unittest.TestCase):
 
         lines = output.getvalue().splitlines()
         self.assertIn("jarv \u25b8 heads-up", lines[0])
-        self.assertIn("openai / test-model", lines[0])
-        self.assertNotIn("openai / test-model", lines[-1])
-        self.assertIn("cost $0.123", lines[-1])
+        self.assertIn("openai / test-model / medium", lines[0])
+        self.assertNotIn("openai / test-model / medium", lines[-1])
+        self.assertIn("$0.123", lines[-1])
+        self.assertNotIn("cost $0.123", lines[-1])
         self.assertIn("12.5% full", lines[-1])
 
     def test_usage_status_styles_money_and_context_fill(self):
@@ -199,6 +203,7 @@ class HeadsupTests(unittest.TestCase):
         self.assertNotIn("cost est.", status.plain)
         money_index = status.plain.index("$0.123")
         percent_index = status.plain.index("90.0% full")
+        full_index = status.plain.index("full")
         self.assertTrue(
             any(span.start <= money_index < span.end and str(span.style) == "green" for span in status.spans)
         )
@@ -208,6 +213,7 @@ class HeadsupTests(unittest.TestCase):
                 for span in status.spans
             )
         )
+        self.assertTrue(any(span.start <= full_index < span.end and str(span.style) == "dim" for span in status.spans))
 
     def test_usage_status_shows_zero_context_for_new_session(self):
         app, _test_console, _output = self._app(width=80)
@@ -219,7 +225,8 @@ class HeadsupTests(unittest.TestCase):
         with patch("jarv.headsup.load_usage", return_value=usage):
             status = app._usage_status(80)
 
-        self.assertIn("cost $0.00", status.plain)
+        self.assertIn("$0.00", status.plain)
+        self.assertNotIn("cost $0.00", status.plain)
         self.assertIn("0% full", status.plain)
         self.assertNotIn("context unknown", status.plain)
 
@@ -234,6 +241,57 @@ class HeadsupTests(unittest.TestCase):
         self.assertEqual(len(app.entries), before + 1)
         self.assertEqual(app.entries[-1].kind, "usage")
         self.assertEqual(app.entries[-1].renderable.plain, "Usage: 1 in")
+
+    def test_streaming_deltas_are_coalesced_between_refresh_frames(self):
+        class FakeApp:
+            def __init__(self):
+                self.messages = []
+                self.refresh_count = 0
+
+            def add_user_message(self, _query):
+                pass
+
+            def upsert_assistant_message(self, index, text):
+                self.messages.append(text)
+                return 0 if index is None else index
+
+            def invalidate_usage_status(self):
+                pass
+
+            def refresh(self):
+                self.refresh_count += 1
+
+        app = FakeApp()
+        ui = HeadsupAgentUI(app)
+        ui.start_turn("hello", {})
+
+        with patch("jarv.headsup.time.perf_counter", side_effect=[0.0, 0.01, 0.02]):
+            ui.append_stream_delta("a")
+            ui.append_stream_delta("b")
+            ui.append_stream_delta("c")
+
+        self.assertEqual(app.messages, ["a"])
+        ui.finish_assistant_message("abc")
+        self.assertEqual(app.messages, ["a", "abc"])
+        self.assertEqual(app.refresh_count, 0)
+
+    def test_transcript_rendering_reuses_cached_entry_lines(self):
+        app, _test_console, _output = self._app()
+        app.add_user_message("hello")
+        app.upsert_assistant_message(None, "world")
+
+        calls = []
+
+        def render_lines(renderable, width):
+            calls.append((renderable, width))
+            return [Text(getattr(renderable, "plain", str(renderable)))]
+
+        with patch("jarv.headsup.rendered_text_lines", side_effect=render_lines):
+            first = app._transcript_lines(80)
+            second = app._transcript_lines(80)
+
+        self.assertEqual([line.plain for line in first], [line.plain for line in second])
+        self.assertEqual(len(calls), len(app.entries))
 
     def test_initial_sync_loads_saved_history_and_tool_cards(self):
         context = SimpleNamespace(

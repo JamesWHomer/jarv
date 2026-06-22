@@ -7,7 +7,7 @@ import threading
 import time
 from collections import deque
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 from rich import box
@@ -32,6 +32,7 @@ from .command_input import (
 from .command_registry import parse_command_alias
 from .agent_ui import (
     _THINKING_FRAMES,
+    STREAM_PREVIEW_REFRESH_INTERVAL,
     response_wait_label,
     thought_complete_indicator,
     tool_activity_label,
@@ -105,6 +106,7 @@ _SGR_MOUSE_TEXT_LOOKBACK = 64
 # Length of the quick, non-blocking dissolve that plays when the idle intro is
 # dismissed by the user's first message.
 _OUTRO_DURATION = 0.4
+_USAGE_STATUS_CACHE_TTL = 0.5
 
 
 def _sanitize_editor_key(key: str) -> str:
@@ -123,6 +125,16 @@ class TranscriptEntry:
     kind: str
     renderable: RenderableType
     spacer_before: bool = False
+    _render_cache_width: int | None = field(default=None, init=False, repr=False)
+    _render_cache_lines: list[Text] | None = field(default=None, init=False, repr=False)
+
+    def rendered_lines(self, width: int) -> list[Text]:
+        if self._render_cache_width == width and self._render_cache_lines is not None:
+            return self._render_cache_lines
+        lines = rendered_text_lines(self.renderable, width)
+        self._render_cache_width = width
+        self._render_cache_lines = lines
+        return lines
 
 
 def _panel_width(terminal_width: int) -> int:
@@ -137,6 +149,17 @@ def _context_fill_style(percent: float | None) -> str:
     if percent >= 70:
         return "bold yellow"
     return "cyan"
+
+
+def _model_status(config: dict) -> str:
+    status_parts = [
+        str(config.get("provider", "openai")),
+        str(config.get("model", DEFAULT_CONFIG["model"])),
+    ]
+    reasoning_effort = str(config.get("reasoning_effort") or "").strip()
+    if reasoning_effort:
+        status_parts.append(reasoning_effort)
+    return " / ".join(status_parts)
 
 
 class HeadsupAgentUI:
@@ -158,6 +181,8 @@ class HeadsupAgentUI:
         self._ticker_lock = threading.Lock()
         self._ticker_thread: threading.Thread | None = None
         self._animated_live_tool_keys: set[str] = set()
+        self._stream_dirty = False
+        self._last_stream_refresh_at: float | None = None
 
     def start_turn(self, query: str, _config: dict) -> None:
         self._stream_text = ""
@@ -170,6 +195,8 @@ class HeadsupAgentUI:
         self._response_waiting = False
         self._tool_waiting = False
         self._animated_live_tool_keys.clear()
+        self._stream_dirty = False
+        self._last_stream_refresh_at = None
         self.app.add_user_message(query)
 
     def start_response_wait(self, start_time: float) -> None:
@@ -190,6 +217,7 @@ class HeadsupAgentUI:
         )
 
     def complete_response_phase(self, status_text: str) -> None:
+        self._flush_stream()
         self._response_waiting = False
         self._response_status_index = self.app.upsert_status(
             self._response_status_index,
@@ -198,6 +226,7 @@ class HeadsupAgentUI:
         self._response_status_index = None
 
     def start_tool_activity(self, start_time: float) -> None:
+        self._flush_stream()
         self._tool_started_at = start_time
         self._tool_names = ()
         self._tool_waiting = True
@@ -224,22 +253,26 @@ class HeadsupAgentUI:
 
     def append_stream_delta(self, delta: str) -> None:
         self._stream_text += delta
-        self._stream_index = self.app.upsert_assistant_message(
-            self._stream_index,
-            self._stream_text,
-        )
+        self._stream_dirty = True
+        now = time.perf_counter()
+        if (
+            self._last_stream_refresh_at is None
+            or now - self._last_stream_refresh_at >= STREAM_PREVIEW_REFRESH_INTERVAL
+        ):
+            self._flush_stream(now)
 
     def replace_stream_text(self, text: str) -> None:
         self._stream_text = text
-        self._stream_index = self.app.upsert_assistant_message(
-            self._stream_index,
-            self._stream_text,
-        )
+        self._stream_dirty = True
+        self._flush_stream()
 
     def finish_assistant_message(self, text: str) -> None:
         if text and text != self._stream_text:
             self.replace_stream_text(text)
+        elif self._stream_dirty:
+            self._flush_stream()
         elif self._stream_index is not None:
+            self.app.invalidate_usage_status()
             self.app.refresh()
 
     def retry_stream(self) -> None:
@@ -252,6 +285,7 @@ class HeadsupAgentUI:
         self.app.add_notice(Text("Retrying response stream...", style="yellow"))
 
     def show_tool_card(self, renderable: RenderableType) -> None:
+        self._flush_stream()
         live_kind = type(renderable).__name__
         if live_kind == "RunningCommandCard":
             self.app.upsert_live_tool(live_kind, renderable)
@@ -365,6 +399,16 @@ class HeadsupAgentUI:
             self.app.refresh()
         return active
 
+    def _flush_stream(self, now: float | None = None) -> None:
+        if not self._stream_dirty:
+            return
+        self._stream_index = self.app.upsert_assistant_message(
+            self._stream_index,
+            self._stream_text or " ",
+        )
+        self._stream_dirty = False
+        self._last_stream_refresh_at = time.perf_counter() if now is None else now
+
 
 class HeadsupApp:
     def __init__(
@@ -391,6 +435,7 @@ class HeadsupApp:
         self.scroll_offset = 0
         self.live: Live | None = None
         self.lock = threading.RLock()
+        self._refresh_lock = threading.Lock()
         self._exit_armed = False
         self._cancel_token: CancellationToken | None = None
         self._esc_listener_stop: threading.Event | None = None
@@ -425,6 +470,7 @@ class HeadsupApp:
         self._prompt_history_index: int | None = None
         self._prompt_history_draft = ""
         self._prompt_notice: RenderableType | None = None
+        self._usage_status_cache: tuple[float, int, object, str | None, Text] | None = None
 
     def run(self) -> None:
         self._sync_initial_transcript_from_history()
@@ -527,7 +573,7 @@ class HeadsupApp:
         term_w = max(20, term_w)
         term_h = max(8, term_h)
         panel_width = _panel_width(term_w)
-        model_status = f"{self.config.get('provider', 'openai')} / {self.config.get('model', DEFAULT_CONFIG['model'])}"
+        model_status = _model_status(self.config)
         title = self._panel_title(model_status, panel_width)
         rendered_panel_width = self._rendered_panel_width(term_w, panel_width, title)
         inner_width = max(1, rendered_panel_width - 4)
@@ -628,9 +674,18 @@ class HeadsupApp:
     def refresh(self) -> None:
         if self._refresh_suspended:
             return
-        if self.live is not None:
-            with self.lock:
-                self.live.refresh()
+        live = self.live
+        if live is None:
+            return
+        if not self._refresh_lock.acquire(blocking=False):
+            return
+        try:
+            live.refresh()
+        finally:
+            self._refresh_lock.release()
+
+    def invalidate_usage_status(self) -> None:
+        self._usage_status_cache = None
 
     def _idle_animation_active(self) -> bool:
         if self._idle_anim_stop.is_set():
@@ -816,7 +871,7 @@ class HeadsupApp:
         term_w, _term_h = terminal_size(console=self.console)
         term_w = max(20, term_w)
         panel_width = _panel_width(term_w)
-        model_status = f"{self.config.get('provider', 'openai')} / {self.config.get('model', DEFAULT_CONFIG['model'])}"
+        model_status = _model_status(self.config)
         title = self._panel_title(model_status, panel_width)
         rendered_panel_width = self._rendered_panel_width(term_w, panel_width, title)
         return self._prompt_edit_width(max(1, rendered_panel_width - 4))
@@ -1414,7 +1469,7 @@ class HeadsupApp:
         for entry in self.entries:
             if entry.spacer_before:
                 lines.append(Text(""))
-            rendered = rendered_text_lines(entry.renderable, width)
+            rendered = entry.rendered_lines(width)
             lines.extend(rendered or [Text("")])
         return lines or [Text("")]
 
@@ -1511,8 +1566,20 @@ class HeadsupApp:
         )
 
     def _usage_status(self, width: int) -> Text:
+        session_id = self.session_context.session_id
+        now = time.monotonic()
+        cached = self._usage_status_cache
+        if (
+            cached is not None
+            and now - cached[0] <= _USAGE_STATUS_CACHE_TTL
+            and cached[1] == width
+            and cached[2] == self.usage_path
+            and cached[3] == session_id
+        ):
+            return cached[4].copy()
+
         try:
-            usage = load_usage(self.usage_path, self.session_context.session_id, warn=False)
+            usage = load_usage(self.usage_path, session_id, warn=False)
         except Exception:
             usage = {}
         totals = usage.get("totals") if isinstance(usage.get("totals"), dict) else {}
@@ -1523,11 +1590,8 @@ class HeadsupApp:
         if cost["exact_requests"] or cost["estimated_requests"] or cost["has_tracked_cost"]:
             if cost["estimated_requests"] and not cost["exact_requests"]:
                 status.append("est. ", style="dim")
-            else:
-                status.append("cost ", style="dim")
             status.append(format_cost(cost["total_usd"]), style="green")
         else:
-            status.append("cost ", style="dim")
             status.append("$0.00", style="green")
         if cost["unknown_requests"] or cost["contract_requests"]:
             status.append(" incomplete", style="yellow")
@@ -1547,13 +1611,18 @@ class HeadsupApp:
         if context_percent is None:
             status.append("context unknown", style="dim")
         else:
-            context_label = "0% full" if context_percent == 0.0 else f"{context_percent:.1f}% full"
-            status.append(
-                context_label,
-                style=_context_fill_style(context_percent),
-            )
+            context_label = "0%" if context_percent == 0.0 else f"{context_percent:.1f}%"
+            status.append(context_label, style=_context_fill_style(context_percent))
+            status.append(" full", style="dim")
 
         status.truncate(max(1, width), overflow="ellipsis")
+        self._usage_status_cache = (
+            now,
+            width,
+            self.usage_path,
+            session_id,
+            status.copy(),
+        )
         return status
 
 
