@@ -109,6 +109,7 @@ _SGR_MOUSE_TEXT_LOOKBACK = 64
 # dismissed by the user's first message.
 _OUTRO_DURATION = 0.4
 _USAGE_STATUS_CACHE_TTL = 0.5
+_WRAP_GUARD_COLUMNS = 2
 _ERASE_TO_END_OF_LINE = Control((ControlType.ERASE_IN_LINE, 0)).segment
 
 
@@ -163,7 +164,10 @@ class TranscriptEntry:
 
 
 def _panel_width(terminal_width: int) -> int:
-    return max(1, terminal_width - 1)
+    # WSL/ConPTY can keep stale border cells when a redraw's cursor reaches the
+    # final column before newline. Two spare columns let erase-to-EOL clear any
+    # old right edge while keeping the cursor out of the wrap zone.
+    return max(1, terminal_width - _WRAP_GUARD_COLUMNS)
 
 
 def _context_fill_style(percent: float | None) -> str:

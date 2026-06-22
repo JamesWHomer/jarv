@@ -41,6 +41,19 @@ def test_terminal_size_prefers_real_tty_size(monkeypatch):
     assert terminal_size(console=console) == (100, 40)
 
 
+def test_terminal_size_prefers_output_tty_for_rendering(monkeypatch):
+    console = FakeConsole(width=70, height=20)
+    sizes = {
+        0: display.os.terminal_size((140, 40)),
+        1: display.os.terminal_size((100, 30)),
+        2: display.os.terminal_size((120, 35)),
+    }
+
+    monkeypatch.setattr(display.os, "get_terminal_size", lambda fd: sizes[fd])
+
+    assert terminal_size(console=console) == (100, 30)
+
+
 def test_terminal_size_falls_back_to_console_size(monkeypatch):
     console = FakeConsole(width=70, height=20)
 

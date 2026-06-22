@@ -91,7 +91,7 @@ STEP_DOT_PENDING = "\u25cb"
 
 def terminal_size(*, console: Console = console) -> tuple[int, int]:
     """Return current terminal dimensions as (width, height)."""
-    for stream in (0, 1, 2):
+    for stream in (1, 2, 0):
         try:
             size = os.get_terminal_size(stream)
         except OSError:
