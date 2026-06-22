@@ -106,7 +106,7 @@ Jarv uses a multi-provider tool-calling agent loop (OpenAI Responses API, Anthro
 
 | Tool | Purpose |
 | --- | --- |
-| `run_command` | Execute a shell command and return stdout, stderr, and exit code |
+| `run_command` | Execute a shell command, including simple interactive stdin prompts |
 | `web_search` | Search the web through DuckDuckGo's public HTML endpoint |
 | `read` | Page through command output, artifacts, URLs, or local files |
 | `spawn` | Fan out work to parallel subagents, each with their own tool access |
@@ -117,6 +117,8 @@ Each tool can be enabled or disabled from `jarv /settings`. Disabled tools are n
 On Windows, commands run through PowerShell. On other platforms, they run through the system shell.
 
 `run_command` accepts optional `head_chars` and `tail_chars` parameters that control how much of the beginning and end of command output is returned to the model. Omitted values split `max_tool_output_chars` between the two sides. Explicit values override that configured limit for the command. When output is longer than the requested head and tail, Jarv retains the full result under a session-scoped `cmd_<id>` and reports the exact omitted offset and size so the model can retrieve it with `read`.
+
+If a command stays alive after its output goes idle, Jarv treats it as waiting for stdin. The next assistant response is sent to that process instead of printed as chat, and Jarv repeats that loop until the command exits or is cancelled. Each interaction is shown as its own command card with the stdin sent and only the new stdout/stderr since the previous interaction. Jarv also sends only that new output back to the model; it does not accumulate interactive output into later command results or transcripts.
 
 In the terminal, command output uses at most one-third of the screen height. Truncated output is biased roughly 2:1 toward the first lines, followed by the omitted-middle count and the final lines. Jarv also shows the resolved `head_chars` and `tail_chars` for each command.
 
