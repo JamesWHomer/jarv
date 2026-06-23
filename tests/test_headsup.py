@@ -1383,5 +1383,67 @@ class HeadsupTests(unittest.TestCase):
         self.assertIn("Restored 'second'", rendered)
 
 
+class HeadsupGoldenFrameTests(unittest.TestCase):
+    """Frame-level invariants at fixed terminal sizes.
+
+    These guard the recurring WSL/ConPTY visual bugs (wrap-guard overflow, stale
+    right edge, panel height) across small/medium/large terminals so a geometry
+    regression fails here regardless of which size it shows up at first.
+    """
+
+    SIZES = [(40, 20), (80, 24), (120, 40), (200, 50)]
+
+    def _render_lines(self, width, height):
+        ready = threading.Event()
+        ready.set()
+        output = io.StringIO()
+        test_console = Console(
+            file=output,
+            force_terminal=False,
+            color_system=None,
+            width=width,
+        )
+        app = HeadsupApp(
+            {"provider": "openai", "model": "test-model", "reasoning_effort": "high"},
+            client=object(),
+            args=None,
+            agent_loader=({"module": SimpleNamespace()}, ready),
+            handle_slash=lambda command, rest, config, client, args, hint: (config, client),
+            maybe_command=lambda _first, _rest: None,
+            render_console=test_console,
+        )
+        # Populate the transcript so the footer (not the intro animation) renders.
+        app.add_user_message("hello from the golden frame harness")
+        app.upsert_assistant_message(None, "a reply body that may need to wrap on narrow widths")
+        with patch("jarv.headsup.terminal_size", return_value=(width, height)):
+            test_console.print(app.render())
+        return output.getvalue().splitlines()
+
+    def test_no_line_exceeds_wrap_guard_at_any_size(self):
+        from jarv.tui_capabilities import wrap_guard_columns
+
+        for width, height in self.SIZES:
+            with self.subTest(width=width, height=height):
+                lines = self._render_lines(width, height)
+                widest = max(cell_len(line) for line in lines)
+                self.assertLessEqual(widest, width - wrap_guard_columns())
+
+    def test_panel_fills_terminal_height_at_any_size(self):
+        for width, height in self.SIZES:
+            with self.subTest(width=width, height=height):
+                lines = self._render_lines(width, height)
+                self.assertEqual(len(lines), height)
+
+    def test_frame_has_rounded_borders_and_title_at_any_size(self):
+        for width, height in self.SIZES:
+            with self.subTest(width=width, height=height):
+                rendered = "\n".join(self._render_lines(width, height))
+                # Rounded box corners on the outer panel.
+                self.assertIn("╭", rendered)  # top-left
+                self.assertIn("╯", rendered)  # bottom-right
+                self.assertIn("jarv", rendered)
+                self.assertIn("Enter send", rendered)
+
+
 if __name__ == "__main__":
     unittest.main()

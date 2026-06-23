@@ -66,7 +66,7 @@ class AgentInputTests(unittest.TestCase):
         )
         config = {**DEFAULT_CONFIG, "tool_call_display": "print"}
 
-        with patch("jarv.agent.console", new=test_console):
+        with patch("jarv.agent_ui.console", new=test_console):
             test_console.print()
             _print_tool_card(tool_card("web_search", "first"), config)
             _print_tool_card(tool_card("read", "second"), config)
@@ -85,7 +85,7 @@ class AgentInputTests(unittest.TestCase):
         )
         config = {**DEFAULT_CONFIG, "tool_call_display": "fullscreen"}
 
-        with patch("jarv.agent.console", new=test_console):
+        with patch("jarv.agent_ui.console", new=test_console):
             _print_tool_card(
                 tool_card("web_search", "first", display_mode="fullscreen"),
                 config,
@@ -112,10 +112,6 @@ class AgentInputTests(unittest.TestCase):
         with (
             patch("jarv.agent.console", test_console),
             patch("jarv.agent.check_command", return_value=(True, "")),
-            patch(
-                "jarv.agent.execute_command",
-                return_value=CommandResult("echo ok", "", "", 0),
-            ),
         ):
             _dispatch_run_command_with_ui(
                 {"command": "echo ok", "head_chars": 12000},
@@ -634,7 +630,7 @@ class AgentInputTests(unittest.TestCase):
     def test_ask_user_ctrl_c_propagates_to_cancel_turn(self):
         with (
             patch("jarv.agent.sys.stdin") as stdin,
-            patch("jarv.agent.read_editable_line", side_effect=KeyboardInterrupt),
+            patch("jarv.agent_ui.read_editable_line", side_effect=KeyboardInterrupt),
         ):
             stdin.isatty.return_value = True
             with self.assertRaises(KeyboardInterrupt):
@@ -656,7 +652,7 @@ class AgentInputTests(unittest.TestCase):
             patch("jarv.agent.sys.stdin") as stdin,
             patch("jarv.agent.sys.stdout") as stdout,
             patch("builtins.open", return_value=tty) as open_tty,
-            patch("jarv.agent.read_editable_line", return_value="yes") as read_line,
+            patch("jarv.agent_ui.read_editable_line", return_value="yes") as read_line,
         ):
             stdin.isatty.return_value = False
             stdin.encoding = "utf-8"
@@ -676,7 +672,7 @@ class AgentInputTests(unittest.TestCase):
             patch("jarv.agent.sys.platform", "win32"),
             patch("jarv.agent.sys.stdin") as stdin,
             patch("jarv.agent.sys.stdout") as stdout,
-            patch("jarv.agent.read_editable_line", return_value="yes") as read_line,
+            patch("jarv.agent_ui.read_editable_line", return_value="yes") as read_line,
         ):
             stdin.isatty.return_value = False
             stdout.isatty.return_value = True
@@ -695,9 +691,9 @@ class AgentInputTests(unittest.TestCase):
         )
         with (
             patch("jarv.agent.sys.stdin") as stdin,
-            patch("jarv.agent.read_editable_line", return_value="yes") as read_line,
+            patch("jarv.agent_ui.read_editable_line", return_value="yes") as read_line,
             patch(
-                "jarv.agent.console",
+                "jarv.agent_ui.console",
                 new=Console(
                     file=console_output,
                     force_terminal=False,
@@ -736,8 +732,8 @@ class AgentInputTests(unittest.TestCase):
 
         with (
             patch("jarv.agent.sys.stdin") as stdin,
-            patch("jarv.agent.read_editable_line", side_effect=answer_prompt),
-            patch("jarv.agent.console", new=test_console),
+            patch("jarv.agent_ui.read_editable_line", side_effect=answer_prompt),
+            patch("jarv.agent_ui.console", new=test_console),
         ):
             stdin.isatty.return_value = True
             result = _dispatch_ask_user(
@@ -824,7 +820,7 @@ class AgentInputTests(unittest.TestCase):
                 patch("jarv.agent.create_client", side_effect=fake_create_client),
                 patch("jarv.agent.stream_response", side_effect=fake_stream_response),
                 patch("jarv.agent.sys.stdout", new=TtyStringIO()),
-                patch("jarv.agent.Live", FakeLive),
+                patch("jarv.agent_ui.Live", FakeLive),
             ):
                 run_agent("hello!", DEFAULT_CONFIG, client=None, incognito=True)
 
@@ -1038,6 +1034,10 @@ class AgentInputTests(unittest.TestCase):
                 patch("jarv.agent.check_command", return_value=(True, "")),
                 patch(
                     "jarv.agent.console",
+                    new=Console(file=console_output, force_terminal=False, color_system=None),
+                ),
+                patch(
+                    "jarv.interactive_command.console",
                     new=Console(file=console_output, force_terminal=False, color_system=None),
                 ),
                 patch("jarv.agent.sys.stdout", new=io.StringIO()),
@@ -1465,7 +1465,7 @@ class AgentInputTests(unittest.TestCase):
                 patch("jarv.agent.prepare_session_context", return_value=context),
                 patch("jarv.agent.stream_response", side_effect=fake_stream_response),
                 patch("jarv.agent.sys.stdout", new=io.StringIO()),
-                patch("jarv.agent.console", new=Console(file=console_output, force_terminal=False, color_system=None)),
+                patch("jarv.agent_ui.console", new=Console(file=console_output, force_terminal=False, color_system=None)),
             ):
                 run_agent(
                     "hello!",

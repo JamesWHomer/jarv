@@ -6,7 +6,6 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 
-from rich.console import Group
 from rich.control import Control, ControlType
 from rich.live import Live
 from rich.live_render import LiveRender
@@ -18,12 +17,10 @@ from rich.text import Text
 from .config import DEFAULT_CONFIG
 from .context_budget import build_input, trim_turn_input
 from .cancellation import CancellationToken, TurnCancelled, cancel_token_on_sigint
-from .command_input import read_editable_line
 from .display import (
     console,
     flatten_headings,
     terminal_size,
-    tool_card,
     track_live_display,
 )
 from .history import (
@@ -60,8 +57,6 @@ from .orchestrator import (
     AgentNode,
     SpawnObserver,
     ToolExecutionHooks,
-    check_run_command,
-    execute_run_command,
     execute_tool_calls,
     filter_enabled_tools,
     history_has_web_search_read_nudge,
@@ -115,7 +110,6 @@ def resolve_tool_call_display(config: dict, *, heads_up: bool) -> str:
     return str(mode)
 
 
-from . import agent_ui as _agent_ui
 from .agent_ui import (
     InPlaceLive,
     ResponseWaitIndicator,
@@ -123,13 +117,12 @@ from .agent_ui import (
     StreamingMarkdownPreview,
     TailMarkdown,
     ToolActivityIndicator,
-    _dispatch_ask_user as _agent_ui_dispatch_ask_user,
-    _dispatch_run_command_with_ui as _agent_ui_dispatch_run_command_with_ui,
-    _dispatch_spawn_with_ui as _agent_ui_dispatch_spawn_with_ui,
+    _dispatch_ask_user,
+    _dispatch_spawn_with_ui,
     _format_agent_usage_line,
-    _print_agent_usage_if_enabled as _agent_ui_print_agent_usage_if_enabled,
-    _print_tool_card as _agent_ui_print_tool_card,
-    _start_response_wait_indicator as _agent_ui_start_response_wait_indicator,
+    _print_agent_usage_if_enabled,
+    _print_tool_card,
+    _start_response_wait_indicator,
     _ui_call,
     get_system_info,
     response_start_status,
@@ -142,7 +135,7 @@ from .agent_ui import (
 from .context_budget import build_input
 from .response_items import to_response_input_item
 from .safety import check_command
-from .shell import InteractiveCommandProcess, command_result_renderable, execute_command
+from .shell import InteractiveCommandProcess
 
 
 @dataclass(frozen=True)
@@ -167,360 +160,19 @@ def _agent_check_run_command(prepared, config: dict, **kwargs):
     )
 
 
-def _agent_execute_run_command(
-    prepared,
-    config: dict,
-    *,
-    cancellation_token=None,
-    retained_store=None,
-):
-    from .orchestrator import format_run_command_output
-
-    result = execute_command(
-        prepared.cmd,
-        config.get("command_timeout", 60),
-        cancellation_token=cancellation_token,
-    )
-    output, output_id = format_run_command_output(result, prepared, retained_store)
-    return output, result, output_id
-
-
-def _with_agent_ui_globals(fn, *args, command_hooks: bool = False, **kwargs):
-    previous = _agent_ui.console
-    previous_live = _agent_ui.Live
-    previous_read_editable_line = _agent_ui.read_editable_line
-    previous_check = _agent_ui.check_run_command
-    previous_execute = _agent_ui.execute_run_command
-    _agent_ui.console = console
-    _agent_ui.Live = Live
-    _agent_ui.read_editable_line = read_editable_line
-    if command_hooks:
-        _agent_ui.check_run_command = _agent_check_run_command
-        _agent_ui.execute_run_command = _agent_execute_run_command
-    try:
-        return fn(*args, **kwargs)
-    finally:
-        _agent_ui.console = previous
-        _agent_ui.Live = previous_live
-        _agent_ui.read_editable_line = previous_read_editable_line
-        _agent_ui.check_run_command = previous_check
-        _agent_ui.execute_run_command = previous_execute
-
-
-def _print_tool_card(renderable, config: dict, ui=None) -> None:
-    return _with_agent_ui_globals(_agent_ui_print_tool_card, renderable, config, ui=ui)
-
-
-def _format_elapsed_seconds(seconds: float | int | None) -> str:
-    try:
-        value = max(0.0, float(seconds or 0.0))
-    except (TypeError, ValueError):
-        value = 0.0
-    if value < 10:
-        return f"{value:.1f}s"
-    return f"{value:.0f}s"
-
-
-def _interactive_check_in_seconds(config: dict) -> float | None:
-    try:
-        seconds = float(config.get("command_timeout", 60))
-    except (TypeError, ValueError):
-        return 60.0
-    return seconds if seconds > 0 else None
-
-
-def _run_command_waiting_prompt(snapshot) -> str:
-    result = snapshot.to_delta_command_result()
-    status_lines = []
-    if getattr(snapshot, "check_in", False):
-        status_lines.extend([
-            "Status: command_timeout check-in; the process is still running and was not killed.",
-            f"Elapsed: {_format_elapsed_seconds(getattr(snapshot, 'elapsed_seconds', 0.0))}",
-            f"Time since last output: {_format_elapsed_seconds(getattr(snapshot, 'idle_seconds', 0.0))}",
-        ])
-    header = (
-        "[interactive command still running]\n"
-        if getattr(snapshot, "check_in", False)
-        else "[interactive command waiting for terminal input]\n"
-    )
-    status_text = "\n".join(status_lines) + "\n\n" if status_lines else ""
-    return (
-        f"{header}"
-        f"Command: {snapshot.command}\n\n"
-        f"{status_text}"
-        "New command output since last interaction:\n"
-        "```text\n"
-        f"{result.full_model_output()}\n"
-        "```\n\n"
-        "Reply with exactly one line of terminal input or one control. Do not "
-        "explain. Do not chain multiple controls. Plain text sends that text "
-        "followed by Enter. Special controls: <ENTER>, <WAIT>, <WAIT 10s>, "
-        "<CTRL_C>, <EOF>, <CTRL_D>, <ESC>, <TAB>, <UP>, <DOWN>, <LEFT>, "
-        "<RIGHT>. Only the first input/control will be used."
-    )
-
-
-def _run_command_final_prompt(output: str) -> str:
-    return (
-        "[interactive command exited]\n"
-        "Final command output:\n"
-        "```text\n"
-        f"{output}\n"
-        "```"
-    )
-
-
-_TERMINAL_CONTROL_NAMES = (
-    "<ENTER>",
-    "<WAIT",
-    "<CTRL_C>",
-    "<EOF>",
-    "<CTRL_D>",
-    "<ESC>",
-    "<TAB>",
-    "<UP>",
-    "<DOWN>",
-    "<LEFT>",
-    "<RIGHT>",
+from .interactive_command import (
+    _continue_interactive_command,
+    _first_terminal_action,
+    _format_elapsed_seconds,
+    _format_finished_interactive_output,
+    _interactive_check_in_seconds,
+    _interactive_command_card,
+    _parse_terminal_control,
+    _run_command_final_prompt,
+    _run_command_waiting_prompt,
+    _show_interactive_command_card,
+    _terminal_action_display,
 )
-
-
-def _first_terminal_action(text: str) -> str:
-    lines = []
-    for raw_line in text.strip().splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("```"):
-            continue
-        if line.lower().startswith("stdin>"):
-            line = line[6:].strip()
-        lines.append(line)
-    if not lines:
-        return ""
-
-    line = lines[0]
-    upper = line.upper()
-    first_control_at: int | None = None
-    for token in _TERMINAL_CONTROL_NAMES:
-        idx = upper.find(token)
-        if idx >= 0 and (first_control_at is None or idx < first_control_at):
-            first_control_at = idx
-
-    if first_control_at is None:
-        return line
-    if first_control_at > 0:
-        return line[:first_control_at].strip()
-
-    closing = line.find(">")
-    if closing >= 0:
-        return line[:closing + 1].strip()
-    return line
-
-
-def _parse_terminal_control(text: str) -> tuple[str, str | float | None]:
-    stripped = _first_terminal_action(text)
-    upper = stripped.upper()
-    if upper == "<ENTER>":
-        return "stdin", "\n"
-    if upper == "<WAIT>":
-        return "wait", None
-    if upper.startswith("<WAIT ") and upper.endswith(">"):
-        raw = stripped[6:-1].strip().lower()
-        multiplier = 1.0
-        if raw.endswith("ms"):
-            multiplier = 0.001
-            raw = raw[:-2].strip()
-        elif raw.endswith("s"):
-            raw = raw[:-1].strip()
-        try:
-            return "wait", max(0.0, float(raw) * multiplier)
-        except ValueError:
-            return "stdin", stripped.rstrip("\n") + "\n"
-    if upper == "<CTRL_C>":
-        return "ctrl_c", None
-    if upper in {"<EOF>", "<CTRL_D>"}:
-        return "eof", None
-    special_keys = {
-        "<ESC>": "\x1b",
-        "<TAB>": "\t",
-        "<UP>": "\x1b[A",
-        "<DOWN>": "\x1b[B",
-        "<RIGHT>": "\x1b[C",
-        "<LEFT>": "\x1b[D",
-    }
-    if upper in special_keys:
-        return "stdin_raw", special_keys[upper]
-    return "stdin", stripped.rstrip("\n") + "\n"
-
-
-def _terminal_action_display(action: str, payload: str | float | None) -> str:
-    if action == "stdin":
-        text = str(payload or "").rstrip("\n")
-        return text or "<ENTER>"
-    if action == "wait":
-        if isinstance(payload, float):
-            return f"<WAIT {payload:g}s>"
-        return "<WAIT>"
-    if action == "ctrl_c":
-        return "<CTRL_C>"
-    if action == "eof":
-        return "<EOF>"
-    if action == "stdin_raw":
-        controls = {
-            "\x1b": "<ESC>",
-            "\t": "<TAB>",
-            "\x1b[A": "<UP>",
-            "\x1b[B": "<DOWN>",
-            "\x1b[C": "<RIGHT>",
-            "\x1b[D": "<LEFT>",
-        }
-        return controls.get(str(payload or ""), "<KEY>")
-    return ""
-
-
-def _interactive_command_card(
-    prepared,
-    snapshot,
-    config: dict,
-    *,
-    status: str,
-    terminal_reply: str | None = None,
-):
-    display_mode = config.get(
-        "tool_call_display",
-        DEFAULT_CONFIG["tool_call_display"],
-    )
-    command_line = Text("> ", style="bold yellow")
-    command_line.append(prepared.cmd)
-    body_parts = [command_line]
-    if terminal_reply is not None:
-        stdin_line = Text("stdin> ", style="bold cyan")
-        stdin_line.append(terminal_reply.rstrip("\n") or "<ENTER>")
-        body_parts.append(stdin_line)
-    result = snapshot.to_delta_command_result()
-    if status == "waiting":
-        if getattr(snapshot, "check_in", False):
-            body_parts.append(Text(
-                "command_timeout check-in; process still running",
-                style="dim",
-            ))
-            body_parts.append(Text(
-                "elapsed "
-                f"{_format_elapsed_seconds(getattr(snapshot, 'elapsed_seconds', 0.0))}"
-                " | idle "
-                f"{_format_elapsed_seconds(getattr(snapshot, 'idle_seconds', 0.0))}",
-                style="dim",
-            ))
-        body_parts.append(Text(result.full_model_output()))
-        body_parts.append(Text("Waiting for terminal input", style="dim"))
-    else:
-        body_parts.append(command_result_renderable(result))
-    return tool_card(
-        "run_command",
-        Group(*body_parts),
-        metadata=(
-            f"model window {prepared.head_chars:,} / "
-            f"{prepared.tail_chars:,} chars"
-        ),
-        display_mode=display_mode,
-        status=status,
-        status_style="blue" if status == "waiting" else (
-            "green" if result.exit_code in (None, 0) else "red"
-        ),
-    )
-
-
-def _show_interactive_command_card(
-    pending: PendingRunCommand,
-    snapshot,
-    config: dict,
-    *,
-    status: str,
-    terminal_reply: str | None = None,
-    ui=None,
-) -> None:
-    card = _interactive_command_card(
-        pending.prepared,
-        snapshot,
-        config,
-        status=status,
-        terminal_reply=terminal_reply,
-    )
-    if ui is not None:
-        _ui_call(ui, "show_tool_card", card)
-        return
-    console.print(card)
-    if config.get(
-        "tool_call_display",
-        DEFAULT_CONFIG["tool_call_display"],
-    ) == "print":
-        console.print()
-
-
-def _format_finished_interactive_output(
-    pending: PendingRunCommand,
-    snapshot,
-    retained_store,
-) -> str:
-    from .orchestrator import format_run_command_output
-
-    result = snapshot.to_delta_command_result()
-    output, _output_id = format_run_command_output(
-        result,
-        pending.prepared,
-        retained_store,
-    )
-    if callable(pending.unregister_cancel):
-        pending.unregister_cancel()
-        pending.unregister_cancel = None
-    return output
-
-
-def _continue_interactive_command(
-    pending: PendingRunCommand,
-    terminal_reply: str,
-    *,
-    config: dict,
-    cancellation_token=None,
-):
-    action, payload = _parse_terminal_control(terminal_reply)
-    action_display = _terminal_action_display(action, payload)
-    check_in_seconds = _interactive_check_in_seconds(config)
-    if action == "stdin":
-        pending.process.write_stdin(str(payload))
-        snapshot = pending.process.wait_until_idle(
-            check_in_seconds=check_in_seconds,
-            cancellation_token=cancellation_token,
-        )
-    elif action == "stdin_raw":
-        pending.process.write_stdin(str(payload or ""))
-        snapshot = pending.process.wait_until_idle(
-            check_in_seconds=check_in_seconds,
-            cancellation_token=cancellation_token,
-        )
-    elif action == "wait":
-        snapshot = pending.process.wait_until_idle(
-            wait_seconds=payload if isinstance(payload, float) else 0.5,
-            check_in_seconds=check_in_seconds,
-            cancellation_token=cancellation_token,
-        )
-    elif action == "ctrl_c":
-        pending.process.interrupt()
-        snapshot = pending.process.wait_until_idle(
-            check_in_seconds=check_in_seconds,
-            cancellation_token=cancellation_token,
-        )
-    elif action == "eof":
-        pending.process.close_stdin()
-        snapshot = pending.process.wait_until_idle(
-            check_in_seconds=check_in_seconds,
-            cancellation_token=cancellation_token,
-        )
-    else:
-        snapshot = pending.process.wait_until_idle(
-            check_in_seconds=check_in_seconds,
-            cancellation_token=cancellation_token,
-        )
-    return snapshot, action_display
 
 
 def _dispatch_run_command_with_ui(
@@ -645,26 +297,6 @@ def _dispatch_run_command_with_ui(
     return RunCommandDispatchResult(
         _run_command_waiting_prompt(snapshot),
         pending,
-    )
-
-
-def _dispatch_spawn_with_ui(*args, **kwargs):
-    return _with_agent_ui_globals(_agent_ui_dispatch_spawn_with_ui, *args, **kwargs)
-
-
-def _dispatch_ask_user(*args, **kwargs):
-    return _with_agent_ui_globals(_agent_ui_dispatch_ask_user, *args, **kwargs)
-
-
-def _print_agent_usage_if_enabled(*args, **kwargs):
-    return _with_agent_ui_globals(_agent_ui_print_agent_usage_if_enabled, *args, **kwargs)
-
-
-def _start_response_wait_indicator(*args, **kwargs):
-    return _with_agent_ui_globals(
-        _agent_ui_start_response_wait_indicator,
-        *args,
-        **kwargs,
     )
 
 

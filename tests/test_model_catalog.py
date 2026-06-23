@@ -8,6 +8,7 @@ import pytest
 from rich.console import Console
 
 from jarv import model_catalog, settings_command, setup
+from jarv.command_input import TextInput
 from jarv.anthropic_http import list_models as list_anthropic_models
 from jarv.config import DEFAULT_CONFIG
 from jarv.gemini_http import list_models as list_gemini_models
@@ -805,7 +806,7 @@ def test_model_picker_inserts_batched_text():
 
     assert settings_command._settings_model_apply_key(
         edit,
-        settings_command.TextInput("custom/model"),
+        TextInput("custom/model"),
     )
     assert edit["model_input_active"] is True
     assert edit["buffer"] == "custom/model"
