@@ -10,14 +10,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Callable
 
-from rich import box
 from rich.cells import cell_len
 from rich.console import Console, Group, RenderableType
-from rich.control import Control, ControlType
 from rich.live import Live
 from rich.markdown import Markdown
-from rich.panel import Panel
-from rich.segment import Segment
 from rich.text import Text
 
 from .cancellation import CancellationToken, TurnCancelled
@@ -42,7 +38,6 @@ from .agent_ui import (
 )
 from .config import DEFAULT_CONFIG
 from .display import (
-    TITLE_STYLE,
     console,
     flatten_headings,
     mark_first_paint,
@@ -60,6 +55,15 @@ from .session_render import (
     _tool_call_renderable,
 )
 from .text_editor import apply_text_editor_key, initialize_text_editor, render_visual_line_window
+from .tui_frame import (
+    assemble_body,
+    build_frame,
+    compose_title,
+    compute_layout,
+    panel_width as _panel_width,
+    transcript_rows as _transcript_rows_for,
+    window_transcript,
+)
 from .tui_layout import clip_text
 from .usage import format_cost, known_context_window, load_usage, usage_cost_summary, usage_file_for
 
@@ -109,30 +113,6 @@ _SGR_MOUSE_TEXT_LOOKBACK = 64
 # dismissed by the user's first message.
 _OUTRO_DURATION = 0.4
 _USAGE_STATUS_CACHE_TTL = 0.5
-_WRAP_GUARD_COLUMNS = 2
-_ERASE_TO_END_OF_LINE = Control((ControlType.ERASE_IN_LINE, 0)).segment
-
-
-class _EraseTrailingColumns:
-    """Render a frame without padding into WSL's auto-wrap column."""
-
-    def __init__(self, renderable: RenderableType):
-        self.renderable = renderable
-
-    def __rich_console__(self, console: Console, options):
-        lines = console.render_lines(
-            self.renderable,
-            options,
-            pad=False,
-            new_lines=False,
-        )
-        newline = Segment.line()
-        for index, line in enumerate(lines):
-            yield from line
-            if console.is_terminal:
-                yield _ERASE_TO_END_OF_LINE
-            if index != len(lines) - 1:
-                yield newline
 
 
 def _sanitize_editor_key(key: str) -> str:
@@ -161,13 +141,6 @@ class TranscriptEntry:
         self._render_cache_width = width
         self._render_cache_lines = lines
         return lines
-
-
-def _panel_width(terminal_width: int) -> int:
-    # WSL/ConPTY can keep stale border cells when a redraw's cursor reaches the
-    # final column before newline. Two spare columns let erase-to-EOL clear any
-    # old right edge while keeping the cursor out of the wrap zone.
-    return max(1, terminal_width - _WRAP_GUARD_COLUMNS)
 
 
 def _context_fill_style(percent: float | None) -> str:
@@ -599,26 +572,17 @@ class HeadsupApp:
 
     def render(self) -> RenderableType:
         term_w, term_h = terminal_size(console=self.console)
-        term_w = max(20, term_w)
-        term_h = max(8, term_h)
-        panel_width = _panel_width(term_w)
+        layout = compute_layout(term_w, term_h)
+        inner_width = layout.inner_width
         model_status = _model_status(self.config)
-        title = self._panel_title(model_status, panel_width)
-        rendered_panel_width = self._rendered_panel_width(term_w, panel_width, title)
-        inner_width = max(1, rendered_panel_width - 4)
-        body_height = max(3, term_h - 2)
-        max_prompt_rows = min(8, max(1, body_height - 2), max(3, term_h // 3))
+        title = compose_title(model_status, layout.panel_width)
 
         with self.lock:
-            prompt_lines = self._prompt_lines(inner_width, max_lines=max_prompt_rows)
+            prompt_lines = self._prompt_lines(inner_width, max_lines=layout.max_prompt_rows)
             footer = self._footer_line(inner_width)
-            transcript_rows = max(1, body_height - len(prompt_lines) - 1)
+            rows = _transcript_rows_for(layout.body_height, len(prompt_lines))
             transcript = self._transcript_lines(inner_width)
-            max_scroll = max(0, len(transcript) - transcript_rows)
-            self.scroll_offset = max(0, min(self.scroll_offset, max_scroll))
-            end = len(transcript) - self.scroll_offset
-            start = max(0, end - transcript_rows)
-            visible = list(transcript[start:end])
+            visible, self.scroll_offset = window_transcript(transcript, rows, self.scroll_offset)
             show_intro = (
                 not self._idle_anim_stop.is_set()
                 and self.scroll_offset == 0
@@ -631,7 +595,7 @@ class HeadsupApp:
         if show_intro:
             intro = render_intro(
                 inner_width,
-                transcript_rows,
+                rows,
                 time.perf_counter() - self._idle_anim_started_at,
             )
         elif outro_started_at:
@@ -639,71 +603,28 @@ class HeadsupApp:
             if exit_progress < 1.0:
                 intro = render_intro(
                     inner_width,
-                    transcript_rows,
+                    rows,
                     time.perf_counter() - self._idle_anim_started_at,
                     exit=exit_progress,
                 )
         if intro is not None:
             visible = intro
 
-        while len(visible) < transcript_rows:
-            visible.insert(0, Text(""))
-
-        parts: list[RenderableType] = visible
-        target_rows_before_footer = max(0, body_height - 1 - len(prompt_lines))
-        if len(parts) > target_rows_before_footer:
-            del parts[target_rows_before_footer:]
-        while len(parts) < target_rows_before_footer:
-            parts.append(Text(""))
-        parts.append(footer)
-        parts.extend(prompt_lines)
+        parts = assemble_body(visible, footer, prompt_lines, layout.body_height, rows)
         subtitle = self._panel_subtitle(inner_width)
-        panel = Panel(
-            Group(*parts),
+        return build_frame(
+            parts,
             title=title,
-            title_align="left",
             subtitle=subtitle,
-            subtitle_align="right",
-            border_style="cyan",
-            box=box.ROUNDED,
-            padding=(0, 1),
-            width=panel_width,
-            height=term_h,
+            panel_width=layout.panel_width,
+            term_h=layout.term_h,
         )
-        return _EraseTrailingColumns(panel)
-
-    def _panel_title(self, model_status: str, panel_width: int) -> Text:
-        left = "jarv \u25b8 heads-up"
-        # Rich reserves six cells around panel titles. Keeping the title inside
-        # that budget prevents Rich from expanding past our WSL wrap guard.
-        title_width = max(1, panel_width - 6)
-        title = Text(no_wrap=True, overflow="crop")
-        left = clip_text(left, title_width)
-        title.append(left, style=TITLE_STYLE)
-        remaining = title_width - cell_len(left)
-        if remaining <= 1:
-            return title
-        status = clip_text(model_status, remaining - 1)
-        separator_width = title_width - cell_len(left) - cell_len(status) - 2
-        if separator_width > 0:
-            title.append(" ")
-            title.append("─" * separator_width, style="cyan")
-            title.append(" ")
-        else:
-            title.append(" ")
-        title.append(status, style="dim")
-        return title
 
     def _panel_subtitle(self, width: int) -> Text:
         subtitle = Text(no_wrap=True, overflow="crop")
         subtitle.append_text(self._usage_status(width))
         subtitle.truncate(max(1, width), overflow="ellipsis")
         return subtitle
-
-    def _rendered_panel_width(self, term_w: int, panel_width: int, title: Text) -> int:
-        # _panel_title clips to the title budget, so Rich should honor the
-        # explicit width and leave the spare terminal column unused.
-        return panel_width
 
     def refresh(self) -> None:
         if self._refresh_suspended:
@@ -903,12 +824,8 @@ class HeadsupApp:
 
     def _current_prompt_edit_width(self) -> int:
         term_w, _term_h = terminal_size(console=self.console)
-        term_w = max(20, term_w)
-        panel_width = _panel_width(term_w)
-        model_status = _model_status(self.config)
-        title = self._panel_title(model_status, panel_width)
-        rendered_panel_width = self._rendered_panel_width(term_w, panel_width, title)
-        return self._prompt_edit_width(max(1, rendered_panel_width - 4))
+        inner_width = max(1, _panel_width(max(20, term_w)) - 4)
+        return self._prompt_edit_width(inner_width)
 
     def _apply_editor_key(self, key: str, repeat: int) -> tuple[bool, bool]:
         if isinstance(key, TextInput):
