@@ -647,14 +647,6 @@ class HeadsupTests(unittest.TestCase):
     def test_running_command_card_keeps_headsup_refresh_active(self):
         app, _test_console, _output = self._app()
         ui = HeadsupAgentUI(app)
-        refresh_count = 0
-
-        class FakeLive:
-            def refresh(self):
-                nonlocal refresh_count
-                refresh_count += 1
-
-        app.live = FakeLive()
 
         ui.show_tool_card(
             RunningCommandCard(
@@ -664,16 +656,18 @@ class HeadsupTests(unittest.TestCase):
                 time.perf_counter(),
             )
         )
-        refreshes_after_show = refresh_count
-
+        # A running command card is an active animation the loop keeps repainting.
+        self.assertTrue(ui.has_active_animation())
+        app._dirty = False
         self.assertTrue(ui._refresh_wait_statuses())
-        self.assertGreater(refresh_count, refreshes_after_show)
+        self.assertTrue(app._dirty)
 
         ui.show_tool_card(Text("done"))
-        refreshes_after_done = refresh_count
-
+        # Once the card is replaced with its result, nothing is animating.
+        self.assertFalse(ui.has_active_animation())
+        app._dirty = False
         self.assertFalse(ui._refresh_wait_statuses())
-        self.assertEqual(refresh_count, refreshes_after_done)
+        self.assertFalse(app._dirty)
 
     def test_unbind_cancel_token_stops_wait_status_refreshes(self):
         app, _test_console, _output = self._app()
@@ -812,6 +806,7 @@ class HeadsupTests(unittest.TestCase):
             patch("jarv.headsup.Live", FakeLive),
             patch("jarv.headsup.refresh_on_resize", noop_context),
             patch("jarv.headsup.disable_mouse_capture") as disable_mouse_capture,
+            patch("jarv.headsup._key_available", lambda: bool(keys)),
             patch("jarv.headsup._read_key_with_repeats", side_effect=lambda **kwargs: keys.pop(0)),
         ):
             app.run()
@@ -906,6 +901,7 @@ class HeadsupTests(unittest.TestCase):
             patch("jarv.headsup.Live", FakeLive),
             patch("jarv.headsup.refresh_on_resize", noop_context),
             patch("jarv.headsup.disable_mouse_capture") as disable_mouse_capture,
+            patch("jarv.headsup._key_available", lambda: bool(keys)),
             patch("jarv.headsup._read_key_with_repeats", side_effect=lambda **kwargs: keys.pop(0)),
         ):
             app.run()
@@ -1233,7 +1229,7 @@ class HeadsupTests(unittest.TestCase):
         self.assertNotIn("old visible reply", rendered)
         self.assertFalse(app._idle_anim_stop.is_set())
 
-    def test_new_restarts_idle_animation_thread_in_active_headsup(self):
+    def test_new_restarts_idle_animation_in_active_headsup(self):
         app, _test_console, _output = self._app()
         old_context = SimpleNamespace(
             session_id="old-session",
@@ -1262,18 +1258,13 @@ class HeadsupTests(unittest.TestCase):
         ):
             try:
                 app._run_slash("/new", [])
-                self.assertTrue(
-                    self._wait_for(
-                        lambda: app._idle_anim_thread is not None
-                        and app._idle_anim_thread.is_alive()
-                    )
-                )
+                # No background thread now: the loop's on_tick drives the intro.
+                # /new should re-arm the animation (stop cleared, timer reset).
                 self.assertFalse(app._idle_anim_stop.is_set())
+                self.assertGreater(app._idle_anim_started_at, 0.0)
+                self.assertTrue(app._idle_animation_active())
             finally:
                 app._idle_anim_stop.set()
-                thread = app._idle_anim_thread
-                if thread is not None:
-                    thread.join(timeout=0.5)
                 app._foreground_input_active = False
 
     def test_new_on_already_empty_session_still_shows_intro(self):

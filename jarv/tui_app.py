@@ -35,6 +35,7 @@ compose with this loop; this module owns only the loop, input, and lifecycle.
 from __future__ import annotations
 
 import queue
+import threading
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -116,6 +117,7 @@ class AltScreenApp:
         self.live: Any | None = None
         self.result: Any = None
         self._last_size: tuple[int, int] | None = None
+        self._loop_thread: threading.Thread | None = None
 
         self._live_factory = live_factory or self._default_live_factory
         self._read_key_fn = read_key_fn or self._default_read_key
@@ -164,12 +166,20 @@ class AltScreenApp:
     # Producer API (safe to call from any thread)
     # ------------------------------------------------------------------ #
     def invalidate(self) -> None:
-        """Mark the view as needing a repaint and wake the loop promptly."""
+        """Mark the view as needing a repaint and wake the loop promptly.
+
+        Called from a worker thread, this enqueues a wake sentinel so the idle
+        loop repaints immediately. Called from the loop thread itself (e.g. an
+        ``on_tick`` animation frame), it only sets the dirty flag -- enqueuing a
+        wake there would short-circuit the idle wait and busy-spin the loop, so
+        the frame interval is left to pace the repaint.
+        """
         self._dirty = True
-        try:
-            self._queue.put_nowait(_WAKE)
-        except queue.Full:  # pragma: no cover - unbounded queue
-            pass
+        if threading.current_thread() is not self._loop_thread:
+            try:
+                self._queue.put_nowait(_WAKE)
+            except queue.Full:  # pragma: no cover - unbounded queue
+                pass
 
     def post(self, event: Any) -> None:
         """Enqueue an event object for the loop to dispatch."""
@@ -196,6 +206,7 @@ class AltScreenApp:
         """Enter the alternate screen and pump events until stopped."""
         self._running = True
         self._dirty = True
+        self._loop_thread = threading.current_thread()
         self._last_size = self._terminal_size_fn(console=self.console)
 
         disable_mouse_capture()
@@ -292,6 +303,16 @@ class AltScreenApp:
             return
         live.refresh()
         mark_first_paint(self.first_paint_label)
+
+    def paint_now(self) -> None:
+        """Force one synchronous repaint. Only call on the loop thread.
+
+        Used by nested modal reads (a confirmation prompt, captured command
+        output) that block the main loop and need the screen updated in place
+        before they return.
+        """
+        self._paint()
+        self._dirty = False
 
     # ------------------------------------------------------------------ #
     # Screen / input plumbing (overridable via injection)
