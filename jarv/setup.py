@@ -8,6 +8,10 @@ from rich.text import Text
 from .display import console, jarv_panel, section_rule
 from .provider import PROVIDERS, LOCAL_PROVIDERS, KEY_PATTERNS
 from .provider_catalog import PROVIDER_CHOICES
+from .settings_model_picker import (
+    _settings_resolve_model,
+    _settings_resolve_provider,
+)
 
 
 class GoBack(Exception):
@@ -87,7 +91,7 @@ def setup_provider(config: dict) -> dict:
         if choice.lower() in ("b", "back"):
             raise GoBack()
 
-        provider_name = _resolve_provider(choice)
+        provider_name = _settings_resolve_provider(choice)
         if provider_name is not None:
             break
         console.print(f"  [red]Unknown provider '{choice}'. Please pick again.[/red]")
@@ -519,44 +523,27 @@ def _prompt_api_key(provider_name: str) -> str:
         return key
 
 
-def _resolve_provider(choice: str) -> str | None:
-    try:
-        idx = int(choice)
-        if 1 <= idx <= len(PROVIDER_CHOICES):
-            return PROVIDER_CHOICES[idx - 1][0]
-        return None
-    except ValueError:
-        pass
-    needle = choice.lower().replace(" ", "").replace("_", "")
-    for key, label, _ in PROVIDER_CHOICES:
-        if needle in (key.lower(), label.lower()):
-            return key
-    for key, label, _ in PROVIDER_CHOICES:
-        key_norm = key.lower().replace("_", "")
-        label_norm = label.lower().replace(" ", "").replace("_", "")
-        if needle in key_norm or needle in label_norm or key_norm.startswith(needle):
-            return key
-    return None
-
-
 def _resolve_model(
     provider_name: str,
     choice: str,
     *,
     models: list[tuple[str, str]] | None = None,
 ) -> str | None:
+    """Resolve a typed model choice to a *listed* model, or None if unrecognized.
+
+    The number/exact-name matching is shared with the settings picker
+    (:func:`_settings_resolve_model`); the wizard additionally treats anything
+    that doesn't land on a known model as unrecognized, so it can ask the user to
+    confirm a free-typed model name.
+    """
+    if not choice.strip():
+        return None
+    config = {"provider": provider_name}
     if models is None:
         from .model_catalog import get_model_choices
 
-        models = get_model_choices({"provider": provider_name})
-    try:
-        idx = int(choice)
-        if 1 <= idx <= len(models):
-            return models[idx - 1][0]
-        return None
-    except ValueError:
-        pass
-    for name, _ in models:
-        if choice.lower() == name.lower():
-            return name
+        models = get_model_choices(config)
+    resolved = _settings_resolve_model(config, choice, models=models)
+    if any(resolved == name for name, _desc in models):
+        return resolved
     return None

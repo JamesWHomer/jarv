@@ -114,9 +114,9 @@ def _settings_resolve_provider(choice: str) -> str | None:
     raw = choice.strip()
     if not raw:
         return None
+    choices = _settings_provider_choices()
     try:
         idx = int(raw)
-        choices = _settings_provider_choices()
         if 1 <= idx <= len(choices):
             return choices[idx - 1][0]
         return None
@@ -124,9 +124,18 @@ def _settings_resolve_provider(choice: str) -> str | None:
         pass
 
     lowered = raw.lower()
-    for key, label, _model in _settings_provider_choices():
+    for key, label, _model in choices:
         compact_label = label.split("(", 1)[0].strip().lower()
         if lowered in (key.lower(), label.lower(), compact_label):
+            return key
+    # Fuzzy fallback for the setup wizard's free-typed input ("op" -> openai):
+    # match on normalized substrings and key prefixes. Exact/number matches above
+    # win first, so this only fires when nothing precise was typed.
+    needle = lowered.replace(" ", "").replace("_", "")
+    for key, label, _model in choices:
+        key_norm = key.lower().replace("_", "")
+        label_norm = label.lower().replace(" ", "").replace("_", "")
+        if needle in key_norm or needle in label_norm or key_norm.startswith(needle):
             return key
     return None
 

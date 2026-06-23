@@ -145,6 +145,46 @@ class AgentRunResult:
     error: str | None = None
 
 
+class SessionPersistence:
+    """The single "write the turn to disk" path for a :func:`run_agent` run.
+
+    ``run_agent`` loads the session stores once after session prep, then mutates
+    ``history`` in place for the rest of the turn. This collaborator owns those
+    stores so the normal turn end, the error flush, and the cancel checkpoint all
+    persist through one method instead of three copies of the same writes. Fields
+    are populated incrementally during prep (mirroring the run-local variables) so
+    a failure part-way through prep persists exactly what was loaded so far -- the
+    same behaviour as the closures it replaces. Incognito runs never touch disk.
+    """
+
+    def __init__(self, *, incognito: bool):
+        self.incognito = incognito
+        self.history: list = []
+        self.session_context = None
+        self.artifact_store = None
+        self.artifact_file = None
+        self.retained_store = None
+        self.reads_file = None
+
+    def save(self, *, clear_redo: bool = False) -> None:
+        if self.incognito:
+            return
+        if self.session_context is not None:
+            if clear_redo:
+                redo_path = redo_file_for(self.session_context.history_file)
+                if redo_path.exists():
+                    redo_path.unlink()
+            save_history(self.history, self.session_context.history_file)
+        if self.artifact_store is not None and self.artifact_file is not None:
+            save_artifact_store(self.artifact_store, self.artifact_file)
+        if self.retained_store is not None and self.reads_file is not None:
+            save_retained_output_store(self.retained_store, self.reads_file)
+
+    def save_turn(self) -> None:
+        """Persist the turn and drop any stale redo checkpoint."""
+        self.save(clear_redo=True)
+
+
 def _agent_check_run_command(prepared, config: dict, **kwargs):
     safety_level = config.get("command_safety", "risky")
     audit = config.get("audit", True)
@@ -323,6 +363,7 @@ def run_agent(
     reads_file = None
     retained_store = None
     usage_path = None
+    persistence = SessionPersistence(incognito=incognito)
     wait_indicator: ResponseWaitIndicator | None = None
     tool_indicator: ToolActivityIndicator | None = None
     spinner_live: Live | None = None
@@ -354,30 +395,13 @@ def run_agent(
             stream_live.stop()
             stream_live = None
 
-    def _persist_session_state(*, clear_redo: bool = False) -> None:
-        if incognito:
-            return
-        if session_context is not None:
-            if clear_redo:
-                redo_path = redo_file_for(session_context.history_file)
-                if redo_path.exists():
-                    redo_path.unlink()
-            save_history(history, session_context.history_file)
-        if artifact_store is not None and artifact_file is not None:
-            save_artifact_store(artifact_store, artifact_file)
-        if retained_store is not None and reads_file is not None:
-            save_retained_output_store(retained_store, reads_file)
-
-    def _save_turn_state() -> None:
-        _persist_session_state(clear_redo=True)
-
     def _flush_error_state() -> None:
         if pending_status_history_items:
             history.extend(pending_status_history_items)
             pending_status_history_items.clear()
         if reply_text and not tool_calls:
             history.append({"role": "assistant", "content": reply_text, **metadata})
-        _persist_session_state()
+        persistence.save()
 
     def _checkpoint_cancelled_turn() -> None:
         if pending_status_history_items:
@@ -445,7 +469,7 @@ def run_agent(
             "content": "[Turn cancelled by user.]",
             **metadata,
         })
-        _save_turn_state()
+        persistence.save_turn()
 
     sigint_cancel_scope = cancel_token_on_sigint(cancellation_token)
     try:
@@ -459,14 +483,20 @@ def run_agent(
             mark_message=not incognito,
             persist_metadata=not incognito,
         )
+        persistence.session_context = session_context
         history = [] if (new_session or incognito) else load_history(session_context.history_file)
+        persistence.history = history
         web_search_read_nudge_sent = history_has_web_search_read_nudge(history)
         metadata = history_metadata(session_context)
 
         artifact_file = artifact_file_for(session_context.history_file)
         artifact_store = load_artifact_store(artifact_file)
+        persistence.artifact_file = artifact_file
+        persistence.artifact_store = artifact_store
         reads_file = reads_file_for(session_context.history_file)
         retained_store = load_retained_output_store(reads_file)
+        persistence.reads_file = reads_file
+        persistence.retained_store = retained_store
         usage_path = usage_file_for(session_context.history_file)
         root_node = AgentNode(
             label="root",
@@ -975,7 +1005,7 @@ def run_agent(
             else:
                 append_status_history_items()
                 history.append({"role": "assistant", "content": reply_text, **metadata})
-                _save_turn_state()
+                persistence.save_turn()
                 _print_agent_usage_if_enabled(
                     config,
                     usage_path,
