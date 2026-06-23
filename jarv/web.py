@@ -13,7 +13,7 @@ import httpx
 
 from . import __version__
 from .cancellation import CancellationToken
-from .config import DEFAULT_CONFIG
+from .config import DEFAULT_CONFIG, get_setting
 
 
 DUCKDUCKGO_HTML_URL = "https://html.duckduckgo.com/html/"
@@ -723,7 +723,7 @@ def dispatch_web_tool(
     cancellation_token: CancellationToken | None = None,
 ) -> str:
     try:
-        timeout = float(config.get("web_timeout", DEFAULT_CONFIG["web_timeout"]))
+        timeout = float(get_setting(config, "web_timeout"))
     except (TypeError, ValueError):
         timeout = float(DEFAULT_CONFIG["web_timeout"])
     if timeout <= 0:

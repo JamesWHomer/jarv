@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 
 from .artifacts import ArtifactStore
 from .cancellation import CancellationToken, TurnCancelled
-from .config import DEFAULT_CONFIG
+from .config import DEFAULT_CONFIG, get_setting
 from .model_catalog import get_image_output_capability
 from .pdf_extract import PdfExtractionError, extract_pdf_text, is_pdf_bytes, is_pdf_media_type
 from .retained_outputs import RetainedOutputStore
@@ -135,12 +135,7 @@ def retain_command_output(
 
 def _default_size(config: dict) -> int:
     try:
-        value = int(
-            config.get(
-                "max_tool_output_chars",
-                DEFAULT_CONFIG["max_tool_output_chars"],
-            )
-        )
+        value = int(get_setting(config, "max_tool_output_chars"))
     except (TypeError, ValueError):
         value = int(DEFAULT_CONFIG["max_tool_output_chars"])
     return min(MAX_READ_SIZE, max(1, value))
@@ -282,9 +277,7 @@ def _resolve_source(
     parsed = urlsplit(value)
     if parsed.scheme.lower() in {"http", "https"}:
         try:
-            timeout = float(
-                config.get("web_timeout", DEFAULT_CONFIG["web_timeout"])
-            )
+            timeout = float(get_setting(config, "web_timeout"))
         except (TypeError, ValueError):
             timeout = float(DEFAULT_CONFIG["web_timeout"])
         if timeout <= 0:

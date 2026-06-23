@@ -18,7 +18,7 @@ from rich.text import Text
 from .artifacts import ArtifactStore
 from .cancellation import CancellationToken, TurnCancelled
 from .command_input import read_editable_line
-from .config import DEFAULT_CONFIG
+from .config import DEFAULT_CONFIG, get_setting
 from .display import (
     console,
     flatten_headings,
@@ -56,10 +56,7 @@ def _print_tool_card(renderable, config: dict, ui=None) -> None:
         _ui_call(ui, "show_tool_card", renderable)
         return
     console.print(renderable)
-    if config.get(
-        "tool_call_display",
-        DEFAULT_CONFIG["tool_call_display"],
-    ) == "print":
+    if get_setting(config, "tool_call_display") == "print":
         console.print()
 
 
@@ -423,7 +420,7 @@ def _print_agent_usage_if_enabled(
 ) -> None:
     if heads_up:
         return
-    if not config.get("print_usage_after_agent", DEFAULT_CONFIG["print_usage_after_agent"]):
+    if not get_setting(config, "print_usage_after_agent"):
         return
     usage_line = _format_agent_usage_line(load_usage(usage_path, session_id, warn=False))
     if usage_line is not None:
@@ -481,10 +478,7 @@ def _dispatch_run_command_with_ui(
             console.print(f"[dim]{denial}[/dim]")
         return denial
 
-    display_mode = config.get(
-        "tool_call_display",
-        DEFAULT_CONFIG["tool_call_display"],
-    )
+    display_mode = get_setting(config, "tool_call_display")
     metadata = f"model window {prepared.head_chars:,} / {prepared.tail_chars:,} chars"
     running_card = RunningCommandCard(
         prepared.cmd,
@@ -624,10 +618,7 @@ def _dispatch_ask_user(args: dict, config: dict | None = None, ui=None) -> str:
         if not can_prompt:
             return "[non-interactive session; user unavailable]"
         config = config or DEFAULT_CONFIG
-        display_mode = config.get(
-            "tool_call_display",
-            DEFAULT_CONFIG["tool_call_display"],
-        )
+        display_mode = get_setting(config, "tool_call_display")
         if display_mode == "auto":
             display_mode = "print"
         question_renderable = Markdown(flatten_headings(question))
@@ -782,10 +773,7 @@ def _dispatch_spawn_with_ui(
                 Group(*lines),
                 status=f"{done}/{total} done",
                 status_style="green" if done == total else "magenta",
-                display_mode=config.get(
-                    "tool_call_display",
-                    DEFAULT_CONFIG["tool_call_display"],
-                ),
+                display_mode=get_setting(config, "tool_call_display"),
             )
 
     def _run_spawn() -> str:
@@ -841,8 +829,5 @@ def _dispatch_spawn_with_ui(
             return output
         live.update(SpawnPanel())
 
-    if config.get(
-        "tool_call_display",
-        DEFAULT_CONFIG["tool_call_display"],
-    ) == "print":
+    if get_setting(config, "tool_call_display") == "print":
         console.print()

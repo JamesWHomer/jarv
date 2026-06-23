@@ -9,6 +9,8 @@ from .config_schema import (
     TOOL_CALL_DISPLAY_CHOICES,
     TOOL_NAMES,
     build_default_config,
+    get_setting,
+    setting_default,
     validate_config_fields,
 )
 from .paths import CONFIG_DIR, CONFIG_FILE
@@ -26,9 +28,11 @@ __all__ = [
     "TOOL_CALL_DISPLAY_CHOICES",
     "TOOL_NAMES",
     "build_default_config",
+    "get_setting",
     "is_setup_complete",
     "load_config",
     "save_config",
+    "setting_default",
     "validate_config",
 ]
 

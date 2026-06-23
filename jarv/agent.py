@@ -14,7 +14,7 @@ from rich.markup import escape
 from rich.segment import Segment
 from rich.text import Text
 
-from .config import DEFAULT_CONFIG
+from .config import DEFAULT_CONFIG, get_setting
 from .context_budget import build_input, trim_turn_input
 from .cancellation import CancellationToken, TurnCancelled, cancel_token_on_sigint
 from .display import (
@@ -104,7 +104,7 @@ TOOLS = build_agent_tools(DEFAULT_CONFIG)
 
 
 def resolve_tool_call_display(config: dict, *, heads_up: bool) -> str:
-    mode = config.get("tool_call_display", DEFAULT_CONFIG["tool_call_display"])
+    mode = get_setting(config, "tool_call_display")
     if mode == "auto":
         return "fullscreen" if heads_up else "print"
     return str(mode)
@@ -208,10 +208,7 @@ def _dispatch_run_command_with_ui(
             console.print(f"[dim]{denial}[/dim]")
         return denial
 
-    display_mode = config.get(
-        "tool_call_display",
-        DEFAULT_CONFIG["tool_call_display"],
-    )
+    display_mode = get_setting(config, "tool_call_display")
     metadata_text = f"model window {prepared.head_chars:,} / {prepared.tail_chars:,} chars"
     running_card = RunningCommandCard(
         prepared.cmd,
@@ -883,10 +880,7 @@ def run_agent(
             if tool_calls:
                 from .session_render import tool_call_card_from_args
 
-                if config.get(
-                    "tool_call_display",
-                    DEFAULT_CONFIG["tool_call_display"],
-                ) == "print":
+                if get_setting(config, "tool_call_display") == "print":
                     console.print()
                 append_status_history_items()
 
@@ -901,10 +895,7 @@ def run_agent(
                         tool_call_card_from_args(
                             "read",
                             read_args,
-                            display_mode=config.get(
-                                "tool_call_display",
-                                DEFAULT_CONFIG["tool_call_display"],
-                            ),
+                            display_mode=get_setting(config, "tool_call_display"),
                         ),
                         config,
                         ui=ui,
@@ -915,10 +906,7 @@ def run_agent(
                         tool_call_card_from_args(
                             "web_search",
                             search_args,
-                            display_mode=config.get(
-                                "tool_call_display",
-                                DEFAULT_CONFIG["tool_call_display"],
-                            ),
+                            display_mode=get_setting(config, "tool_call_display"),
                         ),
                         config,
                         ui=ui,
