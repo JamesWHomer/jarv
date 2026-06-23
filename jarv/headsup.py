@@ -22,7 +22,6 @@ from .command_input import (
     _key_available,
     _read_key,
     _read_key_with_repeats,
-    bracketed_paste,
     disable_mouse_capture,
     requeue_key,
     strip_sgr_mouse_sequences,
@@ -40,7 +39,6 @@ from .config import get_setting
 from .display import (
     console,
     flatten_headings,
-    mark_first_paint,
     refresh_on_resize,
     rendered_text_lines,
     terminal_size,
@@ -55,6 +53,7 @@ from .session_render import (
     _tool_call_renderable,
 )
 from .text_editor import apply_text_editor_key, initialize_text_editor, render_visual_line_window
+from .tui_app import AltScreenApp
 from .tui_frame import (
     assemble_body,
     build_frame,
@@ -180,8 +179,6 @@ class HeadsupAgentUI:
         self._tool_names: tuple[str, ...] = ()
         self._response_waiting = False
         self._tool_waiting = False
-        self._ticker_lock = threading.Lock()
-        self._ticker_thread: threading.Thread | None = None
         self._animated_live_tool_keys: set[str] = set()
         self._stream_dirty = False
         self._last_stream_refresh_at: float | None = None
@@ -209,7 +206,6 @@ class HeadsupAgentUI:
             self._response_status_index,
             self._response_wait_text(),
         )
-        self._ensure_ticker()
 
     def set_response_wait_has_reasoning(self, has_reasoning: bool) -> None:
         self._has_reasoning = has_reasoning
@@ -236,7 +232,6 @@ class HeadsupAgentUI:
             self._tool_status_index,
             self._tool_wait_text(),
         )
-        self._ensure_ticker()
 
     def update_tool_activity(self, tool_names: tuple[str, ...]) -> None:
         self._tool_names = tool_names
@@ -293,7 +288,6 @@ class HeadsupAgentUI:
             self.app.upsert_live_tool(live_kind, renderable)
             self._tool_live_kind = live_kind
             self._animated_live_tool_keys.add(live_kind)
-            self._ensure_ticker()
             return
         if live_kind == "SpawnPanel":
             self.app.upsert_live_tool(live_kind, renderable)
@@ -365,22 +359,17 @@ class HeadsupAgentUI:
         )
         return Text(f"{frame}  {label}\u2026  {elapsed}s")
 
-    def _ensure_ticker(self) -> None:
-        with self._ticker_lock:
-            if self._ticker_thread is not None and self._ticker_thread.is_alive():
-                return
-            self._ticker_thread = threading.Thread(
-                target=self._ticker_loop,
-                name="headsup-status-ticker",
-                daemon=True,
-            )
-            self._ticker_thread.start()
+    def has_active_animation(self) -> bool:
+        """Whether a spinner or live tool card still needs periodic repaints.
 
-    def _ticker_loop(self) -> None:
-        while True:
-            time.sleep(0.25)
-            if not self._refresh_wait_statuses():
-                return
+        Polled by the heads-up loop's ``on_tick`` (which replaced this UI's old
+        background ticker thread) to decide when to keep animating.
+        """
+        return bool(
+            self._response_waiting
+            or self._tool_waiting
+            or self._animated_live_tool_keys
+        )
 
     def _refresh_wait_statuses(self) -> bool:
         active = False
@@ -412,7 +401,13 @@ class HeadsupAgentUI:
         self._last_stream_refresh_at = time.perf_counter() if now is None else now
 
 
-class HeadsupApp:
+class HeadsupApp(AltScreenApp):
+    # Heads-up keeps its own SGR-mouse handling, so it disables Rich/terminal
+    # mouse capture rather than letting the base app capture the mouse.
+    clear_on_resize = False
+    translate_mouse_wheel = False
+    first_paint_label = "headsup"
+
     def __init__(
         self,
         config: dict,
@@ -424,20 +419,25 @@ class HeadsupApp:
         maybe_command: MaybeCommand,
         render_console: Console = console,
     ):
+        super().__init__(
+            console=render_console,
+            repeatable_keys=_HEADSUP_REPEATABLE_KEYS,
+            live_factory=self._build_live,
+            read_key_fn=self._read_headsup_key,
+            key_available_fn=self._headsup_key_available,
+            refresh_on_resize_fn=self._headsup_refresh_on_resize,
+        )
         self.config = dict(config)
         self.client = client
         self.args = args
         self.agent_import, self.agent_ready = agent_loader
         self.handle_slash = handle_slash
         self.maybe_command = maybe_command
-        self.console = render_console
         self.entries: list[TranscriptEntry] = [self._initial_notice_entry()]
         self.editor: dict = {}
         initialize_text_editor(self.editor, "")
         self.scroll_offset = 0
-        self.live: Live | None = None
         self.lock = threading.RLock()
-        self._refresh_lock = threading.Lock()
         self._exit_armed = False
         self._cancel_token: CancellationToken | None = None
         self._esc_listener_stop: threading.Event | None = None
@@ -449,8 +449,9 @@ class HeadsupApp:
         self._foreground_input_thread: threading.Thread | None = None
         self._idle_anim_started_at = 0.0
         self._idle_anim_stop = threading.Event()
-        self._idle_anim_thread: threading.Thread | None = None
         self._outro_started_at = 0.0
+        self._active_ui: HeadsupAgentUI | None = None
+        self._last_wait_tick = 0.0
         self._agent_busy = False
         self._agent_thread: threading.Thread | None = None
         self._queued_queries: deque[str] = deque()
@@ -474,101 +475,143 @@ class HeadsupApp:
         self._prompt_notice: RenderableType | None = None
         self._usage_status_cache: tuple[float, int, object, str | None, Text] | None = None
 
+    # ------------------------------------------------------------------ #
+    # AltScreenApp wiring: resolve patchable module symbols at call time so
+    # tests that patch ``jarv.headsup.*`` keep driving the loop.
+    # ------------------------------------------------------------------ #
+    def _build_live(self, get_renderable, _console):
+        return Live(
+            get_renderable=get_renderable,
+            console=self.console,
+            screen=True,
+            auto_refresh=False,
+            transient=False,
+            vertical_overflow="crop",
+        )
+
+    def _read_headsup_key(self) -> tuple[str, int]:
+        return _read_key_with_repeats(
+            text_mode=True,
+            batch_text=True,
+            repeatable=_HEADSUP_REPEATABLE_KEYS,
+            translate_mouse_wheel=False,
+        )
+
+    def _headsup_key_available(self) -> bool:
+        return _key_available()
+
+    def _headsup_refresh_on_resize(self, live, *, on_change):
+        return refresh_on_resize(live, on_change=on_change)
+
+    # ------------------------------------------------------------------ #
+    # Lifecycle (single-threaded loop owned by AltScreenApp)
+    # ------------------------------------------------------------------ #
     def run(self) -> None:
         self._sync_initial_transcript_from_history()
-        disable_mouse_capture()
-        try:
-            with Live(
-                get_renderable=self.render,
-                console=self.console,
-                screen=True,
-                auto_refresh=False,
-                transient=False,
-                vertical_overflow="crop",
-            ) as live, refresh_on_resize(live, on_change=self.refresh), bracketed_paste():
-                mark_first_paint("headsup")
-                self.live = live
-                self._foreground_input_active = True
-                self._foreground_input_thread = threading.current_thread()
-                self._start_idle_animation()
-                try:
-                    while True:
-                        self.refresh()
-                        try:
-                            key, repeat = _read_key_with_repeats(
-                                text_mode=True,
-                                batch_text=True,
-                                repeatable=_HEADSUP_REPEATABLE_KEYS,
-                                translate_mouse_wheel=False,
-                            )
-                        except KeyboardInterrupt:
-                            if self._handle_prompt_dismiss():
-                                break
-                            continue
+        super().run()
 
-                        if key == "ENTER":
-                            if self._answer_request is not None:
-                                self._complete_answer()
-                                continue
-                            raw_query = str(self.editor.get("buffer", ""))
-                            query = raw_query.strip("\r\n")
-                            if not query.strip():
-                                initialize_text_editor(self.editor, "")
-                                self._clear_prompt_notice()
-                                self._exit_armed = False
-                                continue
-                            self._record_prompt_history(query)
-                            initialize_text_editor(self.editor, "")
-                            self._clear_prompt_notice()
-                            self._exit_armed = False
-                            if self._handle_query(query) == "exit":
-                                break
-                        elif key == "ESC":
-                            if self._answer_request is not None:
-                                self._cancel_answer()
-                                continue
-                            if self._handle_prompt_dismiss():
-                                break
-                        elif key == "PAGEUP":
-                            self._scroll_transcript(5 * repeat)
-                        elif key == "PAGEDOWN":
-                            self._scroll_transcript(-5 * repeat)
-                        elif key == "MOUSE_WHEEL_UP":
-                            self._scroll_transcript(3 * repeat)
-                        elif key == "MOUSE_WHEEL_DOWN":
-                            self._scroll_transcript(-3 * repeat)
-                        elif key == "MOUSE_WHEEL_PAGEUP":
-                            self._scroll_transcript(5 * repeat)
-                        elif key == "MOUSE_WHEEL_PAGEDOWN":
-                            self._scroll_transcript(-5 * repeat)
-                        elif (
-                            key in {"UP", "DOWN"}
-                            and self._answer_request is None
-                            and not self._prompt_has_multiline_draft()
-                        ):
-                            if self._navigate_prompt_history(key, repeat):
-                                self.scroll_offset = 0
-                                self._clear_prompt_notice()
-                                self._exit_armed = False
-                        else:
-                            changed, user_text = self._apply_editor_key(key, repeat)
-                            if changed or user_text:
-                                if self._answer_request is None:
-                                    self._reset_prompt_history_navigation()
-                                self.scroll_offset = 0
-                                self._clear_prompt_notice()
-                                self._exit_armed = False
-                finally:
-                    self._idle_anim_stop.set()
-                    if self._answer_request is not None:
-                        self._cancel_answer()
-                    self._foreground_input_active = False
-                    self._foreground_input_thread = None
-                    self._cancel_active_turn(clear_queue=True)
-                    self._wait_for_agent_idle(timeout=5.0)
-                    self.live = None
-        finally:
-            disable_mouse_capture()
+    def on_start(self) -> None:
+        disable_mouse_capture()
+        self._foreground_input_active = True
+        self._foreground_input_thread = threading.current_thread()
+        self._begin_idle_animation()
+
+    def on_stop(self) -> None:
+        self._idle_anim_stop.set()
+        if self._answer_request is not None:
+            self._cancel_answer()
+        self._foreground_input_active = False
+        self._foreground_input_thread = None
+        self._cancel_active_turn(clear_queue=True)
+        self._wait_for_agent_idle(timeout=5.0)
+        disable_mouse_capture()
+
+    def on_interrupt(self) -> None:
+        if self._handle_prompt_dismiss():
+            self.stop()
+
+    def on_key(self, key: str, repeat: int) -> None:
+        if key == "ENTER":
+            if self._answer_request is not None:
+                self._complete_answer()
+                return
+            raw_query = str(self.editor.get("buffer", ""))
+            query = raw_query.strip("\r\n")
+            if not query.strip():
+                initialize_text_editor(self.editor, "")
+                self._clear_prompt_notice()
+                self._exit_armed = False
+                return
+            self._record_prompt_history(query)
+            initialize_text_editor(self.editor, "")
+            self._clear_prompt_notice()
+            self._exit_armed = False
+            if self._handle_query(query) == "exit":
+                self.stop()
+            return
+        if key == "ESC":
+            if self._answer_request is not None:
+                self._cancel_answer()
+                return
+            if self._handle_prompt_dismiss():
+                self.stop()
+            return
+        if key == "PAGEUP":
+            self._scroll_transcript(5 * repeat)
+            return
+        if key == "PAGEDOWN":
+            self._scroll_transcript(-5 * repeat)
+            return
+        if key == "MOUSE_WHEEL_UP":
+            self._scroll_transcript(3 * repeat)
+            return
+        if key == "MOUSE_WHEEL_DOWN":
+            self._scroll_transcript(-3 * repeat)
+            return
+        if key == "MOUSE_WHEEL_PAGEUP":
+            self._scroll_transcript(5 * repeat)
+            return
+        if key == "MOUSE_WHEEL_PAGEDOWN":
+            self._scroll_transcript(-5 * repeat)
+            return
+        if (
+            key in {"UP", "DOWN"}
+            and self._answer_request is None
+            and not self._prompt_has_multiline_draft()
+        ):
+            if self._navigate_prompt_history(key, repeat):
+                self.scroll_offset = 0
+                self._clear_prompt_notice()
+                self._exit_armed = False
+            return
+        changed, user_text = self._apply_editor_key(key, repeat)
+        if changed or user_text:
+            if self._answer_request is None:
+                self._reset_prompt_history_navigation()
+            self.scroll_offset = 0
+            self._clear_prompt_notice()
+            self._exit_armed = False
+
+    def on_tick(self) -> None:
+        now = time.perf_counter()
+        repaint = False
+        if self._idle_animation_active() or (
+            self._outro_started_at and now - self._outro_started_at < _OUTRO_DURATION
+        ):
+            # The intro/outro frame is derived from the clock in render(), so a
+            # plain repaint advances the animation.
+            repaint = True
+        elif self._outro_started_at:
+            self._outro_started_at = 0.0
+            repaint = True
+        ui = self._active_ui
+        if ui is not None and ui.has_active_animation():
+            if now - self._last_wait_tick >= 0.2:
+                self._last_wait_tick = now
+                # Recomputes the spinner text in place (and invalidates).
+                ui._refresh_wait_statuses()
+        if repaint:
+            self.invalidate()
 
     def render(self) -> RenderableType:
         term_w, term_h = terminal_size(console=self.console)
@@ -627,17 +670,12 @@ class HeadsupApp:
         return subtitle
 
     def refresh(self) -> None:
+        # The loop thread is the sole painter; producers (the agent worker,
+        # animations, slash output) only request a repaint. ``_refresh_suspended``
+        # still drops requests while console output is being captured.
         if self._refresh_suspended:
             return
-        live = self.live
-        if live is None:
-            return
-        if not self._refresh_lock.acquire(blocking=False):
-            return
-        try:
-            live.refresh()
-        finally:
-            self._refresh_lock.release()
+        self.invalidate()
 
     def invalidate_usage_status(self) -> None:
         self._usage_status_cache = None
@@ -652,39 +690,28 @@ class HeadsupApp:
                 return False
             return all(entry.kind == "notice" for entry in self.entries)
 
-    def _start_idle_animation(self) -> None:
-        if self._idle_anim_thread is not None:
-            return
+    def _begin_idle_animation(self) -> None:
+        # The intro is now driven by the loop's on_tick rather than a dedicated
+        # thread; this only arms the animation state when it should be visible.
         if not self._idle_animation_active():
             return
         self._idle_anim_started_at = time.perf_counter()
         self._idle_anim_stop.clear()
-        thread = threading.Thread(
-            target=self._idle_animation_loop,
-            name="headsup-intro-anim",
-            daemon=True,
-        )
-        self._idle_anim_thread = thread
-        thread.start()
 
     def _restart_idle_animation(self) -> None:
-        thread = self._idle_anim_thread
         self._idle_anim_stop.set()
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=0.2)
-        self._idle_anim_thread = None
         self._outro_started_at = 0.0
         self._idle_anim_started_at = time.perf_counter()
         self._idle_anim_stop.clear()
-        if self._foreground_input_active:
-            self._start_idle_animation()
+        self.invalidate()
 
     def _dismiss_intro(self) -> None:
         """Tear down the idle intro, playing a quick outro if it's on screen.
 
         Called the first time real transcript content lands. If the intro is
-        currently visible we kick off a short, non-blocking dissolve before the
-        transcript takes over; otherwise we just mark it dismissed.
+        currently visible we start a short, non-blocking dissolve (advanced by
+        on_tick) before the transcript takes over; otherwise we just mark it
+        dismissed.
         """
         if self._idle_anim_stop.is_set():
             return
@@ -692,40 +719,6 @@ class HeadsupApp:
         self._idle_anim_stop.set()
         if was_visible and self._foreground_input_active:
             self._outro_started_at = time.perf_counter()
-            self._start_outro_animation()
-
-    def _start_outro_animation(self) -> None:
-        if not self._foreground_input_active:
-            return
-        thread = threading.Thread(
-            target=self._outro_animation_loop,
-            name="headsup-intro-outro",
-            daemon=True,
-        )
-        thread.start()
-
-    def _outro_animation_loop(self) -> None:
-        # ~30 fps for the brief dissolve, then land on the cleared frame.
-        deadline = self._outro_started_at + _OUTRO_DURATION
-        while time.perf_counter() < deadline:
-            if not self._foreground_input_active:
-                return
-            self.refresh()
-            time.sleep(1 / 30)
-        self._outro_started_at = 0.0
-        self.refresh()
-
-    def _idle_animation_loop(self) -> None:
-        # ~14 fps; the wait() both paces the loop and exits promptly on stop.
-        current = threading.current_thread()
-        while not self._idle_anim_stop.wait(1 / 14):
-            if not self._foreground_input_active:
-                continue
-            if not self._idle_animation_active():
-                break
-            self.refresh()
-        if self._idle_anim_thread is current:
-            self._idle_anim_thread = None
 
     def add_user_message(self, query: str) -> None:
         line = Text()
@@ -795,7 +788,8 @@ class HeadsupApp:
             }
         try:
             while True:
-                self.refresh()
+                # This nested modal read blocks the main loop, so paint in place.
+                self.paint_now()
                 try:
                     key, repeat = _read_key_with_repeats(
                         text_mode=True,
@@ -1030,14 +1024,20 @@ class HeadsupApp:
             if "error" in self.agent_import:
                 raise self.agent_import["error"]
             ui = HeadsupAgentUI(self)
-            result = self.agent_import["module"].run_agent(
-                query,
-                self.config,
-                self.client,
-                heads_up=True,
-                incognito=self.incognito,
-                ui=ui,
-            )
+            # The loop's on_tick polls the active UI to animate spinners and live
+            # tool cards (this replaced the UI's old background ticker thread).
+            self._active_ui = ui
+            try:
+                result = self.agent_import["module"].run_agent(
+                    query,
+                    self.config,
+                    self.client,
+                    heads_up=True,
+                    incognito=self.incognito,
+                    ui=ui,
+                )
+            finally:
+                self._active_ui = None
             if getattr(result, "cancelled", False) is True:
                 prompt = result.prompt or query
                 with self.lock:
@@ -1197,7 +1197,9 @@ class HeadsupApp:
                     self.console.push_render_hook(live)
         finally:
             self._refresh_suspended = max(0, self._refresh_suspended - 1)
-            self.refresh()
+            if not self._refresh_suspended:
+                # Slash output runs on the loop thread; repaint in place now.
+                self.paint_now()
 
     @contextmanager
     def _preserve_alt_screen(self):
