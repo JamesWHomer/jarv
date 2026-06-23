@@ -12,7 +12,7 @@ from rich.console import Group
 from rich.text import Text
 
 from .agent_ui import _ui_call
-from .config import DEFAULT_CONFIG
+from .config import get_setting
 from .display import console, tool_card
 from .orchestrator import PendingRunCommand
 from .shell import command_result_renderable
@@ -192,10 +192,7 @@ def _interactive_command_card(
     status: str,
     terminal_reply: str | None = None,
 ):
-    display_mode = config.get(
-        "tool_call_display",
-        DEFAULT_CONFIG["tool_call_display"],
-    )
+    display_mode = get_setting(config, "tool_call_display")
     command_line = Text("> ", style="bold yellow")
     command_line.append(prepared.cmd)
     body_parts = [command_line]
@@ -256,10 +253,7 @@ def _show_interactive_command_card(
         _ui_call(ui, "show_tool_card", card)
         return
     console.print(card)
-    if config.get(
-        "tool_call_display",
-        DEFAULT_CONFIG["tool_call_display"],
-    ) == "print":
+    if get_setting(config, "tool_call_display") == "print":
         console.print()
 
 

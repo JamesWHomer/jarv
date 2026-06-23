@@ -36,7 +36,7 @@ from .agent_ui import (
     tool_activity_label,
     tool_complete_indicator,
 )
-from .config import DEFAULT_CONFIG
+from .config import get_setting
 from .display import (
     console,
     flatten_headings,
@@ -156,7 +156,7 @@ def _context_fill_style(percent: float | None) -> str:
 def _model_status(config: dict) -> str:
     status_parts = [
         str(config.get("provider", "openai")),
-        str(config.get("model", DEFAULT_CONFIG["model"])),
+        str(get_setting(config, "model")),
     ]
     reasoning_effort = str(config.get("reasoning_effort") or "").strip()
     if reasoning_effort:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .config import DEFAULT_CONFIG
+from .config import get_setting, setting_default
 from .tool_outputs import summarize_tool_output
 from .usage import estimate_context_breakdown, estimate_item_tokens, resolve_context_window
 
@@ -14,11 +14,10 @@ _COMPACTION_TARGET_RATIO = 0.72
 
 
 def _config_ratio(config: dict, key: str) -> float:
-    default = DEFAULT_CONFIG[key]
     try:
-        value = float(config.get(key, default))
+        value = float(get_setting(config, key))
     except (TypeError, ValueError):
-        value = float(default)
+        value = float(setting_default(key))
     return max(0.05, min(value, 0.95))
 
 
@@ -149,9 +148,9 @@ def build_input(
         )
     api_items = history_to_api_items(source)
     try:
-        max_items = int(config.get("max_history", DEFAULT_CONFIG["max_history"]))
+        max_items = int(get_setting(config, "max_history"))
     except (TypeError, ValueError):
-        max_items = int(DEFAULT_CONFIG["max_history"])
+        max_items = int(setting_default("max_history"))
     api_items = _cap_items_by_count(api_items, max_items)
     budget = history_token_budget(model, config, instructions, tools)
     return trim_items_to_budget(api_items, model, budget)

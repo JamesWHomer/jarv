@@ -14,7 +14,7 @@ from typing import Callable
 
 from .artifacts import ArtifactStore
 from .cancellation import CancellationToken, TurnCancelled
-from .config import DEFAULT_CONFIG, TOOL_NAMES
+from .config import DEFAULT_CONFIG, TOOL_NAMES, get_setting
 from .context_budget import trim_turn_input
 from .safety import check_command
 from .anthropic_http import DEFAULT_SUBAGENT_MAX_TOKENS
@@ -286,10 +286,7 @@ def prepare_run_command(args: dict, config: dict) -> RunCommandPrepared | str:
         head_chars, tail_chars = resolve_command_output_window(
             _optional_arg(args, "head_chars", COMMAND_OUTPUT_UNSET),
             _optional_arg(args, "tail_chars", COMMAND_OUTPUT_UNSET),
-            config.get(
-                "max_tool_output_chars",
-                DEFAULT_CONFIG["max_tool_output_chars"],
-            ),
+            get_setting(config, "max_tool_output_chars"),
         )
     except ValueError as e:
         return f"[tool argument error: {e}]"
@@ -297,12 +294,7 @@ def prepare_run_command(args: dict, config: dict) -> RunCommandPrepared | str:
         cmd=cmd,
         head_chars=head_chars,
         tail_chars=tail_chars,
-        max_tool_output_chars=int(
-            config.get(
-                "max_tool_output_chars",
-                DEFAULT_CONFIG["max_tool_output_chars"],
-            )
-        ),
+        max_tool_output_chars=int(get_setting(config, "max_tool_output_chars")),
     )
 
 
@@ -653,12 +645,7 @@ def dispatch_tool(
 
 
 def _max_tool_output_chars(config: dict) -> int:
-    return int(
-        config.get(
-            "max_tool_output_chars",
-            DEFAULT_CONFIG["max_tool_output_chars"],
-        )
-    )
+    return int(get_setting(config, "max_tool_output_chars"))
 
 
 def _maybe_truncate_tool_output(name: str, output: ToolOutput, config: dict) -> ToolOutput:

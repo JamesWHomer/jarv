@@ -123,6 +123,36 @@ def build_default_config() -> dict:
     return {field.key: copy.deepcopy(field.default) for field in CONFIG_FIELDS}
 
 
+_MISSING = object()
+
+
+def setting_default(key: str) -> Any:
+    """Return the schema default for ``key``.
+
+    Mutable defaults are deep-copied so callers can safely store or mutate the
+    result without aliasing the shared schema value.
+    """
+    field = CONFIG_FIELD_BY_KEY.get(key)
+    if field is None:
+        raise KeyError(f"unknown config key: {key!r}")
+    return copy.deepcopy(field.default)
+
+
+def get_setting(config: dict, key: str, default: Any = _MISSING) -> Any:
+    """Read ``config[key]``, falling back to the schema default when absent.
+
+    Single source of truth for the ``config.get(key, DEFAULT_CONFIG[key])`` idiom:
+    when ``key`` is present its stored value is returned verbatim (including empty
+    or ``None`` values), otherwise the schema default for ``key`` is used. Pass an
+    explicit ``default`` for keys outside :data:`CONFIG_FIELDS`.
+    """
+    if key in config:
+        return config[key]
+    if default is not _MISSING:
+        return default
+    return setting_default(key)
+
+
 def config_about_lines(config: dict | None = None) -> list[str]:
     """Return /about documentation lines for documented config keys."""
     config = config or build_default_config()
