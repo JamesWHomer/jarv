@@ -285,17 +285,20 @@ class AltScreenApp:
         return True
 
     def _service_input(self) -> bool:
-        handled = False
-        while self._running and self._key_available_fn():
-            try:
-                key, repeat = self._read_key_fn()
-            except KeyboardInterrupt:
-                self.on_interrupt()
-                return True
-            self.on_key(key, repeat)
-            self._dirty = True
-            handled = True
-        return handled
+        # Read at most one key per iteration so the frame repaints between
+        # keystrokes (a burst still drains fast because a handled key keeps the
+        # loop progressing without idling). Repeats of one key are already
+        # coalesced into a count by the reader.
+        if not (self._running and self._key_available_fn()):
+            return False
+        try:
+            key, repeat = self._read_key_fn()
+        except KeyboardInterrupt:
+            self.on_interrupt()
+            return True
+        self.on_key(key, repeat)
+        self._dirty = True
+        return True
 
     def _paint(self) -> None:
         live = self.live

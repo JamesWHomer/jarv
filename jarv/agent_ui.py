@@ -15,28 +15,21 @@ from rich.markdown import Markdown
 from rich.segment import Segment
 from rich.text import Text
 
-from .artifacts import ArtifactStore
 from .cancellation import CancellationToken, TurnCancelled
 from .command_input import read_editable_line
 from .config import DEFAULT_CONFIG, get_setting
 from .display import (
     console,
     flatten_headings,
-    terminal_size,
     tool_card,
     track_live_display,
 )
 from .history import get_shell_name
 from .orchestrator import (
-    AgentNode,
     SpawnObserver,
-    check_run_command,
-    execute_run_command,
     parse_spawn_children,
-    prepare_run_command,
     spawn_tool_output,
 )
-from .shell import command_result_renderable
 from .retained_outputs import RetainedOutputStore
 from .usage import format_cost, format_int, load_usage, usage_cost_summary
 
@@ -443,126 +436,6 @@ def get_system_info() -> str:
     if user:
         parts.append(f"User: {user}")
     return "\n".join(parts)
-
-
-def _dispatch_run_command_with_ui(
-    args: dict,
-    config: dict,
-    history: list | None = None,
-    usage_path=None,
-    session_id: str | None = None,
-    cancellation_token: CancellationToken | None = None,
-    retained_store: RetainedOutputStore | None = None,
-    ui=None,
-) -> str:
-    prepared = prepare_run_command(args, config)
-    if isinstance(prepared, str):
-        if ui is not None:
-            _ui_call(ui, "show_error", prepared)
-        else:
-            console.print(f"[red]{prepared}[/red]")
-        return prepared
-
-    allowed, denial = check_run_command(
-        prepared,
-        config,
-        safety_history=history,
-        usage_path=usage_path,
-        session_id=session_id,
-        cancellation_token=cancellation_token,
-    )
-    if not allowed:
-        if ui is not None:
-            _ui_call(ui, "show_notice", Text(denial, style="dim"))
-        else:
-            console.print(f"[dim]{denial}[/dim]")
-        return denial
-
-    display_mode = get_setting(config, "tool_call_display")
-    metadata = f"model window {prepared.head_chars:,} / {prepared.tail_chars:,} chars"
-    running_card = RunningCommandCard(
-        prepared.cmd,
-        metadata,
-        display_mode,
-        time.perf_counter(),
-    )
-
-    def _result_card(
-        result,
-        *,
-        cancelled: bool = False,
-        output: str = "",
-        output_id: str | None = None,
-    ):
-        command_line = Text("> ", style="bold yellow")
-        command_line.append(prepared.cmd)
-        if cancelled:
-            return (
-                "[cancelled]",
-                tool_card(
-                    "run_command",
-                    Group(command_line, Text("Cancelled", style="bold red")),
-                    metadata=metadata,
-                    display_mode=display_mode,
-                    status="cancelled",
-                    status_style="red",
-                ),
-            )
-        body_parts = [command_line, command_result_renderable(result)]
-        if output_id is not None:
-            retained_line = Text("Retained command output: ", style="dim")
-            retained_line.append(output_id, style="cyan")
-            body_parts.append(retained_line)
-        succeeded = not result.timed_out and result.exit_code in (None, 0)
-        card = tool_card(
-            "run_command",
-            Group(*body_parts),
-            metadata=metadata,
-            display_mode=display_mode,
-            status="done" if succeeded else "failed",
-            status_style="green" if succeeded else "red",
-        )
-        return output, card
-
-    def _run_command():
-        return execute_run_command(
-            prepared,
-            config,
-            cancellation_token=cancellation_token,
-            retained_store=retained_store,
-        )
-
-    if ui is not None:
-        _ui_call(ui, "show_tool_card", running_card)
-        try:
-            output, result, output_id = _run_command()
-        except (KeyboardInterrupt, TurnCancelled):
-            _, card = _result_card(None, cancelled=True)
-            _ui_call(ui, "show_tool_card", card)
-            raise
-        output, card = _result_card(result, output=output, output_id=output_id)
-        _ui_call(ui, "show_tool_card", card)
-        return output
-
-    with track_live_display(), Live(
-        running_card,
-        refresh_per_second=4,
-        console=console,
-        auto_refresh=True,
-        transient=False,
-    ) as live:
-        live.refresh()
-        try:
-            output, result, output_id = _run_command()
-        except (KeyboardInterrupt, TurnCancelled):
-            _, card = _result_card(None, cancelled=True)
-            live.update(card, refresh=True)
-            raise
-        output, card = _result_card(result, output=output, output_id=output_id)
-        live.update(card, refresh=True)
-    if display_mode == "print":
-        console.print()
-    return output
 
 
 @contextmanager

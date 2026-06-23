@@ -85,6 +85,9 @@ def _run_sessions_with_keys(monkeypatch, keys):
         return key, 1
 
     monkeypatch.setattr(session_browser, "_read_key_with_repeats", read_key_with_repeats)
+    # The loop polls key availability before each read; keys are "available"
+    # while the script still has some queued.
+    monkeypatch.setattr(session_browser, "_key_available", lambda: bool(queued))
 
     session_browser.cmd_sessions([])
     assert not queued
