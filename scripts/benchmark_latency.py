@@ -15,6 +15,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import queue
+import threading
 from pathlib import Path
 
 
@@ -101,6 +103,129 @@ def _env(home: Path | None = None, first_paint: bool = False) -> dict[str, str]:
     return env
 
 
+
+def _terminate_process(process: subprocess.Popen) -> None:
+    """Best-effort process cleanup for benchmarks that intentionally stop early."""
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=3)
+
+
+def _stderr_reader(stream, lines: "queue.Queue[str | None]") -> None:
+    try:
+        for line in iter(stream.readline, ""):
+            lines.put(line)
+    finally:
+        lines.put(None)
+
+
+def _run_headsup_case(
+    base_cmd: list[str],
+    reps: int,
+    *,
+    home: Path | None = None,
+    timeout: float = 30,
+) -> dict:
+    """Measure heads-up startup to first paint, then terminate the UI.
+
+    Heads-up mode is intentionally interactive and normally stays open until a
+    user exits. For a repeatable non-interactive benchmark we enable the existing
+    first-paint marker, wait for that stderr line, record startup latency, and
+    then terminate the process instead of trying to drive terminal key input.
+    """
+    times: list[float] = []
+    codes: list[str] = []
+    sample = ""
+    first_paint_ms: list[float] = []
+    command = [*base_cmd, "--incognito"]
+
+    for index in range(reps):
+        started_ns = time.time_ns()
+        started = time.perf_counter()
+        process = subprocess.Popen(
+            command,
+            cwd=REPO_ROOT,
+            env=_env(home, first_paint=True),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        assert process.stderr is not None
+        if process.stdout is not None:
+            threading.Thread(
+                target=_stderr_reader,
+                args=(process.stdout, queue.Queue()),
+                daemon=True,
+            ).start()
+        lines: "queue.Queue[str | None]" = queue.Queue()
+        reader = threading.Thread(
+            target=_stderr_reader,
+            args=(process.stderr, lines),
+            daemon=True,
+        )
+        reader.start()
+
+        marker_seen = False
+        deadline = time.perf_counter() + timeout
+        stderr_sample: list[str] = []
+        try:
+            while time.perf_counter() < deadline:
+                remaining = max(0.0, min(0.1, deadline - time.perf_counter()))
+                try:
+                    line = lines.get(timeout=remaining)
+                except queue.Empty:
+                    if process.poll() is not None:
+                        break
+                    continue
+                if line is None:
+                    break
+                stderr_sample.append(line)
+                parts = line.split()
+                if len(parts) == 3 and parts[0] == "JARV_FIRST_PAINT" and parts[1] == "headsup":
+                    try:
+                        paint_ms = (int(parts[2]) - started_ns) / 1_000_000
+                    except ValueError:
+                        paint_ms = (time.perf_counter() - started) * 1000
+                    first_paint_ms.append(paint_ms)
+                    times.append(paint_ms / 1000)
+                    codes.append("painted")
+                    marker_seen = True
+                    break
+
+            if not marker_seen:
+                elapsed = time.perf_counter() - started
+                times.append(elapsed)
+                if process.poll() is None:
+                    codes.append("timeout")
+                else:
+                    codes.append(str(process.returncode))
+        finally:
+            _terminate_process(process)
+            if index == 0:
+                sample = "".join(stderr_sample).strip()[:500]
+
+    row = {
+        "name": "headsup startup",
+        "reps": len(times),
+        "codes": sorted(set(codes)),
+        "min_ms": min(times) * 1000,
+        "median_ms": statistics.median(times) * 1000,
+        "mean_ms": statistics.mean(times) * 1000,
+        "max_ms": max(times) * 1000,
+        "sample": sample,
+    }
+    if first_paint_ms:
+        row["first_paint_median_ms"] = statistics.median(first_paint_ms)
+    return row
+
 def _run_case(
     base_cmd: list[str],
     name: str,
@@ -170,6 +295,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Benchmark Jarv command latency")
     parser.add_argument("--installed", action="store_true", help="Benchmark jarv from PATH instead of this checkout")
     parser.add_argument("--include-mutating", action="store_true", help="Benchmark mutating commands in an isolated temp home")
+    parser.add_argument("--include-headsup", action="store_true", help="Benchmark heads-up mode startup to first paint")
+    parser.add_argument("--headsup-reps", type=int, default=5, help="Repetitions for --include-headsup")
     parser.add_argument("--prompt", help="Optional one-shot prompt to benchmark once with --incognito")
     parser.add_argument("--first-paint", action="store_true", help="Enable first-paint stderr instrumentation")
     parser.add_argument("--json", action="store_true", help="Print JSON instead of a text table")
@@ -187,6 +314,8 @@ def main() -> int:
                 _run_case(base_cmd, name, case_args, reps, home=isolated_home)
                 for name, case_args, reps in MUTATING_CASES
             )
+        if args.include_headsup:
+            rows.append(_run_headsup_case(base_cmd, args.headsup_reps))
         if args.prompt:
             rows.append(
                 _run_case(
@@ -219,3 +348,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
