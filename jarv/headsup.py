@@ -480,6 +480,7 @@ class HeadsupApp(AltScreenApp):
     # tests that patch ``jarv.headsup.*`` keep driving the loop.
     # ------------------------------------------------------------------ #
     def _build_live(self, get_renderable, _console):
+        self._begin_idle_animation()
         return Live(
             get_renderable=get_renderable,
             console=self.console,

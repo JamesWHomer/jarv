@@ -187,6 +187,28 @@ class HeadsupTests(unittest.TestCase):
         self.assertIn("first message", rendered_after)
         self.assertIn("Heads-up mode. Type /help for commands.", rendered_after)
 
+    def test_live_construction_does_not_capture_completed_intro_frame(self):
+        app, test_console, output = self._app(width=80)
+        captured = []
+
+        class EagerRenderLive:
+            def __init__(self, *args, **kwargs):
+                captured.append(kwargs["get_renderable"]())
+
+        with (
+            patch("jarv.headsup.Live", EagerRenderLive),
+            patch("jarv.headsup.terminal_size", return_value=(80, 24)),
+        ):
+            app._build_live(app.render, test_console)
+
+        self.assertGreater(app._idle_anim_started_at, 0.0)
+        output.seek(0)
+        output.truncate(0)
+        test_console.print(captured[0])
+        rendered = output.getvalue()
+        self.assertNotIn("type a message to begin", rendered)
+        self.assertNotIn("Heads-up mode. Type /help for commands.", rendered)
+
     def test_top_title_styles_jarv_like_settings_menu(self):
         app, test_console, output = self._app(width=80)
         with patch("jarv.headsup.terminal_size", return_value=(80, 12)):
