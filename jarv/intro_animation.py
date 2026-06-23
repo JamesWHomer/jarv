@@ -333,17 +333,18 @@ def _caret(t: float) -> str:
     return "▌" if int(t * 3) % 2 == 0 else " "
 
 
-def _draw_typed_line(chars, colors, y: int, full: str, t: float, stage: float, base_color, shimmer_fn) -> None:
+def _draw_typed_line(chars, colors, y: int, full: str, t: float, stage: float, shimmer_fn) -> None:
+    center_len = len(full) + 1
+
+    def fn(i: int, ch: str):
+        return _WHITE if ch == "▌" else shimmer_fn(i, ch)
+
     if stage >= 1.0:
-        _place_text(chars, colors, y, full, shimmer_fn)
+        _place_text(chars, colors, y, full, fn, center_len=center_len)
         return
     shown = full[: int(stage * len(full))]
     text = shown + _caret(t)
-
-    def fn(i: int, ch: str):
-        return _WHITE if ch == "▌" else base_color
-
-    _place_text(chars, colors, y, text, fn, center_len=len(full) + 1)
+    _place_text(chars, colors, y, text, fn, center_len=center_len)
 
 
 def _rows_to_text(chars, colors, width: int, height: int) -> list[Text]:
@@ -409,8 +410,7 @@ def render_intro(width: int, height: int, elapsed: float, exit: float = 0.0) -> 
         hx = (width - len(hint)) // 2
         _clear_box(chars, colors, hint_y, hint_y + 1, hx - 1, hx + len(hint) + 1)
         _draw_typed_line(
-            chars, colors, hint_y, hint, t, _stage(t, _HINT_IN),
-            (110, 140, 165), _hint_color_fn(t),
+            chars, colors, hint_y, hint, t, _stage(t, _HINT_IN), _hint_color_fn(t),
         )
     else:
         title = "J A R V"
@@ -431,8 +431,7 @@ def render_intro(width: int, height: int, elapsed: float, exit: float = 0.0) -> 
         hx = (width - len(hint)) // 2
         _clear_box(chars, colors, hint_y, hint_y + 1, hx - 1, hx + len(hint) + 1)
         _draw_typed_line(
-            chars, colors, hint_y, hint, t, _stage(t, _HINT_IN),
-            (110, 140, 165), _hint_color_fn(t),
+            chars, colors, hint_y, hint, t, _stage(t, _HINT_IN), _hint_color_fn(t),
         )
 
     if exit > 0.0:
