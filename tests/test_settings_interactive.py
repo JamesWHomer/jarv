@@ -6,7 +6,7 @@ from rich.console import Console
 
 from jarv import settings_interactive
 from jarv.config import DEFAULT_CONFIG
-from jarv.settings_interactive import _settings_fullscreen_panel_width
+from jarv.tui_frame import panel_width
 
 
 @contextmanager
@@ -86,10 +86,11 @@ def _run_settings_with_keys(monkeypatch, config, keys):
     return FakeLive.instances[-1]
 
 
-def test_settings_fullscreen_panel_width_leaves_wrap_guard_column():
-    assert _settings_fullscreen_panel_width(120) == 119
-    assert _settings_fullscreen_panel_width(2) == 1
-    assert _settings_fullscreen_panel_width(1) == 1
+def test_settings_panel_spans_full_terminal_width():
+    # /settings shares the flush-to-edge panel width with the other fullscreen views.
+    assert panel_width(120) == 120
+    assert panel_width(2) == 2
+    assert panel_width(1) == 1
 
 
 def test_settings_esc_exits_from_main_screen(monkeypatch):

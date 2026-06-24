@@ -1,6 +1,7 @@
 """Interactive /settings screen loop."""
 
 import threading
+from types import SimpleNamespace
 
 from rich import box
 from rich.console import Group
@@ -11,33 +12,21 @@ from rich.text import Text
 from .command_input import _read_key_with_repeats, mouse_capture
 from .config import CONFIG_FILE, DEFAULT_CONFIG, save_config
 from .display import console, mark_first_paint, refresh_on_resize, terminal_size
+from .settings_editor import apply_catalog_refresh, apply_editor_key, render_editor_panel
 from .settings_refresher import _ModelCatalogRefresher
+from .tui_frame import panel_width
 from .tui_layout import append_bottom_footer
-from .text_editor import apply_text_editor_key
 from .settings_command import (
     _clip_text,
     _settings_apply_quick,
     _settings_begin_edit,
     _settings_column_layout,
-    _settings_commit_edit,
     _settings_desired_editor_height,
-    _settings_edit_is_dirty,
-    _settings_editor_lines,
     _settings_finish_reset,
-    _settings_model_apply_key,
-    _settings_model_choices_for_key,
-    _settings_model_update_notice,
-    _settings_multiline_apply_key,
-    _settings_provider_keys,
     _settings_reset_action_bar,
     _settings_rows,
     _settings_value_text,
 )
-
-def _settings_fullscreen_panel_width(terminal_width: int) -> int:
-    # Leave one spare column so WSL terminals don't auto-wrap full-width borders.
-    return max(1, terminal_width - 1)
-
 
 def run_settings_interactive(config: dict) -> None:
     rows = _settings_rows(config)
@@ -64,38 +53,7 @@ def run_settings_interactive(config: dict) -> None:
         nonlocal rows, flash
 
         with refresh_lock:
-            current_edit = edit
-            if (
-                current_edit is not None
-                and current_edit["row"]["key"] in {"model", "auditor_model"}
-                and current_edit.get("catalog_provider") == provider
-                and current_edit.get("catalog_generation") == generation
-            ):
-                previous = list(current_edit.get("model_choices") or [])
-                displayed_choices = _settings_model_choices_for_key(
-                    config,
-                    current_edit["row"]["key"],
-                    choices,
-                )
-                selected_name = ""
-                previous_selected = int(
-                    current_edit.get("selected_model_index", 0)
-                )
-                if 0 <= previous_selected < len(previous):
-                    selected_name = previous[previous_selected][0]
-                current_edit["model_choices"] = displayed_choices
-                current_edit["selected_model_index"] = next(
-                    (
-                        idx
-                        for idx, (name, _description) in enumerate(displayed_choices)
-                        if name == selected_name
-                    ),
-                    min(previous_selected, max(0, len(displayed_choices) - 1)),
-                )
-                current_edit["catalog_notice"] = _settings_model_update_notice(
-                    previous,
-                    displayed_choices,
-                )
+            apply_catalog_refresh(edit, config, provider, choices, generation)
             if provider == config.get("provider"):
                 from .reasoning import reconcile_reasoning_effort
 
@@ -124,6 +82,11 @@ def run_settings_interactive(config: dict) -> None:
         )
         if target_edit is not None:
             target_edit["catalog_generation"] = generation
+
+    catalog = SimpleNamespace(
+        request=_request_catalog_refresh,
+        cancel_pending=catalog_refresher.cancel_pending,
+    )
 
     def _footer() -> str:
         return "\u2191\u2193 select   Enter edit/toggle   r reset   Esc/q exit"
@@ -182,8 +145,8 @@ def run_settings_interactive(config: dict) -> None:
     def _render_settings_panel(height: int) -> Panel:
         nonlocal selected
         term_w, _ = terminal_size(console=console)
-        panel_width = _settings_fullscreen_panel_width(term_w)
-        inner_width = max(1, panel_width - 4)
+        width = panel_width(term_w)
+        inner_width = max(1, width - 4)
         height = max(3, height)
         show_footer = edit is None and height >= 8
         content_rows = max(1, height - 2)
@@ -263,36 +226,7 @@ def run_settings_interactive(config: dict) -> None:
             border_style="cyan",
             box=box.ROUNDED,
             padding=(0, 1),
-            width=panel_width,
-            height=height,
-        )
-
-    def _render_editor_panel(height: int) -> Panel:
-        term_w, _ = terminal_size(console=console)
-        panel_width = _settings_fullscreen_panel_width(term_w)
-        inner_width = max(1, panel_width - 4)
-        height = max(3, height)
-        content_rows = max(1, height - 2)
-        row = edit["row"] if edit is not None else {"label": "setting"}
-        editor_parts = _settings_editor_lines(edit, config, inner_width, max_lines=content_rows)
-        if not editor_parts:
-            editor_parts = [Text("")]
-        if edit is not None and edit.get("model_validation_warning"):
-            controls = "\u2190\u2192 select   Enter confirm   Esc keep editing"
-        elif edit is not None and edit.get("discard_armed"):
-            controls = "Esc discard"
-        else:
-            controls = "" if row.get("multiline") else "Enter save   Esc back"
-        return Panel(
-            Group(*editor_parts),
-            title=f"[bold bright_white]jarv \u25b8 edit {row['label']}[/bold bright_white]",
-            title_align="left",
-            subtitle=f"[dim]{controls}[/dim]" if controls else None,
-            subtitle_align="right",
-            border_style="cyan",
-            box=box.ROUNDED,
-            padding=(0, 1),
-            width=panel_width,
+            width=width,
             height=height,
         )
 
@@ -302,8 +236,8 @@ def run_settings_interactive(config: dict) -> None:
         if edit is None:
             return _render_settings_panel(term_h)
 
-        panel_width = _settings_fullscreen_panel_width(term_w)
-        inner_width = max(1, panel_width - 4)
+        width = panel_width(term_w)
+        inner_width = max(1, width - 4)
         desired_editor_height = _settings_desired_editor_height(
             edit,
             config,
@@ -325,7 +259,13 @@ def run_settings_interactive(config: dict) -> None:
 
         return Group(
             _render_settings_panel(settings_height),
-            _render_editor_panel(editor_height),
+            render_editor_panel(
+                edit,
+                config,
+                panel_width=width,
+                height=editor_height,
+                title=f"edit {edit['row']['label']}",
+            ),
         )
 
     with Live(
@@ -349,95 +289,24 @@ def run_settings_interactive(config: dict) -> None:
                 break
 
             if edit is not None:
-                if edit["row"].get("multiline"):
-                    if key == "ESC":
-                        dirty = _settings_edit_is_dirty(edit, config)
-                        if dirty and not edit.get("discard_armed"):
-                            edit["discard_armed"] = True
-                        else:
-                            edit = None
-                            flash = (f"{rows[selected]['label']} unchanged", "dim")
-                    elif key == "CTRL_S":
-                        config, message, style, done = _settings_commit_edit(edit, config)
-                        if done:
-                            rows = _settings_rows(config)
-                            edit = None
-                            flash = (message, style)
-                    else:
-                        edit["discard_armed"] = False
-                        term_w, _term_h = terminal_size(console=console)
-                        _settings_multiline_apply_key(
-                            edit,
-                            key,
-                            repeat_count,
-                            inner_width=max(1, term_w - 4),
-                        )
-                    continue
-                if key == "ESC" and edit.get("model_validation_warning"):
-                    edit.pop("model_validation_warning", None)
-                    edit.pop("model_validation_suggestion", None)
-                    edit.pop("model_warning_actions", None)
-                    edit.pop("model_warning_selection", None)
+                term_w, _term_h = terminal_size(console=console)
+                config, outcome = apply_editor_key(
+                    edit,
+                    config,
+                    key,
+                    repeat_count,
+                    catalog=catalog,
+                    inner_width=max(1, term_w - 4),
+                )
+                if outcome.kind == "committed":
+                    rows = _settings_rows(config)
+                    edit = None
+                    flash = (outcome.message, outcome.style)
+                elif outcome.kind == "cancelled":
+                    edit = None
+                    flash = (outcome.message, outcome.style)
+                elif outcome.clear_flash:
                     flash = None
-                elif key == "ESC":
-                    if _settings_edit_is_dirty(edit, config) and not edit.get("discard_armed"):
-                        edit["discard_armed"] = True
-                        flash = None
-                    else:
-                        edit = None
-                        flash = (f"{rows[selected]['label']} unchanged", "dim")
-                elif edit["row"]["key"] == "provider" and key in ("UP", "DOWN", "HOME", "END"):
-                    edit["discard_armed"] = False
-                    provider_keys = _settings_provider_keys()
-                    current_provider = edit.get("selected_provider", config.get("provider", "openai"))
-                    current_idx = provider_keys.index(current_provider) if current_provider in provider_keys else 0
-                    if key == "UP":
-                        current_idx = max(0, current_idx - repeat_count)
-                    elif key == "DOWN":
-                        current_idx = min(len(provider_keys) - 1, current_idx + repeat_count)
-                    elif key == "HOME":
-                        current_idx = 0
-                    elif key == "END":
-                        current_idx = len(provider_keys) - 1
-                    edit["selected_provider"] = provider_keys[current_idx]
-                    edit["buffer"] = ""
-                    edit["error"] = ""
-                    catalog_refresher.cancel_pending()
-                    _request_catalog_refresh(
-                        provider_keys[current_idx],
-                        delay=0.2,
-                    )
-                elif (
-                    edit["row"]["key"] in {"model", "auditor_model"}
-                    and _settings_model_apply_key(
-                        edit,
-                        key,
-                        repeat_count,
-                    )
-                ):
-                    edit["discard_armed"] = False
-                    flash = None
-                elif key == "ENTER":
-                    config, message, style, done = _settings_commit_edit(edit, config)
-                    if done:
-                        rows = _settings_rows(config)
-                        edit = None
-                        flash = (message, style)
-                    else:
-                        flash = None
-                elif edit["row"]["key"] == "provider":
-                    edit["discard_armed"] = False
-                    edit["error"] = ""
-                else:
-                    edit["discard_armed"] = False
-                    apply_text_editor_key(
-                        edit,
-                        key,
-                        repeat_count,
-                        content_width=1,
-                        allow_newlines=False,
-                    )
-                    edit["error"] = ""
                 continue
 
             if pending_reset is not None:

@@ -1,6 +1,7 @@
 """Interactive settings command."""
 
 import importlib
+import re
 import sys
 
 from rich.console import Group
@@ -571,6 +572,9 @@ def _settings_editor_lines(
                 Text(_clip_text("  Esc returns to settings.", inner_width), style="dim italic"),
             ]
             return lines[:max_lines] if max_lines is not None else lines
+        key_url = PROVIDERS.get(provider, {}).get("key_url")
+        if key_url:
+            intro.append(Text(_clip_text(f"  Get a key at {key_url}", inner_width), style="cyan"))
         env_key = PROVIDERS.get(provider, {}).get("env_key") or "provider env var"
         intro.append(Text(_clip_text(f"  provider: {provider_label}   env: {env_key}", inner_width), style="dim"))
         intro.append(Text(_clip_text("  type a new key, or type clear to remove the stored key", inner_width), style="dim"))
@@ -763,6 +767,15 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
                 edit["error"] = "Could not clear API key."
                 return config, edit["error"], "red", False
             return config, "cleared stored API key", "cyan", True
+        from .provider import KEY_PATTERNS
+
+        pattern = KEY_PATTERNS.get(provider)
+        if pattern and not edit.get("format_warned") and not re.match(pattern, raw):
+            edit["format_warned"] = True
+            edit["error"] = (
+                "Key format looks off for this provider. Enter again to save anyway."
+            )
+            return config, edit["error"], "yellow", False
         config.setdefault("api_keys", {})[provider] = raw
         config["api_key"] = ""
         if not _settings_save_validated(config):
