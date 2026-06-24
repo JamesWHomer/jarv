@@ -19,7 +19,7 @@ class CommandMeta:
 
 COMMANDS: dict[str, CommandMeta] = {
     "setup": CommandMeta(True, mutates_config=True, summary="Run setup or jump to a step", arg_hint="[step]"),
-    "help": CommandMeta(False, summary="Show this help"),
+    "help": CommandMeta(False, summary="Show help menu"),
     "about": CommandMeta(False, summary="Show detailed reference information"),
     "update": CommandMeta(False, needs_nudge=True, summary="Update jarv"),
     "new": CommandMeta(False, needs_nudge=True, summary="Start a fresh session"),
