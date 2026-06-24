@@ -65,7 +65,11 @@ def test_welcome_screen_shows_brand_and_hint(monkeypatch):
 
 
 def test_full_wizard_walks_steps_and_reaches_ready(monkeypatch):
-    app, saved, console = _make_app(monkeypatch, dict(DEFAULT_CONFIG))
+    config = {
+        **DEFAULT_CONFIG,
+        "api_keys": {"openai": "test-key"},
+    }
+    app, saved, console = _make_app(monkeypatch, config)
 
     # Welcome -> first step.
     app.on_key("ENTER", 1)

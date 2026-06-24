@@ -1,6 +1,9 @@
 import io
 import json
+import platform
+import shlex
 import sys
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,6 +44,13 @@ from jarv.provider import (
     ToolCallStarted,
 )
 from jarv.shell import CommandResult, InteractiveCommandSnapshot
+
+
+def _shell_python_command(*parts: str) -> str:
+    quoted = " ".join(shlex.quote(part) for part in (sys.executable, *parts))
+    if platform.system() == "Windows":
+        return f"& {quoted}"
+    return quoted
 
 
 class AgentInputTests(unittest.TestCase):
@@ -132,20 +142,70 @@ class AgentInputTests(unittest.TestCase):
             width=120,
         )
         config = {**DEFAULT_CONFIG, "tool_call_display": "fullscreen"}
+        command = "Read-Host 'Name'"
+        captured_frames: list[str] = []
+
+        class CaptureLive:
+            def __init__(self, renderable, **kwargs):
+                self._renderable = renderable
+                self._console = kwargs.get("console", test_console)
+
+            def __enter__(self):
+                self._record(self._renderable)
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def update(self, renderable, **_kwargs):
+                self._record(renderable)
+
+            def _record(self, renderable) -> None:
+                frame = io.StringIO()
+                Console(
+                    file=frame,
+                    force_terminal=True,
+                    color_system=None,
+                    width=120,
+                ).print(renderable)
+                captured_frames.append(frame.getvalue())
+
+        class FakeInteractiveProcess:
+            def interrupt(self):
+                pass
+
+            def kill_tree(self):
+                pass
+
+            def wait_until_idle(self, **_kwargs):
+                time.sleep(0.3)
+                return InteractiveCommandSnapshot(
+                    command,
+                    "",
+                    "",
+                    None,
+                    exited=False,
+                )
 
         with (
             patch("jarv.agent.console", test_console),
+            patch("jarv.agent.Live", CaptureLive),
             patch("jarv.agent.check_command", return_value=(True, "")),
+            patch(
+                "jarv.agent.InteractiveCommandProcess.start",
+                return_value=FakeInteractiveProcess(),
+            ),
         ):
             result = _dispatch_run_command_with_ui(
-                {"command": "Read-Host 'Name'"},
+                {"command": command},
                 config,
             )
 
         output = stream.getvalue()
-        self.assertIn("Read-Host 'Name'", output)
-        self.assertIn("running 0s", output)
-        self.assertIn("waiting", output)
+        rendered = output + "".join(captured_frames)
+        self.assertIn(command, rendered)
+        self.assertIn("running 0s", rendered)
+        self.assertIn("waiting", rendered)
         self.assertIsInstance(result, RunCommandDispatchResult)
         self.assertIsNotNone(result.pending_command)
         result.pending_command.process.interrupt()
@@ -1000,7 +1060,7 @@ class AgentInputTests(unittest.TestCase):
                 history_file=history_file,
                 now=datetime(2026, 5, 21, tzinfo=timezone.utc),
             )
-            command = f'& "{sys.executable}" "{script}"'
+            command = _shell_python_command(str(script))
             stream_count = 0
             final_prompt = {}
             waiting_prompts = []
