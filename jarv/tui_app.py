@@ -51,7 +51,7 @@ from .command_input import (
     mouse_capture,
 )
 from .display import console as default_console
-from .display import mark_first_paint, refresh_on_resize, terminal_size
+from .display import mark_first_paint, terminal_size
 
 
 @dataclass(frozen=True)
@@ -106,7 +106,6 @@ class AltScreenApp:
         read_key_fn: Callable[[], tuple[str, int]] | None = None,
         key_available_fn: Callable[[], bool] | None = None,
         terminal_size_fn: Callable[..., tuple[int, int]] | None = None,
-        refresh_on_resize_fn: Callable[..., Any] | None = None,
     ):
         self.console = console or default_console
         self.poll_interval = poll_interval
@@ -123,7 +122,6 @@ class AltScreenApp:
         self._read_key_fn = read_key_fn or self._default_read_key
         self._key_available_fn = key_available_fn or _key_available
         self._terminal_size_fn = terminal_size_fn or terminal_size
-        self._refresh_on_resize_fn = refresh_on_resize_fn or refresh_on_resize
 
     # ------------------------------------------------------------------ #
     # Subclass API (called on the loop thread)
@@ -333,16 +331,72 @@ class AltScreenApp:
                     stack.enter_context(mouse_capture())
                 if self.use_bracketed_paste:
                     stack.enter_context(bracketed_paste())
-                stack.enter_context(
-                    self._refresh_on_resize_fn(live, on_change=self._on_resize_signal)
-                )
                 yield live
 
         return _ctx()
 
-    def _on_resize_signal(self) -> None:
-        """Resize watcher callback: just nudge the loop; it polls the size."""
-        self.invalidate()
+    @contextmanager
+    def _preserve_alt_screen(self):
+        r"""Hold a single alternate screen steady while a nested view runs.
+
+        A nested full-screen view stops our ``Live`` and starts its own, and each
+        ``Live`` would otherwise emit its own alt-screen *enter*/*exit* control
+        codes. We are already on the alternate screen for the whole block, so
+        those toggles are all redundant -- and harmful: ``Console.set_alt_screen``
+        is not idempotent, so a round trip writes several ``\x1b[?1049h`` with no
+        matching exit. On Windows ConPTY (Windows Terminal) that burst of
+        switch-to-and-clear sequences, when it overlaps a window resize, corrupts
+        the console's window-size tracking and leaves the view stuck at a stale
+        size -- a state that poisons even a freshly launched process.
+
+        Suppress every toggle so exactly one alt screen stays active across the
+        whole nested round trip, and report it as enabled so a nested ``Live``
+        still homes the cursor (rather than positioning relative to a phantom
+        inline render). The caller (:meth:`suspended`) wipes the held screen so a
+        nested view still gets the clean slate the redundant enter used to give.
+        """
+        original = self.console.set_alt_screen
+
+        def set_alt_screen(enable: bool = True) -> bool:
+            return True
+
+        self.console.set_alt_screen = set_alt_screen
+        try:
+            yield
+        finally:
+            self.console.set_alt_screen = original
+
+    @contextmanager
+    def suspended(self):
+        """Suspend the live display around a nested full-screen view, then resume.
+
+        Stops our ``Live`` so a nested :class:`AltScreenApp` (e.g. an interactive
+        slash command) can own the terminal, keeps the alternate screen, and on
+        resume resets the resize baseline so the loop hard-repaints at the true
+        current size -- even if the terminal was resized and reverted while we were
+        suspended (when ``_last_size`` would otherwise still match and be skipped).
+
+        Because the alt screen is now held steady (see :meth:`_preserve_alt_screen`)
+        rather than re-entered by the nested view, the screen is wiped here once
+        the nested view takes over -- otherwise a compact nested panel would let
+        our frame bleed through around its edges. On resume our own full-screen
+        repaint covers the nested view, so no second clear is needed.
+        """
+        live = self.live
+        with self._preserve_alt_screen():
+            if live is not None:
+                live.stop()
+                try:
+                    self.console.clear()
+                except Exception:
+                    pass
+            try:
+                yield
+            finally:
+                self._last_size = None
+                self._dirty = True
+                if live is not None:
+                    live.start(refresh=True)
 
     def _default_live_factory(self, get_renderable, console):
         return Live(

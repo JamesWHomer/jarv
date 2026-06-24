@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import threading
 import time
-from contextlib import contextmanager
 
 from rich.text import Text
 
@@ -25,6 +24,9 @@ class FakeConsole:
 
     def clear(self):
         self.clears += 1
+
+    def set_alt_screen(self, enable=True):
+        return True
 
 
 class FakeLive:
@@ -47,11 +49,6 @@ class FakeLive:
 
     def refresh(self):
         self.frames.append(self._get_renderable())
-
-
-@contextmanager
-def _noop_resize(live, *, on_change=None):
-    yield
 
 
 def _wait_until(predicate, timeout=1.0):
@@ -123,7 +120,6 @@ def _make_app(keys=None, *, size=(80, 24), console=None, **kwargs):
         poll_interval=0.005,
         live_factory=live_factory,
         terminal_size_fn=lambda *, console=None: size,
-        refresh_on_resize_fn=_noop_resize,
         **kwargs,
     )
     app._key_available_fn = app._key_source_available
@@ -216,6 +212,91 @@ def test_resize_without_change_is_ignored():
     assert app.resizes == []
 
 
+def test_no_key_sentinel_does_not_block_resize_detection():
+    # The reader can hand back the resize sentinel (no actionable key) while the
+    # terminal size changes; the loop must still detect the resize and repaint
+    # rather than treating the sentinel as a blocking read.
+    console = FakeConsole()
+    sizes = [(80, 24), (100, 30), (100, 30)]
+    calls = {"n": 0}
+
+    def sizer(*, console=None):
+        idx = min(calls["n"], len(sizes) - 1)
+        calls["n"] += 1
+        return sizes[idx]
+
+    app, holder = _make_app(keys=[], console=console)
+    app._terminal_size_fn = sizer
+    # Input always reports "available" but only ever yields the no-key sentinel.
+    app._key_available_fn = lambda: True
+    app._read_key_fn = lambda: ("RESIZE", 1)
+
+    base_on_resize = app.on_resize
+
+    def on_resize(size):
+        base_on_resize(size)
+        if size == (100, 30):
+            app.stop("resized")
+
+    app.on_resize = on_resize
+    assert app.run() == "resized"
+    assert (100, 30) in app.resizes
+    assert holder["live"].frames
+
+
+class _StubLive:
+    def __init__(self):
+        self.stopped = False
+        self.started = False
+
+    def stop(self):
+        self.stopped = True
+
+    def start(self, refresh=False):
+        self.started = True
+
+
+def test_suspended_resets_resize_baseline_to_force_repaint():
+    app, _ = _make_app(keys=[])
+    app._last_size = (80, 24)
+    live = _StubLive()
+    app.live = live
+
+    with app.suspended():
+        pass
+
+    # The nested view owned the terminal: our Live was stopped and restarted.
+    assert live.stopped and live.started
+    # Baseline cleared so the next poll repaints even if the size is unchanged
+    # (covers resize-then-revert while suspended).
+    assert app._last_size is None
+    assert app._check_resize() is True
+
+
+def test_preserve_alt_screen_holds_both_directions():
+    calls = []
+
+    class Console(FakeConsole):
+        def set_alt_screen(self, enable=True):
+            calls.append(enable)
+            return True
+
+    app, _ = _make_app(keys=[], console=Console())
+
+    with app._preserve_alt_screen():
+        # Neither toggle reaches the console while the alt screen is held steady,
+        # so no redundant \x1b[?1049h/l control codes are written. Both still
+        # report the screen as enabled so a nested Live homes the cursor.
+        assert app.console.set_alt_screen(False) is True
+        assert app.console.set_alt_screen(True) is True
+    assert calls == []
+
+    # After the block, the real method handles both directions again.
+    app.console.set_alt_screen(False)
+    app.console.set_alt_screen(True)
+    assert calls == [False, True]
+
+
 def test_app_event_marks_dirty():
     app, _ = _make_app(keys=[])
     app._dirty = False
@@ -249,7 +330,6 @@ def test_on_start_can_stop_immediately():
         poll_interval=0.005,
         live_factory=live_factory,
         terminal_size_fn=lambda *, console=None: (80, 24),
-        refresh_on_resize_fn=_noop_resize,
     )
     app._key_available_fn = app._key_source_available
     app._read_key_fn = app._key_source_read
