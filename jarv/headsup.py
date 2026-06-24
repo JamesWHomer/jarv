@@ -18,6 +18,7 @@ from rich.text import Text
 
 from .cancellation import CancellationToken, TurnCancelled
 from .command_input import (
+    PasteRegistry,
     TextInput,
     _key_available,
     _read_key,
@@ -449,6 +450,7 @@ class HeadsupApp(AltScreenApp):
         self.entries: list[TranscriptEntry] = [self._initial_notice_entry()]
         self.editor: dict = {}
         initialize_text_editor(self.editor, "")
+        self._pastes = PasteRegistry()
         self.scroll_offset = 0
         self.lock = threading.RLock()
         self._exit_armed = False
@@ -546,15 +548,17 @@ class HeadsupApp(AltScreenApp):
             if self._answer_request is not None:
                 self._complete_answer()
                 return
-            raw_query = str(self.editor.get("buffer", ""))
+            raw_query = self._pastes.expand(str(self.editor.get("buffer", "")))
             query = raw_query.strip("\r\n")
             if not query.strip():
                 initialize_text_editor(self.editor, "")
+                self._pastes.clear()
                 self._clear_prompt_notice()
                 self._exit_armed = False
                 return
             self._record_prompt_history(query)
             initialize_text_editor(self.editor, "")
+            self._pastes.clear()
             self._clear_prompt_notice()
             self._exit_armed = False
             if self._handle_query(query) == "exit":
@@ -849,6 +853,10 @@ class HeadsupApp(AltScreenApp):
         key = _sanitize_editor_key(key)
         if key == "CTRL_N":
             key = "ENTER"
+        if isinstance(key, TextInput) and self._answer_request is None:
+            marker = self._pastes.collapse(str(key))
+            if marker is not None:
+                key = TextInput(marker)
         changed = apply_text_editor_key(
             self.editor,
             key,
@@ -912,6 +920,7 @@ class HeadsupApp(AltScreenApp):
     def _handle_prompt_dismiss(self) -> bool:
         if str(self.editor.get("buffer", "")):
             initialize_text_editor(self.editor, "")
+            self._pastes.clear()
             self._reset_prompt_history_navigation()
             self.set_prompt_notice(Text("Draft cleared.", style="dim"))
             return False

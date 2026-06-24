@@ -1,7 +1,7 @@
 """Pure frame-composition helpers for the heads-up TUI.
 
 This module owns the geometry and layout math for the heads-up panel -- the part
-that historically caused the WSL/ConPTY wrap-guard and stale-edge visual bugs.
+that historically caused the WSL/ConPTY stale-edge visual bugs.
 Every function here is side-effect free and depends only on its arguments, so the
 behaviour can be unit-tested at fixed terminal sizes (see tests/test_tui_frame.py
 and the golden-frame tests in tests/test_headsup.py).
@@ -23,7 +23,7 @@ from rich.segment import Segment
 from rich.text import Text
 
 from .display import TITLE_STYLE
-from .tui_capabilities import wrap_guard_columns
+from .tui_capabilities import supports_erase_eol
 from .tui_layout import clip_text
 
 _ERASE_TO_END_OF_LINE = Control((ControlType.ERASE_IN_LINE, 0)).segment
@@ -36,11 +36,21 @@ _TITLE_CELL_BUDGET = 6
 
 
 class EraseTrailingColumns:
-    """Render a frame without padding into the terminal's auto-wrap column.
+    """Render a frame, clearing each row's stale right edge before drawing it.
 
-    Emits an erase-to-end-of-line control after each rendered line so a stale
-    right border left by a previous, wider frame is cleared instead of lingering
-    (a WSL/ConPTY redraw quirk).
+    The frame spans the full terminal width, so its right border sits flush
+    against the screen edge -- in the very last column. Before drawing each row
+    we emit an erase-to-end-of-line control while the cursor is still at column
+    0, which clears the entire physical row (including any stale right border a
+    previous, wider frame left behind). Drawing the row afterwards repaints the
+    border, so it survives.
+
+    The erase must come *before* the row content. Emitted after a full-width
+    line, the cursor sits in the last column in the terminal's pending-wrap
+    state, and the erase would wipe the right border we just drew there -- the
+    WSL/ConPTY redraw quirk this used to trip over. The pending-wrap latch
+    itself needs no special handling: Rich's per-frame cursor-home and the
+    newline between rows already reset it.
     """
 
     def __init__(self, renderable: RenderableType):
@@ -54,17 +64,24 @@ class EraseTrailingColumns:
             new_lines=False,
         )
         newline = Segment.line()
+        erase_row = console.is_terminal and supports_erase_eol()
         for index, line in enumerate(lines):
-            yield from line
-            if console.is_terminal:
-                yield _ERASE_TO_END_OF_LINE
-            if index != len(lines) - 1:
+            if index:
                 yield newline
+            if erase_row:
+                yield _ERASE_TO_END_OF_LINE
+            yield from line
 
 
 def panel_width(terminal_width: int) -> int:
-    """Width of the heads-up panel, leaving wrap-guard columns spare."""
-    return max(1, terminal_width - wrap_guard_columns())
+    """Width of a fullscreen panel: the full terminal width, flush to the edge.
+
+    Shared by every fullscreen view (heads-up, settings, setup, the session
+    browser) so their borders line up identically against the screen edge. The
+    stale right-edge artifact this used to leave columns spare for is handled by
+    :class:`EraseTrailingColumns` instead (see the module docstring).
+    """
+    return max(1, terminal_width)
 
 
 @dataclass(frozen=True)

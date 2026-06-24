@@ -86,6 +86,11 @@ _STAR_TIERS = (
 _HINT_WIDE = "type a message to begin   ·   /help for commands"
 _HINT_NARROW = "type to begin · /help"
 
+# Sentinel for ``render_intro(hint=...)``: keep the default heads-up hint unless a
+# caller (e.g. the /setup welcome screen) overrides it. Passing ``hint=""`` draws
+# the brand mark with no hint line at all.
+_DEFAULT_HINT = object()
+
 _WHITE = (236, 246, 255)
 
 # Entrance stage windows, in seconds.
@@ -369,7 +374,14 @@ def _rows_to_text(chars, colors, width: int, height: int) -> list[Text]:
     return lines
 
 
-def render_intro(width: int, height: int, elapsed: float, exit: float = 0.0) -> list[Text] | None:
+def render_intro(
+    width: int,
+    height: int,
+    elapsed: float,
+    exit: float = 0.0,
+    *,
+    hint=_DEFAULT_HINT,
+) -> list[Text] | None:
     """Render the idle intro animation as ``height`` Rich ``Text`` rows.
 
     Returns ``None`` when the area is too small to draw anything meaningful,
@@ -377,6 +389,10 @@ def render_intro(width: int, height: int, elapsed: float, exit: float = 0.0) -> 
 
     ``exit`` runs from 0 (fully present) to 1 (fully gone) to play a quick
     dissolve when the user dismisses the intro by sending their first message.
+
+    ``hint`` overrides the single hint line beneath the wordmark so the same
+    brand mark can front other screens (the /setup welcome). The default keeps
+    the heads-up "type a message to begin" hint; pass ``""`` to draw no hint.
     """
     if width < 18 or height < 5:
         return None
@@ -392,7 +408,8 @@ def render_intro(width: int, height: int, elapsed: float, exit: float = 0.0) -> 
     _draw_starfield(chars, colors, t, height, width, _ease_out(_stage(t, _STARS_IN)))
 
     big = width >= _LOGO_W + 2 and height >= 11
-    hint = _HINT_WIDE if width >= len(_HINT_WIDE) else _HINT_NARROW
+    if hint is _DEFAULT_HINT:
+        hint = _HINT_WIDE if width >= len(_HINT_WIDE) else _HINT_NARROW
 
     if big:
         block_h = _LOGO_H + 1 + 1 + 1 + 1  # logo, gap, wave, gap, hint
@@ -406,12 +423,13 @@ def render_intro(width: int, height: int, elapsed: float, exit: float = 0.0) -> 
         _draw_logo(chars, colors, top, t, width, _stage(t, _LOGO_IN))
         _draw_wave(chars, colors, wave_y, t, width, _stage(t, _WAVE_IN))
 
-        hint_y = wave_y + 2
-        hx = (width - len(hint)) // 2
-        _clear_box(chars, colors, hint_y, hint_y + 1, hx - 1, hx + len(hint) + 1)
-        _draw_typed_line(
-            chars, colors, hint_y, hint, t, _stage(t, _HINT_IN), _hint_color_fn(t),
-        )
+        if hint:
+            hint_y = wave_y + 2
+            hx = (width - len(hint)) // 2
+            _clear_box(chars, colors, hint_y, hint_y + 1, hx - 1, hx + len(hint) + 1)
+            _draw_typed_line(
+                chars, colors, hint_y, hint, t, _stage(t, _HINT_IN), _hint_color_fn(t),
+            )
     else:
         title = "J A R V"
         block_h = 3
@@ -427,12 +445,13 @@ def render_intro(width: int, height: int, elapsed: float, exit: float = 0.0) -> 
         shown = title[: max(0, int(reveal * len(title)))] if reveal < 1.0 else title
         _place_text(chars, colors, top, shown, title_fn, center_len=len(title))
 
-        hint_y = top + 2
-        hx = (width - len(hint)) // 2
-        _clear_box(chars, colors, hint_y, hint_y + 1, hx - 1, hx + len(hint) + 1)
-        _draw_typed_line(
-            chars, colors, hint_y, hint, t, _stage(t, _HINT_IN), _hint_color_fn(t),
-        )
+        if hint:
+            hint_y = top + 2
+            hx = (width - len(hint)) // 2
+            _clear_box(chars, colors, hint_y, hint_y + 1, hx - 1, hx + len(hint) + 1)
+            _draw_typed_line(
+                chars, colors, hint_y, hint, t, _stage(t, _HINT_IN), _hint_color_fn(t),
+            )
 
     if exit > 0.0:
         _apply_exit(chars, colors, exit, width, height)

@@ -100,14 +100,17 @@ class HeadsupTests(unittest.TestCase):
         self.assertTrue(lines[top_idx + 2].startswith("\u2502 \u2570"))
         self.assertTrue(lines[top_idx + 2].endswith("\u256f \u2502"))
 
-    def test_render_leaves_wrap_guard_columns_for_wsl(self):
+    def test_render_fills_terminal_width_flush(self):
         app, test_console, output = self._app(width=80)
 
         rendered = self._rendered_text(app, test_console, output, width=80, height=24)
 
-        self.assertLessEqual(max(cell_len(line) for line in rendered.splitlines()), 78)
+        widths = [cell_len(line) for line in rendered.splitlines()]
+        # The border spans the full terminal width with no reserved right gap.
+        self.assertLessEqual(max(widths), 80)
+        self.assertEqual(max(widths), 80)
 
-    def test_render_long_prompt_keeps_wrap_guard_columns_for_wsl(self):
+    def test_render_long_prompt_stays_within_terminal_width(self):
         app, test_console, output = self._app(width=80)
         initialize_text_editor(
             app.editor,
@@ -116,7 +119,7 @@ class HeadsupTests(unittest.TestCase):
 
         rendered = self._rendered_text(app, test_console, output, width=80, height=24)
 
-        self.assertLessEqual(max(cell_len(line) for line in rendered.splitlines()), 78)
+        self.assertLessEqual(max(cell_len(line) for line in rendered.splitlines()), 80)
         self.assertIn("\u256d", rendered)
         self.assertIn("\u256f", rendered)
 
@@ -875,7 +878,7 @@ class HeadsupTests(unittest.TestCase):
         self.assertEqual(app.editor["buffer"], "draft")
         self.assertIsNone(app._prompt_history_index)
 
-    def test_prompt_accepts_multiline_paste_and_renders_rows(self):
+    def test_multiline_paste_collapses_to_placeholder_and_expands_on_submit(self):
         app, _test_console, _output = self._app()
 
         with patch("jarv.headsup.terminal_size", return_value=(80, 24)):
@@ -883,13 +886,52 @@ class HeadsupTests(unittest.TestCase):
 
         self.assertTrue(changed)
         self.assertTrue(user_text)
-        self.assertEqual(app.editor["buffer"], "first\nsecond")
+        # The bulky paste collapses to a single-line marker in the draft.
+        self.assertEqual(app.editor["buffer"], "[Pasted text #1 +2 lines]")
+        self.assertFalse(app._prompt_has_multiline_draft())
 
-        lines = app._prompt_lines(40, max_lines=4)
-        self.assertEqual(lines[0].plain, "\u256d" + "\u2500" * 38 + "\u256e")
-        self.assertEqual(lines[1].plain, "\u2502 first" + " " * 32 + "\u2502")
-        self.assertEqual(lines[2].plain, "\u2502 second " + " " * 30 + "\u2502")
-        self.assertEqual(lines[3].plain, "\u2570" + "\u2500" * 38 + "\u256f")
+        # Submitting restores the original paste before it is dispatched.
+        calls: list[str] = []
+        app._run_agent_query = calls.append
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)):
+            app.on_key("ENTER", 1)
+
+        self.assertEqual(calls, ["first\nsecond"])
+        self.assertEqual(app.editor["buffer"], "")
+
+    def test_collapsed_paste_keeps_surrounding_typed_text(self):
+        app, _test_console, _output = self._app()
+
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)):
+            app._apply_editor_key(TextInput("alpha\nbeta\ngamma"), 1)
+            for char in " do it":
+                app._apply_editor_key(char, 1)
+
+        self.assertEqual(app.editor["buffer"], "[Pasted text #1 +3 lines] do it")
+
+        calls: list[str] = []
+        app._run_agent_query = calls.append
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)):
+            app.on_key("ENTER", 1)
+
+        self.assertEqual(calls, ["alpha\nbeta\ngamma do it"])
+
+    def test_single_line_paste_is_not_collapsed(self):
+        app, _test_console, _output = self._app()
+
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)):
+            app._apply_editor_key(TextInput("hello world"), 1)
+
+        self.assertEqual(app.editor["buffer"], "hello world")
+
+    def test_paste_in_answer_modal_is_not_collapsed(self):
+        app, _test_console, _output = self._app()
+        app._answer_request = {"label": "> ", "answer": None}
+
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)):
+            app._apply_editor_key(TextInput("yes\nno"), 1)
+
+        self.assertEqual(app.editor["buffer"], "yes\nno")
 
     def test_multiline_prompt_arrows_move_between_editor_rows(self):
         app, _test_console, _output = self._app()
@@ -1418,7 +1460,7 @@ class HeadsupTests(unittest.TestCase):
 class HeadsupGoldenFrameTests(unittest.TestCase):
     """Frame-level invariants at fixed terminal sizes.
 
-    These guard the recurring WSL/ConPTY visual bugs (wrap-guard overflow, stale
+    These guard the recurring WSL/ConPTY visual bugs (flush right edge, stale
     right edge, panel height) across small/medium/large terminals so a geometry
     regression fails here regardless of which size it shows up at first.
     """
@@ -1451,14 +1493,14 @@ class HeadsupGoldenFrameTests(unittest.TestCase):
             test_console.print(app.render())
         return output.getvalue().splitlines()
 
-    def test_no_line_exceeds_wrap_guard_at_any_size(self):
-        from jarv.tui_capabilities import wrap_guard_columns
-
+    def test_frame_spans_terminal_width_at_any_size(self):
         for width, height in self.SIZES:
             with self.subTest(width=width, height=height):
                 lines = self._render_lines(width, height)
                 widest = max(cell_len(line) for line in lines)
-                self.assertLessEqual(widest, width - wrap_guard_columns())
+                # Flush to the edge: never past the terminal, and reaching it.
+                self.assertLessEqual(widest, width)
+                self.assertEqual(widest, width)
 
     def test_panel_fills_terminal_height_at_any_size(self):
         for width, height in self.SIZES:

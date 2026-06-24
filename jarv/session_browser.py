@@ -28,6 +28,7 @@ from .history import (
 )
 from .session_render import _history_visual_lines, _session_row_widths
 from .session_store import archive_session_files, delete_session_files, unarchive_session_files
+from .tui_frame import panel_width
 from .tui_layout import append_bottom_footer, clip_text
 from .tui_overlay import (
     apply_scroll_keys,
@@ -520,8 +521,8 @@ class SessionBrowserScreen(AltScreenApp):
 
     def _render_preview(self) -> Panel:
         term_w, term_h = terminal_size(console=console)
-        panel_width = max(1, term_w)
-        inner_width = max(1, panel_width - 4)
+        width = panel_width(term_w)
+        inner_width = max(1, width - 4)
         body_rows, show_footer = body_content_rows(term_h)
         body_rows = max(1, body_rows - 1)
 
@@ -571,7 +572,7 @@ class SessionBrowserScreen(AltScreenApp):
             "preview",
             subtitle=short_id or None,
             padding=(0, 1),
-            width=panel_width,
+            width=width,
             height=term_h,
         )
 
@@ -596,8 +597,8 @@ class SessionBrowserScreen(AltScreenApp):
         if self.preview_sid is not None:
             return self._render_preview()
         term_w, term_h = terminal_size(console=console)
-        panel_width = max(1, term_w)
-        inner_width = max(1, panel_width - 4)
+        width = panel_width(term_w)
+        inner_width = max(1, width - 4)
         show_footer = term_h >= 6
 
         visible = self._visible_rows_list()
@@ -659,7 +660,7 @@ class SessionBrowserScreen(AltScreenApp):
                 border_style="cyan",
                 box=box.ROUNDED,
                 padding=(0, 1),
-                width=panel_width,
+                width=width,
                 height=term_h,
             )
 
@@ -770,7 +771,7 @@ class SessionBrowserScreen(AltScreenApp):
             border_style="cyan",
             box=box.ROUNDED,
             padding=(0, 1),
-            width=panel_width,
+            width=width,
             height=term_h,
         )
 

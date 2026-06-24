@@ -6,16 +6,110 @@ free, the regressions are now caught here directly instead of only through a
 live render.
 """
 
+import io
+
 from rich.cells import cell_len
+from rich.console import Console
 from rich.text import Text
 
 from jarv import tui_frame
-from jarv.tui_capabilities import wrap_guard_columns
 
 
-def test_panel_width_reserves_wrap_guard_columns():
-    assert tui_frame.panel_width(80) == 80 - wrap_guard_columns()
-    assert tui_frame.panel_width(120) == 120 - wrap_guard_columns()
+def _emulate_terminal(stream: str, width: int, height: int) -> list[str]:
+    """Replay a control stream onto a grid, modelling the pending-wrap latch.
+
+    Just enough VT to catch the stale-edge regression: printable cells, CR/LF,
+    cursor-home (``ESC[H``) and erase-to-end-of-line (``ESC[0K``). Auto-wrap is
+    deferred -- writing the last column arms a latch instead of moving the cursor
+    -- which is the behaviour that made an erase emitted *after* a flush
+    right-border wipe that border (see ``EraseTrailingColumns``).
+    """
+    grid = [[" "] * width for _ in range(height)]
+    row = col = 0
+    pending_wrap = False
+    i = 0
+    while i < len(stream):
+        ch = stream[i]
+        if ch == "\x1b" and stream[i + 1] == "[":
+            j = i + 2
+            params = ""
+            while j < len(stream) and not stream[j].isalpha():
+                params += stream[j]
+                j += 1
+            final = stream[j]
+            if final == "H":
+                row = col = 0
+                pending_wrap = False
+            elif final == "K" and params in ("", "0"):
+                for c in range(col, width):
+                    grid[row][c] = " "
+                pending_wrap = False
+            i = j + 1
+            continue
+        if ch in "\r\n":
+            if ch == "\n":
+                row = min(height - 1, row + 1)
+            col = 0
+            pending_wrap = False
+            i += 1
+            continue
+        if pending_wrap:
+            row = min(height - 1, row + 1)
+            col = 0
+            pending_wrap = False
+        if row < height and col < width:
+            grid[row][col] = ch
+        if col == width - 1:
+            pending_wrap = True
+        else:
+            col += 1
+        i += 1
+    return ["".join(r) for r in grid]
+
+
+def _render_to_terminal(width: int, height: int) -> list[str]:
+    layout = tui_frame.compute_layout(width, height)
+    frame = tui_frame.build_frame(
+        [Text("hello"), Text("world")],
+        title=tui_frame.compose_title("openai / gpt-x / high", layout.panel_width),
+        subtitle=Text("$0.00 - 0% full"),
+        panel_width=layout.panel_width,
+        term_h=layout.term_h,
+    )
+    console = Console(
+        file=io.StringIO(),
+        width=width,
+        height=height,
+        force_terminal=True,
+        color_system=None,
+        legacy_windows=False,
+    )
+    console.print(frame)
+    return _emulate_terminal(console.file.getvalue(), width, height)
+
+
+def test_frame_keeps_flush_right_border_on_a_real_terminal():
+    # Regression: on a terminal the erase-to-end-of-line used to fire after each
+    # full-width row and wipe the border sitting in the last (auto-wrap) column,
+    # leaving the heads-up panel with no right edge.
+    width, height = 40, 12
+    rows = _render_to_terminal(width, height)
+    framed = [r for r in rows if r[0] == "│" or r[0] in "╭╰"]
+    assert framed, "expected bordered rows to be drawn"
+    # Top-right and bottom-right corners are present and flush to the edge.
+    assert rows[0].rstrip(" ")[-1] == "╮"
+    last_framed = max(idx for idx, r in enumerate(rows) if r.strip())
+    assert rows[last_framed].rstrip(" ")[-1] == "╯"
+    # Every interior bordered row carries the right edge in the final column.
+    for r in framed:
+        if r[0] == "│":
+            assert r[width - 1] == "│", repr(r)
+
+
+def test_panel_width_spans_full_terminal_width():
+    # The panel border sits flush against the terminal edge -- no reserved gap.
+    assert tui_frame.panel_width(80) == 80
+    assert tui_frame.panel_width(120) == 120
 
 
 def test_panel_width_never_below_one():
@@ -27,7 +121,7 @@ def test_compute_layout_clamps_tiny_terminals():
     layout = tui_frame.compute_layout(5, 2)
     assert layout.term_w == 20
     assert layout.term_h == 8
-    assert layout.panel_width == 20 - wrap_guard_columns()
+    assert layout.panel_width == 20
     assert layout.inner_width == layout.panel_width - 4
     assert layout.body_height == max(3, layout.term_h - 2)
 
@@ -35,7 +129,7 @@ def test_compute_layout_clamps_tiny_terminals():
 def test_compute_layout_matches_historical_math():
     term_w, term_h = 100, 30
     layout = tui_frame.compute_layout(term_w, term_h)
-    assert layout.panel_width == term_w - wrap_guard_columns()
+    assert layout.panel_width == term_w
     assert layout.inner_width == layout.panel_width - 4
     assert layout.body_height == term_h - 2
     assert layout.max_prompt_rows == min(8, max(1, layout.body_height - 2), max(3, term_h // 3))
