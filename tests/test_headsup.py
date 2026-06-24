@@ -343,6 +343,29 @@ class HeadsupTests(unittest.TestCase):
         self.assertEqual(app.messages, ["a", "abc"])
         self.assertEqual(app.refresh_count, 0)
 
+    def test_begin_assistant_message_appends_instead_of_overwriting(self):
+        app, _test_console, _output = self._app()
+        ui = HeadsupAgentUI(app)
+        ui.start_turn("hello", {})
+
+        # First streamed turn finalizes one entry.
+        ui.append_stream_delta("alpha reply")
+        ui.finish_assistant_message("alpha reply")
+        # A tool card lands between turns, then a second turn streams text.
+        app.add_tool(Text("middle tool card"))
+        ui.begin_assistant_message()
+        ui.append_stream_delta("omega reply")
+        ui.finish_assistant_message("omega reply")
+
+        rendered = self._entry_text(app)
+        # The second message appends after the tool card rather than upserting
+        # onto (and corrupting) the first turn's entry above it.
+        self.assertIn("alpha reply", rendered)
+        self.assertIn("omega reply", rendered)
+        self.assertEqual(rendered.count("alpha reply"), 1)
+        self.assertLess(rendered.index("alpha reply"), rendered.index("middle tool card"))
+        self.assertLess(rendered.index("middle tool card"), rendered.index("omega reply"))
+
     def test_transcript_rendering_reuses_cached_entry_lines(self):
         app, _test_console, _output = self._app()
         app.add_user_message("hello")

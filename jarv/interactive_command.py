@@ -61,9 +61,13 @@ def _run_command_waiting_prompt(snapshot) -> str:
         "```\n\n"
         "Reply with exactly one line of terminal input or one control. Do not "
         "explain. Do not chain multiple controls. Plain text sends that text "
-        "followed by Enter. Special controls: <ENTER>, <WAIT>, <WAIT 10s>, "
-        "<CTRL_C>, <EOF>, <CTRL_D>, <ESC>, <TAB>, <UP>, <DOWN>, <LEFT>, "
-        "<RIGHT>. Only the first input/control will be used."
+        "followed by Enter. Special controls: <ENTER>; <WAIT> to briefly yield "
+        "then check again; <WAIT Ns> to pause about N seconds before checking "
+        "again — pick N to fit what you are waiting on (e.g. <WAIT 3s>, "
+        "<WAIT 30s>, <WAIT 120s>); it is a placeholder, not a fixed value, so "
+        "do not always send <WAIT 10s>. Other controls: <CTRL_C>, <EOF>, "
+        "<CTRL_D>, <ESC>, <TAB>, <UP>, <DOWN>, <LEFT>, <RIGHT>. Only the first "
+        "input/control will be used."
     )
 
 
@@ -184,6 +188,69 @@ def _terminal_action_display(action: str, payload: str | float | None) -> str:
     return ""
 
 
+def _terminal_action_is_stdin(action: str) -> bool:
+    """Whether the action actually wrote characters to the process's stdin."""
+    return action in {"stdin", "stdin_raw"}
+
+
+def _interaction_marker(action: str, action_display: str) -> str:
+    """One-line record of what was sent, distinguishing stdin from controls.
+
+    Waits, Ctrl-C and EOF never reach stdin, so labelling them ``stdin>`` (as
+    the card used to) is misleading; they get their own dim markers instead.
+    """
+    if _terminal_action_is_stdin(action):
+        return f"stdin> {action_display or '<ENTER>'}"
+    if action == "wait":
+        inner = action_display.strip("<>").strip().lower() or "wait"
+        return f"[{inner}]"
+    if action == "ctrl_c":
+        return "[sent Ctrl-C]"
+    if action == "eof":
+        return "[closed stdin / EOF]"
+    return f"[{action_display}]"
+
+
+def _attach_interactive_output_item(pending, history: list) -> None:
+    """Point a pending command at its stored ``function_call_output`` item.
+
+    The whole interactive exchange is collapsed into that single tool record so
+    the resumed/reloaded transcript shows one command card instead of a stream
+    of repeated waiting prompts and ``[terminal input sent]`` chat messages.
+    """
+    call_id = getattr(pending, "call_id", None)
+    for item in reversed(history):
+        if (
+            isinstance(item, dict)
+            and item.get("type") == "function_call_output"
+            and item.get("call_id") == call_id
+        ):
+            pending.output_item = item
+            break
+
+
+def _record_interactive_input(pending, action: str, action_display: str) -> None:
+    """Append one sent input/control to the single stored command record."""
+    output_item = getattr(pending, "output_item", None)
+    if not isinstance(output_item, dict):
+        return
+    pending.input_markers.append(_interaction_marker(action, action_display))
+    output_item["output"] = "\n".join(pending.input_markers)
+
+
+def _finalize_interactive_record(pending, final_output: str) -> None:
+    """Collapse a finished interaction into inputs followed by the final output."""
+    output_item = getattr(pending, "output_item", None)
+    if not isinstance(output_item, dict):
+        return
+    segments: list[str] = []
+    if pending.input_markers:
+        segments.append("\n".join(pending.input_markers))
+    if final_output and final_output.strip():
+        segments.append(final_output)
+    output_item["output"] = "\n".join(segments)
+
+
 def _interactive_command_card(
     prepared,
     snapshot,
@@ -191,15 +258,22 @@ def _interactive_command_card(
     *,
     status: str,
     terminal_reply: str | None = None,
+    terminal_kind: str | None = None,
 ):
     display_mode = get_setting(config, "tool_call_display")
     command_line = Text("> ", style="bold yellow")
     command_line.append(prepared.cmd)
     body_parts = [command_line]
     if terminal_reply is not None:
-        stdin_line = Text("stdin> ", style="bold cyan")
-        stdin_line.append(terminal_reply.rstrip("\n") or "<ENTER>")
-        body_parts.append(stdin_line)
+        if terminal_kind is None or _terminal_action_is_stdin(terminal_kind):
+            reply_line = Text("stdin> ", style="bold cyan")
+            reply_line.append(terminal_reply.rstrip("\n") or "<ENTER>")
+        else:
+            reply_line = Text(
+                _interaction_marker(terminal_kind, terminal_reply),
+                style="dim cyan",
+            )
+        body_parts.append(reply_line)
     result = snapshot.to_delta_command_result()
     if status == "waiting":
         if getattr(snapshot, "check_in", False):
@@ -240,6 +314,7 @@ def _show_interactive_command_card(
     *,
     status: str,
     terminal_reply: str | None = None,
+    terminal_kind: str | None = None,
     ui=None,
 ) -> None:
     card = _interactive_command_card(
@@ -248,6 +323,7 @@ def _show_interactive_command_card(
         config,
         status=status,
         terminal_reply=terminal_reply,
+        terminal_kind=terminal_kind,
     )
     if ui is not None:
         _ui_call(ui, "show_tool_card", card)
@@ -321,4 +397,4 @@ def _continue_interactive_command(
             check_in_seconds=check_in_seconds,
             cancellation_token=cancellation_token,
         )
-    return snapshot, action_display
+    return snapshot, action_display, action

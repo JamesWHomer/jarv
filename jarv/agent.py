@@ -201,13 +201,16 @@ def _agent_check_run_command(prepared, config: dict, **kwargs):
 
 
 from .interactive_command import (
+    _attach_interactive_output_item,
     _continue_interactive_command,
+    _finalize_interactive_record,
     _first_terminal_action,
     _format_elapsed_seconds,
     _format_finished_interactive_output,
     _interactive_check_in_seconds,
     _interactive_command_card,
     _parse_terminal_control,
+    _record_interactive_input,
     _run_command_final_prompt,
     _run_command_waiting_prompt,
     _show_interactive_command_card,
@@ -554,6 +557,11 @@ class _TurnRenderer:
                         self.stream_live,
                         stream_max_lines,
                     )
+                elif self.ui is not None:
+                    # New streamed message this turn; reset the UI's stream
+                    # cursor so it appends in order rather than overwriting the
+                    # previous turn's bubble above the intervening tool cards.
+                    _ui_call(self.ui, "begin_assistant_message")
             if self.pending_interactive_command is not None:
                 self.reply_text += event.delta
             elif self.stream_preview is not None:
@@ -867,40 +875,39 @@ def run_agent(
                         "role": "user",
                         "content": (
                             "A terminal command is currently waiting for input. "
-                            "Do not call tools. Reply only with stdin text or one of "
-                            "<ENTER>, <WAIT>, <WAIT 10s>, <CTRL_C>, <EOF>, "
-                            "<CTRL_D>, <ESC>, <TAB>, <UP>, <DOWN>, <LEFT>, "
-                            "<RIGHT>."
+                            "Do not call tools. Reply only with stdin text or one "
+                            "of <ENTER>, <WAIT>, <WAIT Ns> (choose N to fit the "
+                            "wait), <CTRL_C>, <EOF>, <CTRL_D>, <ESC>, <TAB>, "
+                            "<UP>, <DOWN>, <LEFT>, <RIGHT>."
                         ),
                     }]
                     continue
+                # The model's control reply and the next prompt stay in the live
+                # ``kwargs["input"]`` conversation only; history keeps just the one
+                # collapsed run_command record (rewritten via the helpers below).
                 terminal_reply = renderer.reply_text
                 kwargs["input"] = kwargs["input"] + [{
                     "role": "assistant",
                     "content": terminal_reply,
                 }]
-                snapshot, terminal_action = _continue_interactive_command(
+                snapshot, terminal_action, terminal_kind = _continue_interactive_command(
                     pending_interactive_command,
                     terminal_reply,
                     config=config,
                     cancellation_token=cancellation_token,
                 )
-                history.append({
-                    "role": "assistant",
-                    "content": (
-                        "[terminal input sent]\n"
-                        "```text\n"
-                        f"{terminal_action}\n"
-                        "```"
-                    ),
-                    **metadata,
-                })
+                _record_interactive_input(
+                    pending_interactive_command,
+                    terminal_kind,
+                    terminal_action,
+                )
                 _show_interactive_command_card(
                     pending_interactive_command,
                     snapshot,
                     config,
                     status="done" if snapshot.exited else "waiting",
                     terminal_reply=terminal_action,
+                    terminal_kind=terminal_kind,
                     ui=ui,
                 )
                 if snapshot.exited:
@@ -913,11 +920,10 @@ def run_agent(
                         "role": "user",
                         "content": _run_command_final_prompt(final_output),
                     }]
-                    history.append({
-                        "role": "user",
-                        "content": _run_command_final_prompt(final_output),
-                        **metadata,
-                    })
+                    _finalize_interactive_record(
+                        pending_interactive_command,
+                        final_output,
+                    )
                     pending_interactive_command = None
                 else:
                     waiting_prompt = _run_command_waiting_prompt(snapshot)
@@ -925,11 +931,6 @@ def run_agent(
                         "role": "user",
                         "content": waiting_prompt,
                     }]
-                    history.append({
-                        "role": "user",
-                        "content": waiting_prompt,
-                        **metadata,
-                    })
                 continue
 
             if renderer.tool_calls:
@@ -1027,6 +1028,10 @@ def run_agent(
                     execute_tool_calls_fn=_execute_tools,
                 )
                 pending_interactive_command = _exec_result.pending_command
+                if pending_interactive_command is not None:
+                    _attach_interactive_output_item(
+                        pending_interactive_command, history
+                    )
             else:
                 append_status_history_items()
                 history.append({"role": "assistant", "content": renderer.reply_text, **metadata})
