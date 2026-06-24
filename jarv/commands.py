@@ -153,6 +153,18 @@ def cmd_unset(args: list) -> None:
         console.print(f"[bold cyan]✓[/bold cyan] [bold cyan]{key}[/bold cyan] [dim]removed.[/dim]")
 
 
+def _command_help_rows(names: list[str]) -> list[tuple[str, str, str]]:
+    """Build (label, summary, style) help rows from the command registry."""
+    from .command_registry import COMMANDS
+
+    rows: list[tuple[str, str, str]] = []
+    for name in names:
+        meta = COMMANDS[name]
+        label = f"/{name} {meta.arg_hint}".rstrip()
+        rows.append((label, meta.summary, "bold cyan"))
+    return rows
+
+
 def _help_body() -> Group:
     from rich.console import Group
     from rich.table import Table
@@ -183,29 +195,10 @@ def _help_body() -> Group:
             ("--incognito", "Do not load or save session history", "bold yellow"),
             ("--version", "Print the version and exit", "bold yellow"),
         ],
-        [
-            ("/new", "Start a fresh session", "bold cyan"),
-            ("/history", "Show recent conversation history", "bold cyan"),
-            ("/undo [n]", "Unsend the last n exchanges", "bold cyan"),
-            ("/redo [n]", "Restore undone exchanges", "bold cyan"),
-            ("/sessions", "List sessions", "bold cyan"),
-            ("/sessions <id>", "Load a session by ID prefix", "bold cyan"),
-            ("/archive", "Archive this session and start fresh", "bold cyan"),
-        ],
-        [
-            ("/settings", "Open common controls", "bold cyan"),
-            ("/config", "Show raw configuration values", "bold cyan"),
-            ("/set <key> <value>", "Set a configuration value", "bold cyan"),
-            ("/unset <key>", "Reset or remove a configuration value", "bold cyan"),
-            ("/setup [step]", "Run setup or jump to a step", "bold cyan"),
-        ],
-        [
-            ("/usage [period]", "Show token usage", "bold cyan"),
-            ("/update", "Update jarv", "bold cyan"),
-            ("/help", "Show this help", "bold cyan"),
-            ("/about", "Show detailed reference information", "bold cyan"),
-            ("exit, quit, /exit, /quit", "Leave heads-up mode", "bold cyan"),
-        ],
+        _command_help_rows(["new", "history", "undo", "redo", "sessions", "archive"]),
+        _command_help_rows(["settings", "config", "set", "unset", "setup"]),
+        _command_help_rows(["usage", "update", "help", "about"])
+        + [("exit, quit, /exit, /quit", "Leave heads-up mode", "bold cyan")],
     ]
     for group_index, rows in enumerate(groups):
         if group_index:

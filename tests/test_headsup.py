@@ -956,6 +956,76 @@ class HeadsupTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(calls, ["/help\nexplain this text"])
 
+    def test_slash_menu_renders_above_input_box_for_partial_command(self):
+        app, test_console, output = self._app(width=80)
+        initialize_text_editor(app.editor, "/se")
+
+        rendered = self._rendered_text(app, test_console, output, width=80, height=20)
+
+        self.assertIn("/settings", rendered)
+        self.assertIn("/setup", rendered)
+        self.assertIn("Open common controls", rendered)
+        self.assertIn("↑↓ select", rendered)
+        # The input box itself still renders beneath the menu.
+        self.assertIn("╭", rendered)
+
+    def test_slash_menu_arrows_drive_highlight_not_prompt_history(self):
+        app, _test_console, _output = self._app()
+        app._prompt_history = ["earlier message"]
+        initialize_text_editor(app.editor, "/se")
+
+        self.assertEqual(app._slash_menu_index, 0)
+        app.on_key("DOWN", 1)
+        self.assertEqual(app._slash_menu_index, 1)
+        app.on_key("UP", 1)
+        self.assertEqual(app._slash_menu_index, 0)
+        # The draft is untouched: arrows moved the menu, not prompt history.
+        self.assertEqual(app.editor["buffer"], "/se")
+        self.assertIsNone(app._prompt_history_index)
+
+    def test_slash_menu_tab_runs_parameterless_command(self):
+        app, _test_console, _output = self._app()
+        handled = []
+        app._handle_query = handled.append
+        initialize_text_editor(app.editor, "/settings")
+
+        app.on_key("TAB", 1)
+
+        self.assertEqual(handled, ["/settings"])
+        self.assertEqual(app.editor["buffer"], "")
+        self.assertEqual(app._prompt_history[-1], "/settings")
+
+    def test_slash_menu_tab_fills_box_for_parameterized_command(self):
+        app, _test_console, _output = self._app()
+        handled = []
+        app._handle_query = handled.append
+        initialize_text_editor(app.editor, "/usage")
+
+        app.on_key("TAB", 1)
+
+        self.assertEqual(handled, [])
+        self.assertEqual(app.editor["buffer"], "/usage ")
+        # The trailing space closes the menu so the user can type arguments.
+        self.assertEqual(app._slash_menu_matches(), [])
+
+    def test_slash_menu_enter_accepts_highlighted_entry(self):
+        app, _test_console, _output = self._app()
+        handled = []
+        app._handle_query = handled.append
+        initialize_text_editor(app.editor, "/sett")
+
+        app.on_key("ENTER", 1)
+
+        self.assertEqual(handled, ["/settings"])
+        self.assertEqual(app.editor["buffer"], "")
+
+    def test_slash_menu_inactive_once_draft_has_arguments(self):
+        app, _test_console, _output = self._app()
+        initialize_text_editor(app.editor, "/set model")
+
+        self.assertIsNone(app._slash_menu_query())
+        self.assertEqual(app._slash_menu_matches(), [])
+
     def test_mouse_wheel_scrolls_transcript_without_prompt_history_navigation(self):
         class FakeLive:
             def __init__(self, *args, **kwargs):
