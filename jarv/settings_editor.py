@@ -199,7 +199,20 @@ def apply_editor_key(
         edit["error"] = ""
         return config, _continue()
 
+    # API key: a single backspace clears the masked stand-in for a stored key.
+    if (
+        key_name == "api_key"
+        and edit.get("placeholder_active")
+        and key in ("BACKSPACE", "DELETE")
+    ):
+        edit["placeholder_active"] = False
+        edit["cleared"] = True
+        edit["discard_armed"] = False
+        edit["error"] = ""
+        return config, _continue(clear_flash=True)
+
     edit["discard_armed"] = False
+    before = str(edit.get("buffer", ""))
     apply_text_editor_key(
         edit,
         key,
@@ -207,6 +220,9 @@ def apply_editor_key(
         content_width=1,
         allow_newlines=False,
     )
+    # Typing over the masked stand-in replaces the stored key.
+    if key_name == "api_key" and str(edit.get("buffer", "")) != before:
+        edit["placeholder_active"] = False
     edit["error"] = ""
     return config, _continue()
 
