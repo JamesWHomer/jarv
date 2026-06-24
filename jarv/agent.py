@@ -337,6 +337,283 @@ def _dispatch_run_command_with_ui(
     )
 
 
+class _TurnRenderer:
+    """Drives the live display and phase bookkeeping for one streamed turn.
+
+    A :func:`run_agent` turn streams a model response that may interleave
+    reasoning, assistant text, and tool calls. This object owns the transient
+    Rich ``Live`` handles (the response-wait spinner, the tool-activity spinner,
+    the inline streaming preview) and the per-turn phase state, and exposes the
+    stream callbacks ``collect_stream_response`` expects. Folding that tangle of
+    ``nonlocal`` flags into one named collaborator lets the turn loop read as a
+    sequence of steps. One instance is reused across the loop's iterations and
+    across stream retries; :meth:`begin_turn` resets the per-turn scratch state
+    while leaving the live handles (which persist between turns) untouched.
+
+    The turn *result* (final ``reply_text``/``tool_calls``/``reasoning_items``)
+    is adopted from the stream collection via :meth:`adopt_stream_result`; the
+    cancel/error checkpoints in ``run_agent`` read it back from here so a turn
+    interrupted mid-stream still persists whatever text streamed so far.
+    """
+
+    def __init__(self, *, ui, interactive, status_items, metadata):
+        self.ui = ui
+        self.interactive = interactive
+        self.status_items = status_items  # shared pending_status_history_items list
+        self.metadata = metadata
+        # Live handles persist across turns; stopped in run_agent's finally.
+        self.spinner_live: Live | None = None
+        self.stream_live: Live | None = None
+        self.wait_indicator: ResponseWaitIndicator | None = None
+        self.tool_indicator: ToolActivityIndicator | None = None
+        self.thought_started = time.perf_counter()
+        self.pending_interactive_command = None
+        self._reset_turn_state()
+
+    def _reset_turn_state(self) -> None:
+        self.reply_text = ""
+        self.tool_calls = []
+        self.reasoning_items = []
+        self.saw_reasoning = False
+        self.got_text = False
+        self.started_tool_positions: dict[str, int] = {}
+        self.started_tool_names: list[str] = []
+        self.tool_started_at: float | None = None
+        self.tool_completed_at: float | None = None
+        self.response_phase_completed = False
+        self.tool_phase_completed = False
+        self.stream_preview: StreamingMarkdownPreview | None = None
+
+    def begin_turn(self, pending_interactive_command) -> None:
+        self.pending_interactive_command = pending_interactive_command
+        self._reset_turn_state()
+
+    def adopt_stream_result(self, stream_result) -> None:
+        self.reply_text = stream_result.reply_text
+        self.tool_calls = stream_result.tool_calls
+        self.reasoning_items = stream_result.reasoning_items
+        self.saw_reasoning = stream_result.saw_reasoning
+        self.got_text = stream_result.got_text
+
+    # -- live handles -------------------------------------------------- #
+    def _refresh_wait_indicator(self) -> None:
+        if self.wait_indicator is not None and self.spinner_live is not None:
+            self.spinner_live.update(self.wait_indicator, refresh=True)
+
+    def _refresh_tool_indicator(self) -> None:
+        if self.tool_indicator is not None and self.spinner_live is not None:
+            self.spinner_live.update(self.tool_indicator, refresh=True)
+
+    def stop_live(self) -> None:
+        if self.spinner_live is not None:
+            self.spinner_live.stop()
+            self.spinner_live = None
+        if self.stream_live is not None:
+            self.stream_live.stop()
+            self.stream_live = None
+
+    def start_response_wait_now(self) -> None:
+        """Show the response-wait spinner immediately (inline mode only).
+
+        Called before the first stream so the spinner is visible during the
+        potentially slow session prep; the UI-driven path starts its wait per
+        turn via :meth:`ensure_response_wait`.
+        """
+        if self.ui is None:
+            self.wait_indicator, self.spinner_live = _start_response_wait_indicator(
+                self.interactive, self.thought_started
+            )
+
+    def ensure_response_wait(self) -> None:
+        if self.spinner_live is None:
+            self.thought_started = time.perf_counter()
+            if self.ui is not None:
+                _ui_call(self.ui, "start_response_wait", self.thought_started)
+            else:
+                self.wait_indicator, self.spinner_live = _start_response_wait_indicator(
+                    self.interactive, self.thought_started
+                )
+
+    # -- phase transitions --------------------------------------------- #
+    def complete_response_phase(self) -> None:
+        if self.response_phase_completed:
+            return
+        if self.spinner_live is not None:
+            self.spinner_live.stop()
+            self.spinner_live = None
+        self.wait_indicator = None
+        self.response_phase_completed = True
+        if self.pending_interactive_command is not None:
+            return
+        status_text = response_start_status(
+            time.perf_counter() - self.thought_started,
+            has_reasoning=self.saw_reasoning,
+        )
+        self.status_items.append(
+            status_history_item(status_text, "response", self.metadata)
+        )
+        if self.ui is not None:
+            _ui_call(self.ui, "complete_response_phase", status_text)
+            return
+        if self.interactive:
+            console.print(thought_complete_indicator(status_text))
+
+    def complete_tool_phase(self) -> None:
+        if self.tool_started_at is None or self.tool_phase_completed:
+            return
+        if self.spinner_live is not None:
+            self.spinner_live.stop()
+            self.spinner_live = None
+        self.tool_phase_completed = True
+        status_text = tool_activity_complete_status(
+            (self.tool_completed_at or time.perf_counter()) - self.tool_started_at,
+            tuple(self.started_tool_names),
+        )
+        self.status_items.append(
+            status_history_item(status_text, "tool", self.metadata)
+        )
+        if self.ui is not None:
+            _ui_call(self.ui, "complete_tool_phase", status_text)
+            return
+        if self.interactive:
+            console.print(tool_complete_indicator(status_text))
+
+    def note_tool_call_started(self, item_id: str, call_id: str, name: str) -> None:
+        keys = {value for value in (item_id, call_id) if value}
+        positions = {
+            self.started_tool_positions[key]
+            for key in keys
+            if key in self.started_tool_positions
+        }
+        if positions:
+            position = min(positions)
+            for key in keys:
+                self.started_tool_positions[key] = position
+            if name and not self.started_tool_names[position]:
+                self.started_tool_names[position] = name
+                if self.tool_indicator is not None:
+                    self.tool_indicator.start_tool_call(str(position), name)
+                    self._refresh_tool_indicator()
+            return
+
+        if self.tool_started_at is None:
+            self.complete_response_phase()
+            if self.stream_preview is not None:
+                self.stream_preview.flush(refresh=False)
+            if self.stream_live is not None:
+                self.stream_live.stop()
+                self.stream_live = None
+            self.tool_started_at = time.perf_counter()
+            if self.ui is not None:
+                _ui_call(self.ui, "start_tool_activity", self.tool_started_at)
+            elif self.interactive:
+                self.tool_indicator = ToolActivityIndicator(self.tool_started_at)
+                self.spinner_live = Live(
+                    self.tool_indicator,
+                    refresh_per_second=4,
+                    console=console,
+                    auto_refresh=True,
+                    transient=True,
+                )
+
+        if not keys:
+            keys = {f"tool_{len(self.started_tool_names)}"}
+        position = len(self.started_tool_names)
+        for key in keys:
+            self.started_tool_positions[key] = position
+        self.started_tool_names.append(name)
+        if self.ui is not None:
+            _ui_call(self.ui, "update_tool_activity", tuple(self.started_tool_names))
+        elif self.tool_indicator is not None:
+            self.tool_indicator.start_tool_call(str(position), name)
+            if self.spinner_live is not None:
+                self.spinner_live.start()
+            self._refresh_tool_indicator()
+
+    # -- stream callbacks ---------------------------------------------- #
+    def on_stream_event(self, event, _result: StreamCollection) -> None:
+        if isinstance(event, TextDelta):
+            if not self.got_text:
+                self.got_text = True
+                self.complete_tool_phase()
+                self.complete_response_phase()
+                if self.pending_interactive_command is not None:
+                    pass
+                elif self.interactive:
+                    _, term_h = terminal_size(console=console)
+                    stream_max_lines = term_h - 2
+                    self.stream_live = InPlaceLive(
+                        TailMarkdown("", stream_max_lines),
+                        console=console,
+                        auto_refresh=False,
+                        transient=True,
+                        vertical_overflow="crop",
+                    )
+                    self.stream_live.start()
+                    self.stream_preview = StreamingMarkdownPreview(
+                        self.stream_live,
+                        stream_max_lines,
+                    )
+            if self.pending_interactive_command is not None:
+                self.reply_text += event.delta
+            elif self.stream_preview is not None:
+                self.stream_preview.append(event.delta)
+            elif self.ui is not None:
+                _ui_call(self.ui, "append_stream_delta", event.delta)
+            else:
+                self.reply_text += event.delta
+        elif isinstance(event, ToolCallStarted):
+            self.note_tool_call_started(event.id, event.call_id, event.name)
+        elif isinstance(event, ToolCallDone):
+            self.note_tool_call_started(event.id, event.call_id, event.name)
+            self.tool_completed_at = time.perf_counter()
+        elif isinstance(event, ReasoningStarted):
+            self.saw_reasoning = True
+            if self.ui is not None:
+                _ui_call(self.ui, "set_response_wait_has_reasoning", True)
+            elif self.wait_indicator is not None:
+                self.wait_indicator.has_reasoning = True
+                self._refresh_wait_indicator()
+        elif isinstance(event, ReasoningDone):
+            self.saw_reasoning = True
+            if self.ui is not None:
+                _ui_call(self.ui, "set_response_wait_has_reasoning", True)
+            elif self.wait_indicator is not None:
+                self.wait_indicator.has_reasoning = True
+                self._refresh_wait_indicator()
+
+    def on_stream_attempt_end(self, result: StreamCollection, _retry_stream: bool) -> None:
+        if result.final_text and self.stream_preview is not None:
+            self.stream_preview.replace(result.final_text)
+        elif result.final_text and self.ui is not None:
+            _ui_call(self.ui, "replace_stream_text", result.final_text)
+        if self.stream_preview is not None:
+            result.reply_text = self.stream_preview.text
+            self.stream_preview.flush(refresh=False)
+        self.reply_text = result.reply_text
+        if self.spinner_live is not None:
+            self.spinner_live.stop()
+            self.spinner_live = None
+        if self.stream_live is not None:
+            self.stream_live.stop()
+            self.stream_live = None
+
+    def on_stream_retry(self) -> None:
+        self._reset_turn_state()
+        self.status_items.clear()
+        self.tool_indicator = None
+        self.wait_indicator = None
+        self.thought_started = time.perf_counter()
+        if self.ui is not None:
+            _ui_call(self.ui, "retry_stream")
+            _ui_call(self.ui, "start_response_wait", self.thought_started)
+        else:
+            self.wait_indicator, self.spinner_live = _start_response_wait_indicator(
+                self.interactive,
+                self.thought_started,
+            )
+
+
 def run_agent(
     query: str,
     config: dict,
@@ -353,8 +630,6 @@ def run_agent(
         heads_up=heads_up,
     )
     interactive = sys.stdout.isatty() and ui is None
-    reply_text = ""
-    tool_calls = []
     history: list = []
     metadata: dict = {}
     session_context = None
@@ -364,43 +639,25 @@ def run_agent(
     retained_store = None
     usage_path = None
     persistence = SessionPersistence(incognito=incognito)
-    wait_indicator: ResponseWaitIndicator | None = None
-    tool_indicator: ToolActivityIndicator | None = None
-    spinner_live: Live | None = None
-    stream_live: Live | None = None
-    reasoning_items = []
     active_tool_call = None
     pending_status_history_items: list[dict] = []
     cancellation_token = CancellationToken()
-    thought_started = time.perf_counter()
+    renderer = _TurnRenderer(
+        ui=ui,
+        interactive=interactive,
+        status_items=pending_status_history_items,
+        metadata=metadata,
+    )
     _ui_call(ui, "bind_cancel_token", cancellation_token)
     _ui_call(ui, "start_turn", query, config)
-    if ui is None:
-        wait_indicator, spinner_live = _start_response_wait_indicator(interactive, thought_started)
-
-    def _refresh_wait_indicator() -> None:
-        if wait_indicator is not None and spinner_live is not None:
-            spinner_live.update(wait_indicator, refresh=True)
-
-    def _refresh_tool_indicator() -> None:
-        if tool_indicator is not None and spinner_live is not None:
-            spinner_live.update(tool_indicator, refresh=True)
-
-    def _stop_live_displays() -> None:
-        nonlocal spinner_live, stream_live
-        if spinner_live is not None:
-            spinner_live.stop()
-            spinner_live = None
-        if stream_live is not None:
-            stream_live.stop()
-            stream_live = None
+    renderer.start_response_wait_now()
 
     def _flush_error_state() -> None:
         if pending_status_history_items:
             history.extend(pending_status_history_items)
             pending_status_history_items.clear()
-        if reply_text and not tool_calls:
-            history.append({"role": "assistant", "content": reply_text, **metadata})
+        if renderer.reply_text and not renderer.tool_calls:
+            history.append({"role": "assistant", "content": renderer.reply_text, **metadata})
         persistence.save()
 
     def _checkpoint_cancelled_turn() -> None:
@@ -413,7 +670,7 @@ def run_agent(
             for item in history
             if isinstance(item, dict) and item.get("type") == "reasoning"
         }
-        for item in reasoning_items:
+        for item in renderer.reasoning_items:
             if str(item.id) not in recorded_reasoning_ids:
                 stored_reasoning = {
                     "type": "reasoning",
@@ -425,8 +682,8 @@ def run_agent(
                     stored_reasoning["provider_content"] = item.provider_content
                 history.append(stored_reasoning)
 
-        if reply_text:
-            history.append({"role": "assistant", "content": reply_text, **metadata})
+        if renderer.reply_text:
+            history.append({"role": "assistant", "content": renderer.reply_text, **metadata})
 
         recorded_call_ids = {
             str(item.get("call_id"))
@@ -437,7 +694,7 @@ def run_agent(
             str(active_tool_call.call_id)
             if active_tool_call is not None else None
         )
-        for item in tool_calls:
+        for item in renderer.tool_calls:
             if str(item.call_id) in recorded_call_ids:
                 continue
             if str(item.call_id) == active_call_id:
@@ -488,6 +745,7 @@ def run_agent(
         persistence.history = history
         web_search_read_nudge_sent = history_has_web_search_read_nudge(history)
         metadata = history_metadata(session_context)
+        renderer.metadata = metadata
 
         artifact_file = artifact_file_for(session_context.history_file)
         artifact_store = load_artifact_store(artifact_file)
@@ -538,133 +796,14 @@ def run_agent(
         pending_interactive_command: PendingRunCommand | None = None
 
         while True:
-            reply_text = ""
-            tool_calls = []
-            reasoning_items = []
-            saw_reasoning = False
-            got_text = False
-            started_tool_positions: dict[str, int] = {}
-            started_tool_names: list[str] = []
-            tool_started_at: float | None = None
-            tool_completed_at: float | None = None
-            response_phase_completed = False
-            tool_phase_completed = False
-            stream_preview: StreamingMarkdownPreview | None = None
-
-            def complete_response_phase() -> None:
-                nonlocal spinner_live, wait_indicator, response_phase_completed
-                if response_phase_completed:
-                    return
-                if spinner_live is not None:
-                    spinner_live.stop()
-                    spinner_live = None
-                wait_indicator = None
-                response_phase_completed = True
-                if pending_interactive_command is not None:
-                    return
-                status_text = response_start_status(
-                    time.perf_counter() - thought_started,
-                    has_reasoning=saw_reasoning,
-                )
-                pending_status_history_items.append(
-                    status_history_item(status_text, "response", metadata)
-                )
-                if ui is not None:
-                    _ui_call(ui, "complete_response_phase", status_text)
-                    return
-                if interactive:
-                    console.print(thought_complete_indicator(status_text))
-
-            def complete_tool_phase() -> None:
-                nonlocal spinner_live, tool_phase_completed
-                if tool_started_at is None or tool_phase_completed:
-                    return
-                if spinner_live is not None:
-                    spinner_live.stop()
-                    spinner_live = None
-                tool_phase_completed = True
-                status_text = tool_activity_complete_status(
-                    (tool_completed_at or time.perf_counter())
-                    - tool_started_at,
-                    tuple(started_tool_names),
-                )
-                pending_status_history_items.append(
-                    status_history_item(status_text, "tool", metadata)
-                )
-                if ui is not None:
-                    _ui_call(ui, "complete_tool_phase", status_text)
-                    return
-                if interactive:
-                    console.print(tool_complete_indicator(status_text))
+            renderer.begin_turn(pending_interactive_command)
 
             def append_status_history_items() -> None:
                 if pending_status_history_items:
                     history.extend(pending_status_history_items)
                     pending_status_history_items.clear()
 
-            def note_tool_call_started(
-                item_id: str,
-                call_id: str,
-                name: str,
-            ) -> None:
-                nonlocal spinner_live, stream_live, tool_indicator, tool_started_at
-                keys = {value for value in (item_id, call_id) if value}
-                positions = {
-                    started_tool_positions[key]
-                    for key in keys
-                    if key in started_tool_positions
-                }
-                if positions:
-                    position = min(positions)
-                    for key in keys:
-                        started_tool_positions[key] = position
-                    if name and not started_tool_names[position]:
-                        started_tool_names[position] = name
-                        if tool_indicator is not None:
-                            tool_indicator.start_tool_call(str(position), name)
-                            _refresh_tool_indicator()
-                    return
-
-                if tool_started_at is None:
-                    complete_response_phase()
-                    if stream_preview is not None:
-                        stream_preview.flush(refresh=False)
-                    if stream_live is not None:
-                        stream_live.stop()
-                        stream_live = None
-                    tool_started_at = time.perf_counter()
-                    if ui is not None:
-                        _ui_call(ui, "start_tool_activity", tool_started_at)
-                    elif interactive:
-                        tool_indicator = ToolActivityIndicator(tool_started_at)
-                        spinner_live = Live(
-                            tool_indicator,
-                            refresh_per_second=4,
-                            console=console,
-                            auto_refresh=True,
-                            transient=True,
-                        )
-
-                if not keys:
-                    keys = {f"tool_{len(started_tool_names)}"}
-                position = len(started_tool_names)
-                for key in keys:
-                    started_tool_positions[key] = position
-                started_tool_names.append(name)
-                if ui is not None:
-                    _ui_call(ui, "update_tool_activity", tuple(started_tool_names))
-                elif tool_indicator is not None:
-                    tool_indicator.start_tool_call(str(position), name)
-                    if spinner_live is not None:
-                        spinner_live.start()
-                    _refresh_tool_indicator()
-
-            if spinner_live is None:
-                thought_started = time.perf_counter()
-                if ui is not None:
-                    _ui_call(ui, "start_response_wait", thought_started)
-                else:
-                    wait_indicator, spinner_live = _start_response_wait_indicator(interactive, thought_started)
+            renderer.ensure_response_wait()
 
             active_tools = [] if pending_interactive_command is not None else kwargs.get("tools", [])
 
@@ -685,129 +824,13 @@ def run_agent(
                     cancellation_token=cancellation_token,
                 )
 
-            def on_stream_event(event, _result: StreamCollection) -> None:
-                nonlocal reply_text, got_text, saw_reasoning, stream_live, stream_preview
-                nonlocal tool_completed_at
-                if isinstance(event, TextDelta):
-                    if not got_text:
-                        got_text = True
-                        complete_tool_phase()
-                        complete_response_phase()
-                        if pending_interactive_command is not None:
-                            pass
-                        elif interactive:
-                            _, term_h = terminal_size(console=console)
-                            stream_max_lines = term_h - 2
-                            stream_live = InPlaceLive(
-                                TailMarkdown("", stream_max_lines),
-                                console=console,
-                                auto_refresh=False,
-                                transient=True,
-                                vertical_overflow="crop",
-                            )
-                            stream_live.start()
-                            stream_preview = StreamingMarkdownPreview(
-                                stream_live,
-                                stream_max_lines,
-                            )
-                    if pending_interactive_command is not None:
-                        reply_text += event.delta
-                    elif stream_preview is not None:
-                        stream_preview.append(event.delta)
-                    elif ui is not None:
-                        _ui_call(ui, "append_stream_delta", event.delta)
-                    else:
-                        reply_text += event.delta
-                elif isinstance(event, ToolCallStarted):
-                    note_tool_call_started(
-                        event.id,
-                        event.call_id,
-                        event.name,
-                    )
-                elif isinstance(event, ToolCallDone):
-                    note_tool_call_started(
-                        event.id,
-                        event.call_id,
-                        event.name,
-                    )
-                    tool_completed_at = time.perf_counter()
-                elif isinstance(event, ReasoningStarted):
-                    saw_reasoning = True
-                    if ui is not None:
-                        _ui_call(ui, "set_response_wait_has_reasoning", True)
-                    elif wait_indicator is not None:
-                        wait_indicator.has_reasoning = True
-                        _refresh_wait_indicator()
-                elif isinstance(event, ReasoningDone):
-                    saw_reasoning = True
-                    if ui is not None:
-                        _ui_call(ui, "set_response_wait_has_reasoning", True)
-                    elif wait_indicator is not None:
-                        wait_indicator.has_reasoning = True
-                        _refresh_wait_indicator()
-
-            def on_stream_attempt_end(
-                result: StreamCollection,
-                _retry_stream: bool,
-            ) -> None:
-                nonlocal reply_text, spinner_live, stream_live, stream_preview
-                if result.final_text and stream_preview is not None:
-                    stream_preview.replace(result.final_text)
-                elif result.final_text and ui is not None:
-                    _ui_call(ui, "replace_stream_text", result.final_text)
-                if stream_preview is not None:
-                    result.reply_text = stream_preview.text
-                    stream_preview.flush(refresh=False)
-                reply_text = result.reply_text
-                if spinner_live is not None:
-                    spinner_live.stop()
-                    spinner_live = None
-                if stream_live is not None:
-                    stream_live.stop()
-                    stream_live = None
-
-            def on_stream_retry() -> None:
-                nonlocal reply_text, tool_calls, reasoning_items, saw_reasoning
-                nonlocal got_text, started_tool_positions, started_tool_names
-                nonlocal tool_started_at, tool_completed_at, spinner_live
-                nonlocal response_phase_completed, tool_phase_completed
-                nonlocal stream_preview, tool_indicator, wait_indicator, thought_started
-                reply_text = ""
-                tool_calls = []
-                reasoning_items = []
-                saw_reasoning = False
-                got_text = False
-                started_tool_positions = {}
-                started_tool_names = []
-                tool_started_at = None
-                tool_completed_at = None
-                response_phase_completed = False
-                tool_phase_completed = False
-                pending_status_history_items.clear()
-                stream_preview = None
-                tool_indicator = None
-                wait_indicator = None
-                thought_started = time.perf_counter()
-                if ui is not None:
-                    _ui_call(ui, "retry_stream")
-                    _ui_call(ui, "start_response_wait", thought_started)
-                else:
-                    wait_indicator, spinner_live = _start_response_wait_indicator(
-                        interactive,
-                        thought_started,
-                    )
-
             stream_result = collect_stream_response(
                 make_stream,
-                on_event=on_stream_event,
-                on_attempt_end=on_stream_attempt_end,
-                on_retry=on_stream_retry,
+                on_event=renderer.on_stream_event,
+                on_attempt_end=renderer.on_stream_attempt_end,
+                on_retry=renderer.on_stream_retry,
             )
-            reply_text = stream_result.reply_text
-            tool_calls = stream_result.tool_calls
-            reasoning_items = stream_result.reasoning_items
-            saw_reasoning = stream_result.saw_reasoning
-            got_text = stream_result.got_text
+            renderer.adopt_stream_result(stream_result)
             final_response = stream_result.final_response
             if not incognito:
                 from .provider_catalog import configured_service_tier
@@ -821,23 +844,25 @@ def run_agent(
                     provider=str(config.get("provider") or "openai"),
                     requested_service_tier=configured_service_tier(config),
                     context_breakdown=_ctx_breakdown,
-                    output_text=stream_usage_output_text(reply_text, tool_calls),
+                    output_text=stream_usage_output_text(
+                        renderer.reply_text, renderer.tool_calls
+                    ),
                 )
-            complete_tool_phase()
-            complete_response_phase()
-            if got_text:
+            renderer.complete_tool_phase()
+            renderer.complete_response_phase()
+            if renderer.got_text:
                 if pending_interactive_command is not None:
                     pass
                 elif ui is not None:
-                    _ui_call(ui, "finish_assistant_message", reply_text)
+                    _ui_call(ui, "finish_assistant_message", renderer.reply_text)
                 elif interactive:
-                    console.print(Markdown(flatten_headings(reply_text)))
+                    console.print(Markdown(flatten_headings(renderer.reply_text)))
                 else:
-                    print(reply_text)
+                    print(renderer.reply_text)
 
             if pending_interactive_command is not None:
                 append_status_history_items()
-                if tool_calls:
+                if renderer.tool_calls:
                     kwargs["input"] = kwargs["input"] + [{
                         "role": "user",
                         "content": (
@@ -849,7 +874,7 @@ def run_agent(
                         ),
                     }]
                     continue
-                terminal_reply = reply_text
+                terminal_reply = renderer.reply_text
                 kwargs["input"] = kwargs["input"] + [{
                     "role": "assistant",
                     "content": terminal_reply,
@@ -907,7 +932,7 @@ def run_agent(
                     })
                 continue
 
-            if tool_calls:
+            if renderer.tool_calls:
                 from .session_render import tool_call_card_from_args
 
                 if get_setting(config, "tool_call_display") == "print":
@@ -969,13 +994,13 @@ def run_agent(
                     on_tool_error=_on_tool_error,
                 )
 
-                active_tool_call = tool_calls[0] if tool_calls else None
+                active_tool_call = renderer.tool_calls[0] if renderer.tool_calls else None
 
                 def _execute_tools(_new_input, append_tool_result):
                     nonlocal active_tool_call, web_search_read_nudge_sent
-                    active_tool_call = tool_calls[0] if tool_calls else None
+                    active_tool_call = renderer.tool_calls[0] if renderer.tool_calls else None
                     result = execute_tool_calls(
-                        tool_calls,
+                        renderer.tool_calls,
                         node=root_node,
                         store=artifact_store,
                         client=client,
@@ -1004,7 +1029,7 @@ def run_agent(
                 pending_interactive_command = _exec_result.pending_command
             else:
                 append_status_history_items()
-                history.append({"role": "assistant", "content": reply_text, **metadata})
+                history.append({"role": "assistant", "content": renderer.reply_text, **metadata})
                 persistence.save_turn()
                 _print_agent_usage_if_enabled(
                     config,
@@ -1041,6 +1066,6 @@ def run_agent(
     finally:
         sigint_cancel_scope.__exit__(None, None, None)
         _ui_call(ui, "unbind_cancel_token")
-        _stop_live_displays()
+        renderer.stop_live()
 
 
