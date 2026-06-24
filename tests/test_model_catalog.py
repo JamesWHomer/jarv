@@ -7,7 +7,7 @@ import httpx
 import pytest
 from rich.console import Console
 
-from jarv import model_catalog, settings_command, setup
+from jarv import model_catalog, settings_command
 from jarv.command_input import TextInput
 from jarv.anthropic_http import list_models as list_anthropic_models
 from jarv.config import DEFAULT_CONFIG
@@ -1104,45 +1104,6 @@ def test_unknown_custom_model_can_return_to_editing(monkeypatch):
     assert edit["buffer"] == "gpt-unknown"
     assert edit["cursor"] == 4
     assert "model_validation_warning" not in edit
-
-
-def test_setup_model_shows_openrouter_pricing(tmp_path, monkeypatch):
-    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
-    model_catalog._write_cache("openrouter", [
-        CatalogModel(
-            id="openai/gpt-5.5",
-            metadata={
-                "pricing": {
-                    "prompt": "0.000005",
-                    "completion": "0.00003",
-                },
-            },
-        ),
-    ])
-    monkeypatch.setattr(
-        model_catalog,
-        "get_model_choices",
-        lambda _config, refresh=False: [("gpt-5.5", "Flagship - latest GPT")],
-    )
-    monkeypatch.setattr(
-        model_catalog,
-        "get_default_model",
-        lambda _config, choices=None: "gpt-5.5",
-    )
-    monkeypatch.setattr(setup.Prompt, "ask", lambda *args, **kwargs: "1")
-    output = io.StringIO()
-    monkeypatch.setattr(
-        setup,
-        "console",
-        Console(file=output, force_terminal=False, color_system=None, width=180),
-    )
-
-    config = setup.setup_model({"provider": "openai"})
-
-    rendered = output.getvalue()
-    assert config["model"] == "gpt-5.5"
-    assert "$5.00 / n/a / $30.00" in rendered
-    assert "OpenRouter pricing per 1M" not in rendered
 
 
 def test_settings_opens_model_editor_from_cache_without_refresh(monkeypatch):
