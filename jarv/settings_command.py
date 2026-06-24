@@ -101,13 +101,18 @@ def _settings_set_service_tier(config: dict, tier: str) -> None:
 
 
 def _settings_has_api_key(config: dict) -> tuple[bool, str]:
-    from .provider import LOCAL_PROVIDERS, PROVIDERS, resolve_api_key
+    from .provider import LOCAL_PROVIDERS, PROVIDERS
+    from .provider_auth import api_key_source
 
     provider = config.get("provider", "openai")
     if provider in LOCAL_PROVIDERS:
         return True, "not needed"
-    if resolve_api_key(config):
+    source = api_key_source(config)
+    if source == "config":
         return True, "configured"
+    if source == "env":
+        env_key = PROVIDERS.get(provider, {}).get("env_key") or "env"
+        return True, f"from {env_key}"
     label = PROVIDERS.get(provider, {}).get("label", provider)
     return False, f"missing for {label}"
 
@@ -345,11 +350,23 @@ def _settings_begin_edit(row: dict, config: dict) -> dict:
 
     if key == "api_key":
         from .provider import LOCAL_PROVIDERS
+        from .provider_auth import api_key_source
 
         provider = config.get("provider", "openai")
         readonly = provider in LOCAL_PROVIDERS
-        edit = {"row": row, "secret": True, "readonly": readonly, "error": ""}
+        source = api_key_source(config)
+        edit = {
+            "row": row,
+            "secret": True,
+            "readonly": readonly,
+            "error": "",
+            "key_source": source,
+        }
         initialize_text_editor(edit, "")
+        # A key already stored in config is shown as a masked stand-in that a
+        # single backspace clears; an env key is overridable but has nothing to
+        # mask, so no placeholder is armed.
+        edit["placeholder_active"] = (not readonly) and source == "config"
         edit["discard_armed"] = False
         return edit
 
@@ -576,8 +593,19 @@ def _settings_editor_lines(
         if key_url:
             intro.append(Text(_clip_text(f"  Get a key at {key_url}", inner_width), style="cyan"))
         env_key = PROVIDERS.get(provider, {}).get("env_key") or "provider env var"
-        intro.append(Text(_clip_text(f"  provider: {provider_label}   env: {env_key}", inner_width), style="dim"))
-        intro.append(Text(_clip_text("  type a new key, or type clear to remove the stored key", inner_width), style="dim"))
+        source = edit.get("key_source")
+        if source == "config" and edit.get("placeholder_active"):
+            intro.append(Text(_clip_text("  A key is already saved for this provider (shown as *****).", inner_width), style="green"))
+            intro.append(Text(_clip_text("  Backspace clears it, or type a new key to replace it.", inner_width), style="dim"))
+        elif source == "config" and edit.get("cleared") and not edit.get("buffer"):
+            intro.append(Text(_clip_text("  The saved key will be removed when you save.", inner_width), style="yellow"))
+            intro.append(Text(_clip_text("  Type a new key to keep one instead.", inner_width), style="dim"))
+        elif source == "env":
+            intro.append(Text(_clip_text(f"  A key is set via {env_key} in your environment.", inner_width), style="green"))
+            intro.append(Text(_clip_text("  Type a key here to override it for this provider.", inner_width), style="dim"))
+        else:
+            intro.append(Text(_clip_text(f"  provider: {provider_label}   env: {env_key}", inner_width), style="dim"))
+            intro.append(Text(_clip_text("  type a new key, or type clear to remove the stored key", inner_width), style="dim"))
         choice_items = []
         prompt = "API key"
     elif row["kind"] == "int":
@@ -604,20 +632,27 @@ def _settings_editor_lines(
             style=prompt_style,
         )
         remaining = max(1, inner_width - len(line.plain))
-        masked = bool(
-            edit.get("secret")
-            and str(edit["buffer"]).lower() != "clear"
-        )
-        line.append_text(
-            render_single_line(
-                edit,
-                remaining,
-                masked=masked,
-                text_style="green" if input_active else "dim",
-                cursor_style="reverse" if input_active else "dim",
-                cursor_visible=not bool(edit.get("model_validation_warning")),
+        if edit.get("placeholder_active") and not edit.get("buffer"):
+            # Masked stand-in for a key already stored in config; one backspace
+            # clears the whole thing.
+            stars = "*" * min(5, max(1, remaining - 1))
+            line.append(stars, style="green" if input_active else "dim")
+            line.append(" ", style="reverse" if input_active else "dim")
+        else:
+            masked = bool(
+                edit.get("secret")
+                and str(edit["buffer"]).lower() != "clear"
             )
-        )
+            line.append_text(
+                render_single_line(
+                    edit,
+                    remaining,
+                    masked=masked,
+                    text_style="green" if input_active else "dim",
+                    cursor_style="reverse" if input_active else "dim",
+                    cursor_visible=not bool(edit.get("model_validation_warning")),
+                )
+            )
         tail.append(line)
 
     if edit.get("error"):
@@ -757,6 +792,16 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
     if key == "api_key":
         provider = config.get("provider", "openai")
         if not raw:
+            if edit.get("cleared"):
+                # User backspaced over the masked stand-in for a stored key.
+                api_keys = config.get("api_keys")
+                if isinstance(api_keys, dict):
+                    api_keys.pop(provider, None)
+                config["api_key"] = ""
+                if not _settings_save_validated(config):
+                    edit["error"] = "Could not clear API key."
+                    return config, edit["error"], "red", False
+                return config, "cleared stored API key", "cyan", True
             return config, "API key unchanged", "dim", True
         if raw.lower() == "clear":
             api_keys = config.get("api_keys")

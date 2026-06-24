@@ -1,9 +1,23 @@
 import io
+from types import SimpleNamespace
 
 from rich.console import Console
 
-from jarv import command_input, settings_command
+from jarv import command_input, settings_command, settings_editor
 from jarv.config import DEFAULT_CONFIG
+
+
+_DUMMY_CATALOG = SimpleNamespace(
+    request=lambda *a, **k: None,
+    cancel_pending=lambda: None,
+)
+
+
+def _api_key_row(config):
+    return next(
+        row for row in settings_command._settings_rows(config)
+        if row["key"] == "api_key"
+    )
 
 
 def _system_prompt_row(config):
@@ -235,6 +249,108 @@ def test_api_key_compact_editor_masks_value_but_not_clear():
     edit["cursor"] = len(edit["buffer"])
     clear = settings_command._settings_editor_lines(edit, config, 80)
     assert "clear" in "\n".join(line.plain for line in clear)
+
+
+def test_api_key_editor_masks_stored_config_key_as_placeholder():
+    config = {**DEFAULT_CONFIG, "provider": "openai", "api_keys": {"openai": "sk-secretvalue"}}
+    row = _api_key_row(config)
+    edit = settings_command._settings_begin_edit(row, config)
+
+    assert edit["key_source"] == "config"
+    assert edit["placeholder_active"] is True
+
+    text = "\n".join(
+        line.plain for line in settings_command._settings_editor_lines(edit, config, 80)
+    )
+    assert "*****" in text
+    assert "sk-secretvalue" not in text
+    assert "already saved" in text
+
+
+def test_api_key_backspace_clears_stored_config_key(monkeypatch):
+    saved = []
+    monkeypatch.setattr(settings_command, "save_config", lambda cfg: saved.append(dict(cfg)))
+    config = {**DEFAULT_CONFIG, "provider": "openai", "api_keys": {"openai": "sk-secretvalue"}}
+    row = _api_key_row(config)
+    edit = settings_command._settings_begin_edit(row, config)
+
+    config, outcome = settings_editor.apply_editor_key(
+        edit, config, "BACKSPACE", 1, catalog=_DUMMY_CATALOG, inner_width=80
+    )
+    assert outcome.kind == "continue"
+    assert edit["placeholder_active"] is False
+    assert edit["cleared"] is True
+
+    # The masked stand-in is gone; the field now reads as empty.
+    text = "\n".join(
+        line.plain for line in settings_command._settings_editor_lines(edit, config, 80)
+    )
+    assert "*****" not in text
+
+    cfg, message, style, done = settings_command._settings_commit_edit(edit, config)
+    assert done is True
+    assert message == "cleared stored API key"
+    assert "openai" not in cfg.get("api_keys", {})
+    assert saved
+
+
+def test_api_key_enter_without_touching_keeps_stored_key():
+    config = {**DEFAULT_CONFIG, "provider": "openai", "api_keys": {"openai": "sk-secretvalue"}}
+    row = _api_key_row(config)
+    edit = settings_command._settings_begin_edit(row, config)
+
+    cfg, message, _style, done = settings_command._settings_commit_edit(edit, config)
+    assert done is True
+    assert message == "API key unchanged"
+    assert cfg["api_keys"]["openai"] == "sk-secretvalue"
+
+
+def test_api_key_typing_replaces_stored_config_placeholder(monkeypatch):
+    saved = []
+    monkeypatch.setattr(settings_command, "save_config", lambda cfg: saved.append(dict(cfg)))
+    config = {**DEFAULT_CONFIG, "provider": "openai", "api_keys": {"openai": "sk-oldvalue"}}
+    row = _api_key_row(config)
+    edit = settings_command._settings_begin_edit(row, config)
+
+    config, _outcome = settings_editor.apply_editor_key(
+        edit, config, "x", 1, catalog=_DUMMY_CATALOG, inner_width=80
+    )
+    assert edit["placeholder_active"] is False
+    assert edit["buffer"] == "x"
+
+    edit["buffer"] = "sk-brandnewreplacementkey00"
+    edit["cursor"] = len(edit["buffer"])
+    cfg, message, _style, done = settings_command._settings_commit_edit(edit, config)
+    assert done is True
+    assert message == "saved API key"
+    assert cfg["api_keys"]["openai"] == "sk-brandnewreplacementkey00"
+
+
+def test_api_key_editor_announces_env_key(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-fromenv-1234567890")
+    config = {**DEFAULT_CONFIG, "provider": "openai", "api_keys": {}, "api_key": ""}
+    row = _api_key_row(config)
+    edit = settings_command._settings_begin_edit(row, config)
+
+    assert edit["key_source"] == "env"
+    assert edit["placeholder_active"] is False
+
+    text = "\n".join(
+        line.plain for line in settings_command._settings_editor_lines(edit, config, 80)
+    )
+    assert "OPENAI_API_KEY" in text
+    assert "override" in text
+    assert "*****" not in text
+
+
+def test_api_key_value_text_distinguishes_env_from_config(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-fromenv-1234567890")
+    env_config = {**DEFAULT_CONFIG, "provider": "openai", "api_keys": {}, "api_key": ""}
+    row = _api_key_row(env_config)
+    assert settings_command._settings_value_text(row, env_config).plain == "from OPENAI_API_KEY"
+
+    config_config = {**DEFAULT_CONFIG, "provider": "openai", "api_keys": {"openai": "sk-stored"}}
+    assert settings_command._settings_value_text(row, config_config).plain == "configured"
 
 
 def test_read_key_maps_windows_ctrl_s(monkeypatch):
