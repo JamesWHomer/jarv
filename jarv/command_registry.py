@@ -12,25 +12,28 @@ class CommandMeta:
     takes_rest: bool
     needs_nudge: bool = False
     mutates_config: bool = False
+    summary: str = ""
+    arg_hint: str = ""
+    menu: bool = True
 
 
 COMMANDS: dict[str, CommandMeta] = {
-    "setup": CommandMeta(True, needs_nudge=False, mutates_config=True),
-    "help": CommandMeta(False),
-    "about": CommandMeta(False),
-    "update": CommandMeta(False, needs_nudge=True),
-    "new": CommandMeta(False, needs_nudge=True),
-    "archive": CommandMeta(False, needs_nudge=True),
-    "session": CommandMeta(True, needs_nudge=True),
-    "sessions": CommandMeta(True, needs_nudge=True),
-    "history": CommandMeta(False, needs_nudge=True),
-    "usage": CommandMeta(True),
-    "set": CommandMeta(True, needs_nudge=True, mutates_config=True),
-    "unset": CommandMeta(True, needs_nudge=True, mutates_config=True),
-    "config": CommandMeta(False),
-    "settings": CommandMeta(False, needs_nudge=True, mutates_config=True),
-    "undo": CommandMeta(True, needs_nudge=True),
-    "redo": CommandMeta(True, needs_nudge=True),
+    "setup": CommandMeta(True, mutates_config=True, summary="Run setup or jump to a step", arg_hint="[step]"),
+    "help": CommandMeta(False, summary="Show this help"),
+    "about": CommandMeta(False, summary="Show detailed reference information"),
+    "update": CommandMeta(False, needs_nudge=True, summary="Update jarv"),
+    "new": CommandMeta(False, needs_nudge=True, summary="Start a fresh session"),
+    "archive": CommandMeta(False, needs_nudge=True, summary="Archive this session and start fresh"),
+    "session": CommandMeta(True, needs_nudge=True, summary="List sessions", menu=False),
+    "sessions": CommandMeta(True, needs_nudge=True, summary="List sessions"),
+    "history": CommandMeta(False, needs_nudge=True, summary="Show recent conversation history"),
+    "usage": CommandMeta(True, summary="Show token usage", arg_hint="[period]"),
+    "set": CommandMeta(True, needs_nudge=True, mutates_config=True, summary="Set a configuration value", arg_hint="<key> <value>"),
+    "unset": CommandMeta(True, needs_nudge=True, mutates_config=True, summary="Reset or remove a configuration value", arg_hint="<key>"),
+    "config": CommandMeta(False, summary="Show raw configuration values"),
+    "settings": CommandMeta(False, needs_nudge=True, mutates_config=True, summary="Open common controls"),
+    "undo": CommandMeta(True, needs_nudge=True, summary="Unsend the last n exchanges", arg_hint="[n]"),
+    "redo": CommandMeta(True, needs_nudge=True, summary="Restore undone exchanges", arg_hint="[n]"),
 }
 
 CONFIG_MUTATING_COMMANDS = frozenset(

@@ -27,6 +27,7 @@ from .command_input import (
     requeue_key,
     strip_sgr_mouse_sequences,
 )
+from .command_menu import MenuEntry, filter_entries, menu_entries
 from .command_registry import parse_command_alias
 from .agent_ui import (
     _THINKING_FRAMES,
@@ -55,6 +56,7 @@ from .session_render import (
 from .text_editor import apply_text_editor_key, initialize_text_editor, render_visual_line_window
 from .tui_app import AltScreenApp
 from .tui_frame import (
+    FrameLayout,
     assemble_body,
     build_frame,
     compose_title,
@@ -82,6 +84,10 @@ _FULLSCREEN_SLASH_COMMANDS = frozenset({
     "/setup",
     "/usage",
 })
+
+# Most rows the slash-command autocomplete menu shows at once before it windows
+# around the selection and appends a "+N more" tail.
+_SLASH_MENU_MAX_ROWS = 6
 
 _COMMAND_CONFIRM_YES = frozenset({"1", "c", "cmd", "command", "run", "y", "yes"})
 _SESSION_SWITCHING_SLASH_COMMANDS = frozenset({
@@ -487,6 +493,7 @@ class HeadsupApp(AltScreenApp):
         )
         self._prompt_history_index: int | None = None
         self._prompt_history_draft = ""
+        self._slash_menu_index = 0
         self._prompt_notice: RenderableType | None = None
         self._usage_status_cache: tuple[float, int, object, str | None, Text] | None = None
 
@@ -548,6 +555,12 @@ class HeadsupApp(AltScreenApp):
             if self._answer_request is not None:
                 self._complete_answer()
                 return
+            menu_matches = self._slash_menu_matches()
+            if menu_matches:
+                # Enter mirrors Tab while the menu is open, so a partial draft
+                # like "/sett" never runs as an unknown command.
+                self._slash_menu_accept(menu_matches[self._slash_menu_index])
+                return
             raw_query = self._pastes.expand(str(self.editor.get("buffer", "")))
             query = raw_query.strip("\r\n")
             if not query.strip():
@@ -589,6 +602,22 @@ class HeadsupApp(AltScreenApp):
         if key == "MOUSE_WHEEL_PAGEDOWN":
             self._scroll_transcript(-5 * repeat)
             return
+        if key in {"UP", "DOWN", "TAB"}:
+            # The autocomplete menu owns these keys whenever it is open, taking
+            # priority over prompt-history navigation (a "/se" draft is a single
+            # line, so history nav would otherwise capture the arrows).
+            menu_matches = self._slash_menu_matches()
+            if menu_matches:
+                if key == "TAB":
+                    self._slash_menu_accept(menu_matches[self._slash_menu_index])
+                elif key == "UP":
+                    self._slash_menu_index = max(0, self._slash_menu_index - repeat)
+                else:
+                    self._slash_menu_index = min(
+                        len(menu_matches) - 1, self._slash_menu_index + repeat
+                    )
+                self.refresh()
+                return
         if (
             key in {"UP", "DOWN"}
             and self._answer_request is None
@@ -606,6 +635,8 @@ class HeadsupApp(AltScreenApp):
             self.scroll_offset = 0
             self._clear_prompt_notice()
             self._exit_armed = False
+            # Re-typing always re-highlights the top match.
+            self._slash_menu_index = 0
 
     def on_tick(self) -> None:
         now = time.perf_counter()
@@ -637,8 +668,10 @@ class HeadsupApp(AltScreenApp):
 
         with self.lock:
             prompt_lines = self._prompt_lines(inner_width, max_lines=layout.max_prompt_rows)
+            menu_lines = self._slash_menu_lines(inner_width, layout)  # [] when inactive
+            prompt_block = menu_lines + prompt_lines
             footer = self._footer_line(inner_width)
-            rows = _transcript_rows_for(layout.body_height, len(prompt_lines))
+            rows = _transcript_rows_for(layout.body_height, len(prompt_block))
             transcript = self._transcript_lines(inner_width)
             visible, self.scroll_offset = window_transcript(transcript, rows, self.scroll_offset)
             show_intro = (
@@ -668,7 +701,7 @@ class HeadsupApp(AltScreenApp):
         if intro is not None:
             visible = intro
 
-        parts = assemble_body(visible, footer, prompt_lines, layout.body_height, rows)
+        parts = assemble_body(visible, footer, prompt_block, layout.body_height, rows)
         subtitle = self._panel_subtitle(inner_width)
         return build_frame(
             parts,
@@ -1390,6 +1423,147 @@ class HeadsupApp(AltScreenApp):
         initialize_text_editor(self.editor, value)
         return True
 
+    # ------------------------------------------------------------------ #
+    # Slash-command autocomplete menu (derived state above the input box)
+    # ------------------------------------------------------------------ #
+    def _slash_menu_query(self) -> str | None:
+        """The command token being typed, or None when the menu is inactive.
+
+        Active means the draft is a single line starting with ``/`` with no
+        whitespace yet (still typing the command name) and we are not answering
+        an agent question. Returns the text after the leading ``/``.
+        """
+        if self._answer_request is not None:
+            return None
+        buffer = str(self.editor.get("buffer", ""))
+        if not buffer.startswith("/"):
+            return None
+        rest = buffer[1:]
+        if any(ch.isspace() for ch in rest):
+            return None
+        return rest
+
+    def _slash_menu_matches(self) -> list[MenuEntry]:
+        """Visible menu entries for the current draft (clamps the highlight)."""
+        query = self._slash_menu_query()
+        if query is None:
+            self._slash_menu_index = 0
+            return []
+        matches = filter_entries(menu_entries(), query)
+        if not matches:
+            self._slash_menu_index = 0
+            return []
+        self._slash_menu_index = max(0, min(self._slash_menu_index, len(matches) - 1))
+        return matches
+
+    def _slash_menu_accept(self, entry: MenuEntry) -> None:
+        self._slash_menu_index = 0
+        if not entry.takes_rest:
+            # No parameters possible: run it now, exactly as submitting the
+            # command text would.
+            self._record_prompt_history(entry.display)
+            initialize_text_editor(self.editor, "")
+            self._pastes.clear()
+            self._clear_prompt_notice()
+            self._exit_armed = False
+            if self._handle_query(entry.display) == "exit":
+                self.stop()
+            return
+        # Parameters possible: drop "/name " into the box so the user can finish
+        # the line. The trailing space makes the menu close (query becomes None).
+        initialize_text_editor(self.editor, entry.display + " ")
+        self._clear_prompt_notice()
+        self._exit_armed = False
+        self.refresh()
+
+    def _slash_menu_lines(self, width: int, layout: FrameLayout) -> list[Text]:
+        matches = self._slash_menu_matches()
+        if not matches:
+            return []
+        query = self._slash_menu_query() or ""
+        selected = self._slash_menu_index
+
+        prefix_width = 3  # " › " / "   "
+        gap = 2
+        labels = [
+            entry.display + (f" {entry.arg_hint}" if entry.arg_hint else "")
+            for entry in matches
+        ]
+        name_col = max((cell_len(label) for label in labels), default=0)
+        name_col = max(1, min(name_col, max(1, width - prefix_width - gap - 8)))
+
+        available = max(1, min(_SLASH_MENU_MAX_ROWS, max(1, layout.body_height - 3)))
+        total = len(matches)
+        if total <= available:
+            start, count, show_more = 0, total, False
+        else:
+            count = available - 1
+            show_more = True
+            start = max(0, min(selected - count + 1, total - count))
+            if selected < start:
+                start = selected
+
+        lines = [
+            self._slash_menu_row(
+                matches[index],
+                index == selected,
+                query,
+                name_col,
+                prefix_width,
+                gap,
+                width,
+            )
+            for index in range(start, start + count)
+        ]
+        if show_more:
+            hidden = total - count
+            lines.append(
+                Text(f"   +{hidden} more", style="dim", no_wrap=True, overflow="crop")
+            )
+        return lines
+
+    def _slash_menu_row(
+        self,
+        entry: MenuEntry,
+        selected: bool,
+        query: str,
+        name_col: int,
+        prefix_width: int,
+        gap: int,
+        width: int,
+    ) -> Text:
+        line = Text(no_wrap=True, overflow="crop")
+        line.append(" › " if selected else "   ", style="bold cyan" if selected else "")
+
+        base_style = "bold bright_white" if selected else "cyan"
+        accent_style = "bold bright_cyan" if selected else "bold cyan"
+        display = entry.display
+        needle = query.lower()
+        pos = entry.name.lower().find(needle) if needle else -1
+        if pos >= 0:
+            # Offset by 1 for the leading "/" in display so the matched portion
+            # of the command name is accented.
+            a_start, a_end = 1 + pos, 1 + pos + len(needle)
+            line.append(display[:a_start], style=base_style)
+            line.append(display[a_start:a_end], style=accent_style)
+            line.append(display[a_end:], style=base_style)
+        else:
+            line.append(display, style=base_style)
+
+        label_len = cell_len(display)
+        if entry.arg_hint:
+            line.append(" ")
+            line.append(entry.arg_hint, style="dim italic")
+            label_len += 1 + cell_len(entry.arg_hint)
+
+        line.append(" " * max(1, name_col + gap - label_len))
+        summary_avail = max(0, width - prefix_width - name_col - gap)
+        line.append(
+            clip_text(entry.summary, summary_avail),
+            style="white" if selected else "dim",
+        )
+        return line
+
     def _scroll_transcript(self, delta: int) -> None:
         self.scroll_offset = max(0, self.scroll_offset + delta)
 
@@ -1490,6 +1664,7 @@ class HeadsupApp(AltScreenApp):
             answering = self._answer_request is not None
             cancelling = self._cancel_token is not None
             exit_armed = self._exit_armed
+            menu_active = bool(self._slash_menu_matches())
 
         if notice is not None:
             lines = rendered_text_lines(notice, width)
@@ -1498,6 +1673,14 @@ class HeadsupApp(AltScreenApp):
             footer.no_wrap = True
             footer.overflow = "crop"
             return footer
+
+        if menu_active:
+            return Text(
+                clip_text("↑↓ select   Tab/Enter accept   Esc close", width),
+                style="dim italic",
+                no_wrap=True,
+                overflow="crop",
+            )
 
         if exit_armed:
             value = "Esc/Ctrl+C exit   Any other key continue"
