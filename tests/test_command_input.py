@@ -532,10 +532,44 @@ def test_read_key_with_repeats_batches_pasted_lines_without_bracketed_paste(monk
     monkeypatch.setattr(command_input, "_read_key", lambda text_mode=False: keys.pop(0))
     monkeypatch.setattr(command_input, "_key_available", lambda: bool(keys))
 
+    # A multi-line paste coalesces into one token; its trailing newline is part
+    # of the paste, so it does NOT leak out as a submit.
     assert command_input._read_key_with_repeats(
         text_mode=True,
         batch_text=True,
     ) == (command_input.TextInput("first\nsecond"), 1)
+    assert not command_input._PENDING_KEYS
+    command_input._PENDING_KEYS.clear()
+
+
+def test_read_key_with_repeats_keeps_blank_lines_in_pasted_block(monkeypatch):
+    command_input._PENDING_KEYS.clear()
+    # "para1\n\npara2" -- the blank line between paragraphs must survive.
+    keys = [*"para1", "ENTER", "ENTER", *"para2"]
+
+    monkeypatch.setattr(command_input, "_read_key", lambda text_mode=False: keys.pop(0))
+    monkeypatch.setattr(command_input, "_key_available", lambda: bool(keys))
+
+    assert command_input._read_key_with_repeats(
+        text_mode=True,
+        batch_text=True,
+    ) == (command_input.TextInput("para1\n\npara2"), 1)
+    assert not command_input._PENDING_KEYS
+    command_input._PENDING_KEYS.clear()
+
+
+def test_read_key_with_repeats_submits_single_typed_line(monkeypatch):
+    command_input._PENDING_KEYS.clear()
+    keys = [*"hello", "ENTER"]
+
+    monkeypatch.setattr(command_input, "_read_key", lambda text_mode=False: keys.pop(0))
+    monkeypatch.setattr(command_input, "_key_available", lambda: bool(keys))
+
+    # A single typed line keeps ENTER as a submit (no embedded newline).
+    assert command_input._read_key_with_repeats(
+        text_mode=True,
+        batch_text=True,
+    ) == (command_input.TextInput("hello"), 1)
     assert list(command_input._PENDING_KEYS) == ["ENTER"]
     command_input._PENDING_KEYS.clear()
 
@@ -715,6 +749,33 @@ def test_read_editable_line_ctrl_c_clears_before_exiting():
     )
 
     assert result == "hi"
+
+
+def test_read_editable_line_collapses_and_expands_multiline_paste():
+    keys = iter([command_input.TextInput("first\nsecond\nthird"), *" go", "ENTER"])
+    captured: list[str] = []
+
+    result = command_input.read_editable_line(
+        "jarv> ",
+        read_key=lambda: next(keys),
+        write=captured.append,
+    )
+
+    # The buffer carries the short marker; the submitted line restores the paste.
+    assert "[Pasted text #1 +3 lines] go" in "".join(captured)
+    assert result == "first\nsecond\nthird go"
+
+
+def test_read_editable_line_inserts_single_line_paste_inline():
+    keys = iter([command_input.TextInput("hello world"), "ENTER"])
+
+    result = command_input.read_editable_line(
+        "jarv> ",
+        read_key=lambda: next(keys),
+        write=lambda _text: None,
+    )
+
+    assert result == "hello world"
 
 
 def test_read_editable_line_ctrl_c_exits_when_empty():

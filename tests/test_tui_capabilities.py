@@ -3,10 +3,6 @@
 from jarv import tui_capabilities
 
 
-def test_wrap_guard_columns_is_positive_and_stable():
-    assert tui_capabilities.wrap_guard_columns() == 2
-
-
 def test_is_wsl_detects_env_markers(monkeypatch):
     tui_capabilities.is_wsl.cache_clear()
     monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")

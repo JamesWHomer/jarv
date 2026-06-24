@@ -7,7 +7,8 @@ import sys
 import time
 from collections import deque
 from collections.abc import Iterable
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass, field
 
 from rich.cells import cell_len, get_character_cell_size
 
@@ -48,10 +49,53 @@ _WINDOWS_MOUSE_WHEELED = 0x0004
 # (resize/focus/mouse-move). Mirrors the POSIX read returning ``None`` on a size
 # change: the loop treats it as "no key this iteration" and repaints if needed.
 _NO_ACTIONABLE_KEY = "RESIZE"
+# Upper bound on characters folded into a single batched-text token. A paste can
+# be tens of thousands of characters (Windows delivers it key-by-key, not as a
+# bracketed-paste chunk), and it must coalesce into ONE token or it fragments
+# into many; the bound only guards against a terminal that never stops reporting
+# input as available.
+_TEXT_BATCH_LIMIT = 100_000
 
 
 class TextInput(str):
     """A queued group of printable characters from an editable input."""
+
+
+@dataclass
+class PasteRegistry:
+    """Collapse bulky multi-line pastes into short inline placeholders.
+
+    A paste that spans more than one line is replaced in the editable buffer
+    with a ``[Pasted text #N +M lines]`` marker so the input stays readable,
+    and the original text is restored by :meth:`expand` when the line is
+    submitted. Single-line pastes are left untouched (``collapse`` returns
+    ``None``) so short snippets stay visible and editable.
+    """
+
+    _pastes: dict[str, str] = field(default_factory=dict)
+    _count: int = 0
+
+    def collapse(self, text: str) -> str | None:
+        """Return a placeholder marker for a multi-line paste, else ``None``."""
+        line_count = len(text.splitlines())
+        if line_count < 2:
+            return None
+        self._count += 1
+        marker = f"[Pasted text #{self._count} +{line_count} lines]"
+        self._pastes[marker] = text
+        return marker
+
+    def expand(self, text: str) -> str:
+        """Restore any placeholder markers in ``text`` to their pasted content."""
+        for marker, original in self._pastes.items():
+            if marker in text:
+                text = text.replace(marker, original)
+        return text
+
+    def clear(self) -> None:
+        """Forget every stored paste (call when the draft is sent or cleared)."""
+        self._pastes.clear()
+        self._count = 0
 
 
 @contextmanager
@@ -599,18 +643,28 @@ def _read_key_with_repeats(
         and text_mode
         and _is_batched_text_key(key)
     ):
+        # Coalesce a burst of printable characters (a paste, or held/queued
+        # typing) into one TextInput so the view redraws once. Windows hands a
+        # paste to a console-record reader key-by-key -- including a carriage
+        # return per line break -- so newlines are folded into the token rather
+        # than leaking out as separate ENTER submits. A newline only ends the
+        # burst as a submit when the burst is a single typed line; a multi-line
+        # paste keeps its content (trailing newline dropped) and stays in the
+        # editor so the user can keep editing, mirroring bracketed paste.
         inserted = [key]
-        while len(inserted) < max_count and _key_available():
+        while len(inserted) < _TEXT_BATCH_LIMIT and _key_available():
             next_key = read_key()
             if _is_batched_text_key(next_key):
                 inserted.append(next_key)
                 continue
-            if next_key == "ENTER" and _key_available():
-                after_enter = read_key()
-                if _is_batched_text_key(after_enter):
-                    inserted.extend(("\n", after_enter))
+            if next_key == "ENTER":
+                if _key_available():
+                    inserted.append("\n")
                     continue
-                _PENDING_KEYS.appendleft(after_enter)
+                if "\n" not in inserted:
+                    # Single typed line: hand ENTER back so the caller submits.
+                    _PENDING_KEYS.appendleft("ENTER")
+                break
             _PENDING_KEYS.appendleft(next_key)
             break
         text = strip_sgr_mouse_sequences("".join(inserted))
@@ -847,88 +901,115 @@ def read_editable_line(
     key_available=None,
     write=None,
 ) -> str:
-    """Read one editable line with cross-platform raw key handling."""
+    """Read one editable line with cross-platform raw key handling.
+
+    Multi-line pastes are collapsed to a ``[Pasted text #N +M lines]`` marker
+    (this view is a single line) and restored when the line is submitted.
+    """
+    manage_terminal = read_key is None
     if read_key is None:
-        read_key = lambda: _read_key(text_mode=True)
+        # Batch a paste into one TextInput. POSIX delivers it as a bracketed
+        # chunk; Windows delivers it key-by-key, so the batcher folds the
+        # newlines together instead of letting the first one submit the line.
+        read_key = lambda: _read_key_with_repeats(text_mode=True, batch_text=True)[0]
         key_available = key_available or _key_available
     else:
         key_available = key_available or (lambda: False)
     write = write or sys.stdout.write
+    pastes = PasteRegistry()
     chars = list(initial.replace("\r", " ").replace("\n", " "))
     cursor = len(chars)
     pending: deque[str] = deque()
 
-    _render_editable_line(
-        prompt,
-        "".join(chars),
-        cursor,
-        text_style=text_style,
-        write=write,
-    )
-    try:
-        while True:
-            try:
-                key = pending.popleft() if pending else read_key()
-            except KeyboardInterrupt:
-                if chars:
-                    chars.clear()
-                    cursor = 0
-                    _render_editable_line(
-                        prompt,
-                        "",
-                        cursor,
-                        text_style=text_style,
-                        write=write,
-                    )
-                    continue
-                raise
+    def insert(text: str) -> None:
+        nonlocal cursor
+        printable = [ch for ch in text if ch >= " "]
+        chars[cursor:cursor] = printable
+        cursor += len(printable)
 
-            if key == "ENTER":
-                write("\n")
-                return "".join(chars)
-            if key == "LEFT":
-                cursor = max(0, cursor - 1)
-            elif key == "RIGHT":
-                cursor = min(len(chars), cursor + 1)
-            elif key == "HOME":
-                cursor = 0
-            elif key == "END":
-                cursor = len(chars)
-            elif key == "BACKSPACE":
-                if cursor:
-                    del chars[cursor - 1]
-                    cursor -= 1
-            elif key == "DELETE":
-                if cursor < len(chars):
-                    del chars[cursor]
-            elif key == "\x04":
-                if not chars:
-                    raise EOFError
-                if cursor < len(chars):
-                    del chars[cursor]
-            elif key in ("RESIZE", "OTHER", "ESC"):
-                continue
-            elif len(key) == 1 and key >= " ":
-                inserted = [key]
-                while key_available():
-                    next_key = read_key()
-                    if len(next_key) == 1 and next_key >= " ":
-                        inserted.append(next_key)
+    # On POSIX, ask the terminal to wrap pastes so they arrive as one chunk.
+    # Windows isn't put in VT-input mode here, so it can't emit the markers (and
+    # the enable sequence could echo as raw text); the batching reader coalesces
+    # the key-by-key paste there instead.
+    enable_paste_wrap = manage_terminal and sys.platform != "win32"
+    paste_terminal = bracketed_paste() if enable_paste_wrap else nullcontext()
+    with paste_terminal:
+        _render_editable_line(
+            prompt,
+            "".join(chars),
+            cursor,
+            text_style=text_style,
+            write=write,
+        )
+        try:
+            while True:
+                try:
+                    key = pending.popleft() if pending else read_key()
+                except KeyboardInterrupt:
+                    if chars:
+                        chars.clear()
+                        cursor = 0
+                        pastes.clear()
+                        _render_editable_line(
+                            prompt,
+                            "",
+                            cursor,
+                            text_style=text_style,
+                            write=write,
+                        )
                         continue
-                    pending.append(next_key)
-                    break
-                chars[cursor:cursor] = inserted
-                cursor += len(inserted)
-            else:
-                continue
+                    raise
 
-            _render_editable_line(
-                prompt,
-                "".join(chars),
-                cursor,
-                text_style=text_style,
-                write=write,
-            )
-    finally:
-        sys.stdout.flush()
+                if key == "ENTER":
+                    write("\n")
+                    return pastes.expand("".join(chars))
+                if key == "LEFT":
+                    cursor = max(0, cursor - 1)
+                elif key == "RIGHT":
+                    cursor = min(len(chars), cursor + 1)
+                elif key == "HOME":
+                    cursor = 0
+                elif key == "END":
+                    cursor = len(chars)
+                elif key == "BACKSPACE":
+                    if cursor:
+                        del chars[cursor - 1]
+                        cursor -= 1
+                elif key == "DELETE":
+                    if cursor < len(chars):
+                        del chars[cursor]
+                elif key == "\x04":
+                    if not chars:
+                        raise EOFError
+                    if cursor < len(chars):
+                        del chars[cursor]
+                elif key in ("RESIZE", "OTHER", "ESC"):
+                    continue
+                elif isinstance(key, TextInput):
+                    text = strip_sgr_mouse_sequences(str(key))
+                    marker = pastes.collapse(text)
+                    insert(marker if marker is not None else text.replace("\n", " "))
+                elif len(key) == 1 and key >= " ":
+                    inserted = [key]
+                    while key_available():
+                        next_key = read_key()
+                        if len(next_key) == 1 and next_key >= " ":
+                            inserted.append(next_key)
+                            continue
+                        pending.append(next_key)
+                        break
+                    chars[cursor:cursor] = inserted
+                    cursor += len(inserted)
+                else:
+                    continue
+
+                _render_editable_line(
+                    prompt,
+                    "".join(chars),
+                    cursor,
+                    text_style=text_style,
+                    write=write,
+                )
+        finally:
+            sys.stdout.flush()
 
