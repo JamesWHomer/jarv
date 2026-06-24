@@ -248,6 +248,21 @@ class HeadsupAgentUI:
         )
         self._tool_status_index = None
 
+    def begin_assistant_message(self) -> None:
+        """Start a fresh streamed message for a new turn within the same run.
+
+        ``start_turn`` runs once per ``run_agent`` call, but a single run can
+        stream several assistant messages across tool rounds. Without resetting
+        the stream cursor here, a later turn's text would upsert onto the prior
+        message's entry index and jump above the tool cards in between. Clearing
+        the cursor makes the next flush append a new entry in order.
+        """
+        self._flush_stream()
+        self._stream_text = ""
+        self._stream_index = None
+        self._stream_dirty = False
+        self._last_stream_refresh_at = None
+
     def append_stream_delta(self, delta: str) -> None:
         self._stream_text += delta
         self._stream_dirty = True

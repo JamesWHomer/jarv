@@ -252,6 +252,10 @@ class PendingRunCommand:
     call_id: str
     retained_store: RetainedOutputStore | None = None
     unregister_cancel: object | None = None
+    # The single stored ``function_call_output`` for this command, rewritten in
+    # place as the interaction proceeds so history holds one collapsed record.
+    output_item: dict | None = None
+    input_markers: list = field(default_factory=list)
 
 
 @dataclass

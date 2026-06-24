@@ -1043,11 +1043,18 @@ class AgentInputTests(unittest.TestCase):
                 patch("jarv.agent.sys.stdout", new=io.StringIO()),
             ):
                 result = run_agent("run menu", DEFAULT_CONFIG, client=object())
+            saved_items = load_history(history_file)
             saved_text = "\n".join(
-                item.get("content", "")
-                for item in load_history(history_file)
+                str(item.get("content", ""))
+                for item in saved_items
                 if isinstance(item, dict)
             )
+            command_outputs = [
+                str(item.get("output", ""))
+                for item in saved_items
+                if isinstance(item, dict)
+                and item.get("type") == "function_call_output"
+            ]
 
         self.assertIsNone(result.error)
         self.assertGreater(tool_counts[0], 0)
@@ -1057,10 +1064,16 @@ class AgentInputTests(unittest.TestCase):
         self.assertIn("[interactive command exited]", final_prompt["value"])
         self.assertIn("choice=3 name=Ada", final_prompt["value"])
         self.assertNotIn("1. One", final_prompt["value"])
-        self.assertIn("[terminal input sent]", saved_text)
-        self.assertIn("3", saved_text)
-        self.assertIn("Ada", saved_text)
-        self.assertIn("choice=3 name=Ada", saved_text)
+        # The whole exchange collapses into one run_command record; the repeated
+        # waiting prompts and "[terminal input sent]" chat messages are gone.
+        self.assertNotIn("[terminal input sent]", saved_text)
+        self.assertNotIn("Reply with exactly one line", saved_text)
+        self.assertEqual(len(command_outputs), 1)
+        collapsed = command_outputs[0]
+        self.assertIn("stdin> 3", collapsed)
+        self.assertIn("stdin> Ada", collapsed)
+        self.assertIn("choice=3 name=Ada", collapsed)
+        self.assertNotIn("Reply with exactly one line", collapsed)
         rendered = console_output.getvalue()
         self.assertIn("stdin> 3", rendered)
         self.assertNotIn("3<WAIT>", rendered)
