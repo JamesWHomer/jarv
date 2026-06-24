@@ -14,7 +14,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .command_input import _key_available, _read_key_with_repeats, mouse_capture
-from .display import console, jarv_panel, refresh_on_resize, terminal_size
+from .display import console, jarv_panel, terminal_size
 from .tui_app import AltScreenApp
 from .history import (
     detect_terminal,
@@ -304,7 +304,7 @@ class SessionBrowserScreen(AltScreenApp):
                 transient=False,
                 vertical_overflow="crop",
             )
-            with live, refresh_on_resize(live, on_change=self._on_resize_signal), mouse_capture():
+            with live, mouse_capture():
                 self.live = live
                 yield live
 

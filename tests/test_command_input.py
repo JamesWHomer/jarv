@@ -210,13 +210,19 @@ def test_windows_console_mouse_wheel_record_returns_mouse_token(monkeypatch):
         def GetStdHandle(self, handle):
             return handle
 
-        def ReadConsoleInputW(self, _handle, record, _count, read):
+        def _fill(self, record, read):
             target = record._obj
             target.EventType = 0x0002
             target.MouseEvent.dwEventFlags = 0x0004
             target.MouseEvent.dwButtonState = 120 << 16
             read._obj.value = 1
             return True
+
+        def PeekConsoleInputW(self, _handle, record, _count, read):
+            return self._fill(record, read)
+
+        def ReadConsoleInputW(self, _handle, record, _count, read):
+            return self._fill(record, read)
 
     monkeypatch.setattr(command_input.sys, "platform", "win32")
     monkeypatch.delenv("WT_SESSION", raising=False)
@@ -242,7 +248,7 @@ def test_windows_terminal_console_key_record_returns_arrow(monkeypatch):
         def GetStdHandle(self, handle):
             return handle
 
-        def ReadConsoleInputW(self, _handle, record, _count, read):
+        def _fill(self, record, read):
             target = record._obj
             target.EventType = 0x0001
             target.KeyEvent.bKeyDown = True
@@ -251,6 +257,12 @@ def test_windows_terminal_console_key_record_returns_arrow(monkeypatch):
             target.KeyEvent.UnicodeChar = "\x00"
             read._obj.value = 1
             return True
+
+        def PeekConsoleInputW(self, _handle, record, _count, read):
+            return self._fill(record, read)
+
+        def ReadConsoleInputW(self, _handle, record, _count, read):
+            return self._fill(record, read)
 
     monkeypatch.setattr(command_input.sys, "platform", "win32")
     monkeypatch.setenv("WT_SESSION", "test")
@@ -267,6 +279,127 @@ def test_windows_terminal_console_key_record_returns_arrow(monkeypatch):
         )
     finally:
         command_input._WINDOWS_MOUSE_CAPTURE_DEPTH = 0
+
+
+def _make_console_records_kernel32(records):
+    """FakeKernel32 backed by a queue of record dicts.
+
+    ``PeekConsoleInputW`` reports the head without consuming it; ``ReadConsoleInputW``
+    pops it. Both report ``0`` events read when the queue is empty (never blocking),
+    mirroring the real Win32 calls the freeze fix relies on.
+    """
+    pending = deque(records)
+
+    def _apply(target, rec):
+        target.EventType = rec["type"]
+        if rec["type"] == 0x0001:
+            target.KeyEvent.bKeyDown = rec.get("down", True)
+            target.KeyEvent.wRepeatCount = rec.get("repeat", 1)
+            target.KeyEvent.wVirtualKeyCode = rec.get("vk", 0)
+            target.KeyEvent.UnicodeChar = rec.get("char", "\x00")
+        elif rec["type"] == 0x0002:
+            target.MouseEvent.dwEventFlags = rec.get("flags", 0)
+            target.MouseEvent.dwButtonState = rec.get("button", 0)
+
+    class FakeKernel32:
+        def GetStdHandle(self, handle):
+            return handle
+
+        def PeekConsoleInputW(self, _handle, record, _count, read):
+            if not pending:
+                read._obj.value = 0
+                return True
+            _apply(record._obj, pending[0])
+            read._obj.value = 1
+            return True
+
+        def ReadConsoleInputW(self, _handle, record, _count, read):
+            if not pending:
+                read._obj.value = 0
+                return True
+            _apply(record._obj, pending.popleft())
+            read._obj.value = 1
+            return True
+
+    return FakeKernel32(), pending
+
+
+# Win32 console EventType / mouse-flag values used to script the records above.
+_FOCUS_RECORD = {"type": 0x0010}
+_MOUSE_MOVE_RECORD = {"type": 0x0002, "flags": 0x0001, "button": 0}
+_KEY_DOWN_A = {"type": 0x0001, "down": True, "vk": 0x41, "char": "a"}
+
+
+def test_windows_actionable_pending_drains_non_keys_then_reads_key(monkeypatch):
+    import ctypes
+
+    kernel32, pending = _make_console_records_kernel32(
+        [_FOCUS_RECORD, _MOUSE_MOVE_RECORD, _KEY_DOWN_A]
+    )
+    monkeypatch.setattr(command_input.sys, "platform", "win32")
+    monkeypatch.setattr(ctypes, "windll", SimpleNamespace(kernel32=kernel32), raising=False)
+    command_input._PENDING_KEYS.clear()
+    command_input._WINDOWS_MOUSE_CAPTURE_DEPTH = 1
+
+    try:
+        # Focus + mouse-move are drained; the key-down stays queued at the head.
+        assert command_input._windows_actionable_key_pending() is True
+        assert len(pending) == 1
+        # The read consumes only the key and returns it without ever blocking.
+        assert (
+            command_input._read_windows_console_input_key(
+                text_mode=True,
+                translate_mouse_wheel=False,
+            )
+            == "a"
+        )
+        assert not pending
+    finally:
+        command_input._WINDOWS_MOUSE_CAPTURE_DEPTH = 0
+        command_input._PENDING_KEYS.clear()
+
+
+def test_windows_read_returns_sentinel_when_only_non_key_events(monkeypatch):
+    import ctypes
+
+    kernel32, pending = _make_console_records_kernel32([_FOCUS_RECORD])
+    monkeypatch.setattr(command_input.sys, "platform", "win32")
+    monkeypatch.setattr(ctypes, "windll", SimpleNamespace(kernel32=kernel32), raising=False)
+    command_input._PENDING_KEYS.clear()
+    command_input._WINDOWS_MOUSE_CAPTURE_DEPTH = 1
+
+    try:
+        assert command_input._windows_actionable_key_pending() is False
+        assert not pending  # focus record drained, buffer left clean
+        # Nothing actionable pending -> the read returns the resize sentinel
+        # instead of blocking on the empty console buffer.
+        assert (
+            command_input._read_windows_console_input_key(
+                text_mode=True,
+                translate_mouse_wheel=False,
+            )
+            == command_input._NO_ACTIONABLE_KEY
+        )
+    finally:
+        command_input._WINDOWS_MOUSE_CAPTURE_DEPTH = 0
+        command_input._PENDING_KEYS.clear()
+
+
+def test_key_available_peeks_when_mouse_capture_active(monkeypatch):
+    import ctypes
+
+    kernel32, pending = _make_console_records_kernel32([_FOCUS_RECORD, _KEY_DOWN_A])
+    monkeypatch.setattr(command_input.sys, "platform", "win32")
+    monkeypatch.setattr(ctypes, "windll", SimpleNamespace(kernel32=kernel32), raising=False)
+    command_input._PENDING_KEYS.clear()
+    command_input._WINDOWS_MOUSE_CAPTURE_DEPTH = 1
+
+    try:
+        assert command_input._key_available() is True
+        assert len(pending) == 1  # focus drained, key remains for the read
+    finally:
+        command_input._WINDOWS_MOUSE_CAPTURE_DEPTH = 0
+        command_input._PENDING_KEYS.clear()
 
 
 def test_windows_sgr_mouse_motion_sequence_is_ignored(monkeypatch):

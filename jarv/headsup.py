@@ -39,7 +39,6 @@ from .config import get_setting
 from .display import (
     console,
     flatten_headings,
-    refresh_on_resize,
     rendered_text_lines,
     terminal_size,
     tool_card,
@@ -440,7 +439,6 @@ class HeadsupApp(AltScreenApp):
             live_factory=self._build_live,
             read_key_fn=self._read_headsup_key,
             key_available_fn=self._headsup_key_available,
-            refresh_on_resize_fn=self._headsup_refresh_on_resize,
         )
         self.config = dict(config)
         self.client = client
@@ -515,9 +513,6 @@ class HeadsupApp(AltScreenApp):
 
     def _headsup_key_available(self) -> bool:
         return _key_available()
-
-    def _headsup_refresh_on_resize(self, live, *, on_change):
-        return refresh_on_resize(live, on_change=on_change)
 
     # ------------------------------------------------------------------ #
     # Lifecycle (single-threaded loop owned by AltScreenApp)
@@ -1010,22 +1005,15 @@ class HeadsupApp(AltScreenApp):
                 self.add_notice(notice)
 
     def _run_interactive_slash(self, command: str, rest: list[str]) -> None:
-        live = self.live
-        with self._preserve_alt_screen():
-            if live is not None:
-                live.stop()
-            try:
-                self.config, self.client = self.handle_slash(
-                    command,
-                    rest,
-                    self.config,
-                    self.client,
-                    self.args,
-                    True,
-                )
-            finally:
-                if live is not None:
-                    live.start(refresh=True)
+        with self.suspended():
+            self.config, self.client = self.handle_slash(
+                command,
+                rest,
+                self.config,
+                self.client,
+                self.args,
+                True,
+            )
         self._sync_after_slash(command, None)
 
     def _run_agent_query(self, query: str) -> None:
@@ -1216,21 +1204,6 @@ class HeadsupApp(AltScreenApp):
             if not self._refresh_suspended:
                 # Slash output runs on the loop thread; repaint in place now.
                 self.paint_now()
-
-    @contextmanager
-    def _preserve_alt_screen(self):
-        original = self.console.set_alt_screen
-
-        def set_alt_screen(enable: bool = True) -> bool:
-            if enable is False:
-                return True
-            return original(enable)
-
-        self.console.set_alt_screen = set_alt_screen
-        try:
-            yield
-        finally:
-            self.console.set_alt_screen = original
 
     def _initial_notice_entry(self) -> TranscriptEntry:
         return TranscriptEntry(

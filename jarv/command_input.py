@@ -41,6 +41,13 @@ _WINDOWS_ENABLE_LINE_INPUT = 0x0002
 _WINDOWS_ENABLE_MOUSE_INPUT = 0x0010
 _WINDOWS_ENABLE_QUICK_EDIT_MODE = 0x0040
 _WINDOWS_ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+_WINDOWS_KEY_EVENT = 0x0001
+_WINDOWS_MOUSE_EVENT = 0x0002
+_WINDOWS_MOUSE_WHEELED = 0x0004
+# Returned by the input readers when only non-key console events were pending
+# (resize/focus/mouse-move). Mirrors the POSIX read returning ``None`` on a size
+# change: the loop treats it as "no key this iteration" and repaints if needed.
+_NO_ACTIONABLE_KEY = "RESIZE"
 
 
 class TextInput(str):
@@ -188,6 +195,14 @@ def _read_until_sequence(sequence: str) -> str:
 def _windows_key_available() -> bool:
     if sys.platform != "win32":
         return False
+    if _WINDOWS_MOUSE_CAPTURE_DEPTH:
+        # With mouse capture on, keys are read via ReadConsoleInputW, so judge
+        # availability at that same Win32 layer (PeekConsoleInput) rather than
+        # the CRT ``kbhit`` -- the two can disagree on focus/mouse/resize events.
+        pending = _windows_actionable_key_pending()
+        if pending is not None:
+            return pending
+        # Console-input API unusable: fall back to the CRT layer below.
     try:
         import msvcrt
 
@@ -282,11 +297,16 @@ def _signed_high_word(value: int) -> int:
     return high - 0x10000 if high & 0x8000 else high
 
 
-def _read_windows_console_input_key(
-    *,
-    text_mode: bool,
-    translate_mouse_wheel: bool,
-) -> str | None:
+def _windows_console_input_reader():
+    """Build the Win32 console-input access objects, or return ``None``.
+
+    Returns ``(kernel32, handle, ctypes, wintypes, InputRecord)`` while a captured
+    full-screen view is active on Windows and ctypes is available; otherwise
+    ``None`` so callers fall back to the msvcrt path (or report "no key"). The
+    record structs are rebuilt per call -- cheap, and it keeps the types bound to
+    whatever ``ctypes`` is live (tests swap it), which is how the old inline reader
+    behaved too.
+    """
     if sys.platform != "win32" or not _WINDOWS_MOUSE_CAPTURE_DEPTH:
         return None
 
@@ -294,6 +314,11 @@ def _read_windows_console_input_key(
         import ctypes
         from ctypes import wintypes
     except ImportError:
+        return None
+
+    try:
+        kernel32 = ctypes.windll.kernel32
+    except AttributeError:
         return None
 
     class Coord(ctypes.Structure):
@@ -330,21 +355,96 @@ def _read_windows_console_input_key(
             ("Event", EventUnion),
         ]
 
-    try:
-        kernel32 = ctypes.windll.kernel32
-    except AttributeError:
-        return None
-
     handle = kernel32.GetStdHandle(-10)
+    return kernel32, handle, ctypes, wintypes, InputRecord
+
+
+def _windows_keydown_actionable(virtual_key: int, char: str) -> bool:
+    """Whether a key-down record would yield a key for the loop to handle."""
+    if char == "\x03":  # Ctrl-C: actionable (the read path raises KeyboardInterrupt)
+        return True
+    try:
+        return (
+            _windows_key_from_virtual_key(virtual_key, char, text_mode=True)
+            is not None
+        )
+    except KeyboardInterrupt:  # pragma: no cover - guarded by the \x03 check above
+        return True
+
+
+def _windows_record_is_actionable(record) -> bool:
+    """True only for a key-down or mouse-wheel record (something to act on)."""
+    if record.EventType == _WINDOWS_KEY_EVENT:
+        key = record.KeyEvent
+        if not key.bKeyDown:
+            return False
+        return _windows_keydown_actionable(int(key.wVirtualKeyCode), key.UnicodeChar)
+    if record.EventType == _WINDOWS_MOUSE_EVENT:
+        mouse = record.MouseEvent
+        if int(mouse.dwEventFlags) != _WINDOWS_MOUSE_WHEELED:
+            return False
+        return _signed_high_word(int(mouse.dwButtonState)) != 0
+    return False
+
+
+def _windows_actionable_key_pending() -> bool | None:
+    """Report whether a key/wheel waits, draining non-actionable records first.
+
+    Peeks the head of the Win32 console input buffer one record at a time. Returns
+    ``True`` as soon as a key-down or mouse-wheel record is at the head, ``False``
+    when only non-actionable records (key-up, mouse-move, FOCUS/MENU/
+    WINDOW_BUFFER_SIZE) are queued -- those are consumed, since they would
+    otherwise make the captured read block waiting for a real key -- and ``None``
+    when the console-input API is unusable (e.g. redirected stdin), so callers can
+    fall back to the CRT ``kbhit`` / ``getwch`` path.
+    """
+    reader = _windows_console_input_reader()
+    if reader is None:
+        return None
+    kernel32, handle, ctypes, wintypes, InputRecord = reader
     record = InputRecord()
     read = wintypes.DWORD()
     while True:
+        if not kernel32.PeekConsoleInputW(handle, ctypes.byref(record), 1, ctypes.byref(read)):
+            return None
+        if not read.value:
+            return False
+        if _windows_record_is_actionable(record):
+            return True
+        # Non-actionable head record: consume it and look at the next one.
         if not kernel32.ReadConsoleInputW(handle, ctypes.byref(record), 1, ctypes.byref(read)):
             return None
         if not read.value:
-            return None
+            return False
 
-        if record.EventType == 0x0001:
+
+def _read_windows_console_input_key(
+    *,
+    text_mode: bool,
+    translate_mouse_wheel: bool,
+) -> str | None:
+    reader = _windows_console_input_reader()
+    if reader is None:
+        return None
+    kernel32, handle, ctypes, wintypes, InputRecord = reader
+
+    record = InputRecord()
+    read = wintypes.DWORD()
+    while True:
+        # Never block: only read once an actionable key/wheel is at the head.
+        pending = _windows_actionable_key_pending()
+        if pending is None:
+            return None  # console API unusable -> fall back to msvcrt getwch
+        if not pending:
+            # Nothing actionable -> hand back the resize sentinel so the loop keeps
+            # spinning and repaints (mirrors the POSIX read returning ``None``).
+            return _NO_ACTIONABLE_KEY
+        if not kernel32.ReadConsoleInputW(handle, ctypes.byref(record), 1, ctypes.byref(read)):
+            return None
+        if not read.value:
+            return _NO_ACTIONABLE_KEY
+
+        if record.EventType == _WINDOWS_KEY_EVENT:
             key = record.KeyEvent
             if not key.bKeyDown:
                 continue
@@ -359,9 +459,9 @@ def _read_windows_console_input_key(
                 _PENDING_KEYS.append(token)
             return token
 
-        if record.EventType == 0x0002:
+        if record.EventType == _WINDOWS_MOUSE_EVENT:
             mouse = record.MouseEvent
-            if int(mouse.dwEventFlags) != 0x0004:
+            if int(mouse.dwEventFlags) != _WINDOWS_MOUSE_WHEELED:
                 continue
             delta = _signed_high_word(int(mouse.dwButtonState))
             if delta == 0:
@@ -441,6 +541,10 @@ def _key_available() -> bool:
         return True
     try:
         if sys.platform == "win32":
+            if _WINDOWS_MOUSE_CAPTURE_DEPTH:
+                pending = _windows_actionable_key_pending()
+                if pending is not None:
+                    return pending
             import msvcrt
             return bool(msvcrt.kbhit())
         import select

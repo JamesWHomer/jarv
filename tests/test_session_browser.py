@@ -69,7 +69,6 @@ def _run_sessions_with_keys(monkeypatch, keys):
     monkeypatch.setattr(session_browser, "console", test_console)
     monkeypatch.setattr(session_browser, "terminal_size", lambda *, console: (100, 24))
     monkeypatch.setattr(session_browser, "Live", FakeLive)
-    monkeypatch.setattr(session_browser, "refresh_on_resize", noop_context)
     monkeypatch.setattr(session_browser, "mouse_capture", noop_context)
     monkeypatch.setattr(session_browser, "detect_terminal", lambda: ("term-1", "Terminal 1"))
     monkeypatch.setattr(session_browser, "load_sessions", lambda: data)

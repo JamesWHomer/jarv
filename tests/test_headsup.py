@@ -2,7 +2,6 @@ import io
 import threading
 import time
 import unittest
-from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -17,11 +16,6 @@ from jarv.cancellation import CancellationToken, TurnCancelled
 from jarv.command_input import TextInput
 from jarv.headsup import HeadsupAgentUI, HeadsupApp
 from jarv.text_editor import initialize_text_editor
-
-
-@contextmanager
-def noop_context(*_args, **_kwargs):
-    yield
 
 
 class HeadsupTests(unittest.TestCase):
@@ -849,7 +843,6 @@ class HeadsupTests(unittest.TestCase):
 
         with (
             patch("jarv.headsup.Live", FakeLive),
-            patch("jarv.headsup.refresh_on_resize", noop_context),
             patch("jarv.headsup.disable_mouse_capture") as disable_mouse_capture,
             patch("jarv.headsup._key_available", lambda: bool(keys)),
             patch("jarv.headsup._read_key_with_repeats", side_effect=lambda **kwargs: keys.pop(0)),
@@ -944,7 +937,6 @@ class HeadsupTests(unittest.TestCase):
 
         with (
             patch("jarv.headsup.Live", FakeLive),
-            patch("jarv.headsup.refresh_on_resize", noop_context),
             patch("jarv.headsup.disable_mouse_capture") as disable_mouse_capture,
             patch("jarv.headsup._key_available", lambda: bool(keys)),
             patch("jarv.headsup._read_key_with_repeats", side_effect=lambda **kwargs: keys.pop(0)),
@@ -1093,7 +1085,11 @@ class HeadsupTests(unittest.TestCase):
 
         self.assertEqual(calls[:2], ["stop", ("/history", [], True)])
         self.assertEqual(calls[2], ("start", True))
-        self.assertEqual(alt_screen_calls, [True, True])
+        # The alt screen is held steady across the nested view: none of the
+        # Live stop/start or nested toggles re-enter it, so no redundant
+        # \x1b[?1049h/l control codes reach the terminal (a burst of those while
+        # the window is resized desyncs ConPTY's size tracking on Windows).
+        self.assertEqual(alt_screen_calls, [])
 
     def test_all_supported_slash_commands_route_cleanly_in_headsup(self):
         cases = [
