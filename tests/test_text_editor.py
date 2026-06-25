@@ -63,6 +63,38 @@ def test_single_line_renderer_masks_value_and_keeps_cursor_visible():
     assert "secret" not in rendered.plain
 
 
+def test_visual_lines_highlight_spans_get_distinct_style():
+    state = {}
+    initialize_text_editor(state, "ab[chip]cd", multiline=True)
+    state["cursor"] = 0  # cursor on 'a', clear of the highlighted span
+
+    lines, _ = render_visual_lines(
+        state,
+        40,
+        text_style="white",
+        highlight_spans=[(2, 8)],
+        highlight_style="dim cyan",
+    )
+
+    line = lines[0]
+    assert line.plain == "ab[chip]cd"
+    chip = "".join(line.plain[s.start:s.end] for s in line.spans if str(s.style) == "dim cyan")
+    assert chip == "[chip]"
+
+
+def test_visual_lines_without_highlight_render_one_run_per_segment():
+    state = {}
+    initialize_text_editor(state, "plain text", multiline=True)
+    state["cursor"] = len("plain text")
+
+    lines, _ = render_visual_lines(state, 40, text_style="white")
+
+    # No highlight spans -> the body is a single styled run (plus the cursor).
+    body = [s for s in lines[0].spans if str(s.style) == "white"]
+    assert len(body) == 1
+    assert lines[0].plain == "plain text "  # trailing cursor cell
+
+
 def test_multiline_renderer_and_navigation_share_visual_wraps():
     state = {}
     initialize_text_editor(state, "abcdefghijkl", multiline=True)

@@ -187,6 +187,71 @@ def assemble_body(
     return parts
 
 
+# A small blank gutter kept clear to the right of the menu block so the
+# starfield never butts directly against the command text.
+_MENU_OVERLAY_GUTTER = 2
+
+
+def overlay_menu(
+    visible: list[Text],
+    menu_lines: list[Text],
+    *,
+    rows: int,
+    width: int,
+    console: Console,
+) -> list[Text]:
+    """Composite the slash-command menu over the bottom of the body.
+
+    The menu is painted as a left-aligned block flush above the prompt, so the
+    transcript/starfield behind it keeps its full height instead of being pushed
+    up when the menu opens. Cells under the block are replaced by the menu;
+    cells to its right keep the background, so the starfield twinkles on beside
+    the menu exactly as it does above it.
+
+    ``visible`` is bottom-aligned into ``rows`` rows first (matching how
+    :func:`assemble_body` pads it) so the menu anchors against the prompt.
+    """
+    if not menu_lines or rows <= 0:
+        return visible
+    body = [Text("") for _ in range(max(0, rows - len(visible)))] + list(visible)
+    body = body[-rows:]
+    block_width = max((cell_len(line.plain) for line in menu_lines), default=0)
+    block_width = max(0, min(width, block_width + _MENU_OVERLAY_GUTTER))
+    count = len(menu_lines)
+    for offset, menu_line in enumerate(menu_lines):
+        row_index = rows - count + offset
+        if 0 <= row_index < len(body):
+            body[row_index] = _overlay_line(
+                body[row_index], menu_line, width, block_width, console
+            )
+    return body
+
+
+def _overlay_line(
+    background: Text,
+    foreground: Text,
+    width: int,
+    block_width: int,
+    console: Console,
+) -> Text:
+    """Replace the first ``block_width`` cells of ``background`` with ``foreground``.
+
+    Cells from ``block_width`` to ``width`` keep the background, so whatever sits
+    behind the menu (typically the starfield) shows through to its right.
+    """
+    merged = list(
+        Segment.adjust_line_length(list(foreground.render(console)), block_width, pad=True)
+    )
+    if width > block_width:
+        bg = Segment.adjust_line_length(list(background.render(console)), width, pad=True)
+        merged.extend(list(Segment.divide(bg, [block_width, width]))[1])
+    line = Text(no_wrap=True, overflow="crop")
+    for segment in merged:
+        if segment.text:
+            line.append(segment.text, style=segment.style)
+    return line
+
+
 def build_frame(
     parts: list[RenderableType],
     *,

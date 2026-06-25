@@ -28,7 +28,7 @@ from .command_input import (
     strip_sgr_mouse_sequences,
 )
 from .command_menu import MenuEntry, filter_entries, menu_entries
-from .command_registry import parse_command_alias
+from .command_registry import COMMANDS, parse_command_alias
 from .agent_ui import (
     _THINKING_FRAMES,
     STREAM_PREVIEW_REFRESH_INTERVAL,
@@ -61,6 +61,7 @@ from .tui_frame import (
     build_frame,
     compose_title,
     compute_layout,
+    overlay_menu,
     panel_width as _panel_width,
     transcript_rows as _transcript_rows_for,
     window_transcript,
@@ -118,6 +119,16 @@ _SGR_MOUSE_TEXT_LOOKBACK = 64
 # dismissed by the user's first message.
 _OUTRO_DURATION = 0.4
 _USAGE_STATUS_CACHE_TTL = 0.5
+
+# Aqua used to light up a recognised slash command (the "/name" token) as it is
+# typed in the input box, matching the cyan the autocomplete menu paints its
+# commands with.
+_VALID_COMMAND_STYLE = "cyan"
+
+# A collapsed paste renders as a soft cyan chip so it reads as a placeholder
+# token -- distinct from the white draft text, but in the same accent family as
+# the input box's border. It is deleted and unboxed as a single unit.
+_PASTE_MARKER_STYLE = "dim cyan"
 
 
 def _sanitize_editor_key(key: str) -> str:
@@ -556,9 +567,12 @@ class HeadsupApp(AltScreenApp):
                 self._complete_answer()
                 return
             menu_matches = self._slash_menu_matches()
-            if menu_matches:
-                # Enter mirrors Tab while the menu is open, so a partial draft
-                # like "/sett" never runs as an unknown command.
+            if menu_matches and not self._draft_is_complete_command():
+                # While a *partial* command is being typed, Enter mirrors Tab so
+                # a draft like "/sett" completes to the highlighted command
+                # instead of running as an unknown one. A fully typed command
+                # (e.g. "/usage") falls through to run immediately rather than
+                # gaining a trailing space — see _draft_is_complete_command.
                 self._slash_menu_accept(menu_matches[self._slash_menu_index])
                 return
             raw_query = self._pastes.expand(str(self.editor.get("buffer", "")))
@@ -669,9 +683,11 @@ class HeadsupApp(AltScreenApp):
         with self.lock:
             prompt_lines = self._prompt_lines(inner_width, max_lines=layout.max_prompt_rows)
             menu_lines = self._slash_menu_lines(inner_width, layout)  # [] when inactive
-            prompt_block = menu_lines + prompt_lines
             footer = self._footer_line(inner_width)
-            rows = _transcript_rows_for(layout.body_height, len(prompt_block))
+            # The transcript region is sized for the prompt box alone, never the
+            # menu: the menu floats over the bottom of the body (see below) rather
+            # than displacing rows, so the starfield/logo stay put when it opens.
+            rows = _transcript_rows_for(layout.body_height, len(prompt_lines))
             transcript = self._transcript_lines(inner_width)
             visible, self.scroll_offset = window_transcript(transcript, rows, self.scroll_offset)
             show_intro = (
@@ -701,7 +717,12 @@ class HeadsupApp(AltScreenApp):
         if intro is not None:
             visible = intro
 
-        parts = assemble_body(visible, footer, prompt_block, layout.body_height, rows)
+        # Paint the slash menu over the bottom of the body so it replaces the
+        # stars beneath it while the field shows through to its right.
+        visible = overlay_menu(
+            visible, menu_lines, rows=rows, width=inner_width, console=self.console
+        )
+        parts = assemble_body(visible, footer, prompt_lines, layout.body_height, rows)
         subtitle = self._panel_subtitle(inner_width)
         return build_frame(
             parts,
@@ -886,8 +907,13 @@ class HeadsupApp(AltScreenApp):
         key = _sanitize_editor_key(key)
         if key == "CTRL_N":
             key = "ENTER"
+        if key in ("BACKSPACE", "DELETE") and self._delete_adjacent_paste(key):
+            return True, False
         if isinstance(key, TextInput) and self._answer_request is None:
-            marker = self._pastes.collapse(str(key))
+            content = str(key)
+            if self._unbox_duplicate_paste(content):
+                return True, True
+            marker = self._pastes.collapse(content)
             if marker is not None:
                 key = TextInput(marker)
         changed = apply_text_editor_key(
@@ -898,6 +924,41 @@ class HeadsupApp(AltScreenApp):
             allow_newlines=True,
         )
         return changed, isinstance(key, TextInput)
+
+    def _editor_buffer_cursor(self) -> tuple[str, int]:
+        buffer = str(self.editor.get("buffer", ""))
+        cursor = max(0, min(int(self.editor.get("cursor", len(buffer))), len(buffer)))
+        return buffer, cursor
+
+    def _delete_adjacent_paste(self, key: str) -> bool:
+        """Erase a whole ``[Pasted text]`` chip in one Backspace/Delete."""
+        buffer, cursor = self._editor_buffer_cursor()
+        index = cursor - 1 if key == "BACKSPACE" else cursor
+        if not 0 <= index < len(buffer):
+            return False
+        span = self._pastes.span_covering(buffer, index)
+        if span is None:
+            return False
+        start, end = span
+        self.editor["buffer"] = buffer[:start] + buffer[end:]
+        self.editor["cursor"] = start
+        self.editor["preferred_visual_column"] = None
+        self._pastes.prune(self.editor["buffer"])
+        return True
+
+    def _unbox_duplicate_paste(self, content: str) -> bool:
+        """Expand an adjacent chip to one plain copy when its block is re-pasted."""
+        buffer, cursor = self._editor_buffer_cursor()
+        span = self._pastes.duplicate_span(buffer, cursor, content)
+        if span is None:
+            return False
+        start, end = span
+        text = content.replace("\r\n", "\n").replace("\r", "\n")
+        self.editor["buffer"] = buffer[:start] + text + buffer[end:]
+        self.editor["cursor"] = start + len(text)
+        self.editor["preferred_visual_column"] = None
+        self._pastes.prune(self.editor["buffer"])
+        return True
 
     def bind_cancel_token(self, token: CancellationToken) -> None:
         self.unbind_cancel_token()
@@ -1535,7 +1596,10 @@ class HeadsupApp(AltScreenApp):
         line = Text(no_wrap=True, overflow="crop")
         line.append(" › " if selected else "   ", style="bold cyan" if selected else "")
 
-        base_style = "bold bright_white" if selected else "cyan"
+        # Keep the command (and its leading "/") aqua on every row — including
+        # the selected one, which used to render bright white. The match accent
+        # just brightens within the same cyan family so the highlight stays aqua.
+        base_style = "bold cyan" if selected else "cyan"
         accent_style = "bold bright_cyan" if selected else "bold cyan"
         display = entry.display
         needle = query.lower()
@@ -1611,16 +1675,21 @@ class HeadsupApp(AltScreenApp):
     def _prompt_lines(self, width: int, *, max_lines: int) -> list[Text]:
         label = self._prompt_label()
         edit_width = self._prompt_edit_width(width)
+        marker_spans = self._pastes.marker_spans(str(self.editor.get("buffer", "")))
         rendered, _cursor_idx, _start = render_visual_line_window(
             self.editor,
             edit_width,
             max_lines=max(1, max_lines - (0 if label else 2)),
             text_style="white",
             cursor_style="reverse",
+            highlight_spans=marker_spans,
+            highlight_style=_PASTE_MARKER_STYLE,
         )
         if not rendered:
             rendered = [Text(" ", style="reverse")]
         if not label:
+            if _start == 0:
+                self._highlight_command_token(rendered)
             return self._prompt_input_box_lines(rendered, width, max_lines=max_lines)
 
         line = Text(label, style="bold cyan", no_wrap=True, overflow="crop")
@@ -1632,6 +1701,48 @@ class HeadsupApp(AltScreenApp):
             wrapped.append_text(visual_line)
             lines.append(wrapped)
         return lines[:max(1, max_lines)]
+
+    def _highlight_command_token(self, rendered: list[Text]) -> None:
+        """Paint a recognised "/command" token aqua on the first prompt row.
+
+        Only the leading command word is restyled (any trailing arguments stay
+        white), matching the cyan the autocomplete menu uses so a valid command
+        visibly "lights up" as it is completed. Called only when the window is
+        anchored at the buffer's start, so the token is always on ``rendered[0]``.
+        """
+        length = self._command_highlight_len()
+        if length and rendered:
+            rendered[0].stylize(_VALID_COMMAND_STYLE, 0, length)
+
+    def _command_highlight_len(self) -> int:
+        """Length of the leading "/command" token when it names a real command.
+
+        Returns 0 unless the single-line draft starts with a slash command jarv
+        recognises (the registry plus the headsup-only ``/exit``/``/quit``). The
+        leading slash is included so the whole token is highlighted.
+        """
+        if self._answer_request is not None:
+            return 0
+        buffer = str(self.editor.get("buffer", ""))
+        if not buffer.startswith("/") or "\n" in buffer:
+            return 0
+        token = buffer.split(None, 1)[0]
+        name = token[1:].lower()
+        if name in COMMANDS or token.lower() in {"/exit", "/quit"}:
+            return len(token)
+        return 0
+
+    def _draft_is_complete_command(self) -> bool:
+        """Whether the draft is exactly a complete, recognised "/command".
+
+        True when the single-line draft is a recognised slash command with no
+        arguments and no trailing whitespace (so the autocomplete menu is still
+        open). Lets Enter run a fully typed command immediately — even one that
+        *accepts* parameters, like "/usage" — instead of completing it with a
+        trailing space the way Tab does.
+        """
+        buffer = str(self.editor.get("buffer", ""))
+        return bool(buffer) and self._command_highlight_len() == len(buffer)
 
     def _prompt_input_box_lines(self, rendered: list[Text], width: int, *, max_lines: int) -> list[Text]:
         border_style = "dim cyan"

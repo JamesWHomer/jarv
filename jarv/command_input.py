@@ -29,6 +29,13 @@ _MOUSE_WHEEL_KEYS = {
     3: "MOUSE_WHEEL_PAGEDOWN",
 }
 _POSIX_INPUT_POLL_INTERVAL = 0.1
+# A clipboard paste can reach the batcher in pieces -- Windows hands it to the
+# console buffer chunk by chunk with sub-frame gaps. Once a burst is underway we
+# wait this long for the next character before deciding the paste has ended, so a
+# single paste stays one token instead of fragmenting into several lines (and
+# several ``[Pasted text]`` markers). A lone keystroke never waits: the bridge
+# only applies mid-burst.
+_PASTE_BURST_GAP_SECONDS = 0.02
 _WINDOWS_ESCAPE_SEQUENCE_TIMEOUT = 0.03
 _WINDOWS_CAPTURED_ESCAPE_SEQUENCE_TIMEOUT = 0.12
 _LAST_TERMINAL_SIZE: tuple[int, int] | None = None
@@ -70,6 +77,11 @@ class PasteRegistry:
     and the original text is restored by :meth:`expand` when the line is
     submitted. Single-line pastes are left untouched (``collapse`` returns
     ``None``) so short snippets stay visible and editable.
+
+    The span helpers below let editors treat a marker as a single atomic token:
+    one Backspace/Delete removes the whole placeholder (see
+    :meth:`span_covering`), and pasting the same block again next to its marker
+    can "unbox" it back to plain text (see :meth:`duplicate_span`).
     """
 
     _pastes: dict[str, str] = field(default_factory=dict)
@@ -96,6 +108,70 @@ class PasteRegistry:
         """Forget every stored paste (call when the draft is sent or cleared)."""
         self._pastes.clear()
         self._count = 0
+
+    def prune(self, text: str) -> None:
+        """Forget markers that no longer appear in ``text`` (call after an edit)."""
+        if not self._pastes:
+            return
+        self._pastes = {
+            marker: original
+            for marker, original in self._pastes.items()
+            if marker in text
+        }
+
+    def marker_spans(self, text: str) -> list[tuple[int, int]]:
+        """Return the ``(start, end)`` offsets of every known marker in ``text``."""
+        spans: list[tuple[int, int]] = []
+        for marker in self._pastes:
+            start = text.find(marker)
+            while start != -1:
+                spans.append((start, start + len(marker)))
+                start = text.find(marker, start + len(marker))
+        spans.sort()
+        return spans
+
+    def span_covering(self, text: str, index: int) -> tuple[int, int] | None:
+        """Return the span of the marker covering character ``index``, if any."""
+        for start, end in self.marker_spans(text):
+            if start <= index < end:
+                return start, end
+        return None
+
+    def duplicate_span(
+        self, text: str, cursor: int, content: str
+    ) -> tuple[int, int] | None:
+        """Return an adjacent marker's span when it already holds ``content``.
+
+        "Adjacent" means the marker sits immediately before or after ``cursor``.
+        Pasting the same block again next to its box uses this to unbox the
+        placeholder rather than stacking a second, identical marker.
+        """
+        for marker, original in self._pastes.items():
+            if original != content:
+                continue
+            width = len(marker)
+            before = cursor - width
+            if before >= 0 and text[before:cursor] == marker:
+                return before, cursor
+            if text[cursor : cursor + width] == marker:
+                return cursor, cursor + width
+        return None
+
+
+def _delete_paste_aware(chars: list[str], pastes: PasteRegistry, index: int) -> int:
+    """Delete the character at ``index`` -- or the whole marker covering it.
+
+    Returns the new cursor position (the start of whatever was removed) so a
+    single keypress erases a ``[Pasted text]`` placeholder atomically.
+    """
+    span = pastes.span_covering("".join(chars), index)
+    if span is not None:
+        start, end = span
+        del chars[start:end]
+        pastes.prune("".join(chars))
+        return start
+    del chars[index]
+    return index
 
 
 @contextmanager
@@ -615,6 +691,26 @@ def _is_batched_text_key(key: str) -> bool:
     )
 
 
+def _await_more_input(in_burst: bool) -> bool:
+    """Return whether another character is (or becomes) available to batch.
+
+    Reports immediately when input is already waiting. Otherwise, only while a
+    burst is in progress, it briefly polls so a chunked paste's next piece can
+    arrive before the batch is closed -- bridging the sub-frame gaps that would
+    otherwise split one paste into several tokens.
+    """
+    if _key_available():
+        return True
+    if not in_burst:
+        return False
+    deadline = time.monotonic() + _PASTE_BURST_GAP_SECONDS
+    while time.monotonic() < deadline:
+        if _key_available():
+            return True
+        time.sleep(0.001)
+    return False
+
+
 def _read_key_with_repeats(
     text_mode: bool = False,
     *,
@@ -652,13 +748,13 @@ def _read_key_with_repeats(
         # paste keeps its content (trailing newline dropped) and stays in the
         # editor so the user can keep editing, mirroring bracketed paste.
         inserted = [key]
-        while len(inserted) < _TEXT_BATCH_LIMIT and _key_available():
+        while len(inserted) < _TEXT_BATCH_LIMIT and _await_more_input(len(inserted) >= 2):
             next_key = read_key()
             if _is_batched_text_key(next_key):
                 inserted.append(next_key)
                 continue
             if next_key == "ENTER":
-                if _key_available():
+                if _await_more_input(len(inserted) >= 2):
                     inserted.append("\n")
                     continue
                 if "\n" not in inserted:
@@ -973,11 +1069,10 @@ def read_editable_line(
                     cursor = len(chars)
                 elif key == "BACKSPACE":
                     if cursor:
-                        del chars[cursor - 1]
-                        cursor -= 1
+                        cursor = _delete_paste_aware(chars, pastes, cursor - 1)
                 elif key == "DELETE":
                     if cursor < len(chars):
-                        del chars[cursor]
+                        cursor = _delete_paste_aware(chars, pastes, cursor)
                 elif key == "\x04":
                     if not chars:
                         raise EOFError
@@ -987,8 +1082,18 @@ def read_editable_line(
                     continue
                 elif isinstance(key, TextInput):
                     text = strip_sgr_mouse_sequences(str(key))
-                    marker = pastes.collapse(text)
-                    insert(marker if marker is not None else text.replace("\n", " "))
+                    span = pastes.duplicate_span("".join(chars), cursor, text)
+                    if span is not None:
+                        # The same block pasted again next to its box: unbox it
+                        # to one plain (flattened) copy instead of a second box.
+                        start, end = span
+                        flattened = [ch for ch in text.replace("\n", " ") if ch >= " "]
+                        chars[start:end] = flattened
+                        cursor = start + len(flattened)
+                        pastes.prune("".join(chars))
+                    else:
+                        marker = pastes.collapse(text)
+                        insert(marker if marker is not None else text.replace("\n", " "))
                 elif len(key) == 1 and key >= " ":
                     inserted = [key]
                     while key_available():
