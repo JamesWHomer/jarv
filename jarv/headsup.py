@@ -490,7 +490,7 @@ class HeadsupApp(AltScreenApp):
         self._last_anim_frame = 0.0
         self._agent_busy = False
         self._agent_thread: threading.Thread | None = None
-        self._queued_queries: deque[str] = deque()
+        self._queued_queries: deque[tuple[str, Callable | None]] = deque()
         self._answer_request: dict | None = None
         self._answer_request_completed: dict = {}
         self._answer_condition = threading.Condition(self.lock)
@@ -1095,6 +1095,12 @@ class HeadsupApp(AltScreenApp):
         return answer in _COMMAND_CONFIRM_YES
 
     def _run_slash(self, command: str, rest: list[str]) -> None:
+        if command == "/tree":
+            self._run_tree()
+            return
+        if command == "/btw":
+            self._run_btw(rest)
+            return
         if command in _FULLSCREEN_SLASH_COMMANDS or (
             command in {"/session", "/sessions"} and not rest
         ):
@@ -1127,13 +1133,80 @@ class HeadsupApp(AltScreenApp):
             )
         self._sync_after_slash(command, None)
 
-    def _run_agent_query(self, query: str) -> None:
-        if self.live is not None:
-            self._queue_or_start_agent_query(query)
-            return
-        self._run_agent_query_now(query)
+    def _run_tree(self) -> None:
+        """Open the prompt-tree view and apply the chosen fork/edit/resume.
 
-    def _run_agent_query_now(self, query: str) -> None:
+        Branch operations are pure disk writes (the next turn reloads history), so
+        after the view returns we re-sync the on-screen transcript from disk and,
+        for an edit, pre-fill the editor with the selected prompt to revise.
+        """
+        if self.incognito:
+            self.add_notice(
+                Text("/tree is unavailable in incognito — history isn't saved.", style="yellow")
+            )
+            return
+
+        from . import session_tree
+        from .tree_browser import run_tree_screen
+
+        with self.suspended():
+            outcome = run_tree_screen(self.session_context, self.config)
+
+        if outcome.action not in ("open", "fork", "edit"):
+            return
+        session_tree.checkout(self.session_context.history_file, leaf_id=outcome.leaf_id)
+        self._sync_transcript_from_history()
+        if outcome.action == "edit" and outcome.prefill is not None:
+            with self.lock:
+                initialize_text_editor(self.editor, outcome.prefill)
+
+    def _run_btw(self, rest: list[str]) -> None:
+        """Ask an aside that doesn't derail the main thread.
+
+        The question runs as a normal turn (so its answer streams live), then
+        :meth:`_after_btw` moves that one exchange off the active path into the
+        branch sidecar. The aside stays visible in the transcript and in /tree, but
+        the next main message continues from before it -- so it never enters the
+        main thread's future context.
+        """
+        question = " ".join(rest).strip()
+        if not question:
+            self.add_notice(
+                Text("Usage: /btw <question> — ask an aside without derailing the thread.", style="dim")
+            )
+            return
+        if self.incognito:
+            self.add_notice(Text("Incognito: /btw runs as a normal turn (no aside is saved).", style="dim"))
+            self._run_agent_query(question)
+            return
+        self._run_agent_query(question, on_complete=self._after_btw)
+
+    def _after_btw(self, result) -> None:
+        if result is None or getattr(result, "cancelled", False) or isinstance(
+            getattr(result, "error", None), str
+        ):
+            return  # leave an incomplete aside in place; the user can /tree it
+        from . import session_tree
+        from .history import branches_file_for, load_branches, load_history
+        from .session_tree import build_tree
+
+        history_file = self.session_context.history_file
+        model = build_tree(load_history(history_file), load_branches(branches_file_for(history_file)))
+        active = model.active_path
+        if len(active) < 2:
+            return  # the aside is the only exchange — nothing to return to
+        if session_tree.checkout(history_file, leaf_id=active[-2].frame_id):
+            self.add_notice(Text("↩ Set aside — kept in /tree, out of the main thread.", style="dim cyan"))
+
+    def _run_agent_query(self, query: str, on_complete: Callable | None = None) -> None:
+        if self.live is not None:
+            self._queue_or_start_agent_query(query, on_complete)
+            return
+        result = self._run_agent_query_now(query)
+        if on_complete is not None:
+            on_complete(result)
+
+    def _run_agent_query_now(self, query: str):
         try:
             self.agent_ready.wait()
             if "error" in self.agent_import:
@@ -1165,16 +1238,18 @@ class HeadsupApp(AltScreenApp):
                 self.add_notice(Text("Cancelled.", style="yellow"))
             elif isinstance(getattr(result, "error", None), str):
                 self.add_notice(Text("Turn failed.", style="red"))
+            return result
         except KeyboardInterrupt:
             with self.lock:
                 if not str(self.editor.get("buffer", "")) and self._answer_request is None:
                     initialize_text_editor(self.editor, query)
             self.add_notice(Text("Cancelled.", style="yellow"))
+            return None
 
-    def _queue_or_start_agent_query(self, query: str) -> None:
+    def _queue_or_start_agent_query(self, query: str, on_complete: Callable | None = None) -> None:
         with self.lock:
             if self._agent_busy:
-                self._queued_queries.append(query)
+                self._queued_queries.append((query, on_complete))
                 queued_position = len(self._queued_queries)
             else:
                 self._agent_busy = True
@@ -1182,12 +1257,12 @@ class HeadsupApp(AltScreenApp):
         if queued_position:
             self.add_notice(Text(f"Queued message #{queued_position}.", style="dim"))
             return
-        self._start_agent_thread(query)
+        self._start_agent_thread(query, on_complete)
 
-    def _start_agent_thread(self, query: str) -> None:
+    def _start_agent_thread(self, query: str, on_complete: Callable | None = None) -> None:
         thread = threading.Thread(
             target=self._agent_worker,
-            args=(query,),
+            args=(query, on_complete),
             name="headsup-agent-turn",
             daemon=True,
         )
@@ -1195,19 +1270,26 @@ class HeadsupApp(AltScreenApp):
             self._agent_thread = thread
         thread.start()
 
-    def _agent_worker(self, query: str) -> None:
+    def _agent_worker(self, query: str, on_complete: Callable | None = None) -> None:
         try:
-            self._run_agent_query_now(query)
+            result = self._run_agent_query_now(query)
+            if on_complete is not None:
+                # A post-turn hook (e.g. /btw's return) must not wedge the queue.
+                try:
+                    on_complete(result)
+                except Exception:
+                    pass
         finally:
             next_query: str | None = None
+            next_complete: Callable | None = None
             with self.lock:
                 if self._queued_queries:
-                    next_query = self._queued_queries.popleft()
+                    next_query, next_complete = self._queued_queries.popleft()
                 else:
                     self._agent_busy = False
                     self._agent_thread = None
             if next_query is not None:
-                self._start_agent_thread(next_query)
+                self._start_agent_thread(next_query, next_complete)
 
     def _cancel_active_turn(self, *, clear_queue: bool = False) -> bool:
         with self.lock:

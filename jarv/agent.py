@@ -20,7 +20,6 @@ from .cancellation import CancellationToken, TurnCancelled, cancel_token_on_sigi
 from .display import (
     console,
     flatten_headings,
-    terminal_size,
     track_live_display,
 )
 from .history import (
@@ -29,6 +28,7 @@ from .history import (
     get_shell_name,
     history_metadata,
     load_history,
+    new_frame_id,
     prepare_session_context,
     reads_file_for,
     redo_file_for,
@@ -125,6 +125,7 @@ from .agent_ui import (
     _start_response_wait_indicator,
     _ui_call,
     get_system_info,
+    print_mode_spacer,
     response_start_status,
     response_wait_label,
     tool_activity_complete_status,
@@ -543,20 +544,18 @@ class _TurnRenderer:
                 if self.pending_interactive_command is not None:
                     pass
                 elif self.interactive:
-                    _, term_h = terminal_size(console=console)
-                    stream_max_lines = term_h - 2
+                    # max_lines defaults to None so the crop bound is recomputed
+                    # from the live terminal height on every paint — a mid-stream
+                    # resize reflows instead of overflowing a frozen bound.
                     self.stream_live = InPlaceLive(
-                        TailMarkdown("", stream_max_lines),
+                        TailMarkdown(""),
                         console=console,
                         auto_refresh=False,
                         transient=True,
                         vertical_overflow="crop",
                     )
                     self.stream_live.start()
-                    self.stream_preview = StreamingMarkdownPreview(
-                        self.stream_live,
-                        stream_max_lines,
-                    )
+                    self.stream_preview = StreamingMarkdownPreview(self.stream_live)
                 elif self.ui is not None:
                     # New streamed message this turn; reset the UI's stream
                     # cursor so it appends in order rather than overwriting the
@@ -597,7 +596,10 @@ class _TurnRenderer:
             _ui_call(self.ui, "replace_stream_text", result.final_text)
         if self.stream_preview is not None:
             result.reply_text = self.stream_preview.text
-            self.stream_preview.flush(refresh=False)
+            # Paint the authoritative final text into the live region before it
+            # is stopped, so the last visible streamed frame matches the reprint
+            # rather than freezing on a stale, throttled tail.
+            self.stream_preview.flush(refresh=True)
         self.reply_text = result.reply_text
         if self.spinner_live is not None:
             self.spinner_live.stop()
@@ -776,7 +778,7 @@ def run_agent(
             incognito=incognito,
         )
 
-        history.append({"role": "user", "content": query, **metadata})
+        history.append({"role": "user", "content": query, "id": new_frame_id(), **metadata})
 
         instructions = (
             config["system_prompt"]
@@ -936,8 +938,7 @@ def run_agent(
             if renderer.tool_calls:
                 from .session_render import tool_call_card_from_args
 
-                if get_setting(config, "tool_call_display") == "print":
-                    console.print()
+                print_mode_spacer(config)
                 append_status_history_items()
 
                 def _on_tool_error(message: str) -> None:

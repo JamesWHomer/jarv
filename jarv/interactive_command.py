@@ -11,7 +11,7 @@ from __future__ import annotations
 from rich.console import Group
 from rich.text import Text
 
-from .agent_ui import _ui_call
+from .agent_ui import _ui_call, print_mode_spacer
 from .config import get_setting
 from .display import console, tool_card
 from .orchestrator import PendingRunCommand
@@ -329,8 +329,7 @@ def _show_interactive_command_card(
         _ui_call(ui, "show_tool_card", card)
         return
     console.print(card)
-    if get_setting(config, "tool_call_display") == "print":
-        console.print()
+    print_mode_spacer(config)
 
 
 def _format_finished_interactive_output(

@@ -27,6 +27,7 @@ _FACADE_SPECS = {
     "cmd_settings": ("jarv.settings_command", "cmd_settings"),
     "cmd_redo": ("jarv.undo_commands", "cmd_redo"),
     "cmd_undo": ("jarv.undo_commands", "cmd_undo"),
+    "cmd_tree": ("jarv.tree_command", "cmd_tree"),
     "cmd_usage": ("jarv.usage_command", "cmd_usage"),
 }
 
@@ -67,6 +68,16 @@ def load_config() -> dict:
     from .config import load_config as load
 
     return load()
+
+
+def cmd_btw(args: list | None = None) -> None:
+    # /btw is an in-session affordance: it asks an aside, then folds it off the
+    # main thread. Outside the interactive heads-up loop there is no live thread
+    # to return to, so point the user at where it works.
+    console.print(
+        "[dim]/btw works inside the interactive session — run [bold]jarv[/bold], "
+        "then [bold]/btw <question>[/bold].[/dim]"
+    )
 
 
 def coerce_value(value: str):

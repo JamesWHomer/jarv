@@ -6,6 +6,7 @@ from .config import CONFIG_DIR
 from .history import (
     SESSIONS_DIR,
     artifact_file_for,
+    branches_file_for,
     history_file_for_session,
     load_history,
     reads_file_for,
@@ -42,6 +43,10 @@ def archive_session_files(history_path: Path) -> Path | None:
     if usage_path.exists():
         usage_path.rename(ARCHIVE_DIR / f"usage-{cleared_at}{stem_suffix}.json")
 
+    branches_path = branches_file_for(history_path)
+    if branches_path.exists():
+        branches_path.rename(ARCHIVE_DIR / f"branches-{cleared_at}{stem_suffix}.json")
+
     redo_path = redo_file_for(history_path)
     if redo_path.exists():
         redo_path.unlink()
@@ -59,7 +64,7 @@ def unarchive_session_files(archived_history_path: Path, session_id: str) -> Pat
     archived_dir = archived_history_path.parent
     archived_tail = archived_history_path.stem[len("history"):]  # "-{ts}-{hash}"
     restored_suffix = restored_history.stem[len("history"):]  # "-{hash}"
-    for kind in ("artifacts", "reads", "usage"):
+    for kind in ("artifacts", "reads", "usage", "branches"):
         sib = archived_dir / f"{kind}{archived_tail}.json"
         if sib.exists():
             sib.rename(SESSIONS_DIR / f"{kind}{restored_suffix}.json")
@@ -73,6 +78,7 @@ def delete_session_files(history_path: Path) -> None:
         reads_file_for(history_path),
         usage_file_for(history_path),
         redo_file_for(history_path),
+        branches_file_for(history_path),
     ):
         try:
             if path.exists():
