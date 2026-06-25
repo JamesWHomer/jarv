@@ -15,6 +15,30 @@ from jarv.display import (
 )
 
 
+def test_truecolor_detected_from_colorterm(monkeypatch):
+    monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+    monkeypatch.delenv("WSL_INTEROP", raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setenv("COLORTERM", "truecolor")
+    assert display._truecolor_color_system() == "truecolor"
+
+
+def test_truecolor_detected_under_wsl(monkeypatch):
+    # WSL terminals render 24-bit colour even though TERM advertises only 256.
+    monkeypatch.delenv("COLORTERM", raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+    assert display._truecolor_color_system() == "truecolor"
+
+
+def test_truecolor_left_to_auto_detection_otherwise(monkeypatch):
+    monkeypatch.delenv("COLORTERM", raising=False)
+    monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+    monkeypatch.delenv("WSL_INTEROP", raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    assert display._truecolor_color_system() is None
+
+
 class FakeConsole:
     def __init__(self, width: int = 80, height: int = 24):
         self.width = width

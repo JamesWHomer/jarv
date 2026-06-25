@@ -36,6 +36,13 @@ _POSIX_INPUT_POLL_INTERVAL = 0.1
 # several ``[Pasted text]`` markers). A lone keystroke never waits: the bridge
 # only applies mid-burst.
 _PASTE_BURST_GAP_SECONDS = 0.02
+# When a burst hits a line break we have to decide: paste newline, or a typed
+# line being submitted? A paste's next chunk can lag further than the burst gap
+# (ConPTY scheduling), so we wait longer here before concluding "submit". This
+# only ever delays an ENTER pressed within the burst gap of the previous char --
+# a human pause before ENTER exits the batch loop before this point, so genuine
+# submits stay instant.
+_PASTE_RESUME_GAP_SECONDS = 0.1
 _WINDOWS_ESCAPE_SEQUENCE_TIMEOUT = 0.03
 _WINDOWS_CAPTURED_ESCAPE_SEQUENCE_TIMEOUT = 0.12
 _LAST_TERMINAL_SIZE: tuple[int, int] | None = None
@@ -49,6 +56,7 @@ _WINDOWS_ENABLE_LINE_INPUT = 0x0002
 _WINDOWS_ENABLE_MOUSE_INPUT = 0x0010
 _WINDOWS_ENABLE_QUICK_EDIT_MODE = 0x0040
 _WINDOWS_ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+_WINDOWS_ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200
 _WINDOWS_KEY_EVENT = 0x0001
 _WINDOWS_MOUSE_EVENT = 0x0002
 _WINDOWS_MOUSE_WHEELED = 0x0004
@@ -222,6 +230,120 @@ def bracketed_paste():
     finally:
         sys.stdout.write(BRACKETED_PASTE_DISABLE)
         sys.stdout.flush()
+
+
+def _stdin_isatty() -> bool:
+    try:
+        return bool(sys.stdin.isatty())
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+@contextmanager
+def raw_input_mode():
+    r"""Hold the POSIX terminal in no-echo, non-canonical mode for a full-screen view.
+
+    Full-screen views poll for input on the loop thread *between* repaints, so
+    the terminal spends almost all of its time outside ``_read_key`` (which only
+    sets raw mode for the duration of a single read). POSIX terminals start in
+    cooked mode -- canonical line buffering plus echo -- so without this, every
+    key typed between reads is echoed by the TTY driver at the cursor (flashing
+    in the corner until the next repaint wipes it) and stays line-buffered out of
+    reach of the non-blocking ``select`` read until Enter is pressed. Windows
+    gets the same effect for free (``msvcrt.getwch`` never echoes and isn't line
+    buffered), so this is a no-op there.
+
+    The mode mirrors ``tty.setraw`` -- no echo, no canonical buffering, and no
+    signal generation so Ctrl-C arrives as a ``\x03`` byte that the readers turn
+    into ``KeyboardInterrupt`` -- but deliberately leaves output post-processing
+    (``OPOST``) enabled, so the Live display's newlines still carry a carriage
+    return and the frame doesn't stair-step down the screen.
+    """
+    if sys.platform == "win32" or not _stdin_isatty():
+        yield
+        return
+    try:
+        import termios
+    except ImportError:
+        yield
+        return
+    try:
+        fd = sys.stdin.fileno()
+        original = termios.tcgetattr(fd)
+    except Exception:
+        yield
+        return
+    try:
+        mode = termios.tcgetattr(fd)
+        mode[0] &= ~(
+            termios.BRKINT | termios.ICRNL | termios.INPCK | termios.ISTRIP | termios.IXON
+        )
+        mode[2] &= ~(termios.CSIZE | termios.PARENB)
+        mode[2] |= termios.CS8
+        mode[3] &= ~(termios.ECHO | termios.ICANON | termios.IEXTEN | termios.ISIG)
+        mode[6][termios.VMIN] = 1
+        mode[6][termios.VTIME] = 0
+        termios.tcsetattr(fd, termios.TCSADRAIN, mode)
+    except Exception:
+        yield
+        return
+    try:
+        yield
+    finally:
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, original)
+        except Exception:
+            pass
+
+
+@contextmanager
+def windows_vt_input():
+    """Enable VT input on Windows so pastes arrive as one bracketed-paste block.
+
+    Without this, Windows hands console input over as plain characters and the
+    terminal's ``\\x1b[?2004h`` paste markers never materialise, so a multi-line
+    paste reaches the reader as raw chars (one ``\\r`` per line break) and has to
+    be reassembled by the timing-based batcher. With VT input enabled the paste
+    comes through wrapped in ``\\x1b[200~ ... \\x1b[201~`` and the existing decoder
+    in :func:`_read_key` returns it atomically. No-op off win32 / without ctypes;
+    only the keyboard layer is touched (mouse capture is handled separately).
+    """
+    if sys.platform != "win32":
+        yield
+        return
+
+    try:
+        import ctypes
+    except ImportError:
+        yield
+        return
+
+    try:
+        kernel32 = ctypes.windll.kernel32
+    except AttributeError:
+        yield
+        return
+
+    handle = kernel32.GetStdHandle(-10)
+    mode = ctypes.c_uint()
+    if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+        yield
+        return
+
+    original_mode = mode.value
+    enabled_mode = (
+        original_mode | _WINDOWS_ENABLE_VIRTUAL_TERMINAL_INPUT
+    ) & ~(
+        _WINDOWS_ENABLE_LINE_INPUT | _WINDOWS_ENABLE_ECHO_INPUT
+    )
+    changed = enabled_mode != original_mode and bool(
+        kernel32.SetConsoleMode(handle, enabled_mode)
+    )
+    try:
+        yield
+    finally:
+        if changed:
+            kernel32.SetConsoleMode(handle, original_mode)
 
 
 @contextmanager
@@ -691,19 +813,23 @@ def _is_batched_text_key(key: str) -> bool:
     )
 
 
-def _await_more_input(in_burst: bool) -> bool:
+def _await_more_input(
+    in_burst: bool, *, timeout: float = _PASTE_BURST_GAP_SECONDS
+) -> bool:
     """Return whether another character is (or becomes) available to batch.
 
     Reports immediately when input is already waiting. Otherwise, only while a
-    burst is in progress, it briefly polls so a chunked paste's next piece can
-    arrive before the batch is closed -- bridging the sub-frame gaps that would
-    otherwise split one paste into several tokens.
+    burst is in progress, it polls for up to ``timeout`` seconds so a chunked
+    paste's next piece can arrive before the batch is closed -- bridging the
+    sub-frame gaps that would otherwise split one paste into several tokens. A
+    longer ``timeout`` is used at a line break, where a premature decision would
+    wrongly submit a paste's first line.
     """
     if _key_available():
         return True
     if not in_burst:
         return False
-    deadline = time.monotonic() + _PASTE_BURST_GAP_SECONDS
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if _key_available():
             return True
@@ -754,7 +880,9 @@ def _read_key_with_repeats(
                 inserted.append(next_key)
                 continue
             if next_key == "ENTER":
-                if _await_more_input(len(inserted) >= 2):
+                if _await_more_input(
+                    len(inserted) >= 2, timeout=_PASTE_RESUME_GAP_SECONDS
+                ):
                     inserted.append("\n")
                     continue
                 if "\n" not in inserted:
@@ -885,7 +1013,11 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
         fd = sys.stdin.fileno()
         old = termios.tcgetattr(fd)
         try:
-            tty.setraw(fd)
+            # TCSANOW, not setraw's default TCSAFLUSH: the poll loop calls this
+            # only once a key is already queued (``_key_available`` saw it), and
+            # TCSAFLUSH would discard that unread byte before the read, dropping
+            # the keystroke. TCSANOW applies raw mode without flushing input.
+            tty.setraw(fd, termios.TCSANOW)
             ch = _read_posix_char()
             if ch is None:
                 return "RESIZE"

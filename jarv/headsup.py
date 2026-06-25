@@ -438,6 +438,9 @@ class HeadsupApp(AltScreenApp):
     # mouse capture rather than letting the base app capture the mouse.
     clear_on_resize = False
     translate_mouse_wheel = False
+    # Windows: read pastes as one bracketed-paste block rather than raw chars,
+    # so a multi-line paste can't fragment / submit its first line mid-paste.
+    use_vt_input = True
     first_paint_label = "headsup"
 
     def __init__(
@@ -484,6 +487,7 @@ class HeadsupApp(AltScreenApp):
         self._outro_started_at = 0.0
         self._active_ui: HeadsupAgentUI | None = None
         self._last_wait_tick = 0.0
+        self._last_anim_frame = 0.0
         self._agent_busy = False
         self._agent_thread: threading.Thread | None = None
         self._queued_queries: deque[str] = deque()
@@ -659,8 +663,12 @@ class HeadsupApp(AltScreenApp):
             self._outro_started_at and now - self._outro_started_at < _OUTRO_DURATION
         ):
             # The intro/outro frame is derived from the clock in render(), so a
-            # plain repaint advances the animation.
-            repaint = True
+            # plain repaint advances the animation. Gate it to the animation
+            # cadence: the loop wakes far more often than that for input, and
+            # repainting the starfield every wake would multiply its CPU cost.
+            if now - self._last_anim_frame >= self.frame_interval:
+                self._last_anim_frame = now
+                repaint = True
         elif self._outro_started_at:
             self._outro_started_at = 0.0
             repaint = True
