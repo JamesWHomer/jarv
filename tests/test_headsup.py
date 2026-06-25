@@ -159,6 +159,34 @@ class HeadsupTests(unittest.TestCase):
         self.assertIn((2, 7, "white"), spans)
         self.assertIn((39, 40, "dim cyan"), spans)
 
+    def test_prompt_box_lights_up_valid_command_aqua(self):
+        app, _test_console, _output = self._app()
+        initialize_text_editor(app.editor, "/help")
+
+        lines = app._prompt_lines(40, max_lines=3)
+        spans = [(span.start, span.end, str(span.style)) for span in lines[1].spans]
+        # The "/help" token (offsets 2-7 inside the box) is repainted cyan.
+        self.assertIn((2, 7, "cyan"), spans)
+
+    def test_prompt_box_highlights_only_command_token_not_args(self):
+        app, _test_console, _output = self._app()
+        initialize_text_editor(app.editor, "/set key value")
+
+        lines = app._prompt_lines(40, max_lines=3)
+        spans = [(span.start, span.end, str(span.style)) for span in lines[1].spans]
+        # Only "/set" (offsets 2-6) goes aqua; the arguments stay white.
+        self.assertIn((2, 6, "cyan"), spans)
+        self.assertFalse(any(st == "cyan" and end > 6 for _s, end, st in spans))
+
+    def test_prompt_box_leaves_unknown_command_white(self):
+        app, _test_console, _output = self._app()
+        initialize_text_editor(app.editor, "/nope")
+
+        lines = app._prompt_lines(40, max_lines=3)
+        spans = [(span.start, span.end, str(span.style)) for span in lines[1].spans]
+        self.assertIn((2, 7, "white"), spans)
+        self.assertFalse(any(str(st) == "cyan" for _s, _e, st in spans))
+
     def test_intro_animation_shows_on_fresh_session_and_clears_after_first_message(self):
         app, test_console, output = self._app(width=80)
 
@@ -933,6 +961,76 @@ class HeadsupTests(unittest.TestCase):
 
         self.assertEqual(app.editor["buffer"], "yes\nno")
 
+    def test_backspace_removes_whole_paste_chip(self):
+        app, _test_console, _output = self._app()
+
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)):
+            app._apply_editor_key(TextInput("alpha\nbeta\ngamma"), 1)
+            self.assertEqual(app.editor["buffer"], "[Pasted text #1 +3 lines]")
+            changed, user_text = app._apply_editor_key("BACKSPACE", 1)
+
+        self.assertTrue(changed)
+        self.assertFalse(user_text)
+        self.assertEqual(app.editor["buffer"], "")
+        self.assertEqual(app.editor["cursor"], 0)
+
+    def test_delete_removes_whole_paste_chip(self):
+        app, _test_console, _output = self._app()
+
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)):
+            app._apply_editor_key(TextInput("alpha\nbeta"), 1)
+            app.editor["cursor"] = 0  # in front of the chip
+            app._apply_editor_key("DELETE", 1)
+
+        self.assertEqual(app.editor["buffer"], "")
+
+    def test_backspace_chip_keeps_surrounding_text(self):
+        app, _test_console, _output = self._app()
+        marker = "[Pasted text #1 +2 lines]"
+
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)):
+            app._apply_editor_key(TextInput("alpha\nbeta"), 1)
+            for char in " tail":
+                app._apply_editor_key(char, 1)
+            self.assertEqual(app.editor["buffer"], f"{marker} tail")
+            app.editor["cursor"] = len(marker)  # just after the chip
+            app._apply_editor_key("BACKSPACE", 1)
+
+        self.assertEqual(app.editor["buffer"], " tail")
+
+    def test_duplicate_paste_unboxes_to_one_plain_copy(self):
+        app, _test_console, _output = self._app()
+        block = "alpha\nbeta\ngamma"
+
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)):
+            app._apply_editor_key(TextInput(block), 1)
+            self.assertEqual(app.editor["buffer"], "[Pasted text #1 +3 lines]")
+            # Cursor sits just after the chip; re-pasting the same block unboxes it.
+            changed, user_text = app._apply_editor_key(TextInput(block), 1)
+
+        self.assertTrue(changed)
+        self.assertTrue(user_text)
+        self.assertEqual(app.editor["buffer"], block)
+
+        calls: list[str] = []
+        app._run_agent_query = calls.append
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)):
+            app.on_key("ENTER", 1)
+
+        self.assertEqual(calls, [block])
+
+    def test_distinct_paste_adds_a_second_chip(self):
+        app, _test_console, _output = self._app()
+
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)):
+            app._apply_editor_key(TextInput("alpha\nbeta"), 1)
+            app._apply_editor_key(TextInput("gamma\ndelta"), 1)
+
+        self.assertEqual(
+            app.editor["buffer"],
+            "[Pasted text #1 +2 lines][Pasted text #2 +2 lines]",
+        )
+
     def test_multiline_prompt_arrows_move_between_editor_rows(self):
         app, _test_console, _output = self._app()
         initialize_text_editor(app.editor, "first\nsecond", multiline=True)
@@ -968,6 +1066,40 @@ class HeadsupTests(unittest.TestCase):
         self.assertIn("↑↓ select", rendered)
         # The input box itself still renders beneath the menu.
         self.assertIn("╭", rendered)
+
+    def test_slash_menu_overlays_intro_without_pushing_it_up(self):
+        # Opening the menu must not shrink the transcript/intro region: it floats
+        # over the bottom of the body instead of displacing rows, so the
+        # starfield and JARV logo stay put. We assert render_intro is asked for
+        # the same height whether the menu is open or closed.
+        app, test_console, output = self._app(width=80)
+        heights: list[int] = []
+
+        def fake_intro(width, height, *args, **kwargs):
+            heights.append(height)
+            return [Text("") for _ in range(height)]
+
+        with patch("jarv.headsup.render_intro", side_effect=fake_intro):
+            self._rendered_text(app, test_console, output, width=80, height=20)
+            initialize_text_editor(app.editor, "/se")
+            self._rendered_text(app, test_console, output, width=80, height=20)
+
+        self.assertEqual(len(heights), 2)
+        self.assertEqual(heights[0], heights[1])
+
+    def test_slash_menu_lets_background_show_through_to_its_right(self):
+        # The menu replaces only its own left-aligned block; whatever sits behind
+        # it (here a transcript line) keeps showing to the right of the block.
+        app, test_console, output = self._app(width=80)
+        app.add_user_message("x")
+        app.upsert_assistant_message(None, "RIGHTEDGE" * 9)  # a wide trailing line
+        initialize_text_editor(app.editor, "/se")
+
+        rendered = self._rendered_text(app, test_console, output, width=80, height=20)
+
+        # A menu command and the background text both survive on the menu rows.
+        self.assertIn("/settings", rendered)
+        self.assertIn("RIGHTEDGE", rendered)
 
     def test_slash_menu_arrows_drive_highlight_not_prompt_history(self):
         app, _test_console, _output = self._app()
@@ -1019,12 +1151,54 @@ class HeadsupTests(unittest.TestCase):
         self.assertEqual(handled, ["/settings"])
         self.assertEqual(app.editor["buffer"], "")
 
+    def test_slash_menu_enter_runs_complete_parameterized_command(self):
+        app, _test_console, _output = self._app()
+        handled = []
+        app._handle_query = handled.append
+        # "/usage" accepts an optional period argument, but a fully typed command
+        # with no arguments runs on Enter rather than gaining a trailing space.
+        initialize_text_editor(app.editor, "/usage")
+
+        app.on_key("ENTER", 1)
+
+        self.assertEqual(handled, ["/usage"])
+        self.assertEqual(app.editor["buffer"], "")
+        self.assertEqual(app._prompt_history[-1], "/usage")
+
     def test_slash_menu_inactive_once_draft_has_arguments(self):
         app, _test_console, _output = self._app()
         initialize_text_editor(app.editor, "/set model")
 
         self.assertIsNone(app._slash_menu_query())
         self.assertEqual(app._slash_menu_matches(), [])
+
+    def test_slash_menu_selected_command_is_aqua_including_slash(self):
+        app, _test_console, _output = self._app()
+        initialize_text_editor(app.editor, "/se")
+        matches = app._slash_menu_matches()
+        self.assertTrue(matches)
+
+        row = app._slash_menu_row(
+            matches[0],
+            selected=True,
+            query="se",
+            name_col=12,
+            prefix_width=3,
+            gap=2,
+            width=60,
+        )
+        display = matches[0].display
+        # The command (offsets 3..3+len after the "   "/" › " prefix), leading
+        # "/" included, is painted in the cyan family — never bright white.
+        command_spans = [
+            str(span.style)
+            for span in row.spans
+            if 3 <= span.start < 3 + len(display)
+        ]
+        self.assertTrue(command_spans)
+        for style in command_spans:
+            self.assertIn("cyan", style)
+            self.assertNotIn("white", style)
 
     def test_mouse_wheel_scrolls_transcript_without_prompt_history_navigation(self):
         class FakeLive:

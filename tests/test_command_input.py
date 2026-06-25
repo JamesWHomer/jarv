@@ -574,6 +574,44 @@ def test_read_key_with_repeats_submits_single_typed_line(monkeypatch):
     command_input._PENDING_KEYS.clear()
 
 
+def test_await_more_input_returns_immediately_when_key_waiting(monkeypatch):
+    monkeypatch.setattr(command_input, "_key_available", lambda: True)
+    slept: list[bool] = []
+    monkeypatch.setattr(command_input.time, "sleep", lambda *_: slept.append(True))
+
+    assert command_input._await_more_input(False) is True
+    assert slept == []
+
+
+def test_await_more_input_skips_wait_for_lone_keystroke(monkeypatch):
+    monkeypatch.setattr(command_input, "_key_available", lambda: False)
+    slept: list[bool] = []
+    monkeypatch.setattr(command_input.time, "sleep", lambda *_: slept.append(True))
+
+    # A single keystroke (not mid-burst) never pays the bridge latency.
+    assert command_input._await_more_input(False) is False
+    assert slept == []
+
+
+def test_await_more_input_bridges_burst_gap(monkeypatch):
+    # The next chunk of a chunked paste shows up on the second poll.
+    polls = iter([False, True])
+    monkeypatch.setattr(command_input, "_key_available", lambda: next(polls))
+    monkeypatch.setattr(command_input.time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(command_input.time, "sleep", lambda *_: None)
+
+    assert command_input._await_more_input(True) is True
+
+
+def test_await_more_input_gives_up_after_gap_window(monkeypatch):
+    monkeypatch.setattr(command_input, "_key_available", lambda: False)
+    monkeypatch.setattr(command_input.time, "sleep", lambda *_: None)
+    times = iter([0.0, 0.0, 1.0])  # deadline anchor, one poll, then past deadline
+    monkeypatch.setattr(command_input.time, "monotonic", lambda: next(times))
+
+    assert command_input._await_more_input(True) is False
+
+
 def test_read_key_with_repeats_drops_batched_sgr_mouse_text(monkeypatch):
     command_input._PENDING_KEYS.clear()
     keys = [*"[<35;62;15M"]
@@ -776,6 +814,85 @@ def test_read_editable_line_inserts_single_line_paste_inline():
     )
 
     assert result == "hello world"
+
+
+def test_read_editable_line_backspace_removes_whole_paste_marker():
+    # The chip is the only thing in the line; one Backspace clears it entirely.
+    keys = iter([command_input.TextInput("first\nsecond\nthird"), "BACKSPACE", "ENTER"])
+
+    result = command_input.read_editable_line(
+        "jarv> ",
+        read_key=lambda: next(keys),
+        write=lambda _text: None,
+    )
+
+    assert result == ""
+
+
+def test_read_editable_line_backspace_marker_keeps_neighbouring_text():
+    keys = iter(
+        [
+            command_input.TextInput("first\nsecond"),
+            *"ok",
+            "LEFT",
+            "LEFT",
+            "BACKSPACE",  # cursor sits just after the chip -> remove the chip only
+            "ENTER",
+        ]
+    )
+
+    result = command_input.read_editable_line(
+        "jarv> ",
+        read_key=lambda: next(keys),
+        write=lambda _text: None,
+    )
+
+    assert result == "ok"
+
+
+def test_read_editable_line_duplicate_paste_unboxes_to_plain_text():
+    block = command_input.TextInput("first\nsecond\nthird")
+    keys = iter([block, block, "ENTER"])
+
+    result = command_input.read_editable_line(
+        "jarv> ",
+        read_key=lambda: next(keys),
+        write=lambda _text: None,
+    )
+
+    # One plain (flattened) copy, no markers left to expand.
+    assert result == "first second third"
+
+
+def test_paste_registry_span_helpers_locate_markers():
+    registry = command_input.PasteRegistry()
+    marker = registry.collapse("a\nb\nc")
+    buffer = f"x{marker}y"
+
+    assert registry.marker_spans(buffer) == [(1, 1 + len(marker))]
+    assert registry.span_covering(buffer, 1 + len(marker) - 1) == (1, 1 + len(marker))
+    assert registry.span_covering(buffer, 0) is None
+
+
+def test_paste_registry_duplicate_span_matches_adjacent_marker():
+    registry = command_input.PasteRegistry()
+    marker = registry.collapse("a\nb")
+    buffer = marker
+
+    # Same content, cursor just after the marker -> adjacency hit.
+    assert registry.duplicate_span(buffer, len(marker), "a\nb") == (0, len(marker))
+    # Cursor just before the marker is adjacent too.
+    assert registry.duplicate_span(buffer, 0, "a\nb") == (0, len(marker))
+    # Different content never matches.
+    assert registry.duplicate_span(buffer, len(marker), "x\ny") is None
+
+
+def test_paste_registry_prune_drops_absent_markers():
+    registry = command_input.PasteRegistry()
+    marker = registry.collapse("a\nb")
+
+    registry.prune("nothing here")
+    assert registry.expand(marker) == marker  # mapping forgotten
 
 
 def test_read_editable_line_ctrl_c_exits_when_empty():

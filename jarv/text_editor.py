@@ -58,6 +58,51 @@ def _display_value(value: str, *, masked: bool) -> str:
     return "".join("\n" if char == "\n" else "*" for char in value)
 
 
+def _index_in_spans(index: int, spans) -> bool:
+    return any(start <= index < end for start, end in spans)
+
+
+def _append_segment(
+    line: Text,
+    segment: str,
+    abs_start: int,
+    local_cursor: int | None,
+    *,
+    spans,
+    base_style: str,
+    highlight_style: str,
+    cursor_style: str,
+) -> None:
+    """Append ``segment`` to ``line``, styling marker spans (and the cursor).
+
+    With no spans this collapses to one styled run (plus the cursor split), so
+    the rendered output is identical to plain text styling.
+    """
+    def style_at(offset: int) -> str:
+        return highlight_style if _index_in_spans(abs_start + offset, spans) else base_style
+
+    length = len(segment)
+    offset = 0
+    while offset < length:
+        if local_cursor is not None and offset == local_cursor:
+            line.append(segment[offset], style=cursor_style)
+            offset += 1
+            continue
+        run_style = style_at(offset)
+        end = offset + 1
+        while (
+            end < length
+            and not (local_cursor is not None and end == local_cursor)
+            and style_at(end) == run_style
+        ):
+            end += 1
+        line.append(segment[offset:end], style=run_style)
+        offset = end
+
+    if local_cursor is not None and local_cursor >= length:
+        line.append(" ", style=cursor_style)
+
+
 def render_visual_lines(
     state: dict,
     content_width: int,
@@ -66,27 +111,30 @@ def render_visual_lines(
     masked: bool = False,
     text_style: str = "green",
     cursor_style: str = "reverse",
+    highlight_spans=None,
+    highlight_style: str = "cyan",
 ) -> tuple[list[Text], int]:
     value = str(state.get("buffer", ""))
     display = _display_value(value, masked=masked)
     cursor = max(0, min(int(state.get("cursor", len(value))), len(value)))
     rows = visual_rows(value, content_width)
     active_row = cursor_row_index(rows, cursor)
+    spans = highlight_spans or ()
     rendered: list[Text] = []
 
     for idx, (row_start, row_end) in enumerate(rows):
         segment = display[row_start:row_end]
         line = Text(indent)
-        if idx == active_row:
-            local_cursor = cursor - row_start
-            line.append(segment[:local_cursor], style=text_style)
-            if local_cursor < len(segment):
-                line.append(segment[local_cursor], style=cursor_style)
-                line.append(segment[local_cursor + 1 :], style=text_style)
-            else:
-                line.append(" ", style=cursor_style)
-        else:
-            line.append(segment, style=text_style)
+        _append_segment(
+            line,
+            segment,
+            row_start,
+            (cursor - row_start) if idx == active_row else None,
+            spans=spans,
+            base_style=text_style,
+            highlight_style=highlight_style,
+            cursor_style=cursor_style,
+        )
         rendered.append(line)
 
     return rendered, active_row
@@ -101,6 +149,8 @@ def render_visual_line_window(
     masked: bool = False,
     text_style: str = "green",
     cursor_style: str = "reverse",
+    highlight_spans=None,
+    highlight_style: str = "cyan",
 ) -> tuple[list[Text], int, int]:
     lines, cursor_idx = render_visual_lines(
         state,
@@ -109,6 +159,8 @@ def render_visual_line_window(
         masked=masked,
         text_style=text_style,
         cursor_style=cursor_style,
+        highlight_spans=highlight_spans,
+        highlight_style=highlight_style,
     )
     if max_lines is None:
         return lines, cursor_idx, 0

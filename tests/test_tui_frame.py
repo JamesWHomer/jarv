@@ -212,3 +212,47 @@ def test_assemble_body_trims_overflowing_transcript():
     # footer + prompt are always present; transcript is trimmed to fit body_height
     assert parts[-1].plain == "P"
     assert any(p.plain == "F" for p in parts)
+
+
+def _menu_console() -> Console:
+    return Console(file=io.StringIO(), width=40, color_system=None)
+
+
+def test_overlay_menu_anchors_block_to_bottom_and_keeps_background_to_the_right():
+    background = [Text("S" * 30) for _ in range(5)]
+    menu = [Text("/setup"), Text("/settings")]
+    out = tui_frame.overlay_menu(
+        background, menu, rows=5, width=30, console=_menu_console()
+    )
+
+    assert len(out) == 5
+    # Rows above the menu are untouched -- the starfield/logo never move.
+    assert [line.plain for line in out[:3]] == ["S" * 30] * 3
+    # The menu is painted flush against the bottom of the body, left-aligned.
+    assert out[-2].plain.startswith("/setup")
+    assert out[-1].plain.startswith("/settings")
+    # Stars show through to the right of the menu block; the block itself is a
+    # clean rectangle (no stars bleed into the gap before them).
+    block_width = len("/settings") + tui_frame._MENU_OVERLAY_GUTTER
+    assert out[-1].plain == "/settings".ljust(block_width) + "S" * (30 - block_width)
+    assert out[-2].plain == "/setup".ljust(block_width) + "S" * (30 - block_width)
+
+
+def test_overlay_menu_is_noop_without_menu_lines():
+    background = [Text("a"), Text("b")]
+    assert tui_frame.overlay_menu(
+        background, [], rows=4, width=10, console=_menu_console()
+    ) is background
+
+
+def test_overlay_menu_clips_when_menu_taller_than_body():
+    background = [Text("S" * 12) for _ in range(2)]
+    menu = [Text("one"), Text("two"), Text("three")]
+    out = tui_frame.overlay_menu(
+        background, menu, rows=2, width=12, console=_menu_console()
+    )
+    # Only the rows that fit are kept; the menu stays anchored to the bottom so
+    # its tail rows win over the clipped head.
+    assert len(out) == 2
+    assert out[-1].plain.startswith("three")
+    assert out[-2].plain.startswith("two")
