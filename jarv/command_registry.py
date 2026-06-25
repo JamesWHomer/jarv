@@ -34,6 +34,8 @@ COMMANDS: dict[str, CommandMeta] = {
     "settings": CommandMeta(False, needs_nudge=True, mutates_config=True, summary="Open common controls"),
     "undo": CommandMeta(True, needs_nudge=True, summary="Unsend the last n exchanges", arg_hint="[n]"),
     "redo": CommandMeta(True, needs_nudge=True, summary="Restore undone exchanges", arg_hint="[n]"),
+    "tree": CommandMeta(False, needs_nudge=True, summary="Browse the session as a tree — fork, edit, or resume any prompt"),
+    "btw": CommandMeta(True, needs_nudge=True, summary="Ask an aside without derailing the main thread", arg_hint="<question>"),
 }
 
 CONFIG_MUTATING_COMMANDS = frozenset(
@@ -57,6 +59,8 @@ HANDLER_SPECS: dict[str, tuple[str, str]] = {
     "settings": ("jarv.commands", "cmd_settings"),
     "undo": ("jarv.commands", "cmd_undo"),
     "redo": ("jarv.commands", "cmd_redo"),
+    "tree": ("jarv.commands", "cmd_tree"),
+    "btw": ("jarv.commands", "cmd_btw"),
 }
 
 

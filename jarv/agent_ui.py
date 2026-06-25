@@ -21,6 +21,7 @@ from .config import DEFAULT_CONFIG, get_setting
 from .display import (
     console,
     flatten_headings,
+    terminal_size,
     tool_card,
     track_live_display,
 )
@@ -43,14 +44,30 @@ def _ui_call(ui, method: str, *args, **kwargs):
     return handler(*args, **kwargs)
 
 
+def print_mode_spacer(config: dict, *, mode: str | None = None) -> None:
+    """Emit the one trailing blank line that separates cards in print mode.
+
+    The inline ("print") tool-call display draws each card into normal
+    scrollback and relies on a single blank line as the separator. Routing
+    every separator through here keeps the spacing identical across tool
+    cards, ask_user, spawn, and run_command instead of each site re-deciding.
+
+    ``mode`` lets a caller that has already resolved the effective display
+    mode (e.g. ``auto`` -> ``print``) pass it through instead of re-reading
+    the raw config value.
+    """
+    effective = mode if mode is not None else get_setting(config, "tool_call_display")
+    if effective == "print":
+        console.print()
+
+
 def _print_tool_card(renderable, config: dict, ui=None) -> None:
     """Print a tool card with the spacing required by its display mode."""
     if ui is not None:
         _ui_call(ui, "show_tool_card", renderable)
         return
     console.print(renderable)
-    if get_setting(config, "tool_call_display") == "print":
-        console.print()
+    print_mode_spacer(config)
 
 
 def _replace_terminal_rows(row_count: int) -> bool:
@@ -183,38 +200,65 @@ def _start_response_wait_indicator(interactive: bool, start_time: float) -> tupl
 
 
 def _markdown_tail_source(text: str, max_chars: int) -> str:
+    """Cap the markdown handed to the live preview so rendering stays cheap.
+
+    This is a *silent* performance ceiling only — it carries no visible banner.
+    The single "earlier lines hidden" hint is owned by :class:`TailMarkdown`'s
+    line-level crop, so the preview never stacks two hints on top of each other.
+    """
     if max_chars <= 0 or len(text) <= max_chars:
         return text
     tail = text[-max_chars:]
     newline = tail.find("\n")
     if newline >= 0:
         tail = tail[newline + 1:]
-    return f"_Earlier streaming content hidden; full reply prints when done._\n\n{tail}"
+    return tail
 
 
 class TailMarkdown:
-    """Renders Markdown but keeps only the last `max_lines` rendered rows.
+    """Renders Markdown but keeps only the last few rendered rows.
 
     Live can't move the cursor above the top of the terminal viewport, so if
     the rendered content ever exceeds the visible height the redraw lands at
     row 0 and the prior frame stays in scrollback — producing duplicates. By
     pre-cropping to the viewport from the top we guarantee the live region
     never overflows, while still showing the most recent (streaming) tail.
+
+    ``max_lines`` is the row budget. Pass ``None`` (the streaming default) to
+    derive it from the *current* terminal height at paint time, so the crop
+    tracks a mid-stream resize instead of a value frozen at the first token.
+    A pinned integer is still accepted for deterministic tests.
     """
 
-    def __init__(self, text: str, max_lines: int, max_source_chars: int = 8000):
+    def __init__(
+        self,
+        text: str,
+        max_lines: int | None = None,
+        max_source_chars: int = 8000,
+        *,
+        reserve_rows: int = 2,
+    ):
         self._text = _markdown_tail_source(text, max_source_chars)
-        self._max_lines = max(1, max_lines)
+        self._max_lines = max(1, max_lines) if max_lines is not None else None
+        self._reserve_rows = max(1, reserve_rows)
+
+    def _row_budget(self, console) -> int:
+        if self._max_lines is not None:
+            return self._max_lines
+        _, term_h = terminal_size(console=console)
+        return max(1, term_h - self._reserve_rows)
 
     def __rich_console__(self, console, options):
+        max_lines = self._row_budget(console)
+        # Always reserve exactly one top row for the hint/spacer so the live
+        # block grows to `max_lines` and then holds steady — no one-row jump
+        # when the hint first appears at the overflow threshold.
+        content_budget = max(0, max_lines - 1)
         md = Markdown(self._text)
         lines = console.render_lines(md, options, pad=False)
-        hidden = max(0, len(lines) - self._max_lines)
-        # Always emit exactly one top row (hint or blank spacer) so the live
-        # block has a fixed height from the first token to the last — no jump
-        # when the hint crosses the overflow threshold.
+        hidden = max(0, len(lines) - content_budget)
         if hidden:
-            lines = lines[-(self._max_lines - 1):] if self._max_lines > 1 else []
+            lines = lines[-content_budget:] if content_budget else []
             hint = Text(
                 f"↑ {hidden} earlier line{'s' if hidden != 1 else ''} hidden — full reply will print when done",
                 style="dim italic",
@@ -277,7 +321,7 @@ class StreamingMarkdownPreview:
     def __init__(
         self,
         live: Live,
-        max_lines: int,
+        max_lines: int | None = None,
         *,
         refresh_interval: float = STREAM_PREVIEW_REFRESH_INTERVAL,
         clock=time.perf_counter,
@@ -546,8 +590,7 @@ def _dispatch_ask_user(args: dict, config: dict | None = None, ui=None) -> str:
                     display_mode="fullscreen",
                 )
             )
-        if display_mode == "print":
-            console.print()
+        print_mode_spacer(config, mode=display_mode)
         return answer
 
 
@@ -702,5 +745,4 @@ def _dispatch_spawn_with_ui(
             return output
         live.update(SpawnPanel())
 
-    if get_setting(config, "tool_call_display") == "print":
-        console.print()
+    print_mode_spacer(config)

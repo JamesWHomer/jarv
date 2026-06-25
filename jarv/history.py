@@ -92,6 +92,13 @@ def short_hash(value: str, length: int = 12) -> str:
     return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()[:length]
 
 
+def new_frame_id() -> str:
+    """Stable id stamped on a user message so a prompt can anchor a branch."""
+    import uuid
+
+    return uuid.uuid4().hex
+
+
 def get_windows_console_id() -> tuple[str, str] | None:
     """Return a stable id for a classic Windows console window when available."""
     if os.name != "nt":
@@ -279,3 +286,38 @@ def save_redo_stack(stack: list[list], path: Path) -> None:
         path.write_text(json.dumps(stack, indent=2), encoding="utf-8")
     except OSError as e:
         console.print(f"[yellow]Could not save redo stack:[/yellow] {e}")
+
+
+def branches_file_for(history_path: Path) -> Path:
+    """Sidecar holding every off-spine prompt frame for a session's prompt tree."""
+    return history_path.with_name(history_path.name.replace("history", "branches", 1))
+
+
+def load_branches(path: Path) -> list[dict]:
+    """Return the stored off-spine frames (empty if absent or unreadable).
+
+    Each record is ``{"parent_frame_id": <id | "">, "items": [<frame items>]}``;
+    the frame's own id lives on ``items[0]["id"]``.
+    """
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("frames"), list):
+            return [
+                frame
+                for frame in sanitize_json_value(data["frames"])
+                if isinstance(frame, dict) and isinstance(frame.get("items"), list)
+            ]
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        pass
+    return []
+
+
+def save_branches(frames: list[dict], path: Path) -> None:
+    CONFIG_DIR.mkdir(exist_ok=True)
+    payload = {"version": 1, "frames": frames}
+    try:
+        path.write_text(json.dumps(sanitize_json_value(payload), indent=2), encoding="utf-8")
+    except OSError as e:
+        console.print(f"[yellow]Could not save session branches:[/yellow] {e}")
