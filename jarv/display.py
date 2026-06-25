@@ -14,7 +14,36 @@ from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
 
-console = Console()
+def _truecolor_color_system() -> str | None:
+    """Return ``"truecolor"`` when the terminal renders 24-bit colour, else ``None``.
+
+    Rich auto-detects truecolor from ``COLORTERM``, but several terminals that do
+    render it never set that variable -- most visibly WSL2, where the distro's
+    ``TERM`` is ``xterm-256color`` so Rich quantises to the 256-colour cube. That
+    both shifts the heads-up intro's hand-tuned gradients off-hue and makes them
+    shimmer, because each animation frame's slightly different RGB can snap to a
+    different cube entry. Detect the known-good cases and ask for truecolor;
+    return ``None`` everywhere else so Rich keeps its own auto-detection (and a
+    genuine 256-colour terminal isn't handed sequences it can't render).
+    """
+    colorterm = os.environ.get("COLORTERM", "").lower()
+    if "truecolor" in colorterm or "24bit" in colorterm:
+        return "truecolor"
+    if os.environ.get("TERM", "").endswith("-direct"):
+        return "truecolor"
+    # WSL's terminals (Windows Terminal, VS Code) all render truecolor even
+    # though the distro advertises only 256 colours via TERM.
+    if os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"):
+        return "truecolor"
+    return None
+
+
+def _make_console() -> Console:
+    forced = _truecolor_color_system()
+    return Console(color_system=forced) if forced else Console()
+
+
+console = _make_console()
 
 _live_display_depth = threading.local()
 _first_paint_marks: set[str] = set()

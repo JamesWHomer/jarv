@@ -37,12 +37,15 @@ def _install_posix_input(monkeypatch, text: str) -> FakeStdin:
         "select",
         SimpleNamespace(select=lambda read, _write, _error, _timeout: (read if stdin.remaining else [], [], [])),
     )
-    monkeypatch.setitem(sys.modules, "tty", SimpleNamespace(setraw=lambda _fd: None))
+    monkeypatch.setitem(
+        sys.modules, "tty", SimpleNamespace(setraw=lambda _fd, _when=None: None)
+    )
     monkeypatch.setitem(
         sys.modules,
         "termios",
         SimpleNamespace(
             TCSADRAIN=1,
+            TCSANOW=0,
             tcgetattr=lambda _fd: "old",
             tcsetattr=lambda _fd, _when, _old: None,
         ),
@@ -63,6 +66,93 @@ class FakeStdout:
 
     def flush(self):
         pass
+
+
+class _FakeTermios:
+    """Minimal termios stand-in recording attribute round-trips."""
+
+    # Flag bit masks (arbitrary but distinct powers of two).
+    BRKINT = 0x01
+    ICRNL = 0x02
+    INPCK = 0x04
+    ISTRIP = 0x08
+    IXON = 0x10
+    CSIZE = 0x20
+    PARENB = 0x40
+    CS8 = 0x80
+    ECHO = 0x100
+    ICANON = 0x200
+    IEXTEN = 0x400
+    ISIG = 0x800
+    VMIN = 6
+    VTIME = 5
+    TCSADRAIN = 1
+
+    def __init__(self, mode):
+        self.mode = mode
+        self.applied: list[list] = []
+        self.restored_to = None
+
+    def tcgetattr(self, _fd):
+        # Return a deep-ish copy so the caller's edits don't mutate our baseline.
+        return [list(part) if isinstance(part, list) else part for part in self.mode]
+
+    def tcsetattr(self, _fd, _when, mode):
+        self.applied.append(mode)
+        self.restored_to = mode
+
+
+def _cooked_mode():
+    iflag = _FakeTermios.BRKINT | _FakeTermios.ICRNL | _FakeTermios.IXON
+    lflag = _FakeTermios.ECHO | _FakeTermios.ICANON | _FakeTermios.ISIG
+    cc = [0] * 8
+    return [iflag, 0, 0, lflag, 0, 0, cc]
+
+
+def test_raw_input_mode_disables_echo_and_canonical_then_restores(monkeypatch):
+    baseline = _cooked_mode()
+    fake = _FakeTermios(baseline)
+    monkeypatch.setattr(command_input.sys, "platform", "linux")
+    monkeypatch.setattr(command_input.sys, "stdin", FakeStdin(""))
+    monkeypatch.setattr(command_input, "_stdin_isatty", lambda: True)
+    monkeypatch.setitem(sys.modules, "termios", fake)
+
+    with command_input.raw_input_mode():
+        applied = fake.applied[-1]
+        # Echo, canonical and signal generation are off inside the block...
+        assert not applied[3] & _FakeTermios.ECHO
+        assert not applied[3] & _FakeTermios.ICANON
+        assert not applied[3] & _FakeTermios.ISIG
+        # ...but output post-processing (OFLAG, index 1) is left untouched so the
+        # Live frame doesn't stair-step.
+        assert applied[1] == baseline[1]
+        assert applied[6][_FakeTermios.VMIN] == 1
+
+    # On exit the original cooked attributes are restored verbatim.
+    assert fake.restored_to == baseline
+
+
+def test_raw_input_mode_is_noop_on_windows(monkeypatch):
+    monkeypatch.setattr(command_input.sys, "platform", "win32")
+    fake = _FakeTermios(_cooked_mode())
+    monkeypatch.setitem(sys.modules, "termios", fake)
+
+    with command_input.raw_input_mode():
+        pass
+
+    assert fake.applied == []
+
+
+def test_raw_input_mode_is_noop_without_a_tty(monkeypatch):
+    monkeypatch.setattr(command_input.sys, "platform", "linux")
+    monkeypatch.setattr(command_input, "_stdin_isatty", lambda: False)
+    fake = _FakeTermios(_cooked_mode())
+    monkeypatch.setitem(sys.modules, "termios", fake)
+
+    with command_input.raw_input_mode():
+        pass
+
+    assert fake.applied == []
 
 
 def test_read_key_maps_sgr_mouse_wheel_up_to_up(monkeypatch):
@@ -574,6 +664,28 @@ def test_read_key_with_repeats_submits_single_typed_line(monkeypatch):
     command_input._PENDING_KEYS.clear()
 
 
+def test_read_key_with_repeats_uses_resume_window_at_newline(monkeypatch):
+    command_input._PENDING_KEYS.clear()
+    keys = [*"first", "ENTER", *"second"]
+    timeouts: list[float] = []
+
+    def recording_await(in_burst, *, timeout=command_input._PASTE_BURST_GAP_SECONDS):
+        timeouts.append(timeout)
+        return bool(keys)
+
+    monkeypatch.setattr(command_input, "_read_key", lambda text_mode=False: keys.pop(0))
+    monkeypatch.setattr(command_input, "_key_available", lambda: bool(keys))
+    monkeypatch.setattr(command_input, "_await_more_input", recording_await)
+
+    # The newline decision waits with the longer resume window, not the 20ms burst
+    # gap -- this is what stops a chunked paste's first line being mis-submitted.
+    result, _ = command_input._read_key_with_repeats(text_mode=True, batch_text=True)
+    assert result == command_input.TextInput("first\nsecond")
+    assert command_input._PASTE_RESUME_GAP_SECONDS in timeouts
+    assert not command_input._PENDING_KEYS
+    command_input._PENDING_KEYS.clear()
+
+
 def test_await_more_input_returns_immediately_when_key_waiting(monkeypatch):
     monkeypatch.setattr(command_input, "_key_available", lambda: True)
     slept: list[bool] = []
@@ -671,6 +783,34 @@ def test_read_key_maps_posix_bracketed_paste_to_text_input(monkeypatch):
 
     assert key == command_input.TextInput("first\nsecond")
     assert stdin.remaining == ""
+
+
+def test_read_key_maps_windows_bracketed_paste_to_text_input(monkeypatch):
+    # With VT input enabled, Windows delivers a paste wrapped in the bracketed
+    # paste markers and the whole block must come back as one TextInput -- never
+    # fragmenting into per-line ENTER submits.
+    chars = deque("\x1b[200~first\nsecond\x1b[201~")
+
+    fake_msvcrt = SimpleNamespace(
+        getwch=chars.popleft,
+        kbhit=lambda: bool(chars),
+    )
+
+    command_input._PENDING_KEYS.clear()
+    monkeypatch.setattr(command_input.sys, "platform", "win32")
+    monkeypatch.setenv("WT_SESSION", "test")
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    command_input._WINDOWS_MOUSE_CAPTURE_DEPTH = 0
+
+    try:
+        assert command_input._read_key(text_mode=True) == command_input.TextInput(
+            "first\nsecond"
+        )
+        assert not chars
+        assert not command_input._PENDING_KEYS
+    finally:
+        command_input._WINDOWS_MOUSE_CAPTURE_DEPTH = 0
+        command_input._PENDING_KEYS.clear()
 
 
 def test_read_editable_line_edits_prefilled_text():

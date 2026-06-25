@@ -212,6 +212,7 @@ class SetupApp(AltScreenApp):
         self.step_idx = 0
         self.edit: dict | None = None
         self._brand_started_at = time.perf_counter()
+        self._last_anim_frame = 0.0
         self.conn_status = "idle"  # idle | checking | ok | fail | nokey
         self.conn_error = ""
 
@@ -272,8 +273,13 @@ class SetupApp(AltScreenApp):
 
     def on_tick(self) -> None:
         # Keep the brand mark (and the ready-screen connection spinner) breathing.
+        # Gate to the animation cadence: the loop now wakes far more often than
+        # that for input, so repaint at a steady frame rate rather than every wake.
         if self.phase in ("welcome", "ready"):
-            self.invalidate()
+            now = time.perf_counter()
+            if now - self._last_anim_frame >= self.frame_interval:
+                self._last_anim_frame = now
+                self.invalidate()
 
     # ------------------------------------------------------------------ #
     # Key handling

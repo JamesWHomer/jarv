@@ -49,6 +49,8 @@ from .command_input import (
     bracketed_paste,
     disable_mouse_capture,
     mouse_capture,
+    raw_input_mode,
+    windows_vt_input,
 )
 from .display import console as default_console
 from .display import mark_first_paint, terminal_size
@@ -72,7 +74,11 @@ class AppEvent:
 # without carrying any state of its own.
 _WAKE = object()
 
-_DEFAULT_POLL_INTERVAL = 0.04
+# Idle-wait timeout. Keypresses are polled on the loop thread (not enqueued), so
+# this also bounds how long a buffered key waits before it is detected. Keep it
+# small (~8 ms) so input feels immediate; animation cadence is paced separately
+# by ``frame_interval`` rather than by how often the loop wakes.
+_DEFAULT_POLL_INTERVAL = 0.008
 
 
 class AltScreenApp:
@@ -92,8 +98,17 @@ class AltScreenApp:
     translate_mouse_wheel: bool = False
     use_mouse_capture: bool = False
     use_bracketed_paste: bool = True
+    #: Windows-only: enable VT input so the terminal delivers pastes as one
+    #: bracketed-paste block instead of raw chars. Leave off for mouse-capture
+    #: views, which read console records (incompatible with VT input).
+    use_vt_input: bool = False
     clear_on_resize: bool = True
     first_paint_label: str = "alt-screen"
+    #: Target cadence (seconds) for time-based animations. The loop now wakes far
+    #: more often than this for input responsiveness, so animations that would
+    #: otherwise repaint every tick should gate themselves on this interval (see
+    #: the ``on_tick`` overrides) to keep their frame rate and CPU cost steady.
+    frame_interval: float = 1 / 30
 
     def __init__(
         self,
@@ -325,12 +340,20 @@ class AltScreenApp:
         def _ctx():
             live = self._live_factory(self.render, self.console)
             with ExitStack() as stack:
+                # Outermost so cooked mode is restored only after the alt screen
+                # is left: holds the POSIX terminal in no-echo/non-canonical mode
+                # for the whole loop (a no-op on Windows / non-tty) so keys typed
+                # between polled reads aren't echoed into the corner and line
+                # buffered out of reach. See raw_input_mode.
+                stack.enter_context(raw_input_mode())
                 stack.enter_context(live)
                 self.live = live
                 if self.use_mouse_capture:
                     stack.enter_context(mouse_capture())
                 if self.use_bracketed_paste:
                     stack.enter_context(bracketed_paste())
+                if self.use_vt_input:
+                    stack.enter_context(windows_vt_input())
                 yield live
 
         return _ctx()
