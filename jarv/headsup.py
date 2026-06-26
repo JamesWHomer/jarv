@@ -17,6 +17,7 @@ from rich.markdown import Markdown
 from rich.text import Text
 
 from .cancellation import CancellationToken, TurnCancelled
+from .clipboard import copy_to_clipboard
 from .command_input import (
     PasteRegistry,
     TextInput,
@@ -335,6 +336,18 @@ class HeadsupAgentUI:
     def show_tool_card(self, renderable: RenderableType) -> None:
         self._flush_stream()
         live_kind = type(renderable).__name__
+        if live_kind == "InteractiveCommandCard":
+            # One growing slot for the whole interactive run_command session:
+            # upsert the same card (animating its footer) while it runs, then
+            # finalize on exit so a later command opens a fresh slot rather than
+            # overwriting this finished transcript.
+            if getattr(renderable, "exited", False):
+                self.app.replace_live_tool(live_kind, renderable)
+                self._animated_live_tool_keys.discard(live_kind)
+            else:
+                self.app.upsert_live_tool(live_kind, renderable)
+                self._animated_live_tool_keys.add(live_kind)
+            return
         if live_kind == "RunningCommandCard":
             self.app.upsert_live_tool(live_kind, renderable)
             self._tool_live_kind = live_kind
@@ -586,6 +599,10 @@ class HeadsupApp(AltScreenApp):
         disable_mouse_capture()
 
     def on_interrupt(self) -> None:
+        # Ctrl+C copies an active selection (and clears it) rather than exiting,
+        # so the escape hatch survives: with nothing selected it still dismisses.
+        if self._copy_selection_to_clipboard():
+            return
         if self._handle_prompt_dismiss():
             self.stop()
 
@@ -949,6 +966,33 @@ class HeadsupApp(AltScreenApp):
     def _editor_selection_span(self) -> tuple[int, int] | None:
         """The active Shift-selection span over the draft buffer, if any."""
         return selection_bounds(self.editor)
+
+    def _copy_selection_to_clipboard(self) -> bool:
+        """Copy an active selection to the clipboard; True when it handled Ctrl+C.
+
+        The selection is cleared afterwards so a follow-up Ctrl+C falls through
+        to the normal interrupt/dismiss path -- quitting still works, it just
+        takes a second press while text is selected. Paste-chip markers in the
+        span are expanded so the real pasted text lands on the clipboard.
+        """
+        span = self._editor_selection_span()
+        if span is None:
+            return False
+        start, end = span
+        buffer = str(self.editor.get("buffer", ""))
+        selected = self._pastes.expand(buffer[start:end])
+        self.editor["selection_anchor"] = None
+        if copy_to_clipboard(selected):
+            count = len(selected)
+            unit = "character" if count == 1 else "characters"
+            self.set_prompt_notice(
+                Text(f"Copied {count} {unit} to clipboard.", style="dim")
+            )
+        else:
+            self.set_prompt_notice(
+                Text("Couldn't reach the clipboard.", style="yellow")
+            )
+        return True
 
     def _apply_editor_key(self, key: str, repeat: int) -> tuple[bool, bool]:
         if isinstance(key, TextInput):
@@ -1892,6 +1936,7 @@ class HeadsupApp(AltScreenApp):
         with self.lock:
             notice = self._prompt_notice
             has_draft = bool(str(self.editor.get("buffer", "")))
+            has_selection = self._editor_selection_span() is not None
             answering = self._answer_request is not None
             cancelling = self._cancel_token is not None
             exit_armed = self._exit_armed
@@ -1917,6 +1962,8 @@ class HeadsupApp(AltScreenApp):
             value = "Esc/Ctrl+C exit   Any other key continue"
         elif answering:
             value = "Enter answer   Ctrl+N newline   Esc no response/cancel"
+        elif has_selection:
+            value = "Enter send   Ctrl+C copy selection   Esc clear draft   Wheel/PgUp/PgDn scroll"
         elif has_draft:
             value = "Enter send   Ctrl+N newline   Esc/Ctrl+C clear draft   Wheel/PgUp/PgDn scroll"
         elif cancelling:

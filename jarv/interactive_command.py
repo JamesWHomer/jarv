@@ -8,14 +8,9 @@ during an interactive `run_command`.
 
 from __future__ import annotations
 
-from rich.console import Group
 from rich.text import Text
 
-from .agent_ui import _ui_call, print_mode_spacer
-from .config import get_setting
-from .display import console, tool_card
 from .orchestrator import PendingRunCommand
-from .shell import command_result_renderable
 
 
 def _format_elapsed_seconds(seconds: float | int | None) -> str:
@@ -211,6 +206,21 @@ def _interaction_marker(action: str, action_display: str) -> str:
     return f"[{action_display}]"
 
 
+def _interaction_marker_text(action: str, action_display: str) -> Text:
+    """Styled one-line marker for what was sent this step.
+
+    stdin writes get a bright ``stdin>`` prefix; non-stdin controls (waits,
+    Ctrl-C, EOF) reuse :func:`_interaction_marker`'s wording in a dim style so
+    they read as side notes rather than typed input. Used by the growing
+    :class:`~jarv.agent_ui.InteractiveCommandCard` for each per-step line.
+    """
+    if _terminal_action_is_stdin(action):
+        line = Text("stdin> ", style="bold cyan")
+        line.append((action_display or "").rstrip("\n") or "<ENTER>")
+        return line
+    return Text(_interaction_marker(action, action_display), style="dim cyan")
+
+
 def _attach_interactive_output_item(pending, history: list) -> None:
     """Point a pending command at its stored ``function_call_output`` item.
 
@@ -249,91 +259,6 @@ def _finalize_interactive_record(pending, final_output: str) -> None:
     if final_output and final_output.strip():
         segments.append(final_output)
     output_item["output"] = "\n".join(segments)
-
-
-def _interactive_command_card(
-    prepared,
-    snapshot,
-    config: dict,
-    *,
-    status: str,
-    terminal_reply: str | None = None,
-    terminal_kind: str | None = None,
-):
-    display_mode = get_setting(config, "tool_call_display")
-    command_line = Text("> ", style="bold yellow")
-    command_line.append(prepared.cmd)
-    body_parts = [command_line]
-    if terminal_reply is not None:
-        if terminal_kind is None or _terminal_action_is_stdin(terminal_kind):
-            reply_line = Text("stdin> ", style="bold cyan")
-            reply_line.append(terminal_reply.rstrip("\n") or "<ENTER>")
-        else:
-            reply_line = Text(
-                _interaction_marker(terminal_kind, terminal_reply),
-                style="dim cyan",
-            )
-        body_parts.append(reply_line)
-    result = snapshot.to_delta_command_result()
-    if status == "waiting":
-        if getattr(snapshot, "check_in", False):
-            body_parts.append(Text(
-                "command_timeout check-in; process still running",
-                style="dim",
-            ))
-            body_parts.append(Text(
-                "elapsed "
-                f"{_format_elapsed_seconds(getattr(snapshot, 'elapsed_seconds', 0.0))}"
-                " | idle "
-                f"{_format_elapsed_seconds(getattr(snapshot, 'idle_seconds', 0.0))}",
-                style="dim",
-            ))
-        body_parts.append(Text(result.full_model_output()))
-        if getattr(snapshot, "check_in", False):
-            footer = "Still running — model deciding whether to wait or step in"
-        else:
-            footer = "Idle on stdin — model deciding the next input"
-        body_parts.append(Text(footer, style="dim"))
-    else:
-        body_parts.append(command_result_renderable(result))
-    return tool_card(
-        "run_command",
-        Group(*body_parts),
-        metadata=(
-            f"model window {prepared.head_chars:,} / "
-            f"{prepared.tail_chars:,} chars"
-        ),
-        display_mode=display_mode,
-        status=status,
-        status_style="blue" if status == "waiting" else (
-            "green" if result.exit_code in (None, 0) else "red"
-        ),
-    )
-
-
-def _show_interactive_command_card(
-    pending: PendingRunCommand,
-    snapshot,
-    config: dict,
-    *,
-    status: str,
-    terminal_reply: str | None = None,
-    terminal_kind: str | None = None,
-    ui=None,
-) -> None:
-    card = _interactive_command_card(
-        pending.prepared,
-        snapshot,
-        config,
-        status=status,
-        terminal_reply=terminal_reply,
-        terminal_kind=terminal_kind,
-    )
-    if ui is not None:
-        _ui_call(ui, "show_tool_card", card)
-        return
-    console.print(card)
-    print_mode_spacer(config)
 
 
 def _format_finished_interactive_output(

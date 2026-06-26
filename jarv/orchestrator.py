@@ -256,6 +256,13 @@ class PendingRunCommand:
     # place as the interaction proceeds so history holds one collapsed record.
     output_item: dict | None = None
     input_markers: list = field(default_factory=list)
+    # The growing transcript card and (inline only) the persistent Rich ``Live``
+    # kept open for the whole interactive session, plus the live-display depth
+    # context manager that wraps it. Heads-up mode leaves ``live``/``live_depth_cm``
+    # as ``None`` and re-renders ``card`` through the app instead.
+    card: object | None = None
+    live: object | None = None
+    live_depth_cm: object | None = None
 
 
 @dataclass
