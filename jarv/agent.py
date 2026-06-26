@@ -558,27 +558,37 @@ class _TurnRenderer:
             if not self.got_text:
                 self.got_text = True
                 self.complete_tool_phase()
-                self.complete_response_phase()
                 if self.pending_interactive_command is not None:
+                    # Keep the "Deciding next input…" spinner animating until the
+                    # whole stream completes. The reply text is intentionally
+                    # hidden for interactive continuations, so completing the
+                    # response phase here (stopping the spinner) at the first
+                    # token would leave the rest of a long, often minutes-long
+                    # interleaved-reasoning stream looking frozen — the gap the
+                    # user sees after "Decided next input". The final
+                    # complete_response_phase after the stream prints the trail
+                    # with the true turn duration.
                     pass
-                elif self.interactive:
-                    # max_lines defaults to None so the crop bound is recomputed
-                    # from the live terminal height on every paint — a mid-stream
-                    # resize reflows instead of overflowing a frozen bound.
-                    self.stream_live = InPlaceLive(
-                        TailMarkdown(""),
-                        console=console,
-                        auto_refresh=False,
-                        transient=True,
-                        vertical_overflow="crop",
-                    )
-                    self.stream_live.start()
-                    self.stream_preview = StreamingMarkdownPreview(self.stream_live)
-                elif self.ui is not None:
-                    # New streamed message this turn; reset the UI's stream
-                    # cursor so it appends in order rather than overwriting the
-                    # previous turn's bubble above the intervening tool cards.
-                    _ui_call(self.ui, "begin_assistant_message")
+                else:
+                    self.complete_response_phase()
+                    if self.interactive:
+                        # max_lines defaults to None so the crop bound is recomputed
+                        # from the live terminal height on every paint — a mid-stream
+                        # resize reflows instead of overflowing a frozen bound.
+                        self.stream_live = InPlaceLive(
+                            TailMarkdown(""),
+                            console=console,
+                            auto_refresh=False,
+                            transient=True,
+                            vertical_overflow="crop",
+                        )
+                        self.stream_live.start()
+                        self.stream_preview = StreamingMarkdownPreview(self.stream_live)
+                    elif self.ui is not None:
+                        # New streamed message this turn; reset the UI's stream
+                        # cursor so it appends in order rather than overwriting the
+                        # previous turn's bubble above the intervening tool cards.
+                        _ui_call(self.ui, "begin_assistant_message")
             if self.pending_interactive_command is not None:
                 self.reply_text += event.delta
             elif self.stream_preview is not None:
