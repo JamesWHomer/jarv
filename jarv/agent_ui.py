@@ -21,6 +21,9 @@ from .config import DEFAULT_CONFIG, get_setting
 from .display import (
     console,
     flatten_headings,
+    output_display_split,
+    output_renderable,
+    rendered_text_lines,
     terminal_size,
     tool_card,
     track_live_display,
@@ -192,6 +195,153 @@ class RunningCommandCard:
             display_mode=self._display_mode,
             status=f"running {elapsed}s",
             status_style="blue",
+        )
+
+
+class InteractiveCommandCard:
+    """One growing transcript box for a whole interactive ``run_command`` session.
+
+    Replaces the old "one fresh box per model step" rendering: the ``> command``
+    header and ``model window`` metadata are drawn once and each model step appends
+    a compact ``stdin> …`` marker (with the model's per-step decision time) plus the
+    new delta output. The footer animates while the model decides the next input and
+    resolves to ``exit N`` on completion. One instance is shared between the inline
+    Rich ``Live`` (which auto-refreshes the footer) and the heads-up live-tool slot.
+    """
+
+    def __init__(self, command: str, metadata: str, display_mode: str, start_time: float):
+        self.command = command
+        self.metadata = metadata
+        self.display_mode = display_mode
+        self._start = start_time
+        # Each segment: {"marker": Text | None, "output": str, "seconds": float | None}.
+        self._segments: list[dict] = []
+        self._state = "running"  # running | thinking | waiting | done
+        self._think_start: float | None = None
+        self._check_in = False
+        self._exit_code: int | None = None
+        self._lock = threading.Lock()
+
+    @property
+    def exited(self) -> bool:
+        return self._state == "done"
+
+    def seed_initial(self, snapshot) -> None:
+        """Record the command's first batch of output once it goes idle/exits."""
+        result = snapshot.to_delta_command_result()
+        with self._lock:
+            self._segments.append(
+                {"marker": None, "output": result.full_model_output(), "seconds": None}
+            )
+            if snapshot.exited:
+                self._state = "done"
+                self._exit_code = snapshot.exit_code
+            else:
+                self._state = "waiting"
+                self._check_in = bool(getattr(snapshot, "check_in", False))
+
+    def set_thinking(self, start_time: float) -> None:
+        with self._lock:
+            self._state = "thinking"
+            self._think_start = start_time
+
+    def add_step(
+        self,
+        marker: Text,
+        output: str,
+        seconds: float | None,
+        *,
+        exited: bool,
+        exit_code: int | None = None,
+        check_in: bool = False,
+    ) -> None:
+        with self._lock:
+            self._segments.append(
+                {"marker": marker, "output": output, "seconds": seconds}
+            )
+            if exited:
+                self._state = "done"
+                self._exit_code = exit_code
+            else:
+                self._state = "waiting"
+                self._check_in = check_in
+
+    def _footer(self) -> Text | None:
+        if self._state == "running":
+            elapsed = int(max(0.0, time.perf_counter() - self._start))
+            return Text(f"Running… {elapsed}s", style="dim")
+        if self._state == "thinking":
+            now = time.perf_counter()
+            frame = _THINKING_FRAMES[int(now * 10) % len(_THINKING_FRAMES)]
+            elapsed = int(max(0.0, now - (self._think_start or now)))
+            return Text(f"{frame} deciding next input…  {elapsed}s", style="yellow")
+        if self._state == "waiting":
+            if self._check_in:
+                return Text(
+                    "Still running — model deciding whether to wait or step in",
+                    style="dim",
+                )
+            return Text(
+                "Idle on stdin — model deciding the next input", style="dim"
+            )
+        # done
+        if self._exit_code in (None, 0):
+            return Text("exit 0", style="dim")
+        return Text(f"exit {self._exit_code}", style="bold red")
+
+    def _body_parts(self):
+        command_line = Text("> ", style="bold yellow")
+        command_line.append(self.command)
+        parts = [command_line]
+        for segment in self._segments:
+            marker = segment["marker"]
+            if marker is not None:
+                line = marker.copy()
+                if segment["seconds"] is not None:
+                    line.append(f"   ·{segment['seconds']:.1f}s", style="dim")
+                parts.append(line)
+            output = segment["output"]
+            if output:
+                parts.append(output_renderable(output))
+        return parts
+
+    def __rich_console__(self, console, options):
+        with self._lock:
+            parts = self._body_parts()
+            footer = self._footer()
+            state = self._state
+            exit_code = self._exit_code
+        inner_width = max(
+            10,
+            options.max_width - (4 if self.display_mode == "fullscreen" else 2),
+        )
+        _, term_h = terminal_size(console=console)
+        budget = max(8, term_h - 8)
+        lines = rendered_text_lines(Group(*parts), inner_width)
+        if len(lines) > budget:
+            head_n, tail_n = output_display_split(budget)
+            hidden = len(lines) - head_n - tail_n
+            lines = (
+                lines[:head_n]
+                + [Text(f"… {hidden} earlier lines hidden …", style="dim italic")]
+                + lines[-tail_n:]
+            )
+        body_items = list(lines)
+        if footer is not None:
+            body_items.append(footer)
+        if state == "done":
+            status, status_style = "done", (
+                "green" if exit_code in (None, 0) else "red"
+            )
+        else:
+            status, status_style = "waiting", "blue"
+        yield tool_card(
+            "run_command",
+            Group(*body_items),
+            metadata=self.metadata,
+            display_mode=self.display_mode,
+            status=status,
+            status_style=status_style,
         )
 
 

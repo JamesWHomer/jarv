@@ -12,10 +12,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from rich.console import Console
+from jarv.agent_ui import InteractiveCommandCard
 from jarv.agent import (
     _dispatch_ask_user,
     _dispatch_run_command_with_ui,
-    _interactive_command_card,
+    _interaction_marker_text,
     _parse_terminal_control,
     _print_tool_card,
     _run_command_waiting_prompt,
@@ -38,7 +39,6 @@ from jarv.history import SessionContext, load_history, save_history
 from jarv.history import redo_file_for
 from jarv.orchestrator import (
     RunCommandDispatchResult,
-    RunCommandPrepared,
     WEB_SEARCH_READ_NUDGE,
 )
 from jarv.provider import (
@@ -152,18 +152,23 @@ class AgentInputTests(unittest.TestCase):
         captured_frames: list[str] = []
 
         class CaptureLive:
+            # The interactive card holds one Live open across turns, so it is
+            # driven with start()/refresh()/stop() rather than a `with` block.
             def __init__(self, renderable, **kwargs):
                 self._renderable = renderable
                 self._console = kwargs.get("console", test_console)
 
-            def __enter__(self):
+            def start(self) -> None:
                 self._record(self._renderable)
-                return self
 
-            def __exit__(self, *_args):
-                return False
+            def stop(self) -> None:
+                pass
+
+            def refresh(self) -> None:
+                self._record(self._renderable)
 
             def update(self, renderable, **_kwargs):
+                self._renderable = renderable
                 self._record(renderable)
 
             def _record(self, renderable) -> None:
@@ -210,11 +215,14 @@ class AgentInputTests(unittest.TestCase):
         output = stream.getvalue()
         rendered = output + "".join(captured_frames)
         self.assertIn(command, rendered)
-        self.assertIn("running 0s", rendered)
+        self.assertIn("Running", rendered)
         self.assertIn("waiting", rendered)
         self.assertIsInstance(result, RunCommandDispatchResult)
         self.assertIsNotNone(result.pending_command)
         result.pending_command.process.interrupt()
+        # The card's Live stays open for a pending command; release the
+        # live-display depth it entered so it doesn't leak into later tests.
+        result.pending_command.live_depth_cm.__exit__(None, None, None)
 
     def test_response_wait_label_is_neutral_without_reasoning(self):
         self.assertEqual(response_wait_label(has_reasoning=False), "Waiting")
@@ -1143,10 +1151,6 @@ class AgentInputTests(unittest.TestCase):
                     "jarv.agent.console",
                     new=Console(file=console_output, force_terminal=False, color_system=None),
                 ),
-                patch(
-                    "jarv.interactive_command.console",
-                    new=Console(file=console_output, force_terminal=False, color_system=None),
-                ),
                 patch("jarv.agent.sys.stdout", new=io.StringIO()),
             ):
                 result = run_agent("run menu", DEFAULT_CONFIG, client=object())
@@ -1235,21 +1239,22 @@ class AgentInputTests(unittest.TestCase):
         self.assertIn("Time since last output: 0.4s", prompt)
         self.assertIn("tick", prompt)
 
-    def _render_waiting_card(self, snapshot) -> str:
-        prepared = RunCommandPrepared(
-            cmd=snapshot.command,
-            head_chars=20000,
-            tail_chars=20000,
-            max_tool_output_chars=20000,
-        )
-        card = _interactive_command_card(
-            prepared, snapshot, DEFAULT_CONFIG, status="waiting"
-        )
+    def _render_card(self, card) -> str:
         stream = io.StringIO()
         Console(file=stream, force_terminal=False, color_system=None, width=120).print(
             card
         )
         return stream.getvalue()
+
+    def _render_waiting_card(self, snapshot) -> str:
+        card = InteractiveCommandCard(
+            snapshot.command,
+            "model window 20,000 / 20,000 chars",
+            "inline",
+            time.perf_counter(),
+        )
+        card.seed_initial(snapshot)
+        return self._render_card(card)
 
     def test_waiting_card_footer_names_idle_stdin_state(self):
         snapshot = InteractiveCommandSnapshot(
@@ -1274,6 +1279,52 @@ class AgentInputTests(unittest.TestCase):
         rendered = self._render_waiting_card(snapshot)
         self.assertIn("Still running — model deciding whether to wait or step in", rendered)
         self.assertNotIn("Idle on stdin", rendered)
+
+    def test_interactive_card_grows_with_step_markers_and_exit_footer(self):
+        card = InteractiveCommandCard(
+            "python game.py",
+            "model window 12,000 / 12,000 chars",
+            "inline",
+            time.perf_counter(),
+        )
+        card.seed_initial(
+            InteractiveCommandSnapshot(
+                "python game.py", "FOYER: a hall.\n", "", None, exited=False
+            )
+        )
+        running = self._render_card(card)
+        self.assertIn("> python game.py", running)
+        self.assertIn("FOYER: a hall.", running)
+        self.assertIn("Idle on stdin", running)
+
+        # A model step carries its decision time on the stdin marker and appends
+        # the new output below the earlier transcript (one growing box).
+        card.add_step(
+            _interaction_marker_text("stdin", "go north"),
+            "LIBRARY: dusty shelves.\n",
+            1.2,
+            exited=False,
+        )
+        stepped = self._render_card(card)
+        self.assertIn("stdin> go north", stepped)
+        self.assertIn("1.2s", stepped)
+        self.assertIn("LIBRARY: dusty shelves.", stepped)
+        self.assertIn("FOYER: a hall.", stepped)
+
+        # The final step exits non-zero: the footer resolves to the exit code and
+        # drops the "Idle on stdin" waiting line.
+        card.add_step(
+            _interaction_marker_text("stdin", "quit"),
+            "bye\n",
+            0.4,
+            exited=True,
+            exit_code=2,
+        )
+        self.assertTrue(card.exited)
+        done = self._render_card(card)
+        self.assertIn("stdin> quit", done)
+        self.assertIn("exit 2", done)
+        self.assertNotIn("Idle on stdin", done)
 
     def test_root_batches_consecutive_reads_and_preserves_call_order(self):
         with TemporaryDirectory() as tmp:

@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import queue
 import threading
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -51,6 +51,7 @@ from .command_input import (
     mouse_capture,
     raw_input_mode,
     windows_vt_input,
+    windows_vt_input_suspended,
 )
 from .display import console as default_console
 from .display import mark_first_paint, terminal_size
@@ -406,6 +407,13 @@ class AltScreenApp:
         repaint covers the nested view, so no second clear is needed.
         """
         live = self.live
+        # While we own VT input (heads-up), drop it for the nested view: it reads
+        # keyboard input as console records and would otherwise see arrows/wheel
+        # as raw ``ESC [ A/B`` runs -- the ESC reads as a close key so it exits,
+        # and the trailing ``[A``/``[B`` leaks into our input box on resume.
+        vt_suspend = (
+            windows_vt_input_suspended() if self.use_vt_input else nullcontext()
+        )
         with self._preserve_alt_screen():
             if live is not None:
                 live.stop()
@@ -414,7 +422,8 @@ class AltScreenApp:
                 except Exception:
                     pass
             try:
-                yield
+                with vt_suspend:
+                    yield
             finally:
                 self._last_size = None
                 self._dirty = True

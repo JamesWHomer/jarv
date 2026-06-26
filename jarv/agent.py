@@ -112,8 +112,8 @@ def resolve_tool_call_display(config: dict, *, heads_up: bool) -> str:
 
 from .agent_ui import (
     InPlaceLive,
+    InteractiveCommandCard,
     ResponseWaitIndicator,
-    RunningCommandCard,
     StreamingMarkdownPreview,
     TailMarkdown,
     ToolActivityIndicator,
@@ -208,15 +208,62 @@ from .interactive_command import (
     _first_terminal_action,
     _format_elapsed_seconds,
     _format_finished_interactive_output,
+    _interaction_marker_text,
     _interactive_check_in_seconds,
-    _interactive_command_card,
     _parse_terminal_control,
     _record_interactive_input,
     _run_command_final_prompt,
     _run_command_waiting_prompt,
-    _show_interactive_command_card,
     _terminal_action_display,
 )
+
+
+def _stop_interactive_card_live(live, live_depth_cm) -> None:
+    """Paint a final frame, stop the inline ``Live``, and release its depth.
+
+    No-op for the handles heads-up leaves as ``None``. Tolerant of double calls
+    and of Rich raising during teardown so a failed stop never masks the real
+    error on the cancel/exception paths.
+    """
+    if live is not None:
+        try:
+            live.refresh()
+            live.stop()
+        except Exception:
+            pass
+    if live_depth_cm is not None:
+        try:
+            live_depth_cm.__exit__(None, None, None)
+        except Exception:
+            pass
+
+
+def _close_interactive_card_live(pending) -> None:
+    """Close a pending command's held-open card ``Live`` exactly once."""
+    if pending is None:
+        return
+    _stop_interactive_card_live(
+        getattr(pending, "live", None),
+        getattr(pending, "live_depth_cm", None),
+    )
+    pending.live = None
+    pending.live_depth_cm = None
+
+
+def _refresh_interactive_card(ui, pending) -> None:
+    """Repaint the growing interactive card after the main thread mutates it.
+
+    Heads-up re-renders the card into its live-tool slot; inline just nudges the
+    held-open ``Live`` (its auto-refresh thread would catch the change anyway,
+    but an explicit refresh keeps the box responsive between footer ticks).
+    """
+    card = getattr(pending, "card", None) if pending is not None else None
+    if card is None:
+        return
+    if ui is not None:
+        _ui_call(ui, "show_tool_card", card)
+    elif getattr(pending, "live", None) is not None:
+        pending.live.refresh()
 
 
 def _dispatch_run_command_with_ui(
@@ -254,71 +301,58 @@ def _dispatch_run_command_with_ui(
 
     display_mode = get_setting(config, "tool_call_display")
     metadata_text = f"model window {prepared.head_chars:,} / {prepared.tail_chars:,} chars"
-    running_card = RunningCommandCard(
+    # One growing transcript box for the whole interactive session. Inline mode
+    # holds a Rich ``Live`` open across turns so each model step appends in place
+    # rather than re-printing a fresh box; heads-up re-renders the same card into
+    # its live-tool slot. The card starts in its "running" state.
+    card = InteractiveCommandCard(
         prepared.cmd,
         metadata_text,
         display_mode,
         time.perf_counter(),
     )
+    live = None
+    live_depth_cm = None
 
     try:
         if ui is not None:
-            _ui_call(ui, "show_tool_card", running_card)
-            process = InteractiveCommandProcess.start(prepared.cmd)
-            unregister_cancel = (
-                cancellation_token.register(process.kill_tree)
-                if cancellation_token is not None else None
-            )
-            snapshot = process.wait_until_idle(
-                check_in_seconds=_interactive_check_in_seconds(config),
-                cancellation_token=cancellation_token,
-            )
+            _ui_call(ui, "show_tool_card", card)
         else:
-            with track_live_display(), Live(
-                running_card,
-                refresh_per_second=4,
+            live_depth_cm = track_live_display()
+            live_depth_cm.__enter__()
+            live = Live(
+                card,
+                refresh_per_second=8,
                 console=console,
                 auto_refresh=True,
                 transient=False,
-            ) as live:
-                process = InteractiveCommandProcess.start(prepared.cmd)
-                unregister_cancel = (
-                    cancellation_token.register(process.kill_tree)
-                    if cancellation_token is not None else None
-                )
-                snapshot = process.wait_until_idle(
-                    check_in_seconds=_interactive_check_in_seconds(config),
-                    cancellation_token=cancellation_token,
-                )
-                live.update(
-                    _interactive_command_card(
-                        prepared,
-                        snapshot,
-                        config,
-                        status="done" if snapshot.exited else "waiting",
-                    ),
-                    refresh=True,
-                )
+            )
+            live.start()
+        process = InteractiveCommandProcess.start(prepared.cmd)
+        unregister_cancel = (
+            cancellation_token.register(process.kill_tree)
+            if cancellation_token is not None else None
+        )
+        snapshot = process.wait_until_idle(
+            check_in_seconds=_interactive_check_in_seconds(config),
+            cancellation_token=cancellation_token,
+        )
+        card.seed_initial(snapshot)
+        if ui is not None:
+            _ui_call(ui, "show_tool_card", card)
+        elif live is not None:
+            live.refresh()
     except (KeyboardInterrupt, TurnCancelled):
+        _stop_interactive_card_live(live, live_depth_cm)
         raise
     except Exception as e:
+        _stop_interactive_card_live(live, live_depth_cm)
         return f"[error: {e}]"
-
-    if ui is not None:
-        _ui_call(
-            ui,
-            "show_tool_card",
-            _interactive_command_card(
-                prepared,
-                snapshot,
-                config,
-                status="done" if snapshot.exited else "waiting",
-            ),
-        )
 
     if snapshot.exited:
         from .orchestrator import format_run_command_output
 
+        _stop_interactive_card_live(live, live_depth_cm)
         output, _output_id = format_run_command_output(
             snapshot.to_command_result(),
             prepared,
@@ -334,6 +368,9 @@ def _dispatch_run_command_with_ui(
         call_id="",
         retained_store=retained_store,
         unregister_cancel=unregister_cancel,
+        card=card,
+        live=live,
+        live_depth_cm=live_depth_cm,
     )
     return RunCommandDispatchResult(
         _run_command_waiting_prompt(snapshot),
@@ -429,22 +466,25 @@ class _TurnRenderer:
             )
 
     def ensure_response_wait(self) -> None:
-        if self.spinner_live is None:
-            self.thought_started = time.perf_counter()
-            interactive_command = self.pending_interactive_command is not None
-            if self.ui is not None:
-                _ui_call(
-                    self.ui,
-                    "start_response_wait",
-                    self.thought_started,
-                    interactive_command=interactive_command,
-                )
-            else:
-                self.wait_indicator, self.spinner_live = _start_response_wait_indicator(
-                    self.interactive,
-                    self.thought_started,
-                    interactive_command=interactive_command,
-                )
+        if self.spinner_live is not None:
+            return
+        self.thought_started = time.perf_counter()
+        pending = self.pending_interactive_command
+        if pending is not None and getattr(pending, "card", None) is not None:
+            # During an interactive continuation the card's own footer is the
+            # "deciding next input" indicator, so we never open a separate
+            # response-wait spinner — a second Rich Live on the same console
+            # would collide with the card's held-open Live.
+            pending.card.set_thinking(self.thought_started)
+            _refresh_interactive_card(self.ui, pending)
+            return
+        if self.ui is not None:
+            _ui_call(self.ui, "start_response_wait", self.thought_started)
+        else:
+            self.wait_indicator, self.spinner_live = _start_response_wait_indicator(
+                self.interactive,
+                self.thought_started,
+            )
 
     # -- phase transitions --------------------------------------------- #
     def complete_response_phase(self) -> None:
@@ -455,22 +495,17 @@ class _TurnRenderer:
             self.spinner_live = None
         self.wait_indicator = None
         self.response_phase_completed = True
-        interactive_command = self.pending_interactive_command is not None
+        if self.pending_interactive_command is not None:
+            # The model's decision time is folded into the card's per-step
+            # "·N.Ns" marker (added in the run_agent continuation block), so
+            # there is no standalone "Decided next input" status line and nothing
+            # is appended to status_items/history — the whole interaction stays
+            # collapsed into the single run_command record.
+            return
         status_text = response_start_status(
             time.perf_counter() - self.thought_started,
             has_reasoning=self.saw_reasoning,
-            interactive_command=interactive_command,
         )
-        if interactive_command:
-            # Leave a persistent "Decided next input in Ns" line so a slow
-            # per-line model turn shows it was working rather than hanging, but
-            # keep it out of status_items/history — the whole interaction stays
-            # collapsed into the single run_command record.
-            if self.ui is not None:
-                _ui_call(self.ui, "complete_response_phase", status_text)
-            elif self.interactive:
-                console.print(thought_complete_indicator(status_text))
-            return
         self.status_items.append(
             status_history_item(status_text, "response", self.metadata)
         )
@@ -501,6 +536,11 @@ class _TurnRenderer:
             console.print(tool_complete_indicator(status_text))
 
     def note_tool_call_started(self, item_id: str, call_id: str, name: str) -> None:
+        if self.pending_interactive_command is not None:
+            # Interactive continuations forbid tool calls; if the model emits one
+            # anyway the turn loop nudges it back to stdin. Skip the tool-activity
+            # spinner — a second Rich Live would collide with the card's Live.
+            return
         keys = {value for value in (item_id, call_id) if value}
         positions = {
             self.started_tool_positions[key]
@@ -642,6 +682,14 @@ class _TurnRenderer:
         self.tool_indicator = None
         self.wait_indicator = None
         self.thought_started = time.perf_counter()
+        pending = self.pending_interactive_command
+        if pending is not None and getattr(pending, "card", None) is not None:
+            # Same rule as ensure_response_wait: the card footer is the only live
+            # region during an interactive continuation, so keep the "deciding"
+            # animation going rather than opening a competing response-wait Live.
+            pending.card.set_thinking(self.thought_started)
+            _refresh_interactive_card(self.ui, pending)
+            return
         if self.ui is not None:
             _ui_call(self.ui, "retry_stream")
             _ui_call(self.ui, "start_response_wait", self.thought_started)
@@ -915,6 +963,11 @@ def run_agent(
                 # The model's control reply and the next prompt stay in the live
                 # ``kwargs["input"]`` conversation only; history keeps just the one
                 # collapsed run_command record (rewritten via the helpers below).
+                # Capture the decision time now (before ``_continue`` adds the
+                # process wait) so it lands on this step's "·N.Ns" marker.
+                decision_seconds = max(
+                    0.0, time.perf_counter() - renderer.thought_started
+                )
                 terminal_reply = renderer.reply_text
                 kwargs["input"] = kwargs["input"] + [{
                     "role": "assistant",
@@ -931,16 +984,20 @@ def run_agent(
                     terminal_kind,
                     terminal_action,
                 )
-                _show_interactive_command_card(
-                    pending_interactive_command,
-                    snapshot,
-                    config,
-                    status="done" if snapshot.exited else "waiting",
-                    terminal_reply=terminal_action,
-                    terminal_kind=terminal_kind,
-                    ui=ui,
+                # Grow the single open card in place instead of printing a fresh
+                # box: append this step's stdin marker + delta output and let the
+                # footer resolve to the new waiting/exit state.
+                pending_interactive_command.card.add_step(
+                    _interaction_marker_text(terminal_kind, terminal_action),
+                    snapshot.to_delta_command_result().full_model_output(),
+                    decision_seconds,
+                    exited=snapshot.exited,
+                    exit_code=snapshot.exit_code if snapshot.exited else None,
+                    check_in=bool(getattr(snapshot, "check_in", False)),
                 )
+                _refresh_interactive_card(ui, pending_interactive_command)
                 if snapshot.exited:
+                    _close_interactive_card_live(pending_interactive_command)
                     final_output = _format_finished_interactive_output(
                         pending_interactive_command,
                         snapshot,
@@ -1078,6 +1135,9 @@ def run_agent(
         cancellation_token.cancel()
         pending = locals().get("pending_interactive_command")
         if pending is not None:
+            # Close the held-open card Live before the checkpoint prints below,
+            # so its final frame isn't corrupted by intervening console output.
+            _close_interactive_card_live(pending)
             try:
                 pending.process.kill_tree()
             except Exception:
@@ -1088,6 +1148,7 @@ def run_agent(
             _checkpoint_cancelled_turn()
         return AgentRunResult(cancelled=True, prompt=query)
     except (ProviderError, Exception) as e:
+        _close_interactive_card_live(locals().get("pending_interactive_command"))
         label = "API error" if isinstance(e, ProviderError) else "Unexpected error"
         message = f"{label}: {e}"
         if ui is not None:
@@ -1101,5 +1162,7 @@ def run_agent(
         sigint_cancel_scope.__exit__(None, None, None)
         _ui_call(ui, "unbind_cancel_token")
         renderer.stop_live()
+        # Safety net: close any interactive card Live the paths above missed.
+        _close_interactive_card_live(locals().get("pending_interactive_command"))
 
 

@@ -11,8 +11,9 @@ from rich.console import Console
 from rich.text import Text
 
 from jarv.agent import thought_complete_indicator, tool_complete_indicator
-from jarv.agent_ui import RunningCommandCard
+from jarv.agent_ui import InteractiveCommandCard, RunningCommandCard
 from jarv.cancellation import CancellationToken, TurnCancelled
+from jarv.shell import InteractiveCommandSnapshot
 from jarv.command_input import TextInput
 from jarv.headsup import HeadsupAgentUI, HeadsupApp
 from jarv.text_editor import initialize_text_editor
@@ -228,6 +229,88 @@ class HeadsupTests(unittest.TestCase):
 
         self.assertTrue(app.editor["buffer"].endswith(" ta"))
         self.assertIsNone(app.editor["selection_anchor"])
+
+    def test_ctrl_c_copies_selection_instead_of_exiting(self):
+        app, _test_console, _output = self._app()
+        initialize_text_editor(app.editor, "hello world")
+        app.editor["cursor"] = 0
+        app.on_key("CTRL_SHIFT_RIGHT", 1)  # select "hello"
+        stopped = []
+        app.stop = lambda *a, **k: stopped.append(True)
+
+        with patch("jarv.headsup.copy_to_clipboard", return_value=True) as copy:
+            app.on_interrupt()
+
+        copy.assert_called_once_with("hello")
+        # Buffer is untouched; only the selection is cleared.
+        self.assertEqual(app.editor["buffer"], "hello world")
+        self.assertIsNone(app.editor["selection_anchor"])
+        self.assertFalse(app._exit_armed)
+        self.assertFalse(stopped)
+        self.assertEqual(app._prompt_notice.plain, "Copied 5 characters to clipboard.")
+
+    def test_ctrl_c_without_selection_falls_through_to_dismiss(self):
+        app, _test_console, _output = self._app()
+        initialize_text_editor(app.editor, "draft")
+
+        with patch("jarv.headsup.copy_to_clipboard") as copy:
+            app.on_interrupt()
+
+        copy.assert_not_called()
+        # Existing dismiss behavior: the draft is cleared on the first press.
+        self.assertEqual(app.editor["buffer"], "")
+        self.assertEqual(app._prompt_notice.plain, "Draft cleared.")
+
+    def test_ctrl_c_after_copy_clears_selection_so_dismiss_resumes(self):
+        app, _test_console, _output = self._app()
+        initialize_text_editor(app.editor, "hello world")
+        app.editor["cursor"] = 0
+        app.on_key("CTRL_SHIFT_RIGHT", 1)  # select "hello"
+
+        with patch("jarv.headsup.copy_to_clipboard", return_value=True) as copy:
+            app.on_interrupt()  # copies, clears selection
+            app.on_interrupt()  # no selection now -> dismiss clears the draft
+
+        copy.assert_called_once()
+        self.assertEqual(app.editor["buffer"], "")
+        self.assertEqual(app._prompt_notice.plain, "Draft cleared.")
+
+    def test_ctrl_c_copies_expanded_paste_marker(self):
+        app, _test_console, _output = self._app()
+        initialize_text_editor(app.editor, "")
+        app._apply_editor_key(TextInput("one\ntwo"), 1)  # collapses to a chip
+        # Select the whole chip marker (it contains spaces, so word-select alone
+        # would only grab part of it).
+        app.editor["selection_anchor"] = 0
+        app.editor["cursor"] = len(app.editor["buffer"])
+
+        with patch("jarv.headsup.copy_to_clipboard", return_value=True) as copy:
+            app.on_interrupt()
+
+        copy.assert_called_once_with("one\ntwo")
+
+    def test_ctrl_c_reports_clipboard_failure(self):
+        app, _test_console, _output = self._app()
+        initialize_text_editor(app.editor, "hello world")
+        app.editor["cursor"] = 0
+        app.on_key("CTRL_SHIFT_RIGHT", 1)  # select "hello"
+        stopped = []
+        app.stop = lambda *a, **k: stopped.append(True)
+
+        with patch("jarv.headsup.copy_to_clipboard", return_value=False):
+            app.on_interrupt()
+
+        self.assertIsNone(app.editor["selection_anchor"])
+        self.assertFalse(stopped)
+        self.assertEqual(app._prompt_notice.plain, "Couldn't reach the clipboard.")
+
+    def test_footer_hints_copy_when_selection_active(self):
+        app, _test_console, _output = self._app()
+        initialize_text_editor(app.editor, "hello world")
+        app.editor["cursor"] = 0
+        app.on_key("CTRL_SHIFT_RIGHT", 1)  # select "hello"
+
+        self.assertIn("Ctrl+C copy selection", app._footer_line(120).plain)
 
     def test_intro_animation_shows_on_fresh_session_and_clears_after_first_message(self):
         app, test_console, output = self._app(width=80)
@@ -781,6 +864,33 @@ class HeadsupTests(unittest.TestCase):
         app._dirty = False
         self.assertFalse(ui._refresh_wait_statuses())
         self.assertFalse(app._dirty)
+
+    def test_interactive_command_card_grows_in_one_headsup_slot(self):
+        app, _test_console, _output = self._app()
+        ui = HeadsupAgentUI(app)
+
+        card = InteractiveCommandCard(
+            "python game.py", "", "fullscreen", time.perf_counter()
+        )
+        card.seed_initial(
+            InteractiveCommandSnapshot("python game.py", "hi\n", "", None, exited=False)
+        )
+        ui.show_tool_card(card)
+        slot_count = len(app.entries)
+        # A live (not yet exited) card animates and occupies one tool slot.
+        self.assertTrue(ui.has_active_animation())
+
+        # A later model step grows the SAME slot instead of appending a box.
+        card.add_step(Text("stdin> go"), "there\n", 1.0, exited=False)
+        ui.show_tool_card(card)
+        self.assertEqual(len(app.entries), slot_count)
+        self.assertTrue(ui.has_active_animation())
+
+        # On exit the slot is finalized in place and nothing is animating.
+        card.add_step(Text("stdin> quit"), "bye\n", 0.5, exited=True, exit_code=0)
+        ui.show_tool_card(card)
+        self.assertEqual(len(app.entries), slot_count)
+        self.assertFalse(ui.has_active_animation())
 
     def test_unbind_cancel_token_stops_wait_status_refreshes(self):
         app, _test_console, _output = self._app()

@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import threading
 import time
+from contextlib import contextmanager
 
 from rich.text import Text
 
+from jarv import tui_app
 from jarv.tui_app import AltScreenApp, AppEvent
 
 
@@ -271,6 +273,56 @@ def test_suspended_resets_resize_baseline_to_force_repaint():
     # (covers resize-then-revert while suspended).
     assert app._last_size is None
     assert app._check_resize() is True
+
+
+def test_suspended_drops_vt_input_for_nested_view(monkeypatch):
+    # A VT-input app (heads-up) must hand the console to the nested view as plain
+    # key records: otherwise arrows/wheel arrive as ``ESC [ A/B`` and the leading
+    # ESC closes the nested view while ``[A``/``[B`` leaks into our input box.
+    events: list[str] = []
+
+    @contextmanager
+    def fake_vt_suspend():
+        events.append("vt_off")
+        try:
+            yield
+        finally:
+            events.append("vt_on")
+
+    monkeypatch.setattr(tui_app, "windows_vt_input_suspended", fake_vt_suspend)
+
+    app, _ = _make_app(keys=[])
+    app.use_vt_input = True
+    app.live = _StubLive()
+
+    with app.suspended():
+        events.append("nested")
+
+    assert events == ["vt_off", "nested", "vt_on"]
+
+
+def test_suspended_leaves_vt_input_untouched_without_vt_input(monkeypatch):
+    # Views that never enable VT input must not poke the console mode at all.
+    events: list[str] = []
+
+    @contextmanager
+    def fake_vt_suspend():
+        events.append("vt_off")
+        try:
+            yield
+        finally:
+            events.append("vt_on")
+
+    monkeypatch.setattr(tui_app, "windows_vt_input_suspended", fake_vt_suspend)
+
+    app, _ = _make_app(keys=[])
+    app.use_vt_input = False
+    app.live = _StubLive()
+
+    with app.suspended():
+        events.append("nested")
+
+    assert events == ["nested"]
 
 
 def test_preserve_alt_screen_holds_both_directions():

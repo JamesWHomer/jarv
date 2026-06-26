@@ -393,6 +393,56 @@ def windows_vt_input():
 
 
 @contextmanager
+def windows_vt_input_suspended():
+    r"""Temporarily clear VT input so a nested console view reads key records.
+
+    The inverse of :func:`windows_vt_input`. A VT-input view (heads-up) holds the
+    console in ``ENABLE_VIRTUAL_TERMINAL_INPUT`` for its whole lifetime, including
+    while it suspends to run a nested full-screen view (an interactive slash
+    command). Those nested views read keyboard input as console *records* and
+    expect VT input *off* -- with it on, an arrow key or wheel scroll arrives as
+    the raw byte run ``\x1b [ A``/``\x1b [ B``, whose leading ESC the view reads
+    as a close key (so it exits) while the trailing ``[A``/``[B`` is left in the
+    buffer to leak into the parent's input box on resume. Clearing the flag here
+    for the duration of the nested view restores per-key console records; the
+    original mode (VT input back on) is restored on exit. No-op off win32 /
+    without ctypes / when VT input wasn't enabled.
+    """
+    if sys.platform != "win32":
+        yield
+        return
+
+    try:
+        import ctypes
+    except ImportError:
+        yield
+        return
+
+    try:
+        kernel32 = ctypes.windll.kernel32
+    except AttributeError:
+        yield
+        return
+
+    handle = kernel32.GetStdHandle(-10)
+    mode = ctypes.c_uint()
+    if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+        yield
+        return
+
+    original_mode = mode.value
+    cleared_mode = original_mode & ~_WINDOWS_ENABLE_VIRTUAL_TERMINAL_INPUT
+    changed = cleared_mode != original_mode and bool(
+        kernel32.SetConsoleMode(handle, cleared_mode)
+    )
+    try:
+        yield
+    finally:
+        if changed:
+            kernel32.SetConsoleMode(handle, original_mode)
+
+
+@contextmanager
 def _windows_virtual_terminal_input():
     global _WINDOWS_MOUSE_CAPTURE_DEPTH
 
