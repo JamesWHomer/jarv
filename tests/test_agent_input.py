@@ -19,6 +19,7 @@ from jarv.agent import (
     _parse_terminal_control,
     _print_tool_card,
     _run_command_waiting_prompt,
+    _TurnRenderer,
     _terminal_action_display,
     build_input,
     _format_agent_usage_line,
@@ -264,6 +265,26 @@ class AgentInputTests(unittest.TestCase):
             response_start_status(1.0, has_reasoning=False),
             "Started responding in 1.0 second.",
         )
+
+    def test_interactive_continuation_defers_response_phase_until_stream_done(self):
+        # The spinner is stopped exactly when the response phase completes. For a
+        # normal turn that happens at the first token (so streamed text can take
+        # over). For an interactive continuation the reply is hidden, so the
+        # phase must NOT complete at the first token — otherwise the spinner dies
+        # and the rest of a long stream looks frozen. response_phase_completed is
+        # a faithful proxy for "spinner stopped" without a live terminal.
+        renderer = _TurnRenderer(
+            ui=None, interactive=False, status_items=[], metadata={}
+        )
+
+        renderer.begin_turn(pending_interactive_command=None)
+        renderer.on_stream_event(TextDelta("hi"), None)
+        self.assertTrue(renderer.response_phase_completed)
+
+        renderer.begin_turn(pending_interactive_command=object())
+        renderer.on_stream_event(TextDelta("look"), None)
+        self.assertFalse(renderer.response_phase_completed)
+        self.assertEqual(renderer.reply_text, "look")
 
     def test_response_start_status_records_interactive_command_decision(self):
         # The persistent trail left after each interactive continuation turn so
