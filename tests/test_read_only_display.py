@@ -54,6 +54,8 @@ class FakeLive:
 
 
 def _install_display_harness(monkeypatch, *, width=80, height=24, key="ENTER", force_terminal=True):
+    import jarv.tui_app as tui_app
+
     FakeLive.instances = []
     output = io.StringIO()
     test_console = Console(file=output, force_terminal=force_terminal, width=width, color_system=None)
@@ -61,15 +63,23 @@ def _install_display_harness(monkeypatch, *, width=80, height=24, key="ENTER", f
     monkeypatch.setattr(read_only_display.sys, "stdin", TtyStdin())
     monkeypatch.setattr(read_only_display, "terminal_size", lambda *, console: (width, height))
     monkeypatch.setattr(read_only_display, "Live", FakeLive)
-    monkeypatch.setattr(read_only_display, "refresh_on_resize", noop_context)
-    monkeypatch.setattr(read_only_display, "mouse_capture", noop_context)
 
     def read_key_with_repeats():
         if key == "KeyboardInterrupt":
             raise KeyboardInterrupt
         return key, 1
 
+    # The shared loop polls key_available before reading; one close key is enough
+    # because on_key stops the loop on the first read.
     monkeypatch.setattr(read_only_display, "_read_key_with_repeats", read_key_with_repeats)
+    monkeypatch.setattr(read_only_display, "_key_available", lambda: True)
+
+    # Neutralise the loop's terminal-mode managers (no real terminal under test).
+    monkeypatch.setattr(tui_app, "raw_input_mode", noop_context)
+    monkeypatch.setattr(tui_app, "mouse_capture", noop_context)
+    monkeypatch.setattr(tui_app, "bracketed_paste", noop_context)
+    monkeypatch.setattr(tui_app, "windows_vt_input", noop_context)
+    monkeypatch.setattr(tui_app, "disable_mouse_capture", lambda *a, **k: None)
     return output
 
 
@@ -85,7 +95,8 @@ def test_fullscreen_uses_compact_overlay_for_short_output(monkeypatch):
 
     # Interactive views always render in the alternate screen buffer.
     assert FakeLive.instances[-1].kwargs["screen"] is True
-    assert FakeLive.instances[-1].renderable.height is None
+    # The frame is wrapped in EraseTrailingColumns for the stale-edge fix.
+    assert FakeLive.instances[-1].renderable.renderable.height is None
 
 
 def test_fill_screen_uses_full_height_for_short_output(monkeypatch):
@@ -100,7 +111,7 @@ def test_fill_screen_uses_full_height_for_short_output(monkeypatch):
     )
 
     assert FakeLive.instances[-1].kwargs["screen"] is True
-    assert FakeLive.instances[-1].renderable.height == 20
+    assert FakeLive.instances[-1].renderable.renderable.height == 20
 
 
 def test_fullscreen_uses_scrollable_view_for_long_output(monkeypatch):
@@ -172,7 +183,8 @@ def test_fullscreen_view_uses_max_width_and_custom_close_hint(monkeypatch):
         close_hint="q / Esc / Enter  Close",
     )
 
-    panel = FakeLive.instances[-1].renderable
+    # The frame is wrapped in EraseTrailingColumns; the panel is one level in.
+    panel = FakeLive.instances[-1].renderable.renderable
     assert panel.width == 60
     assert "q / Esc / Enter  Close" in panel.renderable.renderables[-1].plain
 

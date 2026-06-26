@@ -9,7 +9,7 @@ from rich.console import Group, RenderableType
 from rich.live import Live
 from rich.text import Text
 
-from .command_input import _read_key_with_repeats, mouse_capture
+from .command_input import _key_available, _read_key_with_repeats
 from .config import (
     CONFIG_FILE,
     DEFAULT_CONFIG,
@@ -17,7 +17,7 @@ from .config import (
     READ_ONLY_COMMAND_DISPLAY_CHOICES,
     is_setup_complete,
 )
-from .display import console, jarv_panel, refresh_on_resize, rendered_text_lines, terminal_size
+from .display import console, jarv_panel, rendered_text_lines, terminal_size
 from .tui_overlay import scroll_overlay
 
 
@@ -93,7 +93,6 @@ def show_read_only_command(
         console_ref=console,
         live_cls=Live,
         terminal_size_fn=terminal_size,
-        refresh_on_resize_fn=refresh_on_resize,
-        mouse_capture_fn=mouse_capture,
         read_key_fn=_read_key_with_repeats,
+        key_available_fn=_key_available,
     )

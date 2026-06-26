@@ -289,7 +289,11 @@ def _interactive_command_card(
                 style="dim",
             ))
         body_parts.append(Text(result.full_model_output()))
-        body_parts.append(Text("Waiting for terminal input", style="dim"))
+        if getattr(snapshot, "check_in", False):
+            footer = "Still running — model deciding whether to wait or step in"
+        else:
+            footer = "Idle on stdin — model deciding the next input"
+        body_parts.append(Text(footer, style="dim"))
     else:
         body_parts.append(command_result_renderable(result))
     return tool_card(

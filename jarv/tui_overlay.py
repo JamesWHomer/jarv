@@ -7,12 +7,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from rich.console import Group
-from rich.live import Live
 from rich.panel import Panel
 from rich.text import Text
 
-from .command_input import _read_key_with_repeats, mouse_capture
-from .display import console, jarv_panel, mark_first_paint, refresh_on_resize, terminal_size
+from .display import console, jarv_panel, terminal_size
+from .tui_app import AltScreenApp
+from .tui_frame import wrap_frame
 from .tui_layout import append_bottom_footer
 
 
@@ -69,6 +69,50 @@ def apply_scroll_keys(
     return offset
 
 
+class ScrollOverlayApp(AltScreenApp):
+    """Read-only scrollable alternate-screen overlay on the shared loop.
+
+    Replaces the old threaded ``run_scroll_live`` driver -- a Rich ``Live`` plus a
+    ``jarv-resize-refresh`` daemon thread that grabbed ``live._lock`` and a
+    ``SIGWINCH`` handler -- with the single-threaded polled loop shared by
+    heads-up, the tree browser, and settings. Resize is detected by polling
+    ``terminal_size`` each iteration, so no background thread or lock is needed.
+    """
+
+    text_mode = False
+    batch_text = False
+    use_bracketed_paste = False
+    use_mouse_capture = True
+    translate_mouse_wheel = True
+    clear_on_resize = True
+    first_paint_label = "scroll-overlay"
+
+    def __init__(
+        self,
+        render_panel: Callable[[], Panel],
+        on_key: Callable[[str, int, ScrollOverlayState], bool],
+        *,
+        state: ScrollOverlayState,
+        close_keys: frozenset[str],
+        **kwargs: Any,
+    ):
+        super().__init__(**kwargs)
+        self._render_panel = render_panel
+        self._on_key_cb = on_key
+        self._state = state
+        self._close_keys = close_keys
+
+    def render(self) -> Any:
+        # Clear a previous, wider frame's stale right border on WSL/ConPTY.
+        return wrap_frame(self._render_panel())
+
+    def on_key(self, key: str, repeat: int) -> None:
+        if key in self._close_keys or self._on_key_cb(key, repeat, self._state):
+            self.stop()
+        # Otherwise the base loop repaints automatically (it marks dirty), so a
+        # scroll key's offset change shows on the next frame.
+
+
 def run_scroll_live(
     render_panel: Callable[[], Panel],
     on_key: Callable[[str, int, ScrollOverlayState], bool],
@@ -80,42 +124,41 @@ def run_scroll_live(
     refresh_on_resize_fn: Callable[..., Any] | None = None,
     mouse_capture_fn: Callable[..., Any] | None = None,
     read_key_fn: Callable[[], tuple[str, int]] | None = None,
+    key_available_fn: Callable[[], bool] | None = None,
+    terminal_size_fn: Callable[..., tuple[int, int]] | None = None,
 ) -> None:
-    """Run a fullscreen alternate-screen overlay with resize-safe refresh."""
-    console_ref = console_ref or console
-    live_cls = live_cls or Live
-    refresh_on_resize_fn = refresh_on_resize_fn or refresh_on_resize
-    mouse_capture_fn = mouse_capture_fn or mouse_capture
-    read_key_fn = read_key_fn or _read_key_with_repeats
+    """Run a fullscreen read-only scroll overlay on the shared AltScreenApp loop.
 
+    ``refresh_on_resize_fn`` and ``mouse_capture_fn`` are accepted for backward
+    compatibility but no longer used: the loop polls ``terminal_size`` for resize
+    and manages mouse capture itself.
+    """
     scroll_state = state or ScrollOverlayState()
-    live = live_cls(
-        get_renderable=render_panel,
+
+    def _make_live(get_renderable, console):
+        return live_cls(
+            get_renderable=get_renderable,
+            console=console,
+            screen=True,
+            auto_refresh=False,
+            transient=False,
+            vertical_overflow="crop",
+        )
+
+    live_factory = _make_live if live_cls is not None else None
+
+    app = ScrollOverlayApp(
+        render_panel,
+        on_key,
+        state=scroll_state,
+        close_keys=close_keys,
         console=console_ref,
-        screen=True,
-        auto_refresh=False,
-        transient=False,
-        vertical_overflow="crop",
+        live_factory=live_factory,
+        read_key_fn=read_key_fn,
+        key_available_fn=key_available_fn,
+        terminal_size_fn=terminal_size_fn,
     )
-
-    def _on_resize() -> None:
-        with live._lock:
-            try:
-                console_ref.clear()
-            except Exception:
-                pass
-            live.refresh()
-
-    with live, refresh_on_resize_fn(live, on_change=_on_resize), mouse_capture_fn():
-        mark_first_paint("scroll-overlay")
-        while True:
-            live.refresh()
-            try:
-                key, repeat_count = read_key_fn()
-            except KeyboardInterrupt:
-                break
-            if key in close_keys or on_key(key, repeat_count, scroll_state):
-                break
+    app.run()
 
 
 def scroll_overlay(
@@ -135,6 +178,7 @@ def scroll_overlay(
     refresh_on_resize_fn: Callable[..., Any] | None = None,
     mouse_capture_fn: Callable[..., Any] | None = None,
     read_key_fn: Callable[[], tuple[str, int]] | None = None,
+    key_available_fn: Callable[[], bool] | None = None,
 ) -> None:
     """Render a scrollable read-only overlay with shared chrome and key handling."""
     console_ref = console_ref or console
@@ -230,4 +274,6 @@ def scroll_overlay(
         refresh_on_resize_fn=refresh_on_resize_fn,
         mouse_capture_fn=mouse_capture_fn,
         read_key_fn=read_key_fn,
+        key_available_fn=key_available_fn,
+        terminal_size_fn=terminal_size_fn,
     )

@@ -21,10 +21,9 @@ from .command_input import (
     PasteRegistry,
     TextInput,
     _key_available,
-    _read_key,
     _read_key_with_repeats,
     disable_mouse_capture,
-    requeue_key,
+    enable_mouse_wheel_reporting,
     strip_sgr_mouse_sequences,
 )
 from .command_menu import MenuEntry, filter_entries, menu_entries
@@ -53,7 +52,12 @@ from .session_render import (
     _tool_call_output,
     _tool_call_renderable,
 )
-from .text_editor import apply_text_editor_key, initialize_text_editor, render_visual_line_window
+from .text_editor import (
+    apply_text_editor_key,
+    initialize_text_editor,
+    render_visual_line_window,
+    selection_bounds,
+)
 from .tui_app import AltScreenApp
 from .tui_frame import (
     FrameLayout,
@@ -106,6 +110,12 @@ _HEADSUP_REPEATABLE_KEYS = frozenset({
     "DOWN",
     "LEFT",
     "RIGHT",
+    "CTRL_LEFT",
+    "CTRL_RIGHT",
+    "SHIFT_LEFT",
+    "SHIFT_RIGHT",
+    "CTRL_SHIFT_LEFT",
+    "CTRL_SHIFT_RIGHT",
     "PAGEUP",
     "PAGEDOWN",
     "MOUSE_WHEEL_UP",
@@ -129,6 +139,11 @@ _VALID_COMMAND_STYLE = "cyan"
 # token -- distinct from the white draft text, but in the same accent family as
 # the input box's border. It is deleted and unboxed as a single unit.
 _PASTE_MARKER_STYLE = "dim cyan"
+
+# An active Shift/Ctrl+Shift selection paints as a solid cyan band so the
+# selected run reads clearly against the white draft text, while the reverse
+# cursor cell at the moving edge stays visible on top of it.
+_SELECTION_STYLE = "black on cyan"
 
 
 def _sanitize_editor_key(key: str) -> str:
@@ -192,6 +207,7 @@ class HeadsupAgentUI:
         self._tool_live_kind: str | None = None
         self._response_started_at = 0.0
         self._has_reasoning = False
+        self._response_interactive_command = False
         self._tool_started_at = 0.0
         self._tool_names: tuple[str, ...] = ()
         self._response_waiting = False
@@ -215,9 +231,12 @@ class HeadsupAgentUI:
         self._last_stream_refresh_at = None
         self.app.add_user_message(query)
 
-    def start_response_wait(self, start_time: float) -> None:
+    def start_response_wait(
+        self, start_time: float, *, interactive_command: bool = False
+    ) -> None:
         self._response_started_at = start_time
         self._has_reasoning = False
+        self._response_interactive_command = interactive_command
         self._response_waiting = True
         self._response_status_index = self.app.upsert_status(
             self._response_status_index,
@@ -378,7 +397,10 @@ class HeadsupAgentUI:
     def _response_wait_text(self) -> Text:
         elapsed = int(max(0.0, time.perf_counter() - self._response_started_at))
         frame = _THINKING_FRAMES[int(time.perf_counter() * 10) % len(_THINKING_FRAMES)]
-        label = response_wait_label(self._has_reasoning)
+        label = response_wait_label(
+            self._has_reasoning,
+            interactive_command=self._response_interactive_command,
+        )
         return Text(f"{frame}  {label}\u2026  {elapsed}s")
 
     def _tool_wait_text(self) -> Text:
@@ -475,9 +497,6 @@ class HeadsupApp(AltScreenApp):
         self.lock = threading.RLock()
         self._exit_armed = False
         self._cancel_token: CancellationToken | None = None
-        self._esc_listener_stop: threading.Event | None = None
-        self._esc_listener_thread: threading.Thread | None = None
-        self._esc_listener_paused = threading.Event()
         self._live_tool_index: dict[str, int] = {}
         self._refresh_suspended = 0
         self._foreground_input_active = False
@@ -546,7 +565,12 @@ class HeadsupApp(AltScreenApp):
         super().run()
 
     def on_start(self) -> None:
-        disable_mouse_capture()
+        # Capture the wheel as SGR mouse events so MOUSE_WHEEL_* tokens reach
+        # on_key and scroll the transcript -- rather than letting the terminal's
+        # alternate-scroll mode translate the wheel into prompt-history arrows.
+        # Runs after the alt screen / VT output is live (on_start fires inside the
+        # screen context), so the enable sequence reaches the terminal.
+        enable_mouse_wheel_reporting()
         self._foreground_input_active = True
         self._foreground_input_thread = threading.current_thread()
         self._begin_idle_animation()
@@ -564,6 +588,16 @@ class HeadsupApp(AltScreenApp):
     def on_interrupt(self) -> None:
         if self._handle_prompt_dismiss():
             self.stop()
+
+    @contextmanager
+    def suspended(self):
+        # Nested full-screen views (/help, /settings, /tree, the session browser)
+        # set their own mouse modes and reset them on exit, which leaves SGR mouse
+        # reporting off. Re-assert it on resume so the wheel keeps scrolling the
+        # transcript instead of reverting to alternate-scroll arrows.
+        with super().suspended():
+            yield
+        enable_mouse_wheel_reporting()
 
     def on_key(self, key: str, repeat: int) -> None:
         if key == "ENTER":
@@ -789,18 +823,29 @@ class HeadsupApp(AltScreenApp):
         currently visible we start a short, non-blocking dissolve (advanced by
         on_tick) before the transcript takes over; otherwise we just mark it
         dismissed.
+
+        Runs on the agent worker thread, so the stop flag and outro timestamp are
+        mutated under ``self.lock`` (a re-entrant RLock) to stay consistent with
+        the loop thread reading them together in render()/on_tick -- otherwise the
+        loop could see the stop set but the outro timestamp not yet written and
+        cut the intro abruptly for a frame.
         """
-        if self._idle_anim_stop.is_set():
-            return
-        was_visible = self._idle_animation_active()
-        self._idle_anim_stop.set()
-        if was_visible and self._foreground_input_active:
-            self._outro_started_at = time.perf_counter()
+        with self.lock:
+            if self._idle_anim_stop.is_set():
+                return
+            was_visible = self._idle_animation_active()
+            self._idle_anim_stop.set()
+            if was_visible and self._foreground_input_active:
+                self._outro_started_at = time.perf_counter()
 
     def add_user_message(self, query: str) -> None:
         line = Text()
         line.append("\u203a ", style="dim cyan")
         line.append(query, style="bright_white")
+        with self.lock:
+            # A new turn always jumps back to the bottom so the user sees their
+            # message and the streamed response, even if they had scrolled up.
+            self.scroll_offset = 0
         self._append(
             "user",
             line,
@@ -845,6 +890,11 @@ class HeadsupApp(AltScreenApp):
         self.refresh()
 
     def read_answer(self, label: str, *, echo_answer: bool = True) -> str:
+        # Normal heads-up turns run on a worker thread while the loop owns the
+        # screen, so the answer is collected by the loop (resize and repaint keep
+        # working). _read_answer_direct is the defensive fallback for the
+        # degenerate case where read_answer is invoked on the loop thread itself
+        # (routing that to the foreground path would deadlock the loop).
         if self._foreground_input_active:
             if self._foreground_input_thread is threading.current_thread():
                 return self._read_answer_direct(label, echo_answer=echo_answer)
@@ -854,7 +904,6 @@ class HeadsupApp(AltScreenApp):
     def _read_answer_direct(self, label: str, *, echo_answer: bool = True) -> str:
         previous = dict(self.editor)
         initialize_text_editor(self.editor, "")
-        self._pause_esc_listener()
         with self.lock:
             self._answer_request = {
                 "label": label,
@@ -886,7 +935,6 @@ class HeadsupApp(AltScreenApp):
                     return "[no response]"
                 self._apply_editor_key(key, repeat)
         finally:
-            self._resume_esc_listener()
             self.editor = previous
             with self._answer_condition:
                 self._answer_request = None
@@ -897,6 +945,10 @@ class HeadsupApp(AltScreenApp):
         term_w, _term_h = terminal_size(console=self.console)
         inner_width = max(1, _panel_width(max(20, term_w)) - 4)
         return self._prompt_edit_width(inner_width)
+
+    def _editor_selection_span(self) -> tuple[int, int] | None:
+        """The active Shift-selection span over the draft buffer, if any."""
+        return selection_bounds(self.editor)
 
     def _apply_editor_key(self, key: str, repeat: int) -> tuple[bool, bool]:
         if isinstance(key, TextInput):
@@ -910,16 +962,25 @@ class HeadsupApp(AltScreenApp):
                 self.editor["buffer"] = value[:start] + stripped + value[cursor:]
                 self.editor["cursor"] = start + len(stripped)
                 self.editor["preferred_visual_column"] = None
+                self.editor["selection_anchor"] = None
                 return stripped != existing_tail, bool(stripped)
 
         key = _sanitize_editor_key(key)
         if key == "CTRL_N":
             key = "ENTER"
-        if key in ("BACKSPACE", "DELETE") and self._delete_adjacent_paste(key):
+        has_selection = self._editor_selection_span() is not None
+        # An active selection takes priority over the paste-chip shortcuts: a
+        # Backspace/Delete deletes the selection (handled by the editor), and a
+        # re-paste replaces it rather than unboxing an adjacent chip.
+        if (
+            key in ("BACKSPACE", "DELETE")
+            and not has_selection
+            and self._delete_adjacent_paste(key)
+        ):
             return True, False
         if isinstance(key, TextInput) and self._answer_request is None:
             content = str(key)
-            if self._unbox_duplicate_paste(content):
+            if not has_selection and self._unbox_duplicate_paste(content):
                 return True, True
             marker = self._pastes.collapse(content)
             if marker is not None:
@@ -931,6 +992,10 @@ class HeadsupApp(AltScreenApp):
             content_width=self._current_prompt_edit_width(),
             allow_newlines=True,
         )
+        if changed and has_selection:
+            # A selection replace/delete may have cut through a paste chip; drop
+            # any markers no longer present in the buffer.
+            self._pastes.prune(str(self.editor.get("buffer", "")))
         return changed, isinstance(key, TextInput)
 
     def _editor_buffer_cursor(self) -> tuple[str, int]:
@@ -969,55 +1034,14 @@ class HeadsupApp(AltScreenApp):
         return True
 
     def bind_cancel_token(self, token: CancellationToken) -> None:
-        self.unbind_cancel_token()
+        # The single-threaded loop owns stdin and turns ESC into a cancel via
+        # on_key, so we just record the token. (A background esc-listener thread
+        # was removed: it only ever ran for the non-foreground adapter path that
+        # no longer exists, and it raced the polled reader for the same stdin.)
         self._cancel_token = token
-        if self._foreground_input_active:
-            return
-        self._esc_listener_stop = threading.Event()
-        self._esc_listener_paused.clear()
-        self._esc_listener_thread = threading.Thread(
-            target=self._esc_cancel_loop,
-            name="headsup-esc-cancel",
-            daemon=True,
-        )
-        self._esc_listener_thread.start()
 
     def unbind_cancel_token(self) -> None:
-        stop = self._esc_listener_stop
-        thread = self._esc_listener_thread
-        if stop is not None:
-            stop.set()
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=0.2)
-        self._esc_listener_stop = None
-        self._esc_listener_thread = None
         self._cancel_token = None
-        self._esc_listener_paused.clear()
-
-    def _pause_esc_listener(self) -> None:
-        self._esc_listener_paused.set()
-
-    def _resume_esc_listener(self) -> None:
-        self._esc_listener_paused.clear()
-
-    def _esc_cancel_loop(self) -> None:
-        stop = self._esc_listener_stop
-        if stop is None:
-            return
-        while not stop.is_set():
-            if self._esc_listener_paused.is_set():
-                stop.wait(0.05)
-                continue
-            if not _key_available():
-                stop.wait(0.05)
-                continue
-            key = _read_key(text_mode=True)
-            if key == "ESC":
-                token = self._cancel_token
-                if token is not None:
-                    token.cancel()
-                return
-            requeue_key(key)
 
     def _handle_prompt_dismiss(self) -> bool:
         if str(self.editor.get("buffer", "")):
@@ -1726,7 +1750,10 @@ class HeadsupApp(AltScreenApp):
             self._dismiss_intro()
         with self.lock:
             self.entries.append(TranscriptEntry(kind, renderable, spacer_before=spacer_before))
-            self.scroll_offset = 0
+            # Follow the newest line only while pinned to the bottom. When the user
+            # has scrolled up (scroll_offset > 0) to read history, preserve their
+            # position instead of snapping back down on every streamed line --
+            # add_user_message resets to the bottom when a new turn begins.
         self.refresh()
 
     def _upsert(self, index: int | None, kind: str, renderable: RenderableType) -> int:
@@ -1739,7 +1766,8 @@ class HeadsupApp(AltScreenApp):
             else:
                 self.entries.append(TranscriptEntry(kind, renderable))
                 result = len(self.entries) - 1
-            self.scroll_offset = 0
+            # See _append: stay put when the user has scrolled up; otherwise the
+            # offset is already 0 and the view keeps following the newest content.
         self.refresh()
         return result
 
@@ -1774,6 +1802,8 @@ class HeadsupApp(AltScreenApp):
             cursor_style="reverse",
             highlight_spans=marker_spans,
             highlight_style=_PASTE_MARKER_STYLE,
+            selection_span=self._editor_selection_span(),
+            selection_style=_SELECTION_STYLE,
         )
         if not rendered:
             rendered = [Text(" ", style="reverse")]

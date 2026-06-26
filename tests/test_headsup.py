@@ -187,6 +187,48 @@ class HeadsupTests(unittest.TestCase):
         self.assertIn((2, 7, "white"), spans)
         self.assertFalse(any(str(st) == "cyan" for _s, _e, st in spans))
 
+    def test_prompt_box_paints_active_selection(self):
+        app, _test_console, _output = self._app()
+        initialize_text_editor(app.editor, "hello world")
+        app.editor["cursor"] = 0
+
+        # Ctrl+Shift+Right selects the first word ("hello").
+        app.on_key("CTRL_SHIFT_RIGHT", 1)
+        self.assertEqual(app._editor_selection_span(), (0, 5))
+
+        lines = app._prompt_lines(40, max_lines=3)
+        spans = [(span.start, span.end, str(span.style)) for span in lines[1].spans]
+        # The box content starts at offset 2 ("│ "), so "hello" sits at 2..7.
+        self.assertTrue(
+            any(st == "black on cyan" and start >= 2 for start, _e, st in spans)
+        )
+
+    def test_selection_is_replaced_by_typing_through_on_key(self):
+        app, _test_console, _output = self._app()
+        initialize_text_editor(app.editor, "hello world")
+        app.editor["cursor"] = 0
+        app.on_key("CTRL_SHIFT_RIGHT", 1)  # select "hello"
+
+        app.on_key(TextInput("hi"), 1)
+
+        self.assertEqual(app.editor["buffer"], "hi world")
+        self.assertIsNone(app.editor["selection_anchor"])
+
+    def test_backspace_deletes_selection_not_adjacent_chip(self):
+        app, _test_console, _output = self._app()
+        initialize_text_editor(app.editor, "")
+        # A multi-line paste collapses to a chip; then select a trailing word and
+        # confirm Backspace removes the selection rather than the whole chip.
+        app._apply_editor_key(TextInput("one\ntwo"), 1)
+        app._apply_editor_key(TextInput(" tail"), 1)
+        app.on_key("SHIFT_LEFT", 1)
+        app.on_key("SHIFT_LEFT", 1)  # select "il"
+
+        app.on_key("BACKSPACE", 1)
+
+        self.assertTrue(app.editor["buffer"].endswith(" ta"))
+        self.assertIsNone(app.editor["selection_anchor"])
+
     def test_intro_animation_shows_on_fresh_session_and_clears_after_first_message(self):
         app, test_console, output = self._app(width=80)
 
@@ -567,7 +609,8 @@ class HeadsupTests(unittest.TestCase):
 
         app.bind_cancel_token(token)
 
-        self.assertIsNone(app._esc_listener_thread)
+        # No background esc-listener thread is spawned for the foreground loop;
+        # ESC-cancel is handled inline by on_key / read_answer instead.
         self.assertTrue(app._cancel_active_turn())
         self.assertTrue(token.cancelled)
         app.unbind_cancel_token()
@@ -880,7 +923,9 @@ class HeadsupTests(unittest.TestCase):
         ):
             app.run()
 
-        self.assertEqual(disable_mouse_capture.call_count, 2)
+        # on_stop tears down mouse reporting once (on_start now *enables* SGR
+        # wheel reporting via enable_mouse_wheel_reporting instead).
+        self.assertEqual(disable_mouse_capture.call_count, 1)
         self.assertNotEqual(getattr(app._prompt_notice, "plain", None), "Press Esc or Ctrl+C again to exit.")
         self.assertNotIn("Press Esc or Ctrl+C again to exit.", self._entry_text(app))
         self.assertEqual(run_agent_calls[0][0], "hi")
@@ -1223,15 +1268,37 @@ class HeadsupTests(unittest.TestCase):
 
         with (
             patch("jarv.headsup.Live", FakeLive),
+            patch("jarv.headsup.enable_mouse_wheel_reporting") as enable_mouse_wheel_reporting,
             patch("jarv.headsup.disable_mouse_capture") as disable_mouse_capture,
             patch("jarv.headsup._key_available", lambda: bool(keys)),
             patch("jarv.headsup._read_key_with_repeats", side_effect=lambda **kwargs: keys.pop(0)),
         ):
             app.run()
 
-        self.assertEqual(disable_mouse_capture.call_count, 2)
+        # on_start turns SGR mouse-wheel reporting on; on_stop tears it down. The
+        # wheel scrolls the transcript (3 lines x repeat 2) and never touches
+        # prompt-history navigation.
+        self.assertGreaterEqual(enable_mouse_wheel_reporting.call_count, 1)
+        self.assertEqual(disable_mouse_capture.call_count, 1)
         self.assertEqual(app.scroll_offset, 6)
         self.assertIsNone(app._prompt_history_index)
+
+    def test_streamed_content_preserves_scroll_offset_when_scrolled_up(self):
+        app, _test_console, _output = self._app()
+        # Pretend the user has scrolled up to read earlier history.
+        app.scroll_offset = 4
+
+        # A tool card and streamed assistant deltas must not yank the view back to
+        # the bottom while the user is reading earlier content.
+        app.add_tool(Text("tool output"))
+        self.assertEqual(app.scroll_offset, 4)
+        index = app.upsert_assistant_message(None, "streamed")
+        app.upsert_assistant_message(index, "streamed reply")
+        self.assertEqual(app.scroll_offset, 4)
+
+        # A new turn always jumps back to the bottom so the user follows it.
+        app.add_user_message("next question")
+        self.assertEqual(app.scroll_offset, 0)
 
     def test_sgr_mouse_text_fragment_does_not_enter_prompt(self):
         app, _test_console, _output = self._app()
@@ -1274,22 +1341,6 @@ class HeadsupTests(unittest.TestCase):
             app._sync_transcript_from_history()
 
         self.assertEqual(app._prompt_history, ["first", "second"])
-
-    def test_bind_cancel_token_esc_cancels(self):
-        app, _test_console, _output = self._app()
-        token = CancellationToken()
-        keys = ["ESC"]
-
-        with (
-            patch("jarv.headsup._key_available", side_effect=[True, False]),
-            patch("jarv.headsup._read_key", side_effect=lambda text_mode=False: keys.pop(0)),
-        ):
-            app.bind_cancel_token(token)
-            if app._esc_listener_thread is not None:
-                app._esc_listener_thread.join(timeout=1.0)
-
-        self.assertTrue(token.cancelled)
-        app.unbind_cancel_token()
 
     def test_read_answer_esc_cancels_turn(self):
         app, _test_console, _output = self._app()

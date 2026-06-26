@@ -17,6 +17,9 @@ def initialize_text_editor(
         original=value,
         multiline=multiline,
         preferred_visual_column=None,
+        # Start of an active Shift-selection (None when nothing is selected). The
+        # selected range is the span between this anchor and the cursor.
+        selection_anchor=None,
     )
 
 
@@ -72,14 +75,21 @@ def _append_segment(
     base_style: str,
     highlight_style: str,
     cursor_style: str,
+    selection: tuple[int, int] | None = None,
+    selection_style: str = "",
 ) -> None:
     """Append ``segment`` to ``line``, styling marker spans (and the cursor).
 
     With no spans this collapses to one styled run (plus the cursor split), so
-    the rendered output is identical to plain text styling.
+    the rendered output is identical to plain text styling. An active
+    ``selection`` span (highest priority after the cursor) paints the selected
+    range with ``selection_style``.
     """
     def style_at(offset: int) -> str:
-        return highlight_style if _index_in_spans(abs_start + offset, spans) else base_style
+        idx = abs_start + offset
+        if selection is not None and selection_style and selection[0] <= idx < selection[1]:
+            return selection_style
+        return highlight_style if _index_in_spans(idx, spans) else base_style
 
     length = len(segment)
     offset = 0
@@ -113,6 +123,8 @@ def render_visual_lines(
     cursor_style: str = "reverse",
     highlight_spans=None,
     highlight_style: str = "cyan",
+    selection_span: tuple[int, int] | None = None,
+    selection_style: str = "",
 ) -> tuple[list[Text], int]:
     value = str(state.get("buffer", ""))
     display = _display_value(value, masked=masked)
@@ -134,6 +146,8 @@ def render_visual_lines(
             base_style=text_style,
             highlight_style=highlight_style,
             cursor_style=cursor_style,
+            selection=selection_span,
+            selection_style=selection_style,
         )
         rendered.append(line)
 
@@ -151,6 +165,8 @@ def render_visual_line_window(
     cursor_style: str = "reverse",
     highlight_spans=None,
     highlight_style: str = "cyan",
+    selection_span: tuple[int, int] | None = None,
+    selection_style: str = "",
 ) -> tuple[list[Text], int, int]:
     lines, cursor_idx = render_visual_lines(
         state,
@@ -161,6 +177,8 @@ def render_visual_line_window(
         cursor_style=cursor_style,
         highlight_spans=highlight_spans,
         highlight_style=highlight_style,
+        selection_span=selection_span,
+        selection_style=selection_style,
     )
     if max_lines is None:
         return lines, cursor_idx, 0
@@ -226,6 +244,58 @@ def _move_vertical(
     state["preferred_visual_column"] = preferred_column
 
 
+# Shift / Ctrl+Shift + arrow tokens that extend the active selection.
+_SELECT_EXTEND_KEYS = frozenset(
+    {"SHIFT_LEFT", "SHIFT_RIGHT", "CTRL_SHIFT_LEFT", "CTRL_SHIFT_RIGHT"}
+)
+
+
+def _next_word_boundary(value: str, cursor: int) -> int:
+    """Index at the end of the word at/after ``cursor`` (whitespace-delimited)."""
+    length = len(value)
+    index = cursor
+    while index < length and value[index].isspace():
+        index += 1
+    while index < length and not value[index].isspace():
+        index += 1
+    return index
+
+
+def _prev_word_boundary(value: str, cursor: int) -> int:
+    """Index at the start of the word at/before ``cursor`` (whitespace-delimited)."""
+    index = cursor
+    while index > 0 and value[index - 1].isspace():
+        index -= 1
+    while index > 0 and not value[index - 1].isspace():
+        index -= 1
+    return index
+
+
+def selection_bounds(state: dict) -> tuple[int, int] | None:
+    """Return the ``(start, end)`` of the active selection, or ``None``.
+
+    The selection spans from ``selection_anchor`` to ``cursor``; a collapsed span
+    (anchor == cursor) counts as no selection.
+    """
+    anchor = state.get("selection_anchor")
+    if anchor is None:
+        return None
+    value = str(state.get("buffer", ""))
+    cursor = max(0, min(int(state.get("cursor", len(value))), len(value)))
+    anchor = max(0, min(int(anchor), len(value)))
+    lo, hi = (anchor, cursor) if anchor <= cursor else (cursor, anchor)
+    if lo == hi:
+        return None
+    return lo, hi
+
+
+def _word_jump(value: str, cursor: int, *, forward: bool, count: int) -> int:
+    pos = cursor
+    for _ in range(max(1, count)):
+        pos = _next_word_boundary(value, pos) if forward else _prev_word_boundary(value, pos)
+    return pos
+
+
 def apply_text_editor_key(
     state: dict,
     key: str,
@@ -236,13 +306,49 @@ def apply_text_editor_key(
 ) -> bool:
     value = str(state.get("buffer", ""))
     cursor = max(0, min(int(state.get("cursor", len(value))), len(value)))
+    repeat = max(1, repeat_count)
+    selection = selection_bounds(state)
     changed = False
 
+    # --- Selection-extending motion: keep the anchor, move the cursor. ---
+    if key in _SELECT_EXTEND_KEYS:
+        if state.get("selection_anchor") is None:
+            state["selection_anchor"] = cursor
+        if key == "SHIFT_LEFT":
+            new_cursor = max(0, cursor - repeat)
+        elif key == "SHIFT_RIGHT":
+            new_cursor = min(len(value), cursor + repeat)
+        elif key == "CTRL_SHIFT_LEFT":
+            new_cursor = _word_jump(value, cursor, forward=False, count=repeat)
+        else:  # CTRL_SHIFT_RIGHT
+            new_cursor = _word_jump(value, cursor, forward=True, count=repeat)
+        state["cursor"] = new_cursor
+        state["preferred_visual_column"] = None
+        if state.get("selection_anchor") == new_cursor:
+            # Collapsed back onto the anchor -> nothing selected.
+            state["selection_anchor"] = None
+        return False
+
+    # --- Word-wise motion (Ctrl + arrow): move and drop any selection. ---
+    if key == "CTRL_LEFT":
+        state["cursor"] = _word_jump(value, cursor, forward=False, count=repeat)
+        state["selection_anchor"] = None
+        state["preferred_visual_column"] = None
+        return False
+    if key == "CTRL_RIGHT":
+        state["cursor"] = _word_jump(value, cursor, forward=True, count=repeat)
+        state["selection_anchor"] = None
+        state["preferred_visual_column"] = None
+        return False
+
     if key == "LEFT":
-        state["cursor"] = max(0, cursor - repeat_count)
+        # With a selection, plain Left collapses to its left edge.
+        state["cursor"] = selection[0] if selection else max(0, cursor - repeat)
+        state["selection_anchor"] = None
         state["preferred_visual_column"] = None
     elif key == "RIGHT":
-        state["cursor"] = min(len(value), cursor + repeat_count)
+        state["cursor"] = selection[1] if selection else min(len(value), cursor + repeat)
+        state["selection_anchor"] = None
         state["preferred_visual_column"] = None
     elif key == "HOME":
         if allow_newlines:
@@ -250,6 +356,7 @@ def apply_text_editor_key(
             state["cursor"] = rows[cursor_row_index(rows, cursor)][0]
         else:
             state["cursor"] = 0
+        state["selection_anchor"] = None
         state["preferred_visual_column"] = None
     elif key == "END":
         if allow_newlines:
@@ -257,31 +364,50 @@ def apply_text_editor_key(
             state["cursor"] = rows[cursor_row_index(rows, cursor)][1]
         else:
             state["cursor"] = len(value)
+        state["selection_anchor"] = None
         state["preferred_visual_column"] = None
     elif allow_newlines and key == "UP":
         _move_vertical(
             state,
             -1,
             content_width=content_width,
-            count=repeat_count,
+            count=repeat,
         )
+        state["selection_anchor"] = None
     elif allow_newlines and key == "DOWN":
         _move_vertical(
             state,
             1,
             content_width=content_width,
-            count=repeat_count,
+            count=repeat,
         )
-    elif key == "BACKSPACE" and cursor:
-        state["buffer"] = value[: cursor - 1] + value[cursor:]
-        state["cursor"] = cursor - 1
-        changed = True
-    elif key == "DELETE" and cursor < len(value):
-        state["buffer"] = value[:cursor] + value[cursor + 1 :]
-        changed = True
+        state["selection_anchor"] = None
+    elif key == "BACKSPACE":
+        if selection is not None:
+            lo, hi = selection
+            state["buffer"] = value[:lo] + value[hi:]
+            state["cursor"] = lo
+            state["selection_anchor"] = None
+            changed = True
+        elif cursor:
+            state["buffer"] = value[: cursor - 1] + value[cursor:]
+            state["cursor"] = cursor - 1
+            changed = True
+    elif key == "DELETE":
+        if selection is not None:
+            lo, hi = selection
+            state["buffer"] = value[:lo] + value[hi:]
+            state["cursor"] = lo
+            state["selection_anchor"] = None
+            changed = True
+        elif cursor < len(value):
+            state["buffer"] = value[:cursor] + value[cursor + 1 :]
+            changed = True
     elif allow_newlines and key == "ENTER":
-        state["buffer"] = value[:cursor] + "\n" + value[cursor:]
-        state["cursor"] = cursor + 1
+        lo, hi = selection if selection is not None else (cursor, cursor)
+        state["buffer"] = value[:lo] + "\n" + value[hi:]
+        state["cursor"] = lo + 1
+        state["selection_anchor"] = None
         changed = True
     elif isinstance(key, TextInput):
         inserted = str(key).replace("\r\n", "\n").replace("\r", "\n")
@@ -291,8 +417,10 @@ def apply_text_editor_key(
             char == "\n" or char == "\t" or char.isprintable()
             for char in inserted
         ):
-            state["buffer"] = value[:cursor] + inserted + value[cursor:]
-            state["cursor"] = cursor + len(inserted)
+            lo, hi = selection if selection is not None else (cursor, cursor)
+            state["buffer"] = value[:lo] + inserted + value[hi:]
+            state["cursor"] = lo + len(inserted)
+            state["selection_anchor"] = None
             changed = True
     elif (
         isinstance(key, str)
@@ -300,8 +428,10 @@ def apply_text_editor_key(
         and len(key) == 1
         and key.isprintable()
     ):
-        state["buffer"] = value[:cursor] + key + value[cursor:]
-        state["cursor"] = cursor + len(key)
+        lo, hi = selection if selection is not None else (cursor, cursor)
+        state["buffer"] = value[:lo] + key + value[hi:]
+        state["cursor"] = lo + len(key)
+        state["selection_anchor"] = None
         changed = True
 
     if changed:

@@ -43,6 +43,15 @@ _PASTE_BURST_GAP_SECONDS = 0.02
 # a human pause before ENTER exits the batch loop before this point, so genuine
 # submits stay instant.
 _PASTE_RESUME_GAP_SECONDS = 0.1
+# Hard cap on the *total* time a single batched read may block waiting for more
+# of a chunked paste. The fallback batcher runs on the heads-up loop thread, so
+# without a cap a large multi-line paste (each line break could wait a full
+# resume gap) would freeze repaint/resize for seconds. Once this budget is spent
+# the batch returns what it has; any remaining chunks are read on the next loop
+# iteration -- so the screen repaints between chunks instead of stalling. Fast
+# pastes never block at all (the next char is already available), so they still
+# coalesce into one token. Bracketed pastes bypass this path entirely.
+_PASTE_MAX_BLOCK_SECONDS = 0.1
 _WINDOWS_ESCAPE_SEQUENCE_TIMEOUT = 0.03
 _WINDOWS_CAPTURED_ESCAPE_SEQUENCE_TIMEOUT = 0.12
 _LAST_TERMINAL_SIZE: tuple[int, int] | None = None
@@ -214,7 +223,44 @@ def disable_mouse_capture() -> None:
     sys.stdout.flush()
 
 
+def enable_mouse_wheel_reporting() -> None:
+    """Turn on SGR mouse reporting so the wheel arrives as MOUSE_WHEEL_* tokens.
+
+    Writes the same DECSET enables as :func:`mouse_capture` (SGR ``1006h`` +
+    button tracking ``1000h``, and crucially ``1007l`` to *disable* the terminal's
+    alternate-scroll mode that would otherwise translate the wheel into arrow
+    keys). Unlike :func:`mouse_capture` this only writes output escapes and touches
+    no Windows console modes, so it composes with ``windows_vt_input`` -- letting a
+    VT-input view (heads-up) read both bracketed pastes and SGR mouse wheel events
+    from the same stream. Tear down with :func:`disable_mouse_capture`.
+    """
+    if not sys.stdout.isatty():
+        return
+    sys.stdout.write(MOUSE_CAPTURE_ENABLE)
+    sys.stdout.flush()
+
+
+def _restore_terminal_modes_atexit() -> None:
+    """Backstop: undo terminal modes a hard exit could otherwise leak.
+
+    The cursor-hide and bracketed-paste enables are written outside any single
+    context manager (e.g. the editable-line renderer hides the cursor every
+    keystroke), so an interrupt landing between an enable and its ``finally``
+    could leave the user's shell with a hidden cursor or paste mode stuck on.
+    Showing the cursor and disabling paste at exit is idempotent and safe.
+    """
+    if not sys.stdout.isatty():
+        return
+    try:
+        sys.stdout.write(CURSOR_SHOW)
+        sys.stdout.write(BRACKETED_PASTE_DISABLE)
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
 atexit.register(disable_mouse_capture)
+atexit.register(_restore_terminal_modes_atexit)
 
 
 @contextmanager
@@ -739,6 +785,87 @@ def _parse_sgr_mouse(sequence: str, *, translate_wheel: bool = True) -> str:
     return "OTHER"
 
 
+# Final byte -> token for the common letter-terminated CSI navigation keys
+# (``ESC [ <params> <letter>``). The ``~``-terminated variants key off the first
+# numeric parameter instead.
+_CSI_LETTER_TOKENS = {
+    "A": "UP",
+    "B": "DOWN",
+    "C": "RIGHT",
+    "D": "LEFT",
+    "H": "HOME",
+    "F": "END",
+}
+_CSI_TILDE_TOKENS = {
+    "1": "HOME",
+    "3": "DELETE",
+    "4": "END",
+    "5": "PAGEUP",
+    "6": "PAGEDOWN",
+    "7": "HOME",
+    "8": "END",
+}
+
+
+def _csi_token(params: str, final: str) -> str:
+    """Map a parsed CSI sequence (``params`` plus terminating ``final``) to a token.
+
+    Handles xterm-style *modified* navigation keys of the form
+    ``ESC [ 1 ; <mod> X`` (and the ``~``-terminated ``ESC [ N ; <mod> ~``
+    variants). The modifier lives in the second parameter and encodes
+    ``Shift``/``Alt``/``Ctrl`` as ``(mod - 1)`` bit flags. For Left/Right we fold
+    Ctrl and Shift into ``CTRL_``/``SHIFT_`` prefixes so the editable input can
+    map them to word-wise motion and text selection; every other key ignores the
+    modifier and returns its plain token (so e.g. Ctrl+Home is still HOME).
+    """
+    parts = params.split(";")
+    code = parts[0]
+    modifier = 1
+    if len(parts) >= 2 and parts[1].isdigit():
+        modifier = int(parts[1])
+    if final == "~":
+        base = _CSI_TILDE_TOKENS.get(code, "OTHER")
+    else:
+        base = _CSI_LETTER_TOKENS.get(final, "OTHER")
+    if base in ("LEFT", "RIGHT") and modifier >= 2:
+        bits = modifier - 1
+        prefix = ("CTRL_" if bits & 4 else "") + ("SHIFT_" if bits & 1 else "")
+        if prefix:
+            return prefix + base
+    return base
+
+
+def _read_posix_csi_tail(first: str) -> tuple[str, str]:
+    """Read a CSI parameter/final tail on POSIX after its first byte.
+
+    ``first`` is the already-read first parameter byte (e.g. ``"1"`` for a
+    modified arrow ``ESC [ 1 ; 5 D``). Returns ``(params, final)`` where ``final``
+    is the terminating byte (``""`` if the stream ran dry first).
+    """
+    params = first
+    while True:
+        nxt = sys.stdin.read(1)
+        if not nxt:
+            return params, ""
+        if nxt.isdigit() or nxt == ";":
+            params += nxt
+            continue
+        return params, nxt
+
+
+def _read_windows_csi_tail(msvcrt, first: str, timeout: float) -> tuple[str, str]:
+    """Windows counterpart of :func:`_read_posix_csi_tail` using the timed reader."""
+    params = first
+    while True:
+        nxt = _read_windows_available_char(msvcrt, timeout=timeout)
+        if nxt is None:
+            return params, ""
+        if nxt.isdigit() or nxt == ";":
+            params += nxt
+            continue
+        return params, nxt
+
+
 def _terminal_size() -> tuple[int, int] | None:
     for stream in (1, 2, 0):
         try:
@@ -814,7 +941,10 @@ def _is_batched_text_key(key: str) -> bool:
 
 
 def _await_more_input(
-    in_burst: bool, *, timeout: float = _PASTE_BURST_GAP_SECONDS
+    in_burst: bool,
+    *,
+    timeout: float = _PASTE_BURST_GAP_SECONDS,
+    deadline: float | None = None,
 ) -> bool:
     """Return whether another character is (or becomes) available to batch.
 
@@ -824,13 +954,19 @@ def _await_more_input(
     sub-frame gaps that would otherwise split one paste into several tokens. A
     longer ``timeout`` is used at a line break, where a premature decision would
     wrongly submit a paste's first line.
+
+    ``deadline`` (an absolute ``time.monotonic`` instant) caps the wait so the
+    caller can bound the *total* time a batch blocks the loop: once it passes,
+    this only reports input that is already available and never sleeps.
     """
     if _key_available():
         return True
     if not in_burst:
         return False
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    wait_until = time.monotonic() + timeout
+    if deadline is not None:
+        wait_until = min(wait_until, deadline)
+    while time.monotonic() < wait_until:
         if _key_available():
             return True
         time.sleep(0.001)
@@ -874,14 +1010,21 @@ def _read_key_with_repeats(
         # paste keeps its content (trailing newline dropped) and stays in the
         # editor so the user can keep editing, mirroring bracketed paste.
         inserted = [key]
-        while len(inserted) < _TEXT_BATCH_LIMIT and _await_more_input(len(inserted) >= 2):
+        # Bound the total blocking of this batch so the loop thread can't be
+        # starved by a slowly-arriving paste (see _PASTE_MAX_BLOCK_SECONDS).
+        block_deadline = time.monotonic() + _PASTE_MAX_BLOCK_SECONDS
+        while len(inserted) < _TEXT_BATCH_LIMIT and _await_more_input(
+            len(inserted) >= 2, deadline=block_deadline
+        ):
             next_key = read_key()
             if _is_batched_text_key(next_key):
                 inserted.append(next_key)
                 continue
             if next_key == "ENTER":
                 if _await_more_input(
-                    len(inserted) >= 2, timeout=_PASTE_RESUME_GAP_SECONDS
+                    len(inserted) >= 2,
+                    timeout=_PASTE_RESUME_GAP_SECONDS,
+                    deadline=block_deadline,
                 ):
                     inserted.append("\n")
                     continue
@@ -914,8 +1057,10 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
     """Read a single keypress and return a normalised token.
 
     Returns one of: UP, DOWN, LEFT, RIGHT, HOME, END, PAGEUP, PAGEDOWN,
-    ENTER, ESC, TAB, CTRL_F, CTRL_N, CTRL_S, BACKSPACE, DELETE, or the raw character. Raises KeyboardInterrupt on
-    Ctrl-C.  When ``text_mode`` is True, the convenience q/Q → ESC mapping is
+    ENTER, ESC, TAB, CTRL_F, CTRL_N, CTRL_S, BACKSPACE, DELETE, the modified
+    arrows CTRL_LEFT/CTRL_RIGHT (word-wise) and SHIFT_LEFT/SHIFT_RIGHT/
+    CTRL_SHIFT_LEFT/CTRL_SHIFT_RIGHT (selection), or the raw character. Raises
+    KeyboardInterrupt on Ctrl-C.  When ``text_mode`` is True, the convenience q/Q → ESC mapping is
     disabled so a search query can include those letters. When
     ``translate_mouse_wheel`` is False, SGR wheel input returns MOUSE_WHEEL_*
     tokens instead of arrow/page navigation tokens.
@@ -975,6 +1120,15 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
                                 )
                             )
                         return "OTHER"
+                    if ch3 == "1":
+                        # Modified navigation key: ESC [ 1 ; <mod> <final>
+                        # (Ctrl/Shift + arrow). Read the rest of the sequence so
+                        # the modifier byte and final letter aren't left to leak
+                        # back as literal characters.
+                        params, final = _read_windows_csi_tail(
+                            msvcrt, ch3, sequence_timeout
+                        )
+                        return _csi_token(params, final)
                     if ch3 in ("5", "6", "3") and _windows_key_available():
                         msvcrt.getwch()  # consume trailing ~
                     return {
@@ -1039,6 +1193,12 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
                                 )
                             )
                         return "OTHER"
+                    if ch3 == "1":
+                        # Modified navigation key: ESC [ 1 ; <mod> <final>
+                        # (Ctrl/Shift + arrow). Consume the full sequence so its
+                        # modifier byte and final letter don't leak as raw input.
+                        params, final = _read_posix_csi_tail("1")
+                        return _csi_token(params, final)
                     if ch3 in ("5", "6"):
                         sys.stdin.read(1)  # consume trailing ~
                     if ch3 == "3":
