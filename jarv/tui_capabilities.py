@@ -36,6 +36,9 @@ def supports_erase_eol() -> bool:
     """Whether emitting an erase-to-end-of-line control is safe.
 
     True for real terminals; the renderable that uses it already guards on
-    ``console.is_terminal`` per frame, so this stays permissive.
+    ``console.is_terminal`` per frame, so this stays permissive. Set
+    ``JARV_NO_ERASE_EOL=1`` to opt out on a terminal that mishandles
+    ``\\x1b[0K`` (the control then never reaches the wire and views fall back to
+    plain full-width repaints).
     """
-    return True
+    return os.environ.get("JARV_NO_ERASE_EOL") != "1"

@@ -15,6 +15,7 @@ from rich.console import Console
 from jarv.agent import (
     _dispatch_ask_user,
     _dispatch_run_command_with_ui,
+    _interactive_command_card,
     _parse_terminal_control,
     _print_tool_card,
     _run_command_waiting_prompt,
@@ -34,7 +35,11 @@ from jarv.config import DEFAULT_CONFIG
 from jarv.display import tool_card
 from jarv.history import SessionContext, load_history, save_history
 from jarv.history import redo_file_for
-from jarv.orchestrator import RunCommandDispatchResult, WEB_SEARCH_READ_NUDGE
+from jarv.orchestrator import (
+    RunCommandDispatchResult,
+    RunCommandPrepared,
+    WEB_SEARCH_READ_NUDGE,
+)
 from jarv.provider import (
     ReasoningStarted,
     RetryableStreamError,
@@ -216,6 +221,19 @@ class AgentInputTests(unittest.TestCase):
     def test_response_wait_label_uses_thinking_with_reasoning(self):
         self.assertEqual(response_wait_label(has_reasoning=True), "Thinking")
 
+    def test_response_wait_label_names_interactive_command_decision(self):
+        # During an interactive run_command continuation the spinner should say
+        # what jarv is actually doing — choosing the next stdin line — rather
+        # than a generic "Thinking…"/"Waiting…", regardless of reasoning.
+        self.assertEqual(
+            response_wait_label(has_reasoning=False, interactive_command=True),
+            "Deciding next input",
+        )
+        self.assertEqual(
+            response_wait_label(has_reasoning=True, interactive_command=True),
+            "Deciding next input",
+        )
+
     def test_tool_activity_labels_are_specific_to_each_tool(self):
         expected = {
             "run_command": "Writing command",
@@ -245,6 +263,14 @@ class AgentInputTests(unittest.TestCase):
         self.assertEqual(
             response_start_status(1.0, has_reasoning=False),
             "Started responding in 1.0 second.",
+        )
+
+    def test_response_start_status_records_interactive_command_decision(self):
+        # The persistent trail left after each interactive continuation turn so
+        # a slow per-line turn reads as work done, not a hang.
+        self.assertEqual(
+            response_start_status(4.34, has_reasoning=True, interactive_command=True),
+            "Decided next input in 4.3 seconds.",
         )
 
     def test_tool_activity_complete_status_is_specific_to_each_tool(self):
@@ -1188,6 +1214,46 @@ class AgentInputTests(unittest.TestCase):
         self.assertIn("Time since last output: 0.4s", prompt)
         self.assertIn("tick", prompt)
 
+    def _render_waiting_card(self, snapshot) -> str:
+        prepared = RunCommandPrepared(
+            cmd=snapshot.command,
+            head_chars=20000,
+            tail_chars=20000,
+            max_tool_output_chars=20000,
+        )
+        card = _interactive_command_card(
+            prepared, snapshot, DEFAULT_CONFIG, status="waiting"
+        )
+        stream = io.StringIO()
+        Console(file=stream, force_terminal=False, color_system=None, width=120).print(
+            card
+        )
+        return stream.getvalue()
+
+    def test_waiting_card_footer_names_idle_stdin_state(self):
+        snapshot = InteractiveCommandSnapshot(
+            "python 09-escape-room.py", "", "", None, exited=False
+        )
+        rendered = self._render_waiting_card(snapshot)
+        self.assertIn("Idle on stdin — model deciding the next input", rendered)
+        self.assertNotIn("Waiting for terminal input", rendered)
+
+    def test_waiting_card_footer_distinguishes_still_running_check_in(self):
+        snapshot = InteractiveCommandSnapshot(
+            "python busy.py",
+            "tick\n",
+            "",
+            None,
+            exited=False,
+            elapsed_seconds=65.0,
+            idle_seconds=0.4,
+            check_in=True,
+            check_in_after=60.0,
+        )
+        rendered = self._render_waiting_card(snapshot)
+        self.assertIn("Still running — model deciding whether to wait or step in", rendered)
+        self.assertNotIn("Idle on stdin", rendered)
+
     def test_root_batches_consecutive_reads_and_preserves_call_order(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1568,7 +1634,7 @@ class AgentInputTests(unittest.TestCase):
                 def start_turn(self, query, _config):
                     events.append(("start_turn", query))
 
-                def start_response_wait(self, _started_at):
+                def start_response_wait(self, _started_at, *, interactive_command=False):
                     events.append(("start_response_wait",))
 
                 def complete_response_phase(self, text):
@@ -1627,7 +1693,7 @@ class AgentInputTests(unittest.TestCase):
                 def start_turn(self, query, _config):
                     events.append(("start_turn", query))
 
-                def start_response_wait(self, _started_at):
+                def start_response_wait(self, _started_at, *, interactive_command=False):
                     events.append(("start_response_wait",))
 
                 def set_response_wait_has_reasoning(self, value):
@@ -1686,7 +1752,7 @@ class AgentInputTests(unittest.TestCase):
                 def start_turn(self, query, _config):
                     events.append(("start_turn", query))
 
-                def start_response_wait(self, _started_at):
+                def start_response_wait(self, _started_at, *, interactive_command=False):
                     events.append(("start_response_wait",))
 
                 def complete_response_phase(self, text):

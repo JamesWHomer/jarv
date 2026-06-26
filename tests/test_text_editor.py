@@ -5,6 +5,7 @@ from jarv.text_editor import (
     render_single_line,
     render_visual_line_window,
     render_visual_lines,
+    selection_bounds,
 )
 
 
@@ -126,6 +127,118 @@ def test_multiline_editor_inserts_pasted_newlines_and_tabs():
 
     assert state["buffer"] == "ax\n\tyb"
     assert state["cursor"] == 5
+
+
+def test_ctrl_arrow_jumps_by_word():
+    state = {}
+    initialize_text_editor(state, "hello world foo")
+    state["cursor"] = len("hello world foo")
+
+    assert not apply_text_editor_key(state, "CTRL_LEFT")
+    assert state["cursor"] == len("hello world ")  # start of "foo"
+    apply_text_editor_key(state, "CTRL_LEFT")
+    assert state["cursor"] == len("hello ")  # start of "world"
+    apply_text_editor_key(state, "CTRL_RIGHT")
+    assert state["cursor"] == len("hello world")  # end of "world"
+
+
+def test_shift_arrow_extends_and_collapses_selection():
+    state = {}
+    initialize_text_editor(state, "abcdef")
+    state["cursor"] = 3
+
+    apply_text_editor_key(state, "SHIFT_RIGHT")
+    apply_text_editor_key(state, "SHIFT_RIGHT")
+    assert state["selection_anchor"] == 3
+    assert state["cursor"] == 5
+    assert selection_bounds(state) == (3, 5)
+
+    # Shrinking back to the anchor clears the selection entirely.
+    apply_text_editor_key(state, "SHIFT_LEFT")
+    apply_text_editor_key(state, "SHIFT_LEFT")
+    assert state["selection_anchor"] is None
+    assert selection_bounds(state) is None
+    assert state["cursor"] == 3
+
+
+def test_ctrl_shift_arrow_selects_by_word():
+    state = {}
+    initialize_text_editor(state, "hello world")
+    state["cursor"] = 0
+
+    apply_text_editor_key(state, "CTRL_SHIFT_RIGHT")
+    assert selection_bounds(state) == (0, len("hello"))
+    apply_text_editor_key(state, "CTRL_SHIFT_RIGHT")
+    assert selection_bounds(state) == (0, len("hello world"))
+
+
+def test_typing_replaces_selection():
+    state = {}
+    initialize_text_editor(state, "hello world")
+    state["cursor"] = 6  # before "world"
+    apply_text_editor_key(state, "CTRL_SHIFT_RIGHT")  # select "world"
+
+    assert apply_text_editor_key(state, "X")
+    assert state["buffer"] == "hello X"
+    assert state["cursor"] == 7
+    assert state["selection_anchor"] is None
+
+
+def test_backspace_deletes_selection():
+    state = {}
+    initialize_text_editor(state, "hello world")
+    state["cursor"] = 5  # after "hello"
+    apply_text_editor_key(state, "SHIFT_LEFT")
+    apply_text_editor_key(state, "SHIFT_LEFT")  # select "lo"
+
+    assert apply_text_editor_key(state, "BACKSPACE")
+    assert state["buffer"] == "hel world"
+    assert state["cursor"] == 3
+    assert state["selection_anchor"] is None
+
+
+def test_pasted_text_replaces_selection():
+    state = {}
+    initialize_text_editor(state, "hello world", multiline=True)
+    state["cursor"] = 0
+    apply_text_editor_key(state, "CTRL_SHIFT_RIGHT")  # select "hello"
+
+    assert apply_text_editor_key(state, TextInput("hi"), allow_newlines=True)
+    assert state["buffer"] == "hi world"
+    assert state["cursor"] == 2
+
+
+def test_plain_left_collapses_selection_to_left_edge():
+    state = {}
+    initialize_text_editor(state, "abcdef")
+    state["cursor"] = 2
+    apply_text_editor_key(state, "SHIFT_RIGHT")
+    apply_text_editor_key(state, "SHIFT_RIGHT")  # select [2, 4)
+
+    apply_text_editor_key(state, "LEFT")
+    assert state["cursor"] == 2  # collapsed to the left edge, no extra move
+    assert state["selection_anchor"] is None
+
+
+def test_render_visual_lines_paints_selection_span():
+    state = {}
+    initialize_text_editor(state, "hello world", multiline=True)
+    state["cursor"] = 0  # keep the cursor off the selected run
+
+    lines, _ = render_visual_lines(
+        state,
+        40,
+        text_style="white",
+        selection_span=(6, 11),
+        selection_style="black on cyan",
+    )
+    line = lines[0]
+    selected = "".join(
+        line.plain[s.start : s.end]
+        for s in line.spans
+        if str(s.style) == "black on cyan"
+    )
+    assert selected == "world"
 
 
 def test_visual_line_window_keeps_cursor_visible():

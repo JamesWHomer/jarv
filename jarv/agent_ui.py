@@ -92,8 +92,16 @@ _THINKING_FRAMES = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", 
 STREAM_PREVIEW_REFRESH_INTERVAL = 1 / 12
 
 
-def response_wait_label(has_reasoning: bool) -> str:
-    """Return the live wait label for the response stream."""
+def response_wait_label(has_reasoning: bool, *, interactive_command: bool = False) -> str:
+    """Return the live wait label for the response stream.
+
+    During an interactive ``run_command`` continuation the model isn't drafting a
+    reply for the user — it's reading the program's latest output and choosing
+    the next line to type. Naming that explicitly keeps a slow per-line turn from
+    reading as a generic, frozen "Thinking…" spinner.
+    """
+    if interactive_command:
+        return "Deciding next input"
     return "Thinking" if has_reasoning else "Waiting"
 
 
@@ -119,15 +127,18 @@ def tool_activity_label(tool_names: tuple[str, ...]) -> str:
 class ResponseWaitIndicator:
     """Animated response wait line with live elapsed timer."""
 
-    def __init__(self, start_time: float):
+    def __init__(self, start_time: float, *, interactive_command: bool = False):
         self._start = start_time
         self.has_reasoning = False
+        self.interactive_command = interactive_command
 
     def __rich_console__(self, console, options):
         now = time.perf_counter()
         elapsed = now - self._start
         frame = _THINKING_FRAMES[int(now * 10) % len(_THINKING_FRAMES)]
-        label = response_wait_label(self.has_reasoning)
+        label = response_wait_label(
+            self.has_reasoning, interactive_command=self.interactive_command
+        )
         yield Text(f"{frame}  {label}\u2026  {int(elapsed)}s")
 
 
@@ -184,10 +195,17 @@ class RunningCommandCard:
         )
 
 
-def _start_response_wait_indicator(interactive: bool, start_time: float) -> tuple[ResponseWaitIndicator | None, Live | None]:
+def _start_response_wait_indicator(
+    interactive: bool,
+    start_time: float,
+    *,
+    interactive_command: bool = False,
+) -> tuple[ResponseWaitIndicator | None, Live | None]:
     if not interactive:
         return None, None
-    wait_indicator = ResponseWaitIndicator(start_time)
+    wait_indicator = ResponseWaitIndicator(
+        start_time, interactive_command=interactive_command
+    )
     spinner_live = Live(
         wait_indicator,
         refresh_per_second=4,
@@ -384,9 +402,13 @@ def format_thought_duration(seconds: float) -> str:
     return f"{rounded:.1f} {unit}"
 
 
-def response_start_status(seconds: float, has_reasoning: bool) -> str:
+def response_start_status(
+    seconds: float, has_reasoning: bool, *, interactive_command: bool = False
+) -> str:
     """Return the completed wait-status text for the first visible response."""
     duration = format_thought_duration(seconds)
+    if interactive_command:
+        return f"Decided next input in {duration}."
     if has_reasoning:
         return f"Thought for {duration}."
     return f"Started responding in {duration}."

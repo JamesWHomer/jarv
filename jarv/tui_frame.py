@@ -273,4 +273,16 @@ def build_frame(
         width=panel_width,
         height=term_h,
     )
-    return EraseTrailingColumns(panel)
+    return wrap_frame(panel)
+
+
+def wrap_frame(renderable: RenderableType) -> RenderableType:
+    """Wrap any full-screen renderable with the stale-edge erase.
+
+    Shared by every alternate-screen view (heads-up, the tree/session browsers,
+    settings, read-only scroll overlays) so they all clear a previous, wider
+    frame's stale right border on WSL/ConPTY rather than only heads-up doing so.
+    ``EraseTrailingColumns`` itself is a no-op on non-terminals and when
+    ``supports_erase_eol()`` is disabled, so wrapping is always safe.
+    """
+    return EraseTrailingColumns(renderable)

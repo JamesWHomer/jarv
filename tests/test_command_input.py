@@ -669,7 +669,7 @@ def test_read_key_with_repeats_uses_resume_window_at_newline(monkeypatch):
     keys = [*"first", "ENTER", *"second"]
     timeouts: list[float] = []
 
-    def recording_await(in_burst, *, timeout=command_input._PASTE_BURST_GAP_SECONDS):
+    def recording_await(in_burst, *, timeout=command_input._PASTE_BURST_GAP_SECONDS, deadline=None):
         timeouts.append(timeout)
         return bool(keys)
 
@@ -702,6 +702,24 @@ def test_await_more_input_skips_wait_for_lone_keystroke(monkeypatch):
 
     # A single keystroke (not mid-burst) never pays the bridge latency.
     assert command_input._await_more_input(False) is False
+    assert slept == []
+
+
+def test_await_more_input_deadline_caps_blocking(monkeypatch):
+    monkeypatch.setattr(command_input, "_key_available", lambda: False)
+    slept: list[bool] = []
+    monkeypatch.setattr(command_input.time, "sleep", lambda *_: slept.append(True))
+
+    # A deadline already passed means no sleeping even mid-burst with the long
+    # resume-gap timeout -- this is what keeps a slow chunked paste from freezing
+    # the heads-up loop thread; the batch just ends and resumes next iteration.
+    past = command_input.time.monotonic() - 1.0
+    assert (
+        command_input._await_more_input(
+            True, timeout=command_input._PASTE_RESUME_GAP_SECONDS, deadline=past
+        )
+        is False
+    )
     assert slept == []
 
 
@@ -776,6 +794,29 @@ def test_read_key_maps_posix_delete(monkeypatch):
     assert stdin.remaining == ""
 
 
+def test_read_key_maps_posix_modified_arrows(monkeypatch):
+    cases = {
+        "\x1b[1;5D": "CTRL_LEFT",
+        "\x1b[1;5C": "CTRL_RIGHT",
+        "\x1b[1;2D": "SHIFT_LEFT",
+        "\x1b[1;2C": "SHIFT_RIGHT",
+        "\x1b[1;6D": "CTRL_SHIFT_LEFT",
+        "\x1b[1;6C": "CTRL_SHIFT_RIGHT",
+    }
+    for sequence, expected in cases.items():
+        stdin = _install_posix_input(monkeypatch, sequence)
+        assert command_input._read_key(text_mode=True) == expected
+        assert stdin.remaining == ""
+
+
+def test_read_key_maps_posix_modified_non_arrow_to_base(monkeypatch):
+    # A modifier on a non-arrow nav key falls back to its plain token, and the
+    # whole sequence is consumed (no leftover bytes leak as literal input).
+    stdin = _install_posix_input(monkeypatch, "\x1b[1;5H")
+    assert command_input._read_key(text_mode=True) == "HOME"
+    assert stdin.remaining == ""
+
+
 def test_read_key_maps_posix_bracketed_paste_to_text_input(monkeypatch):
     stdin = _install_posix_input(monkeypatch, "\x1b[200~first\nsecond\x1b[201~")
 
@@ -811,6 +852,36 @@ def test_read_key_maps_windows_bracketed_paste_to_text_input(monkeypatch):
     finally:
         command_input._WINDOWS_MOUSE_CAPTURE_DEPTH = 0
         command_input._PENDING_KEYS.clear()
+
+
+def test_read_key_maps_windows_modified_arrows(monkeypatch):
+    # With VT input enabled, Windows delivers modified arrows as xterm-style
+    # CSI sequences (ESC [ 1 ; <mod> <final>) which must decode to the same
+    # CTRL_/SHIFT_ tokens as POSIX -- and consume the whole sequence.
+    cases = {
+        "\x1b[1;5D": "CTRL_LEFT",
+        "\x1b[1;5C": "CTRL_RIGHT",
+        "\x1b[1;2D": "SHIFT_LEFT",
+        "\x1b[1;6C": "CTRL_SHIFT_RIGHT",
+    }
+    for sequence, expected in cases.items():
+        chars = deque(sequence)
+        fake_msvcrt = SimpleNamespace(
+            getwch=chars.popleft,
+            kbhit=lambda chars=chars: bool(chars),
+        )
+        command_input._PENDING_KEYS.clear()
+        monkeypatch.setattr(command_input.sys, "platform", "win32")
+        monkeypatch.setenv("WT_SESSION", "test")
+        monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+        command_input._WINDOWS_MOUSE_CAPTURE_DEPTH = 0
+        try:
+            assert command_input._read_key(text_mode=True) == expected
+            assert not chars
+            assert not command_input._PENDING_KEYS
+        finally:
+            command_input._WINDOWS_MOUSE_CAPTURE_DEPTH = 0
+            command_input._PENDING_KEYS.clear()
 
 
 def test_read_editable_line_edits_prefilled_text():

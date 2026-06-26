@@ -1,6 +1,5 @@
 import os
 import re
-import signal
 import sys
 import threading
 import time
@@ -109,9 +108,6 @@ class ToolCard:
             yield Segment("\u258e ", self.accent)
             yield from line
             yield Segment.line()
-
-RESIZE_REFRESH_INTERVAL = 0.02
-RESIZE_ACTIVE_INTERVAL = 0.1
 
 STEP_DOT_DONE = "\u25cf"
 STEP_DOT_ACTIVE = "\u25cf"
@@ -266,82 +262,6 @@ def tool_card(
         )
     return ToolCard(accent, content)
 
-
-@contextmanager
-def refresh_on_resize(
-    live,
-    *,
-    console: Console = console,
-    interval: float = RESIZE_REFRESH_INTERVAL,
-    active_interval: float = RESIZE_ACTIVE_INTERVAL,
-    on_change=None,
-):
-    """Refresh a Rich Live display when the terminal dimensions change.
-
-    ``on_change`` lets callers substitute a custom repaint (e.g. a full-screen
-    hard repaint for inline views) for the default ``live.refresh()``.
-    """
-    stop = threading.Event()
-    changed = threading.Event()
-    last_size = terminal_size(console=console)
-    previous_sigwinch = None
-    restore_sigwinch = False
-
-    def _repaint() -> None:
-        if on_change is not None:
-            on_change()
-        else:
-            live.refresh()
-
-    def _watch() -> None:
-        nonlocal last_size
-        next_interval = interval
-
-        while not stop.is_set():
-            deadline = time.monotonic() + next_interval
-            while not stop.is_set():
-                signaled = changed.wait(max(0.0, deadline - time.monotonic()))
-                changed.clear()
-                if not signaled or next_interval == interval:
-                    break
-            if stop.is_set():
-                break
-
-            current_size = terminal_size(console=console)
-            if current_size != last_size:
-                last_size = current_size
-                _repaint()
-                next_interval = active_interval
-            else:
-                next_interval = interval
-
-    if hasattr(signal, "SIGWINCH"):
-        try:
-            previous_sigwinch = signal.getsignal(signal.SIGWINCH)
-
-            def _handle_sigwinch(signum, frame):
-                changed.set()
-                if callable(previous_sigwinch):
-                    previous_sigwinch(signum, frame)
-
-            signal.signal(signal.SIGWINCH, _handle_sigwinch)
-            restore_sigwinch = True
-        except (ValueError, OSError):
-            restore_sigwinch = False
-
-    thread = threading.Thread(target=_watch, name="jarv-resize-refresh", daemon=True)
-    thread.start()
-    try:
-        yield
-    finally:
-        stop.set()
-        changed.set()
-        thread.join(timeout=max(0.1, interval * 2))
-        if restore_sigwinch:
-            try:
-                signal.signal(signal.SIGWINCH, previous_sigwinch)
-            except (ValueError, OSError):
-                pass
 
 DISPLAY_HEIGHT_RATIO = 3
 DISPLAY_MIN_LINE_LIMIT = 3

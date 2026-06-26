@@ -431,11 +431,19 @@ class _TurnRenderer:
     def ensure_response_wait(self) -> None:
         if self.spinner_live is None:
             self.thought_started = time.perf_counter()
+            interactive_command = self.pending_interactive_command is not None
             if self.ui is not None:
-                _ui_call(self.ui, "start_response_wait", self.thought_started)
+                _ui_call(
+                    self.ui,
+                    "start_response_wait",
+                    self.thought_started,
+                    interactive_command=interactive_command,
+                )
             else:
                 self.wait_indicator, self.spinner_live = _start_response_wait_indicator(
-                    self.interactive, self.thought_started
+                    self.interactive,
+                    self.thought_started,
+                    interactive_command=interactive_command,
                 )
 
     # -- phase transitions --------------------------------------------- #
@@ -447,12 +455,22 @@ class _TurnRenderer:
             self.spinner_live = None
         self.wait_indicator = None
         self.response_phase_completed = True
-        if self.pending_interactive_command is not None:
-            return
+        interactive_command = self.pending_interactive_command is not None
         status_text = response_start_status(
             time.perf_counter() - self.thought_started,
             has_reasoning=self.saw_reasoning,
+            interactive_command=interactive_command,
         )
+        if interactive_command:
+            # Leave a persistent "Decided next input in Ns" line so a slow
+            # per-line model turn shows it was working rather than hanging, but
+            # keep it out of status_items/history — the whole interaction stays
+            # collapsed into the single run_command record.
+            if self.ui is not None:
+                _ui_call(self.ui, "complete_response_phase", status_text)
+            elif self.interactive:
+                console.print(thought_complete_indicator(status_text))
+            return
         self.status_items.append(
             status_history_item(status_text, "response", self.metadata)
         )

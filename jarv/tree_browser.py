@@ -21,7 +21,7 @@ from .display import console, terminal_size
 from .history import branches_file_for, load_branches, load_history
 from .session_tree import build_tree, delete_subtree, leaf_of, parent_id_of
 from .tui_app import AltScreenApp
-from .tui_frame import panel_width
+from .tui_frame import panel_width, wrap_frame
 from .tui_layout import append_bottom_footer, clip_text
 from .tui_overlay import body_content_rows, clamp_scroll_offset
 
@@ -166,18 +166,22 @@ class TreeBrowserScreen(AltScreenApp):
     def _subtitle(self) -> str:
         return f"[dim]{len(self.model.active_path)} on path · {len(self.nodes)} prompts[/dim]"
 
-    def _panel(self, parts: list, width: int, term_h: int) -> Panel:
-        return Panel(
-            Group(*parts),
-            title="[bold bright_white]jarv ▸ tree[/bold bright_white]",
-            title_align="left",
-            subtitle=self._subtitle(),
-            subtitle_align="right",
-            border_style="cyan",
-            box=box.ROUNDED,
-            padding=(0, 1),
-            width=width,
-            height=term_h,
+    def _panel(self, parts: list, width: int, term_h: int):
+        # wrap_frame clears a previous, wider frame's stale right border on
+        # WSL/ConPTY -- the same fix heads-up uses, applied here too.
+        return wrap_frame(
+            Panel(
+                Group(*parts),
+                title="[bold bright_white]jarv ▸ tree[/bold bright_white]",
+                title_align="left",
+                subtitle=self._subtitle(),
+                subtitle_align="right",
+                border_style="cyan",
+                box=box.ROUNDED,
+                padding=(0, 1),
+                width=width,
+                height=term_h,
+            )
         )
 
     def _clamp(self, body_rows: int) -> int:

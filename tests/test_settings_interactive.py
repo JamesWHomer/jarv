@@ -1,17 +1,10 @@
 import io
-from collections import deque
-from contextlib import contextmanager
 
 from rich.console import Console
 
 from jarv import settings_interactive
 from jarv.config import DEFAULT_CONFIG
 from jarv.tui_frame import panel_width
-
-
-@contextmanager
-def noop_context(*_args, **_kwargs):
-    yield
 
 
 class FakeCatalogRefresher:
@@ -25,29 +18,26 @@ class FakeCatalogRefresher:
         pass
 
 
-class FakeLive:
-    instances = []
+def _make_app(monkeypatch, config):
+    test_console = Console(file=io.StringIO(), force_terminal=False, color_system=None, width=120)
+    monkeypatch.setattr(settings_interactive, "_ModelCatalogRefresher", FakeCatalogRefresher)
+    monkeypatch.setattr(settings_interactive, "terminal_size", lambda *, console=None: (120, 24))
 
-    def __init__(self, *args, **kwargs):
-        self.args = args
-        self.kwargs = kwargs
-        self.snapshots = []
-        FakeLive.instances.append(self)
+    app = settings_interactive.SettingsApp(config, render_console=test_console)
 
-    def __enter__(self):
-        self.refresh()
-        return self
+    # The loop is never started in these tests (on_key is driven directly), so
+    # _running stays False; record stop() requests to detect a closed screen.
+    app.stop_calls = []
+    app.stop = lambda result=None: app.stop_calls.append(result)
+    return app, test_console
 
-    def __exit__(self, *_exc):
-        return False
 
-    def refresh(self):
-        get_renderable = self.kwargs["get_renderable"]
-        self.renderable = get_renderable()
-        output = io.StringIO()
-        console = Console(file=output, force_terminal=False, color_system=None, width=120)
-        console.print(self.renderable)
-        self.snapshots.append(output.getvalue())
+def _render(app, console) -> str:
+    output = console.file
+    output.seek(0)
+    output.truncate(0)
+    console.print(app.render())
+    return output.getvalue()
 
 
 def _row_index(config, key):
@@ -58,34 +48,6 @@ def _row_index(config, key):
     )
 
 
-def _run_settings_with_keys(monkeypatch, config, keys):
-    FakeLive.instances = []
-    queued = deque(keys)
-    output = io.StringIO()
-    test_console = Console(file=output, force_terminal=False, color_system=None, width=120)
-
-    monkeypatch.setattr(settings_interactive, "console", test_console)
-    monkeypatch.setattr(settings_interactive, "terminal_size", lambda *, console: (120, 24))
-    monkeypatch.setattr(settings_interactive, "Live", FakeLive)
-    monkeypatch.setattr(settings_interactive, "refresh_on_resize", noop_context)
-    monkeypatch.setattr(settings_interactive, "mouse_capture", noop_context)
-    monkeypatch.setattr(settings_interactive, "_ModelCatalogRefresher", FakeCatalogRefresher)
-
-    def read_key_with_repeats(**_kwargs):
-        if not queued:
-            raise AssertionError("settings loop requested an extra key")
-        key = queued.popleft()
-        if isinstance(key, tuple):
-            return key
-        return key, 1
-
-    monkeypatch.setattr(settings_interactive, "_read_key_with_repeats", read_key_with_repeats)
-
-    settings_interactive.run_settings_interactive(config)
-    assert not queued
-    return FakeLive.instances[-1]
-
-
 def test_settings_panel_spans_full_terminal_width():
     # /settings shares the flush-to-edge panel width with the other fullscreen views.
     assert panel_width(120) == 120
@@ -94,58 +56,85 @@ def test_settings_panel_spans_full_terminal_width():
 
 
 def test_settings_esc_exits_from_main_screen(monkeypatch):
-    _run_settings_with_keys(monkeypatch, dict(DEFAULT_CONFIG), ["ESC"])
+    app, _console = _make_app(monkeypatch, dict(DEFAULT_CONFIG))
+
+    app.on_key("ESC", 1)
+    assert app.stop_calls
 
 
 def test_settings_esc_returns_from_unchanged_compact_editor(monkeypatch):
     config = dict(DEFAULT_CONFIG)
+    app, _console = _make_app(monkeypatch, config)
 
-    _run_settings_with_keys(
-        monkeypatch,
-        config,
-        [("DOWN", _row_index(config, "base_url")), "ENTER", "ESC", "ESC"],
-    )
+    app.on_key("DOWN", _row_index(config, "base_url"))
+    app.on_key("ENTER", 1)  # open the editor
+    assert app.edit is not None
+
+    app.on_key("ESC", 1)  # unchanged -> back to the list
+    assert app.edit is None
+    assert not app.stop_calls
+
+    app.on_key("ESC", 1)  # exit the screen
+    assert app.stop_calls
 
 
 def test_settings_dirty_compact_editor_requires_second_esc(monkeypatch):
     config = dict(DEFAULT_CONFIG)
+    app, console = _make_app(monkeypatch, config)
 
-    live = _run_settings_with_keys(
-        monkeypatch,
-        config,
-        [("DOWN", _row_index(config, "base_url")), "ENTER", "x", "ESC", "ESC", "ESC"],
-    )
+    app.on_key("DOWN", _row_index(config, "base_url"))
+    app.on_key("ENTER", 1)
+    app.on_key("x", 1)  # dirty the buffer
+    app.on_key("ESC", 1)  # arms discard rather than leaving
 
-    assert any("Esc again to discard" in snapshot for snapshot in live.snapshots)
+    assert app.edit is not None
+    assert "Esc again to discard" in _render(app, console)
+
+    app.on_key("ESC", 1)  # confirm discard -> back to the list
+    assert app.edit is None
+    assert not app.stop_calls
 
 
 def test_settings_dirty_multiline_editor_requires_second_esc(monkeypatch):
     config = dict(DEFAULT_CONFIG)
+    app, console = _make_app(monkeypatch, config)
 
-    live = _run_settings_with_keys(
-        monkeypatch,
-        config,
-        [("DOWN", _row_index(config, "system_prompt")), "ENTER", "x", "ESC", "ESC", "ESC"],
-    )
+    app.on_key("DOWN", _row_index(config, "system_prompt"))
+    app.on_key("ENTER", 1)
+    app.on_key("x", 1)
+    app.on_key("ESC", 1)
 
-    assert any("Esc again to discard" in snapshot for snapshot in live.snapshots)
+    assert app.edit is not None
+    assert "Esc again to discard" in _render(app, console)
 
 
 def test_settings_esc_returns_from_readonly_api_key_editor(monkeypatch):
     config = {**DEFAULT_CONFIG, "provider": "ollama"}
+    app, _console = _make_app(monkeypatch, config)
 
-    _run_settings_with_keys(
-        monkeypatch,
-        config,
-        [("DOWN", _row_index(config, "api_key")), "ENTER", "ESC", "ESC"],
-    )
+    app.on_key("DOWN", _row_index(config, "api_key"))
+    app.on_key("ENTER", 1)
+    assert app.edit is not None
+
+    app.on_key("ESC", 1)  # nothing to save -> back to the list
+    assert app.edit is None
+    assert not app.stop_calls
+
+    app.on_key("ESC", 1)
+    assert app.stop_calls
 
 
 def test_settings_esc_returns_from_reset_confirmation(monkeypatch):
     config = dict(DEFAULT_CONFIG)
+    app, _console = _make_app(monkeypatch, config)
 
-    _run_settings_with_keys(
-        monkeypatch,
-        config,
-        [("DOWN", _row_index(config, "base_url")), "r", "ESC", "ESC"],
-    )
+    app.on_key("DOWN", _row_index(config, "base_url"))
+    app.on_key("r", 1)  # arm the reset confirmation
+    assert app.pending_reset is not None
+
+    app.on_key("ESC", 1)  # cancel the reset -> back to the list
+    assert app.pending_reset is None
+    assert not app.stop_calls
+
+    app.on_key("ESC", 1)
+    assert app.stop_calls
