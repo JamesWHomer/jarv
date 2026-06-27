@@ -64,6 +64,10 @@ from .tui_app import AltScreenApp
 from .tui_frame import (
     FrameLayout,
     assemble_body,
+    box_bottom,
+    box_row,
+    box_tab_top,
+    box_top,
     build_frame,
     compose_subtitle,
     compose_title,
@@ -749,13 +753,25 @@ class HeadsupApp(AltScreenApp):
         title = compose_title(model_status, layout.panel_width)
 
         with self.lock:
-            prompt_lines = self._prompt_lines(inner_width, max_lines=layout.max_prompt_rows)
-            menu_lines = self._slash_menu_lines(inner_width, layout)  # [] when inactive
-            footer = self._footer_line(inner_width)
-            # The transcript region is sized for the prompt box alone, never the
-            # menu: the menu floats over the bottom of the body (see below) rather
-            # than displacing rows, so the starfield/logo stay put when it opens.
+            # The slash-command popup and the input box are drawn as one seamless
+            # unit: a compact, left-aligned popup (top edge + suggestion rows) floats
+            # over the bottom of the transcript, the footer row becomes the edge that
+            # docks it onto the field, and the input box drops its own top so that
+            # docking edge serves as it.
+            menu_lines = self._slash_menu_box(inner_width, layout)
+            prompt_lines = self._prompt_lines(
+                inner_width, max_lines=layout.max_prompt_rows, menu_open=bool(menu_lines)
+            )
+            if menu_lines:
+                footer = box_tab_top(inner_width, cell_len(menu_lines[0].plain))
+            else:
+                footer = self._footer_line(inner_width)
             rows = _transcript_rows_for(layout.body_height, len(prompt_lines))
+            # Opening the popup makes the input box one row shorter (the divider
+            # replaces its top border), so the body has one more row to give the
+            # transcript. The popup is painted over the bottom of the body, so that
+            # extra row lands underneath it -- nothing already on screen moves.
+            intro_height = rows - (1 if menu_lines else 0)
             transcript = self._transcript_lines(inner_width)
             visible, self.scroll_offset = window_transcript(transcript, rows, self.scroll_offset)
             show_intro = (
@@ -766,11 +782,14 @@ class HeadsupApp(AltScreenApp):
             )
             outro_started_at = self._outro_started_at
 
+        # The intro is drawn at the stable (popup-closed) height so its centred
+        # logo and seeded starfield never re-roll or jump as the popup opens; the
+        # freed bottom row is padded out and then covered by the popup overlay.
         intro = None
         if show_intro:
             intro = render_intro(
                 inner_width,
-                rows,
+                intro_height,
                 time.perf_counter() - self._idle_anim_started_at,
             )
         elif outro_started_at:
@@ -778,15 +797,15 @@ class HeadsupApp(AltScreenApp):
             if exit_progress < 1.0:
                 intro = render_intro(
                     inner_width,
-                    rows,
+                    intro_height,
                     time.perf_counter() - self._idle_anim_started_at,
                     exit=exit_progress,
                 )
         if intro is not None:
-            visible = intro
+            visible = intro + [Text("")] * max(0, rows - len(intro))
 
-        # Paint the slash menu over the bottom of the body so it replaces the
-        # stars beneath it while the field shows through to its right.
+        # Paint the slash popup over the bottom of the body so it replaces the
+        # stars beneath it and docks seamlessly onto the input box below.
         visible = overlay_menu(
             visible, menu_lines, rows=rows, width=inner_width, console=self.console
         )
@@ -1731,7 +1750,17 @@ class HeadsupApp(AltScreenApp):
         self._exit_armed = False
         self.refresh()
 
-    def _slash_menu_lines(self, width: int, layout: FrameLayout) -> list[Text]:
+    def _slash_menu_box(self, width: int, layout: FrameLayout) -> list[Text]:
+        """Build the slash-command popup as the open top of the input-box unit.
+
+        Returns the popup's lines -- a rounded top edge plus one row per visible
+        command, and *no* bottom border. The box is compact (sized to its widest
+        row) and left-aligned, so the transcript/starfield shows through to its
+        right. It is painted over the bottom of the transcript by
+        :func:`overlay_menu`; the frame's footer row then draws the edge that docks
+        it onto the input field below (see ``render``), so the popup and field read
+        as one box. Returns ``[]`` when inactive.
+        """
         matches = self._slash_menu_matches()
         if not matches:
             return []
@@ -1740,12 +1769,15 @@ class HeadsupApp(AltScreenApp):
 
         prefix_width = 3  # " › " / "   "
         gap = 2
+        # The box may grow at most to the field's content area (its width minus a
+        # border + gutter on each side); within that it shrinks to fit its rows.
+        max_content = max(1, width - 4)
         labels = [
             entry.display + (f" {entry.arg_hint}" if entry.arg_hint else "")
             for entry in matches
         ]
         name_col = max((cell_len(label) for label in labels), default=0)
-        name_col = max(1, min(name_col, max(1, width - prefix_width - gap - 8)))
+        name_col = max(1, min(name_col, max(1, max_content - prefix_width - gap - 8)))
 
         available = max(1, min(_SLASH_MENU_MAX_ROWS, max(1, layout.body_height - 3)))
         total = len(matches)
@@ -1758,7 +1790,7 @@ class HeadsupApp(AltScreenApp):
             if selected < start:
                 start = selected
 
-        lines = [
+        rows = [
             self._slash_menu_row(
                 matches[index],
                 index == selected,
@@ -1766,16 +1798,20 @@ class HeadsupApp(AltScreenApp):
                 name_col,
                 prefix_width,
                 gap,
-                width,
+                max_content,
             )
             for index in range(start, start + count)
         ]
         if show_more:
             hidden = total - count
-            lines.append(
+            rows.append(
                 Text(f"   +{hidden} more", style="dim", no_wrap=True, overflow="crop")
             )
-        return lines
+        # Shrink-wrap the box to its widest row so it stays compact and left of the
+        # transcript, then frame each row to that one width.
+        content = max(1, min(max((cell_len(row.plain) for row in rows), default=1), max_content))
+        box_width = content + 4
+        return [box_top(box_width)] + [box_row(row, box_width) for row in rows]
 
     def _slash_menu_row(
         self,
@@ -1816,10 +1852,10 @@ class HeadsupApp(AltScreenApp):
 
         line.append(" " * max(1, name_col + gap - label_len))
         summary_avail = max(0, width - prefix_width - name_col - gap)
-        line.append(
-            clip_text(entry.summary, summary_avail),
-            style="white" if selected else "dim",
-        )
+        # The summary stays an even dim on every row; the highlighted row is marked
+        # by its " › " caret and brighter command, not a white summary that would
+        # make the selected row read as a different colour from the rest.
+        line.append(clip_text(entry.summary, summary_avail), style="dim")
         return line
 
     def _scroll_transcript(self, delta: int) -> None:
@@ -1870,7 +1906,7 @@ class HeadsupApp(AltScreenApp):
             return max(1, width - cell_len(label))
         return max(1, width - 4)
 
-    def _prompt_lines(self, width: int, *, max_lines: int) -> list[Text]:
+    def _prompt_lines(self, width: int, *, max_lines: int, menu_open: bool = False) -> list[Text]:
         label = self._prompt_label()
         edit_width = self._prompt_edit_width(width)
         marker_spans = self._pastes.marker_spans(str(self.editor.get("buffer", "")))
@@ -1890,7 +1926,9 @@ class HeadsupApp(AltScreenApp):
         if not label:
             if _start == 0:
                 self._highlight_command_token(rendered)
-            return self._prompt_input_box_lines(rendered, width, max_lines=max_lines)
+            return self._prompt_input_box_lines(
+                rendered, width, max_lines=max_lines, menu_open=menu_open
+            )
 
         line = Text(label, style="bold cyan", no_wrap=True, overflow="crop")
         line.append_text(rendered[0])
@@ -1944,28 +1982,16 @@ class HeadsupApp(AltScreenApp):
         buffer = str(self.editor.get("buffer", ""))
         return bool(buffer) and self._command_highlight_len() == len(buffer)
 
-    def _prompt_input_box_lines(self, rendered: list[Text], width: int, *, max_lines: int) -> list[Text]:
-        border_style = "dim cyan"
-        field_width = max(1, width - 2)
-        content_width = max(1, width - 4)
-        has_horizontal_padding = width >= 4
-        top = Text("\u256d" + "\u2500" * field_width + "\u256e", style=border_style, no_wrap=True)
-        bottom = Text("\u2570" + "\u2500" * field_width + "\u256f", style=border_style, no_wrap=True)
-        rows: list[Text] = [top]
+    def _prompt_input_box_lines(
+        self, rendered: list[Text], width: int, *, max_lines: int, menu_open: bool = False
+    ) -> list[Text]:
+        # When the slash popup is open it supplies the top edge and the divider
+        # that closes onto this field, so we omit our own top border and let the
+        # divider serve as it -- the popup and field then frame as one box.
+        rows: list[Text] = [] if menu_open else [box_top(width)]
         for visual_line in rendered[:max(1, max_lines - 2)]:
-            line = Text(no_wrap=True, overflow="crop")
-            line.append("\u2502", style=border_style)
-            if has_horizontal_padding:
-                line.append(" ")
-            line.append_text(visual_line)
-            padding = max(0, content_width - cell_len(visual_line.plain))
-            if padding:
-                line.append(" " * padding)
-            if has_horizontal_padding:
-                line.append(" ")
-            line.append("\u2502", style=border_style)
-            rows.append(line)
-        rows.append(bottom)
+            rows.append(box_row(visual_line, width))
+        rows.append(box_bottom(width))
         return rows[:max(1, max_lines)]
 
     def _footer_line(self, width: int) -> Text:
@@ -1976,7 +2002,6 @@ class HeadsupApp(AltScreenApp):
             answering = self._answer_request is not None
             cancelling = self._cancel_token is not None
             exit_armed = self._exit_armed
-            menu_active = bool(self._slash_menu_matches())
 
         if notice is not None:
             lines = rendered_text_lines(notice, width)
@@ -1985,14 +2010,6 @@ class HeadsupApp(AltScreenApp):
             footer.no_wrap = True
             footer.overflow = "crop"
             return footer
-
-        if menu_active:
-            return Text(
-                clip_text("↑↓ select   Tab/Enter accept   Esc close", width),
-                style="dim italic",
-                no_wrap=True,
-                overflow="crop",
-            )
 
         if exit_armed:
             value = "Esc/Ctrl+C exit   Any other key continue"

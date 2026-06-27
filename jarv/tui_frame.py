@@ -256,9 +256,10 @@ def assemble_body(
     return parts
 
 
-# A small blank gutter kept clear to the right of the menu block so the
-# starfield never butts directly against the command text.
-_MENU_OVERLAY_GUTTER = 2
+# No gutter to the right of the menu block: the menu is a bordered box, so its
+# own right edge already separates it from the starfield/transcript, which is
+# free to show through immediately past the border.
+_MENU_OVERLAY_GUTTER = 0
 
 
 def overlay_menu(
@@ -318,6 +319,93 @@ def _overlay_line(
     for segment in merged:
         if segment.text:
             line.append(segment.text, style=segment.style)
+    return line
+
+
+# The input field and its slash-command popup are drawn as one continuous box
+# from these helpers. The border is a calm dark blue (dim cyan) so it frames the
+# field without competing with the white draft text; every edge -- the popup top,
+# the divider that joins the popup to the field, and the field's own sides and
+# bottom -- shares this one style so the whole thing reads as a single seamless
+# unit rather than two stacked boxes.
+PROMPT_BOX_BORDER_STYLE = "dim cyan"
+
+
+def box_top(width: int, *, style: str = PROMPT_BOX_BORDER_STYLE) -> Text:
+    """The rounded top edge ``╭───╮`` of the box, spanning ``width`` cells."""
+    return _box_edge(width, "╭", "╮", style)
+
+
+def box_bottom(width: int, *, style: str = PROMPT_BOX_BORDER_STYLE) -> Text:
+    """The rounded bottom edge ``╰───╯`` of the box, spanning ``width`` cells."""
+    return _box_edge(width, "╰", "╯", style)
+
+
+def box_divider(width: int, *, style: str = PROMPT_BOX_BORDER_STYLE) -> Text:
+    """The interior rule ``├───┤`` that joins the popup to the input field.
+
+    Its tees butt against the side borders above and below, so a popup (top edge
+    + rows) and the field beneath it read as one box split by a single rule.
+    """
+    return _box_edge(width, "├", "┤", style)
+
+
+def box_tab_top(width: int, tab_width: int, *, style: str = PROMPT_BOX_BORDER_STYLE) -> Text:
+    """The input field's top edge with a narrower popup docked onto its left.
+
+    Renders ``├────┴────────╮``: the left ``tab_width`` cells close the compact,
+    left-aligned popup resting on top (``├`` down into the field on the left,
+    ``┴`` under the popup's right border), and the remainder is the field's own
+    rounded top edge. The two share this one line, so the popup reads as part of
+    the same box rather than a separate panel floating above it. When the popup
+    spans the full width this degrades to a plain ``├───┤`` divider.
+    """
+    tab_width = max(2, min(tab_width, width))
+    if tab_width >= width:
+        return box_divider(width, style=style)
+    left = "├" + "─" * (tab_width - 2) + "┴"
+    right = "─" * (width - tab_width - 1) + "╮"
+    return _styled_line(left + right, style)
+
+
+def _box_edge(width: int, left: str, right: str, style: str) -> Text:
+    field_width = max(1, width - 2)
+    return _styled_line(left + "─" * field_width + right, style)
+
+
+def _styled_line(text: str, style: str) -> Text:
+    # Carry the border colour as a span, not as the Text's base style: a base
+    # style is applied by the parent renderable, but these edges are also painted
+    # straight onto the body by the overlay (where ``Text.render`` drops a
+    # span-less base style and the border would fall back to white). A span
+    # survives both paths, so the edge keeps its colour wherever it's drawn.
+    line = Text(text, no_wrap=True)
+    line.stylize(style)
+    return line
+
+
+def box_row(content: Text, width: int, *, style: str = PROMPT_BOX_BORDER_STYLE) -> Text:
+    """Frame one content line between the box's side borders.
+
+    The content is padded with a one-cell gutter inside each border (dropped only
+    when the box is too narrow for it) and clipped to fit, so every row in the
+    box -- popup suggestion or input line -- lines its borders up exactly.
+    """
+    content_width = max(1, width - 4)
+    has_gutter = width >= 4
+    body = content.copy()
+    body.truncate(content_width, overflow="crop")
+    line = Text(no_wrap=True, overflow="crop")
+    line.append("│", style=style)
+    if has_gutter:
+        line.append(" ")
+    line.append_text(body)
+    padding = max(0, content_width - cell_len(body.plain))
+    if padding:
+        line.append(" " * padding)
+    if has_gutter:
+        line.append(" ")
+    line.append("│", style=style)
     return line
 
 
