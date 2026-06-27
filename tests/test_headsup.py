@@ -1249,7 +1249,6 @@ class HeadsupTests(unittest.TestCase):
         self.assertIn("/settings", rendered)
         self.assertIn("/setup", rendered)
         self.assertIn("Open common controls", rendered)
-        self.assertIn("↑↓ select", rendered)
         # The input box itself still renders beneath the menu.
         self.assertIn("╭", rendered)
 
@@ -1273,19 +1272,68 @@ class HeadsupTests(unittest.TestCase):
         self.assertEqual(len(heights), 2)
         self.assertEqual(heights[0], heights[1])
 
-    def test_slash_menu_lets_background_show_through_to_its_right(self):
-        # The menu replaces only its own left-aligned block; whatever sits behind
-        # it (here a transcript line) keeps showing to the right of the block.
-        app, test_console, output = self._app(width=80)
-        app.add_user_message("x")
-        app.upsert_assistant_message(None, "RIGHTEDGE" * 9)  # a wide trailing line
+    def test_slash_menu_is_a_compact_box_docked_onto_the_input_field(self):
+        # The popup is compact and left-aligned (no wider than the field, sized to
+        # its rows, open at the bottom), and the footer docks it onto the
+        # full-width field: a tee (┴) under the popup's right border, then the
+        # field's own top edge. Every border shares the one dim-cyan style.
+        from jarv.tui_frame import box_tab_top, compute_layout
+
+        app, _test_console, _output = self._app(width=80)
         initialize_text_editor(app.editor, "/se")
+        layout = compute_layout(80, 20)
+        width = layout.inner_width
 
-        rendered = self._rendered_text(app, test_console, output, width=80, height=20)
+        popup = app._slash_menu_box(width, layout)
+        popup_width = cell_len(popup[0].plain)
+        footer = box_tab_top(width, popup_width)
+        field = app._prompt_lines(width, max_lines=layout.max_prompt_rows, menu_open=True)
 
-        # A menu command and the background text both survive on the menu rows.
-        self.assertIn("/settings", rendered)
-        self.assertIn("RIGHTEDGE", rendered)
+        # Compact + left-aligned: a uniform box, narrower than the field, opening
+        # at the top with no bottom edge of its own.
+        self.assertTrue(any("/settings" in line.plain for line in popup))
+        self.assertLess(popup_width, width)
+        self.assertTrue(all(cell_len(line.plain) == popup_width for line in popup))
+        self.assertEqual(popup[0].plain[0], "╭")
+        self.assertNotIn("╰", "".join(line.plain for line in popup))
+        # The footer docks the popup onto the field: ├ … ┴ (under the popup's right
+        # border) … ╮, spanning the full width.
+        self.assertEqual(cell_len(footer.plain), width)
+        self.assertEqual(footer.plain[0], "├")
+        self.assertEqual(footer.plain[popup_width - 1], "┴")
+        self.assertEqual(footer.plain[-1], "╮")
+        # The field drops its own top edge and closes the box at full width.
+        self.assertEqual(field[0].plain[0], "│")
+        self.assertEqual(field[-1].plain[0], "╰")
+        self.assertEqual(cell_len(field[-1].plain), width)
+        # The popup top, the docking edge, and the field's bottom share one border
+        # colour -- carried as a span so it survives the overlay that paints the
+        # top edge onto the body (a base style is dropped there and shows white).
+        def edge_style(edge):
+            return " ".join(str(span.style) for span in edge.spans)
+
+        self.assertEqual(edge_style(popup[0]), "dim cyan")
+        self.assertEqual(edge_style(footer), "dim cyan")
+        self.assertEqual(edge_style(field[-1]), "dim cyan")
+
+    def test_slash_menu_summaries_are_evenly_dim_across_rows(self):
+        # The highlighted row is marked by its caret and brighter command, not by a
+        # white summary -- so no row's summary reads as a different colour.
+        app, _test_console, _output = self._app(width=80)
+        initialize_text_editor(app.editor, "/se")
+        matches = app._slash_menu_matches()
+
+        for selected in (True, False):
+            row = app._slash_menu_row(
+                matches[0], selected, "se", name_col=12,
+                prefix_width=3, gap=2, width=60,
+            )
+            summary_styles = {
+                str(span.style) for span in row.spans
+                if "Open" in row.plain[span.start:span.end]
+                or "Run" in row.plain[span.start:span.end]
+            }
+            self.assertNotIn("white", " ".join(summary_styles))
 
     def test_slash_menu_arrows_drive_highlight_not_prompt_history(self):
         app, _test_console, _output = self._app()

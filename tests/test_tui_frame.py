@@ -288,3 +288,69 @@ def test_overlay_menu_clips_when_menu_taller_than_body():
     assert len(out) == 2
     assert out[-1].plain.startswith("three")
     assert out[-2].plain.startswith("two")
+
+
+def _edge_style(edge: Text) -> str:
+    # The border colour lives in a span covering the whole edge (see _styled_line),
+    # so it survives being painted straight onto the body by the overlay.
+    return " ".join(str(span.style) for span in edge.spans)
+
+
+def test_box_edges_span_width_with_matching_corners():
+    # Every edge is the same width and carries the one shared border style, so a
+    # popup (top + rows), a divider, and an input field stack into one box.
+    width = 24
+    top = tui_frame.box_top(width)
+    divider = tui_frame.box_divider(width)
+    bottom = tui_frame.box_bottom(width)
+
+    for edge in (top, divider, bottom):
+        assert cell_len(edge.plain) == width
+        assert _edge_style(edge) == tui_frame.PROMPT_BOX_BORDER_STYLE
+    assert (top.plain[0], top.plain[-1]) == ("╭", "╮")
+    assert (divider.plain[0], divider.plain[-1]) == ("├", "┤")
+    assert (bottom.plain[0], bottom.plain[-1]) == ("╰", "╯")
+
+
+def test_box_edge_colour_survives_being_painted_by_the_overlay():
+    # Regression: the popup's top border is the one edge the overlay renders
+    # directly. When its colour lived in the Text's base style (not a span),
+    # Text.render dropped it there and the border showed up white. The colour must
+    # come through as a styled segment after an overlay round-trip.
+    console = _menu_console()
+    top = tui_frame.box_top(12)
+    out = tui_frame.overlay_menu(
+        [Text(" " * 20) for _ in range(2)], [top], rows=2, width=20, console=console
+    )
+    painted = " ".join(str(span.style) for span in out[-1].spans if span.style)
+    assert "dim" in painted and "cyan" in painted
+
+
+def test_box_row_frames_content_with_gutters_and_pads_to_width():
+    row = tui_frame.box_row(Text("hi"), 24)
+    assert cell_len(row.plain) == 24
+    # A border, a one-cell gutter, the content, padding, a gutter, then a border.
+    assert row.plain == "│ hi" + " " * 18 + " │"
+    assert row.plain[0] == "│" and row.plain[-1] == "│"
+
+
+def test_box_row_clips_overlong_content_to_the_content_area():
+    row = tui_frame.box_row(Text("x" * 100), 12)
+    assert cell_len(row.plain) == 12
+    assert row.plain.startswith("│ ") and row.plain.endswith(" │")
+
+
+def test_box_tab_top_docks_a_narrower_popup_onto_the_field():
+    # A 24-wide field with a 10-wide popup docked on its left.
+    line = tui_frame.box_tab_top(24, 10)
+    assert cell_len(line.plain) == 24
+    assert line.plain[0] == "├"          # field's left border continues down
+    assert line.plain[9] == "┴"          # tee under the popup's right border (col 9)
+    assert line.plain[-1] == "╮"         # field's own top-right corner
+    assert _edge_style(line) == tui_frame.PROMPT_BOX_BORDER_STYLE
+
+
+def test_box_tab_top_degrades_to_a_plain_divider_at_full_width():
+    # A popup as wide as the field leaves no field top edge to draw, so the dock
+    # edge is just the plain ├───┤ divider.
+    assert tui_frame.box_tab_top(24, 24).plain == tui_frame.box_divider(24).plain
