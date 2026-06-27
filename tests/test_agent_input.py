@@ -1177,22 +1177,27 @@ class AgentInputTests(unittest.TestCase):
 
         self.assertIsNone(result.error)
         self.assertGreater(tool_counts[0], 0)
-        self.assertEqual(tool_counts[1:3], [0, 0])
+        # The full tool list is kept on interactive continuation turns too, so the
+        # cached prompt prefix (instructions -> tools -> input) holds across the
+        # whole command instead of re-prefilling when tools are blanked.
+        self.assertEqual(tool_counts[1:3], [tool_counts[0], tool_counts[0]])
         self.assertIn("Name:", waiting_prompts[0])
         self.assertNotIn("1. One", waiting_prompts[0])
+        # Help is sent once (on the first prompt); later prompts carry only state.
+        self.assertNotIn("Only the first line is used", waiting_prompts[0])
         self.assertIn("[interactive command exited]", final_prompt["value"])
         self.assertIn("choice=3 name=Ada", final_prompt["value"])
         self.assertNotIn("1. One", final_prompt["value"])
         # The whole exchange collapses into one run_command record; the repeated
         # waiting prompts and "[terminal input sent]" chat messages are gone.
         self.assertNotIn("[terminal input sent]", saved_text)
-        self.assertNotIn("Reply with exactly one line", saved_text)
+        self.assertNotIn("Only the first line is used", saved_text)
         self.assertEqual(len(command_outputs), 1)
         collapsed = command_outputs[0]
         self.assertIn("stdin> 3", collapsed)
         self.assertIn("stdin> Ada", collapsed)
         self.assertIn("choice=3 name=Ada", collapsed)
-        self.assertNotIn("Reply with exactly one line", collapsed)
+        self.assertNotIn("Only the first line is used", collapsed)
         rendered = console_output.getvalue()
         self.assertIn("stdin> 3", rendered)
         self.assertNotIn("3<WAIT>", rendered)
@@ -1246,6 +1251,25 @@ class AgentInputTests(unittest.TestCase):
         self.assertIn("Elapsed: 65s", prompt)
         self.assertIn("Time since last output: 0.4s", prompt)
         self.assertIn("tick", prompt)
+
+    def test_waiting_prompt_help_line_is_gated_by_include_help(self):
+        snapshot = InteractiveCommandSnapshot(
+            "python menu.py",
+            "Choose:\n",
+            "",
+            None,
+        )
+
+        with_help = _run_command_waiting_prompt(snapshot)
+        without_help = _run_command_waiting_prompt(snapshot, include_help=False)
+
+        # State is present either way; the control vocabulary only when asked.
+        self.assertIn("Choose:", with_help)
+        self.assertIn("Choose:", without_help)
+        self.assertIn("Only the first line is used", with_help)
+        self.assertIn("<CTRL_C>", with_help)
+        self.assertNotIn("Only the first line is used", without_help)
+        self.assertNotIn("<CTRL_C>", without_help)
 
     def _render_card(self, card, *, height: int | None = None) -> str:
         stream = io.StringIO()
