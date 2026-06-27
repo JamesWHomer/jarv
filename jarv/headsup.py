@@ -1785,12 +1785,13 @@ class HeadsupApp(AltScreenApp):
 
         available = max(1, min(_SLASH_MENU_MAX_ROWS, max(1, layout.body_height - 3)))
         total = len(matches)
-        if total <= available:
-            start, count, show_more = 0, total, False
+        windowed = total > available
+        if not windowed:
+            start, count = 0, total
             self._slash_menu_scroll = 0
         else:
+            # Reserve the bottom row for the scroll-position tail.
             count = available - 1
-            show_more = True
             # Keep a persistent scroll anchor and only move it when the selection
             # leaves the viewport, so pressing UP/DOWN moves the highlight within
             # the visible rows rather than dragging the whole window each time.
@@ -1814,11 +1815,15 @@ class HeadsupApp(AltScreenApp):
             )
             for index in range(start, start + count)
         ]
-        if show_more:
-            hidden = total - count
-            rows.append(
-                Text(f"   +{hidden} more", style="dim", no_wrap=True, overflow="crop")
-            )
+        # When the list is windowed, the reserved tail row stays put so the box
+        # keeps a constant height. It counts the entries *below* the window (so it
+        # ticks down as the user scrolls) and reads "no more" once the window
+        # reaches the end -- it never reports every off-window entry, and never
+        # vanishes mid-scroll and jostles the layout.
+        if windowed:
+            hidden = total - (start + count)
+            tail = f"   +{hidden} more" if hidden > 0 else "   no more"
+            rows.append(Text(tail, style="dim", no_wrap=True, overflow="crop"))
         # Shrink-wrap the box to its widest row so it stays compact and left of the
         # transcript, then frame each row to that one width.
         content = max(1, min(max((cell_len(row.plain) for row in rows), default=1), max_content))
