@@ -42,6 +42,23 @@ def test_openai_recommendations_update_each_tier_independently():
     ]
 
 
+def test_openai_recommendations_prefer_gpt_56_named_tiers():
+    choices = recommend_models("openai", _models(
+        "gpt-5.5",
+        "gpt-5.4-mini",
+        "gpt-5.4-nano",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+    ))
+
+    assert [model for model, _description in choices] == [
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+    ]
+
+
 def test_default_model_uses_the_providers_preferred_live_tier():
     assert get_default_model(
         {"provider": "openai"},
