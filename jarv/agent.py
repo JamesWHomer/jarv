@@ -210,6 +210,7 @@ from .interactive_command import (
     _format_finished_interactive_output,
     _interaction_marker_text,
     _interactive_check_in_seconds,
+    _interactive_tool_call_reminder,
     _parse_terminal_control,
     _record_interactive_input,
     _run_command_final_prompt,
@@ -275,6 +276,7 @@ def _dispatch_run_command_with_ui(
     cancellation_token=None,
     retained_store=None,
     ui=None,
+    interactive_help=None,
 ):
     prepared = prepare_run_command(args, config)
     if isinstance(prepared, str):
@@ -373,8 +375,12 @@ def _dispatch_run_command_with_ui(
         live=live,
         live_depth_cm=live_depth_cm,
     )
+    include_help = True
+    if interactive_help is not None:
+        include_help = not interactive_help.get("sent", False)
+        interactive_help["sent"] = True
     return RunCommandDispatchResult(
-        _run_command_waiting_prompt(snapshot),
+        _run_command_waiting_prompt(snapshot, include_help=include_help),
         pending,
     )
 
@@ -759,6 +765,9 @@ def run_agent(
     persistence = SessionPersistence(incognito=incognito)
     active_tool_call = None
     pending_status_history_items: list[dict] = []
+    # The terminal-control help line is sent on the first interactive waiting
+    # prompt of the session only; later prompts carry just state.
+    interactive_help = {"sent": False}
     cancellation_token = CancellationToken()
     renderer = _TurnRenderer(
         ui=ui,
@@ -923,7 +932,15 @@ def run_agent(
 
             renderer.ensure_response_wait()
 
-            active_tools = [] if pending_interactive_command is not None else kwargs.get("tools", [])
+            # Keep the full tool list on every turn, including interactive
+            # continuations. Blanking it there changed the cached prompt prefix
+            # (instructions -> tools -> input), forcing a full re-prefill at the
+            # enter/exit boundaries, and a tool-trained model handed no tools
+            # spills tool-shaped text into stdin. Stray mid-interaction tool
+            # calls are still caught and dropped by the reminder branch below
+            # (which `continue`s before the execution path), so passing the real
+            # tools never risks a nested run_command.
+            active_tools = kwargs.get("tools", [])
 
             _ctx_breakdown = estimate_context_breakdown(
                 config["model"],
@@ -983,13 +1000,7 @@ def run_agent(
                 if renderer.tool_calls:
                     kwargs["input"] = kwargs["input"] + [{
                         "role": "user",
-                        "content": (
-                            "A terminal command is currently waiting for input. "
-                            "Do not call tools. Reply only with stdin text or one "
-                            "of <ENTER>, <WAIT>, <WAIT Ns> (choose N to fit the "
-                            "wait), <CTRL_C>, <EOF>, <CTRL_D>, <ESC>, <TAB>, "
-                            "<UP>, <DOWN>, <LEFT>, <RIGHT>."
-                        ),
+                        "content": _interactive_tool_call_reminder(),
                     }]
                     continue
                 # The model's control reply and the next prompt stay in the live
@@ -1045,7 +1056,11 @@ def run_agent(
                     )
                     pending_interactive_command = None
                 else:
-                    waiting_prompt = _run_command_waiting_prompt(snapshot)
+                    include_help = not interactive_help["sent"]
+                    interactive_help["sent"] = True
+                    waiting_prompt = _run_command_waiting_prompt(
+                        snapshot, include_help=include_help
+                    )
                     kwargs["input"] = kwargs["input"] + [{
                         "role": "user",
                         "content": waiting_prompt,
@@ -1098,6 +1113,7 @@ def run_agent(
                         cancellation_token=cancellation_token,
                         retained_store=retained_store,
                         ui=ui,
+                        interactive_help=interactive_help,
                     ),
                     run_spawn=lambda args: _dispatch_spawn_with_ui(
                         args,

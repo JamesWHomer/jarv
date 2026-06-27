@@ -31,7 +31,29 @@ def _interactive_check_in_seconds(config: dict) -> float | None:
     return seconds if seconds > 0 else None
 
 
-def _run_command_waiting_prompt(snapshot) -> str:
+# Single source of truth for the terminal control vocabulary shown to the model,
+# reused by the waiting prompt's help line and the tool-call reminder below.
+_TERMINAL_CONTROLS = (
+    "<ENTER>, <WAIT>, <WAIT Ns> (e.g. <WAIT 30s>), <CTRL_C>, <EOF>, "
+    "<CTRL_D>, <ESC>, <TAB>, <UP>, <DOWN>, <LEFT>, <RIGHT>"
+)
+
+# Sent once per session; later waiting prompts omit it and carry only state.
+_TERMINAL_REPLY_INSTRUCTIONS = (
+    "Reply with one line — stdin text (sent with Enter) or one control: "
+    f"{_TERMINAL_CONTROLS}. Only the first line is used."
+)
+
+
+def _interactive_tool_call_reminder() -> str:
+    """Nudge sent when the model calls a tool mid-interaction instead of replying."""
+    return (
+        "A terminal command is waiting for input — reply with stdin text or one "
+        f"control ({_TERMINAL_CONTROLS}), not a tool call."
+    )
+
+
+def _run_command_waiting_prompt(snapshot, *, include_help: bool = True) -> str:
     result = snapshot.to_delta_command_result()
     status_lines = []
     if getattr(snapshot, "check_in", False):
@@ -46,6 +68,7 @@ def _run_command_waiting_prompt(snapshot) -> str:
         else "[interactive command waiting for terminal input]\n"
     )
     status_text = "\n".join(status_lines) + "\n\n" if status_lines else ""
+    help_text = f"\n\n{_TERMINAL_REPLY_INSTRUCTIONS}" if include_help else ""
     return (
         f"{header}"
         f"Command: {snapshot.command}\n\n"
@@ -53,16 +76,8 @@ def _run_command_waiting_prompt(snapshot) -> str:
         "New command output since last interaction:\n"
         "```text\n"
         f"{result.full_model_output()}\n"
-        "```\n\n"
-        "Reply with exactly one line of terminal input or one control. Do not "
-        "explain. Do not chain multiple controls. Plain text sends that text "
-        "followed by Enter. Special controls: <ENTER>; <WAIT> to briefly yield "
-        "then check again; <WAIT Ns> to pause about N seconds before checking "
-        "again — pick N to fit what you are waiting on (e.g. <WAIT 3s>, "
-        "<WAIT 30s>, <WAIT 120s>); it is a placeholder, not a fixed value, so "
-        "do not always send <WAIT 10s>. Other controls: <CTRL_C>, <EOF>, "
-        "<CTRL_D>, <ESC>, <TAB>, <UP>, <DOWN>, <LEFT>, <RIGHT>. Only the first "
-        "input/control will be used."
+        "```"
+        f"{help_text}"
     )
 
 
