@@ -892,6 +892,37 @@ class HeadsupTests(unittest.TestCase):
         self.assertEqual(len(app.entries), slot_count)
         self.assertFalse(ui.has_active_animation())
 
+    def test_thinking_card_footer_ticks_on_refresh_without_reupsert(self):
+        # Regression: the "deciding next input… 0s" footer used to freeze because
+        # the per-entry render cache replayed its first frame; the tick path must
+        # invalidate the live tool so its clock-driven footer advances in place.
+        app, _test_console, _output = self._app()
+        ui = HeadsupAgentUI(app)
+
+        card = InteractiveCommandCard(
+            "python game.py", "", "fullscreen", time.perf_counter()
+        )
+        card.seed_initial(
+            InteractiveCommandSnapshot("python game.py", "hi\n", "", None, exited=False)
+        )
+        card.set_thinking(time.perf_counter() - 5.0)
+        ui.show_tool_card(card)
+
+        def footer_line() -> str:
+            return next(
+                (l.plain for l in app._transcript_lines(100) if "deciding next input" in l.plain),
+                "",
+            )
+
+        first = footer_line()  # populates the per-entry render cache
+        self.assertRegex(first, r"deciding next input…\s+5s")
+
+        # Advance the model's think time, then drive one animation tick. Nothing
+        # re-upserts the card, so only cache invalidation lets the footer recompute.
+        card.set_thinking(time.perf_counter() - 9.0)
+        self.assertTrue(ui._refresh_wait_statuses())
+        self.assertRegex(footer_line(), r"deciding next input…\s+9s")
+
     def test_unbind_cancel_token_stops_wait_status_refreshes(self):
         app, _test_console, _output = self._app()
         ui = HeadsupAgentUI(app)

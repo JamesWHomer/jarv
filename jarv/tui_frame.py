@@ -166,6 +166,75 @@ def compose_title(
     return title
 
 
+def _clip_head(value: str, width: int, *, ellipsis: str = "…") -> str:
+    """Clip ``value`` to ``width`` cells by dropping its *head*.
+
+    The opposite of :func:`clip_text`: the tail survives and a leading ellipsis
+    marks the truncation. Used for the working-directory label so the most
+    specific (rightmost) path segments stay readable when the panel is narrow.
+    """
+    if width <= 0:
+        return ""
+    if cell_len(value) <= width:
+        return value
+    if width <= cell_len(ellipsis):
+        ellipsis = ""
+    budget = width - cell_len(ellipsis)
+    kept: list[str] = []
+    used = 0
+    for char in reversed(value):
+        char_width = cell_len(char)
+        if used + char_width > budget:
+            break
+        kept.append(char)
+        used += char_width
+    return ellipsis + "".join(reversed(kept))
+
+
+def compose_subtitle(
+    left_label: str,
+    right: Text,
+    panel_width: int,
+    *,
+    left_style: str = "dim",
+) -> Text:
+    """Build the panel's bottom bar: a left label, a rule, then a right status.
+
+    The mirror of :func:`compose_title` for the bottom border. ``right`` (the
+    usage status) is anchored to the right and preserved intact; ``left_label``
+    (the working directory) is anchored to the left and is the first thing
+    truncated -- from its head, so the trailing path segments survive -- as the
+    panel narrows. The middle is filled with the same cyan rule as the title so
+    the border reads as continuous.
+    """
+    bar_width = max(1, panel_width - _TITLE_CELL_BUDGET)
+    bar = Text(no_wrap=True, overflow="crop")
+
+    right = right.copy()
+    right.truncate(bar_width, overflow="ellipsis")
+    right_cells = cell_len(right.plain)
+
+    # Reserve the status plus a one-cell gutter either side of the rule.
+    left_budget = bar_width - right_cells - 3
+    if not left_label or left_budget < 1:
+        fill = bar_width - right_cells - 1
+        if fill > 0:
+            bar.append("─" * fill, style="cyan")
+            bar.append(" ")
+        bar.append_text(right)
+        return bar
+
+    left = _clip_head(left_label, left_budget)
+    bar.append(left, style=left_style)
+    separator_width = bar_width - cell_len(left) - right_cells - 2
+    bar.append(" ")
+    if separator_width > 0:
+        bar.append("─" * separator_width, style="cyan")
+    bar.append(" ")
+    bar.append_text(right)
+    return bar
+
+
 def assemble_body(
     visible: list[RenderableType],
     footer: RenderableType,

@@ -396,15 +396,26 @@ class AltScreenApp:
 
         Stops our ``Live`` so a nested :class:`AltScreenApp` (e.g. an interactive
         slash command) can own the terminal, keeps the alternate screen, and on
-        resume resets the resize baseline so the loop hard-repaints at the true
-        current size -- even if the terminal was resized and reverted while we were
-        suspended (when ``_last_size`` would otherwise still match and be skipped).
+        resume forces a full repaint at the true current size -- even if the
+        terminal was resized and reverted while we were suspended (when a stale
+        ``_last_size`` would otherwise match and be skipped).
 
-        Because the alt screen is now held steady (see :meth:`_preserve_alt_screen`)
-        rather than re-entered by the nested view, the screen is wiped here once
-        the nested view takes over -- otherwise a compact nested panel would let
-        our frame bleed through around its edges. On resume our own full-screen
-        repaint covers the nested view, so no second clear is needed.
+        The repaint is forced via ``_dirty`` plus ``live.start(refresh=True)``, and
+        ``_last_size`` is re-synced to the *actual* current size rather than
+        ``None``. Setting it to ``None`` used to look like a no-op baseline reset,
+        but the next :meth:`_check_resize` then compared ``None`` against the real
+        size, declared a phantom resize, and ran :meth:`Console.clear` -- a
+        full-screen ``\x1b[2J`` wipe *after* our repaint had already covered the
+        nested view. That blank-then-redraw was a one-frame flicker on every menu
+        exit. Re-syncing the baseline keeps the forced repaint but skips the bogus
+        clear (a genuine resize during suspend is captured in the new baseline and
+        repainted at the right size anyway).
+
+        Because the alt screen is held steady (see :meth:`_preserve_alt_screen`)
+        rather than re-entered by the nested view, the screen is wiped on the way
+        *in* (below) once the nested view takes over -- otherwise a compact nested
+        panel would let our frame bleed through around its edges. On resume our own
+        full-screen repaint covers the nested view, so no second clear is needed.
         """
         live = self.live
         # While we own VT input (heads-up), drop it for the nested view: it reads
@@ -425,7 +436,9 @@ class AltScreenApp:
                 with vt_suspend:
                     yield
             finally:
-                self._last_size = None
+                # Re-sync to the real size (not None) so _check_resize doesn't
+                # see a phantom resize and clear the screen after we repaint.
+                self._last_size = self._terminal_size_fn(console=self.console)
                 self._dirty = True
                 if live is not None:
                     live.start(refresh=True)

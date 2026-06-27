@@ -326,6 +326,7 @@ def _dispatch_run_command_with_ui(
                 console=console,
                 auto_refresh=True,
                 transient=False,
+                vertical_overflow="crop",
             )
             live.start()
         process = InteractiveCommandProcess.start(prepared.cmd)
@@ -436,6 +437,35 @@ class _TurnRenderer:
         self.saw_reasoning = stream_result.saw_reasoning
         self.got_text = stream_result.got_text
 
+    # -- interactive-continuation invariant ---------------------------- #
+    @property
+    def interactive_continuation(self) -> bool:
+        """True while a held-open interactive ``run_command`` owns the screen.
+
+        This is the single rule the whole turn renderer keys off: during an
+        interactive continuation the growing command card's own footer is the
+        *only* live region, so every other per-turn chrome path -- the
+        response-wait spinner, the tool-activity spinner, the streamed reply
+        text, and the reasoning label -- must be suppressed. Inline, a second
+        Rich ``Live`` would collide with the card's held-open ``Live``; in
+        heads-up the chrome would leak as stray lines *outside* the card box
+        (the "thinking/stdin outside the box" bug). Every method that would
+        otherwise paint turn chrome checks this first.
+        """
+        return self.pending_interactive_command is not None
+
+    def _animate_card_thinking(self) -> None:
+        """Drive the card footer's "deciding next input" animation.
+
+        Used wherever the non-interactive path would (re)open a response-wait
+        spinner. The card replaces that spinner during a continuation, so we
+        just nudge its footer instead of opening a competing ``Live``.
+        """
+        pending = self.pending_interactive_command
+        if pending is not None and getattr(pending, "card", None) is not None:
+            pending.card.set_thinking(self.thought_started)
+            _refresh_interactive_card(self.ui, pending)
+
     # -- live handles -------------------------------------------------- #
     def _refresh_wait_indicator(self) -> None:
         if self.wait_indicator is not None and self.spinner_live is not None:
@@ -469,14 +499,8 @@ class _TurnRenderer:
         if self.spinner_live is not None:
             return
         self.thought_started = time.perf_counter()
-        pending = self.pending_interactive_command
-        if pending is not None and getattr(pending, "card", None) is not None:
-            # During an interactive continuation the card's own footer is the
-            # "deciding next input" indicator, so we never open a separate
-            # response-wait spinner — a second Rich Live on the same console
-            # would collide with the card's held-open Live.
-            pending.card.set_thinking(self.thought_started)
-            _refresh_interactive_card(self.ui, pending)
+        if self.interactive_continuation:
+            self._animate_card_thinking()
             return
         if self.ui is not None:
             _ui_call(self.ui, "start_response_wait", self.thought_started)
@@ -495,7 +519,7 @@ class _TurnRenderer:
             self.spinner_live = None
         self.wait_indicator = None
         self.response_phase_completed = True
-        if self.pending_interactive_command is not None:
+        if self.interactive_continuation:
             # The model's decision time is folded into the card's per-step
             # "·N.Ns" marker (added in the run_agent continuation block), so
             # there is no standalone "Decided next input" status line and nothing
@@ -536,7 +560,7 @@ class _TurnRenderer:
             console.print(tool_complete_indicator(status_text))
 
     def note_tool_call_started(self, item_id: str, call_id: str, name: str) -> None:
-        if self.pending_interactive_command is not None:
+        if self.interactive_continuation:
             # Interactive continuations forbid tool calls; if the model emits one
             # anyway the turn loop nudges it back to stdin. Skip the tool-activity
             # spinner — a second Rich Live would collide with the card's Live.
@@ -598,16 +622,15 @@ class _TurnRenderer:
             if not self.got_text:
                 self.got_text = True
                 self.complete_tool_phase()
-                if self.pending_interactive_command is not None:
-                    # Keep the "Deciding next input…" spinner animating until the
+                if self.interactive_continuation:
+                    # Keep the "Deciding next input…" footer animating until the
                     # whole stream completes. The reply text is intentionally
                     # hidden for interactive continuations, so completing the
-                    # response phase here (stopping the spinner) at the first
-                    # token would leave the rest of a long, often minutes-long
-                    # interleaved-reasoning stream looking frozen — the gap the
-                    # user sees after "Decided next input". The final
-                    # complete_response_phase after the stream prints the trail
-                    # with the true turn duration.
+                    # response phase here at the first token would leave the rest
+                    # of a long, often minutes-long interleaved-reasoning stream
+                    # looking frozen — the gap the user sees after "Decided next
+                    # input". The final complete_response_phase after the stream
+                    # records the true turn duration.
                     pass
                 else:
                     self.complete_response_phase()
@@ -629,7 +652,9 @@ class _TurnRenderer:
                         # cursor so it appends in order rather than overwriting the
                         # previous turn's bubble above the intervening tool cards.
                         _ui_call(self.ui, "begin_assistant_message")
-            if self.pending_interactive_command is not None:
+            if self.interactive_continuation:
+                # Reply text is the stdin line; it surfaces as the card's
+                # "stdin> …" marker, never as a standalone streamed message.
                 self.reply_text += event.delta
             elif self.stream_preview is not None:
                 self.stream_preview.append(event.delta)
@@ -642,26 +667,35 @@ class _TurnRenderer:
         elif isinstance(event, ToolCallDone):
             self.note_tool_call_started(event.id, event.call_id, event.name)
             self.tool_completed_at = time.perf_counter()
-        elif isinstance(event, ReasoningStarted):
+        elif isinstance(event, (ReasoningStarted, ReasoningDone)):
             self.saw_reasoning = True
-            if self.ui is not None:
-                _ui_call(self.ui, "set_response_wait_has_reasoning", True)
-            elif self.wait_indicator is not None:
-                self.wait_indicator.has_reasoning = True
-                self._refresh_wait_indicator()
-        elif isinstance(event, ReasoningDone):
-            self.saw_reasoning = True
-            if self.ui is not None:
-                _ui_call(self.ui, "set_response_wait_has_reasoning", True)
-            elif self.wait_indicator is not None:
-                self.wait_indicator.has_reasoning = True
-                self._refresh_wait_indicator()
+            self._note_reasoning()
+
+    def _note_reasoning(self) -> None:
+        """Surface that the model is reasoning on the active wait indicator.
+
+        Suppressed during an interactive continuation: there is no response-wait
+        status then (the card footer stands in for it), so pushing a reasoning
+        label would materialise a stray "Thinking…" line outside the card box.
+        """
+        if self.interactive_continuation:
+            return
+        if self.ui is not None:
+            _ui_call(self.ui, "set_response_wait_has_reasoning", True)
+        elif self.wait_indicator is not None:
+            self.wait_indicator.has_reasoning = True
+            self._refresh_wait_indicator()
 
     def on_stream_attempt_end(self, result: StreamCollection, _retry_stream: bool) -> None:
-        if result.final_text and self.stream_preview is not None:
-            self.stream_preview.replace(result.final_text)
-        elif result.final_text and self.ui is not None:
-            _ui_call(self.ui, "replace_stream_text", result.final_text)
+        if not self.interactive_continuation:
+            # Skipped during a continuation: the reply text is the stdin line,
+            # shown in the card's "stdin> …" marker, so replaying it here as a
+            # standalone message is what leaked "go library"/"quit" outside the
+            # card box.
+            if result.final_text and self.stream_preview is not None:
+                self.stream_preview.replace(result.final_text)
+            elif result.final_text and self.ui is not None:
+                _ui_call(self.ui, "replace_stream_text", result.final_text)
         if self.stream_preview is not None:
             result.reply_text = self.stream_preview.text
             # Paint the authoritative final text into the live region before it
@@ -682,13 +716,11 @@ class _TurnRenderer:
         self.tool_indicator = None
         self.wait_indicator = None
         self.thought_started = time.perf_counter()
-        pending = self.pending_interactive_command
-        if pending is not None and getattr(pending, "card", None) is not None:
+        if self.interactive_continuation:
             # Same rule as ensure_response_wait: the card footer is the only live
             # region during an interactive continuation, so keep the "deciding"
             # animation going rather than opening a competing response-wait Live.
-            pending.card.set_thinking(self.thought_started)
-            _refresh_interactive_card(self.ui, pending)
+            self._animate_card_thinking()
             return
         if self.ui is not None:
             _ui_call(self.ui, "retry_stream")
