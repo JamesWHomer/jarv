@@ -554,6 +554,7 @@ class HeadsupApp(AltScreenApp):
         self._prompt_history_index: int | None = None
         self._prompt_history_draft = ""
         self._slash_menu_index = 0
+        self._slash_menu_scroll = 0
         self._prompt_notice: RenderableType | None = None
         self._usage_status_cache: tuple[float, int, object, str | None, Text] | None = None
 
@@ -1722,16 +1723,19 @@ class HeadsupApp(AltScreenApp):
         query = self._slash_menu_query()
         if query is None:
             self._slash_menu_index = 0
+            self._slash_menu_scroll = 0
             return []
         matches = filter_entries(menu_entries(), query)
         if not matches:
             self._slash_menu_index = 0
+            self._slash_menu_scroll = 0
             return []
         self._slash_menu_index = max(0, min(self._slash_menu_index, len(matches) - 1))
         return matches
 
     def _slash_menu_accept(self, entry: MenuEntry) -> None:
         self._slash_menu_index = 0
+        self._slash_menu_scroll = 0
         if not entry.takes_rest:
             # No parameters possible: run it now, exactly as submitting the
             # command text would.
@@ -1783,12 +1787,20 @@ class HeadsupApp(AltScreenApp):
         total = len(matches)
         if total <= available:
             start, count, show_more = 0, total, False
+            self._slash_menu_scroll = 0
         else:
             count = available - 1
             show_more = True
-            start = max(0, min(selected - count + 1, total - count))
+            # Keep a persistent scroll anchor and only move it when the selection
+            # leaves the viewport, so pressing UP/DOWN moves the highlight within
+            # the visible rows rather than dragging the whole window each time.
+            start = self._slash_menu_scroll
             if selected < start:
                 start = selected
+            elif selected >= start + count:
+                start = selected - count + 1
+            start = max(0, min(start, total - count))
+            self._slash_menu_scroll = start
 
         rows = [
             self._slash_menu_row(

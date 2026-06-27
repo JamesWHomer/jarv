@@ -229,17 +229,20 @@ class AltScreenApp:
             if self._running:
                 # Paint the initial frame before blocking on input, so the view
                 # appears immediately (and first-paint latency is measured here).
-                self._paint()
-                self._dirty = False
+                if self._paint():
+                    self._dirty = False
             try:
                 while self._running:
-                    progressed = self._pump()
-                    self.on_tick()
-                    if self._dirty and self._running:
-                        self._paint()
-                        self._dirty = False
-                    if self._running and not progressed:
-                        self._idle_wait()
+                    try:
+                        progressed = self._pump()
+                        self.on_tick()
+                        if self._dirty and self._running:
+                            if self._paint():
+                                self._dirty = False
+                        if self._running and not progressed:
+                            self._idle_wait()
+                    except KeyboardInterrupt:
+                        self._handle_keyboard_interrupt()
             finally:
                 self._running = False
                 self.on_stop()
@@ -308,18 +311,27 @@ class AltScreenApp:
         try:
             key, repeat = self._read_key_fn()
         except KeyboardInterrupt:
-            self.on_interrupt()
+            self._handle_keyboard_interrupt()
             return True
         self.on_key(key, repeat)
         self._dirty = True
         return True
 
-    def _paint(self) -> None:
+    def _paint(self) -> bool:
         live = self.live
         if live is None:
-            return
-        live.refresh()
+            return True
+        try:
+            live.refresh()
+        except KeyboardInterrupt:
+            self._handle_keyboard_interrupt()
+            return False
         mark_first_paint(self.first_paint_label)
+        return True
+
+    def _handle_keyboard_interrupt(self) -> None:
+        self.on_interrupt()
+        self._dirty = True
 
     def paint_now(self) -> None:
         """Force one synchronous repaint. Only call on the loop thread.
@@ -328,8 +340,8 @@ class AltScreenApp:
         output) that block the main loop and need the screen updated in place
         before they return.
         """
-        self._paint()
-        self._dirty = False
+        if self._paint():
+            self._dirty = False
 
     # ------------------------------------------------------------------ #
     # Screen / input plumbing (overridable via injection)
