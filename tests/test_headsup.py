@@ -1349,6 +1349,37 @@ class HeadsupTests(unittest.TestCase):
         self.assertEqual(app.editor["buffer"], "/se")
         self.assertIsNone(app._prompt_history_index)
 
+    def test_slash_menu_up_at_window_bottom_moves_highlight_not_window(self):
+        # Regression: with more matches than fit, pressing UP while the highlight
+        # sits on the bottom visible row moves the highlight up *within* the
+        # window -- it must not scroll the whole window up by one.
+        from jarv.headsup import _SLASH_MENU_MAX_ROWS
+        from jarv.tui_frame import compute_layout
+
+        app, _test_console, _output = self._app(width=80)
+        initialize_text_editor(app.editor, "/")  # empty query -> every command
+        layout = compute_layout(80, 24)
+        width = layout.inner_width
+
+        # The live loop renders after each key; mirror that so the scroll anchor
+        # advances as it would on screen.
+        app._slash_menu_box(width, layout)
+        self.assertGreater(len(app._slash_menu_matches()), _SLASH_MENU_MAX_ROWS)
+
+        # Page down until the window has actually scrolled, leaving the highlight
+        # on the bottom visible row.
+        while app._slash_menu_scroll == 0:
+            app.on_key("DOWN", 1)
+            app._slash_menu_box(width, layout)
+        anchor = app._slash_menu_scroll
+        index = app._slash_menu_index
+
+        app.on_key("UP", 1)
+        app._slash_menu_box(width, layout)
+
+        self.assertEqual(app._slash_menu_index, index - 1)  # highlight moved up
+        self.assertEqual(app._slash_menu_scroll, anchor)    # window stayed put
+
     def test_slash_menu_tab_runs_parameterless_command(self):
         app, _test_console, _output = self._app()
         handled = []

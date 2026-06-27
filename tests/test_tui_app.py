@@ -415,6 +415,79 @@ def test_keyboard_interrupt_routes_to_on_interrupt():
     assert interrupted["hit"]
 
 
+def test_keyboard_interrupt_during_initial_paint_routes_to_on_interrupt():
+    console = FakeConsole()
+    interrupted = {"hit": False}
+
+    def live_factory(get_renderable, _console):
+        live = FakeLive(get_renderable, console)
+
+        def refresh():
+            raise KeyboardInterrupt
+
+        live.refresh = refresh
+        return live
+
+    app = ScriptedApp(
+        console=console,
+        poll_interval=0.005,
+        live_factory=live_factory,
+        terminal_size_fn=lambda *, console=None: (80, 24),
+    )
+    app._key_available_fn = app._key_source_available
+    app._read_key_fn = app._key_source_read
+
+    def on_interrupt():
+        interrupted["hit"] = True
+        app.stop("interrupted")
+
+    app.on_interrupt = on_interrupt
+    assert app.run() == "interrupted"
+    assert interrupted["hit"]
+    assert app.stopped
+
+
+def test_keyboard_interrupt_during_repaint_routes_to_on_interrupt():
+    console = FakeConsole()
+    interrupted = {"hit": False}
+    refreshes = {"count": 0}
+
+    def live_factory(get_renderable, _console):
+        live = FakeLive(get_renderable, console)
+        base_refresh = live.refresh
+
+        def refresh():
+            refreshes["count"] += 1
+            if refreshes["count"] == 2:
+                raise KeyboardInterrupt
+            base_refresh()
+
+        live.refresh = refresh
+        return live
+
+    app = ScriptedApp(
+        console=console,
+        poll_interval=0.005,
+        live_factory=live_factory,
+        terminal_size_fn=lambda *, console=None: (80, 24),
+    )
+    app._key_available_fn = app._key_source_available
+    app._read_key_fn = app._key_source_read
+
+    def tick():
+        app.invalidate()
+
+    def on_interrupt():
+        interrupted["hit"] = True
+        app.stop("interrupted")
+
+    app.on_tick = tick
+    app.on_interrupt = on_interrupt
+    assert app.run() == "interrupted"
+    assert interrupted["hit"]
+    assert refreshes["count"] == 2
+
+
 def test_tick_invalidation_repaints_until_stopped():
     app, holder = _make_app(keys=[])
     target_ticks = 3
