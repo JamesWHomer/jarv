@@ -791,7 +791,7 @@ class HeadsupApp(AltScreenApp):
             visible, menu_lines, rows=rows, width=inner_width, console=self.console
         )
         parts = assemble_body(visible, footer, prompt_lines, layout.body_height, rows)
-        subtitle = self._panel_subtitle(inner_width)
+        subtitle = self._panel_subtitle(layout.panel_width)
         return build_frame(
             parts,
             title=title,
@@ -800,11 +800,26 @@ class HeadsupApp(AltScreenApp):
             term_h=layout.term_h,
         )
 
-    def _panel_subtitle(self, width: int) -> Text:
-        subtitle = Text(no_wrap=True, overflow="crop")
-        subtitle.append_text(self._usage_status(width))
-        subtitle.truncate(max(1, width), overflow="ellipsis")
-        return subtitle
+    def _panel_subtitle(self, panel_width: int) -> Text:
+        # Working directory on the bottom-left, usage status on the bottom-right.
+        # compose_subtitle keeps the usage intact and truncates the dir first.
+        usage = self._usage_status(max(1, panel_width))
+        return compose_subtitle(self._cwd_label(), usage, panel_width)
+
+    def _cwd_label(self) -> str:
+        """The working directory for the bottom bar.
+
+        $HOME is collapsed to ~ only for *sub*directories (``~\\Desktop``); the
+        home directory itself stays absolute, since a lone ``~`` reads oddly.
+        """
+        try:
+            cwd = os.getcwd()
+        except OSError:
+            return ""
+        home = os.path.expanduser("~")
+        if home and home != "~" and cwd.startswith(home + os.sep):
+            cwd = "~" + cwd[len(home):]
+        return cwd
 
     def refresh(self) -> None:
         # The loop thread is the sole painter; producers (the agent worker,

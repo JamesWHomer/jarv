@@ -181,6 +181,38 @@ def test_compose_title_drops_status_when_no_room():
     assert cell_len(title.plain) <= max(1, 14 - 6)
 
 
+def test_compose_subtitle_places_dir_left_and_status_right_within_budget():
+    usage = Text("$0.12 · 5% full")
+    bar = tui_frame.compose_subtitle("~/work/jarv", usage, panel_width=80)
+    assert bar.plain.startswith("~/work/jarv")
+    assert bar.plain.endswith("$0.12 · 5% full")
+    # A full-width bar mirrors the title rule and stays inside the six-cell budget.
+    assert cell_len(bar.plain) == 80 - 6
+
+
+def test_compose_subtitle_truncates_dir_from_head_and_keeps_status():
+    usage = Text("$0.12 · 5% full")
+    bar = tui_frame.compose_subtitle(
+        "~/Desktop/RandomAIProjects/jarv/scripts/interactive",
+        usage,
+        panel_width=50,
+    )
+    # The directory loses its head (leading ellipsis) so the specific tail and the
+    # whole usage status both survive.
+    assert "…" in bar.plain
+    assert bar.plain.endswith("$0.12 · 5% full")
+    assert "interactive" in bar.plain
+    assert cell_len(bar.plain) <= 50 - 6
+
+
+def test_compose_subtitle_drops_dir_when_no_room():
+    usage = Text("$0.12 · 5% full")
+    bar = tui_frame.compose_subtitle("~/work/jarv", usage, panel_width=20)
+    assert "jarv" not in bar.plain
+    assert "$0.12" in bar.plain
+    assert cell_len(bar.plain) <= max(1, 20 - 6)
+
+
 def test_assemble_body_pads_to_full_height_and_appends_footer_and_prompt():
     footer = Text("FOOTER")
     prompt = [Text("PROMPT")]
