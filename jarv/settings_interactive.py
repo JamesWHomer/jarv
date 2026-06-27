@@ -387,4 +387,3 @@ class SettingsApp(AltScreenApp):
 
 def run_settings_interactive(config: dict) -> None:
     SettingsApp(config).run()
-    console.print("[dim]○ Settings closed.[/dim]")

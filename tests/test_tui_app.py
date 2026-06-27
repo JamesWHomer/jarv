@@ -258,8 +258,9 @@ class _StubLive:
         self.started = True
 
 
-def test_suspended_resets_resize_baseline_to_force_repaint():
-    app, _ = _make_app(keys=[])
+def test_suspended_forces_repaint_without_phantom_resize_clear():
+    console = FakeConsole()
+    app, _ = _make_app(keys=[], console=console)
     app._last_size = (80, 24)
     live = _StubLive()
     app.live = live
@@ -269,10 +270,15 @@ def test_suspended_resets_resize_baseline_to_force_repaint():
 
     # The nested view owned the terminal: our Live was stopped and restarted.
     assert live.stopped and live.started
-    # Baseline cleared so the next poll repaints even if the size is unchanged
-    # (covers resize-then-revert while suspended).
-    assert app._last_size is None
-    assert app._check_resize() is True
+    # A repaint is forced on resume (so the nested view is covered)...
+    assert app._dirty is True
+    # ...but the baseline is re-synced to the real current size rather than None,
+    # so the next poll does NOT see a phantom resize and wipe the screen after we
+    # have already repainted -- that bogus clear was a one-frame flicker on exit.
+    assert app._last_size == (80, 24)
+    assert app._check_resize() is False
+    # Only the single intentional clear on the way *in* happened; resume adds none.
+    assert console.clears == 1
 
 
 def test_suspended_drops_vt_input_for_nested_view(monkeypatch):

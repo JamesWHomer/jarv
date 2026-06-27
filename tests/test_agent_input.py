@@ -230,19 +230,6 @@ class AgentInputTests(unittest.TestCase):
     def test_response_wait_label_uses_thinking_with_reasoning(self):
         self.assertEqual(response_wait_label(has_reasoning=True), "Thinking")
 
-    def test_response_wait_label_names_interactive_command_decision(self):
-        # During an interactive run_command continuation the spinner should say
-        # what jarv is actually doing — choosing the next stdin line — rather
-        # than a generic "Thinking…"/"Waiting…", regardless of reasoning.
-        self.assertEqual(
-            response_wait_label(has_reasoning=False, interactive_command=True),
-            "Deciding next input",
-        )
-        self.assertEqual(
-            response_wait_label(has_reasoning=True, interactive_command=True),
-            "Deciding next input",
-        )
-
     def test_tool_activity_labels_are_specific_to_each_tool(self):
         expected = {
             "run_command": "Writing command",
@@ -294,13 +281,34 @@ class AgentInputTests(unittest.TestCase):
         self.assertFalse(renderer.response_phase_completed)
         self.assertEqual(renderer.reply_text, "look")
 
-    def test_response_start_status_records_interactive_command_decision(self):
-        # The persistent trail left after each interactive continuation turn so
-        # a slow per-line turn reads as work done, not a hang.
-        self.assertEqual(
-            response_start_status(4.34, has_reasoning=True, interactive_command=True),
-            "Decided next input in 4.3 seconds.",
+    def test_interactive_continuation_suppresses_reasoning_and_reply_chrome(self):
+        # The two leaks that put "Thinking…"/the stdin reply *outside* the card
+        # box: a reasoning event must not push a response-wait label, and the
+        # end-of-stream final text must not be replayed as a standalone message.
+        calls: list[tuple] = []
+
+        class RecordingUI:
+            def __getattr__(self, name):
+                return lambda *args, **kwargs: calls.append((name, args))
+
+        renderer = _TurnRenderer(
+            ui=RecordingUI(), interactive=False, status_items=[], metadata={}
         )
+        renderer.begin_turn(pending_interactive_command=object())
+
+        renderer.on_stream_event(ReasoningStarted(id="r1"), None)
+        renderer.on_stream_event(TextDelta("go north"), None)
+        result = SimpleNamespace(
+            final_text="go north", reply_text="go north", got_text=True
+        )
+        renderer.on_stream_attempt_end(result, False)
+
+        self.assertTrue(renderer.saw_reasoning)
+        self.assertEqual(renderer.reply_text, "go north")
+        leaked = {name for name, _ in calls}
+        self.assertNotIn("set_response_wait_has_reasoning", leaked)
+        self.assertNotIn("replace_stream_text", leaked)
+        self.assertNotIn("append_stream_delta", leaked)
 
     def test_tool_activity_complete_status_is_specific_to_each_tool(self):
         expected = {
@@ -1239,11 +1247,15 @@ class AgentInputTests(unittest.TestCase):
         self.assertIn("Time since last output: 0.4s", prompt)
         self.assertIn("tick", prompt)
 
-    def _render_card(self, card) -> str:
+    def _render_card(self, card, *, height: int | None = None) -> str:
         stream = io.StringIO()
-        Console(file=stream, force_terminal=False, color_system=None, width=120).print(
-            card
-        )
+        Console(
+            file=stream,
+            force_terminal=False,
+            color_system=None,
+            width=120,
+            height=height,
+        ).print(card)
         return stream.getvalue()
 
     def _render_waiting_card(self, snapshot) -> str:
@@ -1325,6 +1337,94 @@ class AgentInputTests(unittest.TestCase):
         self.assertIn("stdin> quit", done)
         self.assertIn("exit 2", done)
         self.assertNotIn("Idle on stdin", done)
+
+    def test_fullscreen_card_keeps_whole_scrollable_transcript(self):
+        # Heads-up renders the card into a scrollable transcript, so the whole
+        # interactive session must survive even when it overflows the terminal:
+        # every stdin marker and every full delta, never collapsed to a head/tail
+        # window the way the un-scrollable inline ``Live`` must be.
+        def build(display_mode):
+            card = InteractiveCommandCard(
+                "python game.py",
+                "model window 12,000 / 12,000 chars",
+                display_mode,
+                time.perf_counter(),
+            )
+            card.seed_initial(
+                InteractiveCommandSnapshot(
+                    "python game.py", "ROOM 0 line\n", "", None, exited=False
+                )
+            )
+            for step in range(1, 9):
+                delta = "\n".join(f"ROOM {step} line {j}" for j in range(4)) + "\n"
+                card.add_step(
+                    _interaction_marker_text("stdin", f"go {step}"),
+                    delta,
+                    0.1 * step,
+                    exited=False,
+                )
+            return card
+
+        # A short terminal forces the inline window to collapse the middle. The
+        # card must crop against the height of the console it is actually rendered
+        # into (what Rich's ``Live`` uses for its own overflow), so the render
+        # console's height — not a patched ``terminal_size`` — drives the window.
+        full = self._render_card(build("fullscreen"), height=12)
+        inline = self._render_card(build("inline"), height=12)
+
+        # Fullscreen keeps every step marker and the first/last delta lines, and
+        # never inserts the "hidden"/"omitted" collapse markers.
+        for step in range(1, 9):
+            self.assertIn(f"stdin> go {step}", full)
+        self.assertIn("ROOM 0 line", full)
+        self.assertIn("ROOM 8 line 3", full)
+        self.assertNotIn("earlier lines hidden", full)
+        self.assertNotIn("omitted from the middle", full)
+
+        # Inline cannot scroll, so it still collapses the middle to a window.
+        self.assertIn("earlier lines hidden", inline)
+
+    def test_inline_card_fits_render_console_when_os_height_diverges(self):
+        # Regression: the inline card cropped against ``os.get_terminal_size()``
+        # while Rich's ``Live`` crops against the render console's height. When the
+        # OS reports a taller terminal than the console actually paints into, the
+        # card built itself past the Live's window, so Rich replaced the newest
+        # rows with its own "…" ellipsis and the back-and-forth looked frozen.
+        card = InteractiveCommandCard(
+            "python game.py",
+            "model window 12,000 / 12,000 chars",
+            "inline",
+            time.perf_counter(),
+        )
+        card.seed_initial(
+            InteractiveCommandSnapshot(
+                "python game.py", "ROOM 0 line\n", "", None, exited=False
+            )
+        )
+        for step in range(1, 12):
+            delta = "\n".join(f"ROOM {step} line {j}" for j in range(5)) + "\n"
+            card.add_step(
+                _interaction_marker_text("stdin", f"go {step}"),
+                delta,
+                0.1 * step,
+                exited=False,
+            )
+
+        render_height = 14
+        # OS reports a tall terminal; the card must ignore it and fit the console.
+        with patch("jarv.agent_ui.terminal_size", return_value=(120, 80)):
+            rendered = self._render_card(card, height=render_height)
+
+        body = [line for line in rendered.splitlines() if line.strip()]
+        self.assertLessEqual(len(body), render_height)
+        # The newest output line and the live footer survive the crop (the card
+        # keeps the tail), and Rich's own ellipsis line never appears.
+        self.assertIn("ROOM 11 line 4", rendered)
+        self.assertIn("Idle on stdin", rendered)
+        self.assertIn("earlier lines hidden", rendered)
+        self.assertNotIn(
+            "...", [line.strip() for line in rendered.splitlines()]
+        )
 
     def test_root_batches_consecutive_reads_and_preserves_call_order(self):
         with TemporaryDirectory() as tmp:
@@ -1706,7 +1806,7 @@ class AgentInputTests(unittest.TestCase):
                 def start_turn(self, query, _config):
                     events.append(("start_turn", query))
 
-                def start_response_wait(self, _started_at, *, interactive_command=False):
+                def start_response_wait(self, _started_at):
                     events.append(("start_response_wait",))
 
                 def complete_response_phase(self, text):
@@ -1765,7 +1865,7 @@ class AgentInputTests(unittest.TestCase):
                 def start_turn(self, query, _config):
                     events.append(("start_turn", query))
 
-                def start_response_wait(self, _started_at, *, interactive_command=False):
+                def start_response_wait(self, _started_at):
                     events.append(("start_response_wait",))
 
                 def set_response_wait_has_reasoning(self, value):
@@ -1824,7 +1924,7 @@ class AgentInputTests(unittest.TestCase):
                 def start_turn(self, query, _config):
                     events.append(("start_turn", query))
 
-                def start_response_wait(self, _started_at, *, interactive_command=False):
+                def start_response_wait(self, _started_at):
                     events.append(("start_response_wait",))
 
                 def complete_response_phase(self, text):

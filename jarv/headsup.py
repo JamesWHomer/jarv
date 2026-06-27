@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import threading
 import time
 from collections import deque
@@ -64,6 +65,7 @@ from .tui_frame import (
     FrameLayout,
     assemble_body,
     build_frame,
+    compose_subtitle,
     compose_title,
     compute_layout,
     overlay_menu,
@@ -174,6 +176,16 @@ class TranscriptEntry:
         self._render_cache_lines = lines
         return lines
 
+    def invalidate(self) -> None:
+        """Drop cached lines so the next render recomputes from the live renderable.
+
+        Most entries are immutable once rendered, but a live tool card keeps the
+        same entry while its clock-driven footer animates; without this its first
+        frame would stay cached forever (the frozen "deciding next input… 0s" bug).
+        """
+        self._render_cache_width = None
+        self._render_cache_lines = None
+
 
 def _context_fill_style(percent: float | None) -> str:
     if percent is None:
@@ -208,7 +220,6 @@ class HeadsupAgentUI:
         self._tool_live_kind: str | None = None
         self._response_started_at = 0.0
         self._has_reasoning = False
-        self._response_interactive_command = False
         self._tool_started_at = 0.0
         self._tool_names: tuple[str, ...] = ()
         self._response_waiting = False
@@ -232,12 +243,9 @@ class HeadsupAgentUI:
         self._last_stream_refresh_at = None
         self.app.add_user_message(query)
 
-    def start_response_wait(
-        self, start_time: float, *, interactive_command: bool = False
-    ) -> None:
+    def start_response_wait(self, start_time: float) -> None:
         self._response_started_at = start_time
         self._has_reasoning = False
-        self._response_interactive_command = interactive_command
         self._response_waiting = True
         self._response_status_index = self.app.upsert_status(
             self._response_status_index,
@@ -410,10 +418,7 @@ class HeadsupAgentUI:
     def _response_wait_text(self) -> Text:
         elapsed = int(max(0.0, time.perf_counter() - self._response_started_at))
         frame = _THINKING_FRAMES[int(time.perf_counter() * 10) % len(_THINKING_FRAMES)]
-        label = response_wait_label(
-            self._has_reasoning,
-            interactive_command=self._response_interactive_command,
-        )
+        label = response_wait_label(self._has_reasoning)
         return Text(f"{frame}  {label}\u2026  {elapsed}s")
 
     def _tool_wait_text(self) -> Text:
@@ -454,6 +459,10 @@ class HeadsupAgentUI:
             )
         if self._animated_live_tool_keys:
             active = True
+            # Snapshot: the worker thread may add/discard keys as cards open and
+            # exit while the loop thread iterates here.
+            for key in tuple(self._animated_live_tool_keys):
+                self.app.invalidate_live_tool(key)
             self.app.refresh()
         return active
 
@@ -892,6 +901,18 @@ class HeadsupApp(AltScreenApp):
     def replace_live_tool(self, key: str, renderable: RenderableType) -> None:
         index = self._live_tool_index.pop(key, None)
         self._upsert(index, "tool", renderable)
+
+    def invalidate_live_tool(self, key: str) -> None:
+        """Bust an animated live tool's render cache so its footer ticks.
+
+        Status spinners animate by upserting a fresh entry each tick; the live
+        tool cards (running- and interactive-command) are too large to rebuild,
+        so they keep one entry and we just invalidate its cache before a repaint.
+        """
+        with self.lock:
+            index = self._live_tool_index.get(key)
+            if index is not None and 0 <= index < len(self.entries):
+                self.entries[index].invalidate()
 
     def add_notice(self, renderable: RenderableType) -> None:
         self._append("notice", renderable)

@@ -95,16 +95,13 @@ _THINKING_FRAMES = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", 
 STREAM_PREVIEW_REFRESH_INTERVAL = 1 / 12
 
 
-def response_wait_label(has_reasoning: bool, *, interactive_command: bool = False) -> str:
+def response_wait_label(has_reasoning: bool) -> str:
     """Return the live wait label for the response stream.
 
-    During an interactive ``run_command`` continuation the model isn't drafting a
-    reply for the user — it's reading the program's latest output and choosing
-    the next line to type. Naming that explicitly keeps a slow per-line turn from
-    reading as a generic, frozen "Thinking…" spinner.
+    Interactive ``run_command`` continuations never reach this label: their
+    "deciding next input" footer is owned by :class:`InteractiveCommandCard`,
+    which stands in for the response-wait spinner for the whole session.
     """
-    if interactive_command:
-        return "Deciding next input"
     return "Thinking" if has_reasoning else "Waiting"
 
 
@@ -130,18 +127,15 @@ def tool_activity_label(tool_names: tuple[str, ...]) -> str:
 class ResponseWaitIndicator:
     """Animated response wait line with live elapsed timer."""
 
-    def __init__(self, start_time: float, *, interactive_command: bool = False):
+    def __init__(self, start_time: float):
         self._start = start_time
         self.has_reasoning = False
-        self.interactive_command = interactive_command
 
     def __rich_console__(self, console, options):
         now = time.perf_counter()
         elapsed = now - self._start
         frame = _THINKING_FRAMES[int(now * 10) % len(_THINKING_FRAMES)]
-        label = response_wait_label(
-            self.has_reasoning, interactive_command=self.interactive_command
-        )
+        label = response_wait_label(self.has_reasoning)
         yield Text(f"{frame}  {label}\u2026  {int(elapsed)}s")
 
 
@@ -274,7 +268,7 @@ class InteractiveCommandCard:
             now = time.perf_counter()
             frame = _THINKING_FRAMES[int(now * 10) % len(_THINKING_FRAMES)]
             elapsed = int(max(0.0, now - (self._think_start or now)))
-            return Text(f"{frame} deciding next input…  {elapsed}s", style="yellow")
+            return Text(f"{frame}  deciding next input…  {elapsed}s", style="yellow")
         if self._state == "waiting":
             if self._check_in:
                 return Text(
@@ -293,6 +287,10 @@ class InteractiveCommandCard:
         command_line = Text("> ", style="bold yellow")
         command_line.append(self.command)
         parts = [command_line]
+        # Fullscreen heads-up renders into a scrollable transcript, so each delta
+        # is kept whole and scrolling reaches it. Inline pins the card inside a
+        # Rich ``Live`` that cannot scroll, so long deltas collapse to head/tail.
+        full = self.display_mode == "fullscreen"
         for segment in self._segments:
             marker = segment["marker"]
             if marker is not None:
@@ -302,7 +300,9 @@ class InteractiveCommandCard:
                 parts.append(line)
             output = segment["output"]
             if output:
-                parts.append(output_renderable(output))
+                parts.append(
+                    Text(output, style="dim") if full else output_renderable(output)
+                )
         return parts
 
     def __rich_console__(self, console, options):
@@ -315,17 +315,28 @@ class InteractiveCommandCard:
             10,
             options.max_width - (4 if self.display_mode == "fullscreen" else 2),
         )
-        _, term_h = terminal_size(console=console)
-        budget = max(8, term_h - 8)
         lines = rendered_text_lines(Group(*parts), inner_width)
-        if len(lines) > budget:
-            head_n, tail_n = output_display_split(budget)
-            hidden = len(lines) - head_n - tail_n
-            lines = (
-                lines[:head_n]
-                + [Text(f"… {hidden} earlier lines hidden …", style="dim italic")]
-                + lines[-tail_n:]
-            )
+        # Inline pins the card in a Rich ``Live`` that cannot scroll past the
+        # terminal, so collapse the middle to a head/tail window. Fullscreen
+        # heads-up renders into a scrollable transcript, so keep the whole
+        # session (every stdin marker + delta output) and let scrolling reach it.
+        if self.display_mode != "fullscreen":
+            # Crop against the height Rich's ``Live`` itself uses for overflow
+            # (``options.size.height``), not ``os.get_terminal_size()``. When those
+            # two diverge the card builds itself taller than the Live's crop window,
+            # so Rich replaces the newest rows with its own "…" ellipsis and the
+            # back-and-forth appears frozen. The reserve leaves room for the card
+            # header and footer, which are added outside ``lines``.
+            term_h = options.size.height
+            budget = max(8, term_h - 8)
+            if len(lines) > budget:
+                head_n, tail_n = output_display_split(budget)
+                hidden = len(lines) - head_n - tail_n
+                lines = (
+                    lines[:head_n]
+                    + [Text(f"… {hidden} earlier lines hidden …", style="dim italic")]
+                    + lines[-tail_n:]
+                )
         body_items = list(lines)
         if footer is not None:
             body_items.append(footer)
@@ -348,14 +359,10 @@ class InteractiveCommandCard:
 def _start_response_wait_indicator(
     interactive: bool,
     start_time: float,
-    *,
-    interactive_command: bool = False,
 ) -> tuple[ResponseWaitIndicator | None, Live | None]:
     if not interactive:
         return None, None
-    wait_indicator = ResponseWaitIndicator(
-        start_time, interactive_command=interactive_command
-    )
+    wait_indicator = ResponseWaitIndicator(start_time)
     spinner_live = Live(
         wait_indicator,
         refresh_per_second=4,
@@ -552,13 +559,13 @@ def format_thought_duration(seconds: float) -> str:
     return f"{rounded:.1f} {unit}"
 
 
-def response_start_status(
-    seconds: float, has_reasoning: bool, *, interactive_command: bool = False
-) -> str:
-    """Return the completed wait-status text for the first visible response."""
+def response_start_status(seconds: float, has_reasoning: bool) -> str:
+    """Return the completed wait-status text for the first visible response.
+
+    Interactive ``run_command`` continuations don't emit this status — their
+    per-step decision time is folded into the card's "·N.Ns" marker instead.
+    """
     duration = format_thought_duration(seconds)
-    if interactive_command:
-        return f"Decided next input in {duration}."
     if has_reasoning:
         return f"Thought for {duration}."
     return f"Started responding in {duration}."
