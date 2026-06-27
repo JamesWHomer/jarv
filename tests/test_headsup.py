@@ -1,4 +1,5 @@
 import io
+import re
 import threading
 import time
 import unittest
@@ -1379,6 +1380,58 @@ class HeadsupTests(unittest.TestCase):
 
         self.assertEqual(app._slash_menu_index, index - 1)  # highlight moved up
         self.assertEqual(app._slash_menu_scroll, anchor)    # window stayed put
+
+    def test_slash_menu_more_tail_counts_down_and_marks_bottom(self):
+        # Regression: the "+N more" tail summarises entries *below* the window, so
+        # it shrinks as the user scrolls down. At the bottom it must not keep
+        # reporting every off-window entry, nor vanish (which would shift the box
+        # height) -- it stays put and reads "no more".
+        from jarv.headsup import _SLASH_MENU_MAX_ROWS
+        from jarv.tui_frame import compute_layout
+
+        app, _test_console, _output = self._app(width=80)
+        initialize_text_editor(app.editor, "/")  # empty query -> every command
+        layout = compute_layout(80, 24)
+        width = layout.inner_width
+
+        total = len(app._slash_menu_matches())
+        self.assertGreater(total, _SLASH_MENU_MAX_ROWS)
+
+        def more_count(popup):
+            for line in popup:
+                match = re.search(r"\+(\d+) more", line.plain)
+                if match:
+                    return int(match.group(1))
+            return None
+
+        def has_no_more(popup):
+            return any("no more" in line.plain for line in popup)
+
+        # At the top the tail reports the entries hidden below the window.
+        top_popup = app._slash_menu_box(width, layout)
+        top = more_count(top_popup)
+        self.assertIsNotNone(top)
+        self.assertGreater(top, 0)
+
+        # Drive the highlight to the very last match, rendering after each key as
+        # the live loop does so the scroll anchor advances.
+        seen_smaller = False
+        while app._slash_menu_index < total - 1:
+            app.on_key("DOWN", 1)
+            current = more_count(app._slash_menu_box(width, layout))
+            if current is not None and current < top:
+                seen_smaller = True
+
+        # The tail counted down on the way, then became the "no more" marker -- the
+        # row is still there, so the box keeps the height it had while scrolling.
+        self.assertTrue(seen_smaller)
+        bottom_popup = app._slash_menu_box(width, layout)
+        self.assertIsNone(more_count(bottom_popup))
+        self.assertTrue(has_no_more(bottom_popup))
+        self.assertEqual(len(bottom_popup), len(top_popup))
+        # The final command is still on screen alongside the marker.
+        last_label = app._slash_menu_matches()[-1].display
+        self.assertIn(last_label, "\n".join(line.plain for line in bottom_popup))
 
     def test_slash_menu_tab_runs_parameterless_command(self):
         app, _test_console, _output = self._app()
