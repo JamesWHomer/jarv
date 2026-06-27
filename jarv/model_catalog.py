@@ -682,6 +682,9 @@ def _choose_versions(
 _OPENAI_PATTERN = re.compile(
     r"^gpt-(?P<major>\d+)\.(?P<minor>\d+)(?:-(?P<family>mini|nano))?$"
 )
+_OPENAI_NAMED_PATTERN = re.compile(
+    r"^gpt-(?P<major>\d+)\.(?P<minor>\d+)-(?P<family>sol|terra|luna)$"
+)
 _ANTHROPIC_PATTERN = re.compile(
     r"^claude-(?P<family>fable|opus|sonnet|haiku)-"
     r"(?P<major>\d+)(?:-(?P<minor>\d{1,2}))?(?:-(?P<snapshot>\d{8}))?$"
@@ -701,9 +704,15 @@ def _openai_choices(models: list[CatalogModel]) -> list[tuple[str, str]]:
     normalized = []
     for model in models:
         match = _OPENAI_PATTERN.fullmatch(model.id)
-        if not match:
+        named_match = _OPENAI_NAMED_PATTERN.fullmatch(model.id)
+        if not match and not named_match:
             continue
-        family = match.group("family") or "flagship"
+        family = (match or named_match).group("family") or "flagship"
+        family = {
+            "sol": "flagship",
+            "terra": "mini",
+            "luna": "nano",
+        }.get(family, family)
         normalized.append(CatalogModel(
             id=model.id,
             created=model.created,
@@ -711,13 +720,17 @@ def _openai_choices(models: list[CatalogModel]) -> list[tuple[str, str]]:
             metadata={**model.metadata, "family": family},
         ))
 
-    candidates: dict[str, list[tuple[tuple[int, int], CatalogModel]]] = {}
+    candidates: dict[str, list[tuple[tuple[int, int], bool, float, CatalogModel]]] = {}
     for model in normalized:
         match = _OPENAI_PATTERN.fullmatch(model.id)
-        if match:
+        named_match = _OPENAI_NAMED_PATTERN.fullmatch(model.id)
+        if match or named_match:
+            match = match or named_match
             family = str(model.metadata["family"])
             version = (int(match.group("major")), int(match.group("minor")))
-            candidates.setdefault(family, []).append((version, model))
+            candidates.setdefault(family, []).append(
+                (version, named_match is not None, model.created, model)
+            )
 
     result = []
     for family, description in (
@@ -726,7 +739,8 @@ def _openai_choices(models: list[CatalogModel]) -> list[tuple[str, str]]:
         ("nano", "Budget - latest GPT nano"),
     ):
         if candidates.get(family):
-            result.append((max(candidates[family], key=lambda item: item[0])[1].id, description))
+            selected = max(candidates[family], key=lambda item: item[:3])[3]
+            result.append((selected.id, description))
     return result
 
 
