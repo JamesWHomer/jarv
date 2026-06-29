@@ -265,4 +265,4 @@ System-wide usage tracking begins once `~/.jarv/usage.json` exists; older totals
 
 ## License
 
-[Elastic License 2.0 (ELv2)](LICENSE) — free to use, modify, and redistribute. You may not offer jarv as a hosted/managed service.
+[MIT License](LICENSE) — free to use, modify, and redistribute.
