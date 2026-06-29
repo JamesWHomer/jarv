@@ -53,7 +53,7 @@ class ConfigField:
 
 
 CONFIG_FIELDS: tuple[ConfigField, ...] = (
-    ConfigField("provider", "openai", label="Provider", section="account", desc="choose an API provider", ui_kind="setup", about="API provider. Options: openai, openrouter, anthropic, gemini, groq, deepseek, together, fireworks, ollama, lm_studio, vllm. Default: `openai`."),
+    ConfigField("provider", "openai", label="Provider", section="account", desc="choose an API provider", ui_kind="setup", about="API provider. Options: openai, openrouter, anthropic, gemini, groq, deepseek, together, fireworks, ollama, lm_studio, vllm."),
     ConfigField("api_key", "", label="API key", section="account", desc="store or replace the active provider key", ui_kind="setup", about="API key. Can also be provided via provider-specific env vars (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.)."),
     ConfigField("api_keys", {}),
     ConfigField("base_url", "", label="Base URL", section="account", desc="optional custom endpoint", ui_kind="text", empty="provider default", about="Custom API base URL. Overrides the provider's default endpoint."),

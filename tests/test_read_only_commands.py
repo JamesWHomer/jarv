@@ -108,7 +108,7 @@ def test_help_about_and_config_use_shared_renderer(monkeypatch):
     commands.cmd_config()
 
     assert [call["title"] for call in calls] == ["help", "about", "config"]
-    assert calls[0]["fill_screen"] is True
+    assert calls[0]["fill_screen"] is False
     assert calls[2]["config"]["read_only_command_display"] == "fullscreen"
     assert calls[2]["fill_screen"] is True
 
@@ -217,6 +217,28 @@ def test_help_omits_reference_config_and_path_sections():
     ]
     for row in removed_config_rows:
         assert row not in help_text
+
+
+def test_reference_docs_cover_every_menu_command():
+    """Every menu-visible command must appear in both /help and /about.
+
+    The autocomplete menu is already kept in sync with the registry
+    (test_command_menu.py); this is the missing analogue for the reference
+    docs, so a newly registered command cannot silently go undocumented.
+    """
+    import re
+
+    from jarv.command_registry import COMMANDS
+
+    help_text = _render_help_text()
+    about_text = _render_read_only_text(commands._about_body())
+
+    for name, meta in COMMANDS.items():
+        if not meta.menu:
+            continue
+        pattern = rf"/{re.escape(name)}\b"
+        assert re.search(pattern, help_text), f"/{name} is missing from /help"
+        assert re.search(pattern, about_text), f"/{name} is missing from /about"
 
 
 def test_usage_empty_state_uses_shared_renderer(monkeypatch):

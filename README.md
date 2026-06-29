@@ -14,14 +14,10 @@ jarv refactor the auth module           # complex tasks get split across subagen
 Jarv can be installed as a standalone binary or as a Python package. After installing, run `jarv /setup` to choose a provider, enter an API key, and pick a model.
 
 ```powershell
-# WinGet package in progress:
-# winget install JamesWHomer.Jarv
 irm https://github.com/JamesWHomer/jarv/releases/latest/download/install.ps1 | iex
 ```
 
 ```bash
-# Homebrew tap in progress:
-# brew install JamesWHomer/tap/jarv
 curl -fsSL https://github.com/JamesWHomer/jarv/releases/latest/download/install.sh | sh
 uv tool install jarv
 pipx install jarv
@@ -116,17 +112,17 @@ Each tool can be enabled or disabled from `jarv /settings`. Disabled tools are n
 
 On Windows, commands run through PowerShell. On other platforms, they run through the system shell.
 
-`run_command` accepts optional `head_chars` and `tail_chars` parameters that control how much of the beginning and end of command output is returned to the model. Omitted values split `max_tool_output_chars` between the two sides. Explicit values override that configured limit for the command. When output is longer than the requested head and tail, Jarv retains the full result under a session-scoped `cmd_<id>` and reports the exact omitted offset and size so the model can retrieve it with `read`.
+`run_command` returns a head and tail of the output, sized by its `head_chars`/`tail_chars` arguments (omitted values split `max_tool_output_chars` between the two sides). When output is truncated, Jarv retains the full result under a session-scoped `cmd_<id>` so the model can fetch the rest with `read`.
 
-If a command stays alive after its output goes idle, Jarv treats it as waiting for stdin. The next assistant response is sent to that process instead of printed as chat, and Jarv repeats that loop until the command exits or is cancelled. Each interaction is shown as its own command card with the stdin sent and only the new stdout/stderr since the previous interaction. Jarv also sends only that new output back to the model; it does not accumulate interactive output into later command results or transcripts. During this interactive loop, `command_timeout` is a check-in interval: if the process keeps running past it, Jarv asks the model what to do next and reports elapsed/idle time instead of killing the process.
+If a command stays alive after its output goes idle, Jarv treats it as waiting for stdin: the model's next response is sent to the process instead of printed as chat, and the loop repeats until the command exits or is cancelled. Each step shows only the new output since the previous interaction. During this loop, `command_timeout` becomes a check-in interval rather than a kill timer — Jarv asks the model what to do next instead of terminating the process.
 
-In the terminal, command output uses at most one-third of the screen height. Truncated output is biased roughly 2:1 toward the first lines, followed by the omitted-middle count and the final lines. Jarv also shows the resolved `head_chars` and `tail_chars` for each command.
+In the terminal, command output uses at most one-third of the screen height, and Jarv shows the resolved `head_chars` and `tail_chars` for each command.
 
-`read(input, offset, size)` uses Unicode character offsets for text. `offset` defaults to 0 and `size` defaults to `max_tool_output_chars`; an explicit size is returned without generic tool-output truncation. Inputs resolve as retained command IDs, visible artifact labels, HTTP(S) URLs, or local file paths. Relative paths use the current working directory. Local and HTTP(S) PDFs with embedded text are extracted with page markers; scanned/image-only PDFs are not OCR'd. Consecutive reads requested in one model response run concurrently, with results returned in call order.
+`read(input, offset, size)` pages through retained command output, artifacts, HTTP(S) URLs, and local files using Unicode character offsets. PDFs with embedded text are extracted with page markers (scanned/image-only PDFs are not OCR'd), and consecutive reads in one model response run concurrently.
 
-When `read` sees a direct local or HTTP(S) image (`png`, `jpeg`, `webp`, and provider-supported `gif`) and the active model advertises image input support in Jarv's cached provider/OpenRouter catalog, Jarv returns it as native multimodal tool output for that provider. Image reads ignore `offset` and `size`, are capped at 10 MiB, and are not resized or transcoded. If the active model route does not advertise image capability, Jarv returns a text result telling the model that image reads are unavailable instead of sending base64 text.
+Image reads (`png`, `jpeg`, `webp`, and provider-supported `gif`) are returned as native multimodal input when the active model advertises image support; otherwise Jarv returns a short "image reads unavailable" notice instead of base64 text.
 
-Web search and reads require no extra API key. `web_search` accepts any positive `max_results` plus a non-negative `offset`, following DuckDuckGo result pages as needed. URL reads preserve HTTP(S) hyperlinks as absolute URLs in extracted text, do not execute JavaScript, cap text and PDF responses at 2 MiB, and mark every returned page as untrusted content. Public, private, and localhost HTTP(S) addresses are supported, including custom ports.
+Web search and URL reads need no extra API key. `web_search` pages through DuckDuckGo results; URL reads preserve links as absolute URLs, don't execute JavaScript, cap responses at 2 MiB, and mark fetched pages as untrusted content.
 
 ### Command safety
 
@@ -176,8 +172,10 @@ The terminal shows a live progress panel as children run, with a green checkmark
 | `/sessions` | Browse sessions (interactive when in a TTY) |
 | `/sessions <id>` | Load a specific session by ID prefix |
 | `/history` | Show recent conversation history |
+| `/tree` | Browse the session as a tree — fork, edit, or resume any prompt |
 | `/undo [n]` | Remove last *n* exchanges (default 1) |
 | `/redo [n]` | Restore last *n* undone exchanges (default 1) |
+| `/btw <question>` | Ask an aside without derailing the main thread |
 | `/usage` | Show token usage, cost, and context breakdown for the current session |
 | `/usage day` / `/usage week` / `/usage month` | Show system-wide usage for the last 24h, 7d, or 30d |
 | `/usage --all [--since 24h]` | Show system-wide usage across Jarv sessions |
@@ -194,6 +192,7 @@ Each terminal is automatically bound to its own session. Jarv identifies termina
 - `/new` starts a fresh session on the next prompt without archiving the current session.
 - `/sessions` opens an interactive browser (arrow keys to navigate, Enter to load, `a` to archive, `d` to delete, `p` to preview, `Tab` to switch views, Ctrl+F to search).
 - `/history` opens an interactive transcript where Up/Down scroll and Left/Right jump to the previous or next chat/reply.
+- `/tree` opens the session as a navigable tree — fork, edit, or resume from any earlier prompt.
 - `/undo` and `/redo` let you step through recent exchanges.
 
 ![jarv session undo](https://github.com/user-attachments/assets/957729b0-3925-461d-a65c-25cf030ffaa6)
@@ -204,7 +203,7 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `provider` | `"openai"` | API provider (`openai`, `anthropic`, `gemini`, `openrouter`, etc.). |
+| `provider` | `"openai"` | API provider: `openai`, `anthropic`, `gemini`, `openrouter`, `groq`, `deepseek`, `together`, `fireworks`, `ollama`, `lm_studio`, `vllm`. |
 | `api_key` | `""` | Legacy single API key field (migrated to `api_keys`). |
 | `api_keys` | `{}` | Per-provider API keys. Falls back to provider env vars when empty. |
 | `base_url` | `""` | Custom API base URL. Overrides the provider default. |
@@ -255,7 +254,7 @@ All state is stored in `~/.jarv/` (on Windows, `%USERPROFILE%\.jarv\`):
 
 `max_history` counts stored items, not exchanges or tokens. User messages, assistant messages, reasoning items, function calls, and function call outputs each count as one item.
 
-System-wide usage tracking starts from the version that records `~/.jarv/usage.json`; older session totals are not backfilled into time-window reports. Cost tracking is request-based and grouped by provider and processing tier. Provider-reported cost is used when available; otherwise Jarv matches the selected model to pricing from OpenRouter's public model catalog and labels the calculation as estimated. The OpenRouter catalog is refreshed when provider model choices are refreshed, and its input, cached-input, and output rates are shown with model choices. Unknown and contract-priced requests are shown separately instead of being priced as Standard.
+System-wide usage tracking begins once `~/.jarv/usage.json` exists; older totals aren't backfilled into time-window reports. Cost is request-based and grouped by provider and tier: Jarv uses provider-reported cost when available, otherwise estimates from OpenRouter's public pricing catalog, and shows unknown or contract-priced requests separately.
 
 ## Dependencies
 
