@@ -74,6 +74,18 @@ _SPARK_CHARS = " ▁▂▃▄▅▆▇█"
 _WEEKDAY_INITIALS = "MTWTFSS"
 _DAILY_MAX_BARS = 30
 
+# Inner-content-width breakpoints. Below ``_WIDE`` the screen renders the compact
+# single-column layout (so a narrow terminal stays readable); ``_WIDE`` widens
+# bars/columns and expands the secondary facts into breakdown tables; at
+# ``_VERY_WIDE`` those breakdown tables sit two-up.
+_WIDE = 96
+_VERY_WIDE = 132
+
+
+def _scaled(width: int, *, frac: float, lo: int, hi: int) -> int:
+    """A sub-width sized as a fraction of ``width``, clamped to ``[lo, hi]``."""
+    return max(lo, min(hi, min(width, int(width * frac))))
+
 
 def _smooth_bar(percent: float | None, width: int = 36, color: str = "cyan") -> Text:
     """Render a smooth horizontal bar with sub-cell precision."""
@@ -158,10 +170,10 @@ def _reconcile_breakdown(breakdown: dict, target_total: int) -> dict[str, int]:
     return reconciled
 
 
-def _breakdown_section(breakdown: dict, *, input_tokens: int) -> Group:
+def _breakdown_section(breakdown: dict, *, input_tokens: int, width: int = 48) -> Group:
     reconciled = _reconcile_breakdown(breakdown, input_tokens)
     total = sum(reconciled.values())
-    bar = _breakdown_bar(reconciled)
+    bar = _breakdown_bar(reconciled, _scaled(width, frac=0.7, lo=48, hi=120))
 
     bd_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
     bd_table.add_column(no_wrap=True, width=1)
@@ -181,7 +193,7 @@ def _breakdown_section(breakdown: dict, *, input_tokens: int) -> Group:
     return Group(bar, Text(""), bd_table)
 
 
-def _context_usage_renderable(last_root: dict | None) -> Text:
+def _context_usage_renderable(last_root: dict | None, width: int = 32) -> Text:
     if not isinstance(last_root, dict):
         return Text("Unknown until a root request is recorded", style="dim")
     model = str(last_root.get("model") or "")
@@ -195,7 +207,7 @@ def _context_usage_renderable(last_root: dict | None) -> Text:
     line = Text()
     line.append(f"{percent:.1f}% full", style=f"bold {color}")
     line.append("  ")
-    line.append_text(_smooth_bar(percent, width=32, color=color))
+    line.append_text(_smooth_bar(percent, width=_scaled(width, frac=0.4, lo=32, hi=72), color=color))
     line.append("  ")
     line.append(f"({format_int(input_tokens)} / {format_int(context_window)})", style="dim")
     line.append(f" · {format_int(remaining)} remaining", style="dim")
@@ -284,8 +296,12 @@ def _hero_band(view: UsageView) -> Table:
     return table
 
 
-def _daily_chart(view: UsageView) -> Group | None:
-    """A vertical sparkline of daily spend, shown for windows with >=2 days of data."""
+def _daily_chart(view: UsageView, width: int = 0) -> Group | None:
+    """A vertical sparkline of daily spend, shown for windows with >=2 days of data.
+
+    A wide terminal shows more history (up to the 90-day retention window); a
+    narrow one keeps today's 30-bar cap so the line never overruns the panel.
+    """
     days = view.daily
     if len(days) < 2:
         return None
@@ -293,7 +309,8 @@ def _daily_chart(view: UsageView) -> Group | None:
     if max_spend <= 0:
         return None
 
-    shown = days[-_DAILY_MAX_BARS:]
+    cap = max(_DAILY_MAX_BARS, min(90, width // 2)) if width else _DAILY_MAX_BARS
+    shown = days[-cap:]
     # Spaced bars (with weekday ticks) read best for a short window; a long one
     # packs the glyphs contiguously so the line never overflows the panel.
     spaced = len(shown) <= 14
@@ -324,24 +341,38 @@ def _daily_chart(view: UsageView) -> Group | None:
     return Group(*parts)
 
 
-def _model_bars(view: UsageView) -> Group:
-    """Per-model token-share bars with compact tokens and cost; top 6 then '+k more'."""
+def _model_bars(view: UsageView, width: int = 0) -> Group:
+    """Per-model token-share bars with compact tokens and cost; top-N then '+k more'.
+
+    The bar, the name column, the request column, and how many rows show all grow
+    with the available width, so a wide terminal lists more models in more detail
+    while a narrow one keeps today's tight four-column layout.
+    """
     total_tokens = int(view.totals.get("total_tokens") or 0)
-    top = view.models[:6]
+    cap = 16 if width >= _VERY_WIDE else 10 if width >= _WIDE else 6
+    name_width = 32 if width >= _VERY_WIDE else 26 if width >= _WIDE else 20
+    bar_width = _scaled(width, frac=0.22, lo=14, hi=40)
+    show_requests = width >= _WIDE
+    top = view.models[:cap]
     table = Table(box=None, show_header=False, padding=(0, 1), pad_edge=False)
-    table.add_column("Model", no_wrap=True, overflow="ellipsis", width=20)
+    table.add_column("Model", no_wrap=True, overflow="ellipsis", width=name_width)
     table.add_column("Bar", no_wrap=True)
     table.add_column("Tokens", justify="right", no_wrap=True)
+    if show_requests:
+        table.add_column("Requests", justify="right", no_wrap=True, style="dim")
     table.add_column("Cost", justify="right", no_wrap=True)
     for name, bucket in top:
         tokens = int(bucket.get("total_tokens") or 0)
         share = (tokens / total_tokens * 100) if total_tokens else 0.0
-        table.add_row(
+        cells = [
             Text(name, style="bold magenta"),
-            _smooth_bar(share, width=14, color="cyan"),
+            _smooth_bar(share, width=bar_width, color="cyan"),
             Text(format_tokens_compact(tokens)),
-            _compact_cost(bucket),
-        )
+        ]
+        if show_requests:
+            cells.append(Text(format_int(int(bucket.get("request_count") or 0))))
+        cells.append(_compact_cost(bucket))
+        table.add_row(*cells)
     extra = len(view.models) - len(top)
     if extra > 0:
         return Group(table, Text(f"  + {extra} more", style="dim"))
@@ -374,7 +405,145 @@ def _secondary_facts(view: UsageView) -> Text | None:
     return Text(" · ".join(segments), style="dim")
 
 
-def _context_detail(view: UsageView) -> Group | None:
+def _bucket_spend(bucket: object) -> float:
+    if not isinstance(bucket, dict):
+        return 0.0
+    return float(usage_cost_summary(bucket).get("total_usd") or 0.0)
+
+
+def _kv_block(title: str, rows: list[tuple]) -> Group:
+    """A small labeled table: a bold title over right-aligned ``label/mid/value`` rows."""
+    table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
+    table.add_column(no_wrap=True, overflow="ellipsis")
+    table.add_column(justify="right", no_wrap=True)
+    table.add_column(justify="right", no_wrap=True)
+    for cells in rows:
+        table.add_row(*cells)
+    return Group(Text(title, style="bold"), table)
+
+
+def _providers_block(view: UsageView, limit: int = 6) -> Group | None:
+    items = sorted(
+        ((str(n), b) for n, b in view.providers.items()
+         if isinstance(b, dict) and n and n != "unknown"),
+        key=lambda it: _bucket_spend(it[1]),
+        reverse=True,
+    )
+    if not items:
+        return None
+    rows = [
+        (
+            Text(name, style="cyan", overflow="ellipsis"),
+            Text(format_tokens_compact(int(bucket.get("total_tokens") or 0)), style="dim"),
+            _compact_cost(bucket),
+        )
+        for name, bucket in items[:limit]
+    ]
+    block = _kv_block("Providers", rows)
+    extra = len(items) - len(rows)
+    if extra > 0:
+        return Group(block, Text(f"  + {extra} more", style="dim"))
+    return block
+
+
+def _tiers_block(view: UsageView) -> Group | None:
+    items = sorted(
+        ((str(n), b) for n, b in view.tiers.items() if isinstance(b, dict) and n),
+        key=lambda it: _bucket_spend(it[1]),
+        reverse=True,
+    )
+    if not items:
+        return None
+    rows = [
+        (Text(name, style="yellow"), Text(""), _compact_cost(bucket))
+        for name, bucket in items
+    ]
+    return _kv_block("Tiers", rows)
+
+
+def _sources_block(view: UsageView) -> Group | None:
+    rows = []
+    for label in ("root", "subagent"):
+        bucket = view.sources.get(label)
+        count = int(bucket.get("request_count") or 0) if isinstance(bucket, dict) else 0
+        if not count:
+            continue
+        rows.append((Text(label), Text(f"{format_int(count)} req", style="dim"), _compact_cost(bucket)))
+    if not rows:
+        return None
+    return _kv_block("Requests", rows)
+
+
+def _tokens_block(view: UsageView) -> Group | None:
+    """Input / output / cache / reasoning token split (lives in totals for every scope)."""
+    totals = view.totals
+    grand = int(totals.get("total_tokens") or 0) or (
+        int(totals.get("input_tokens") or 0) + int(totals.get("output_tokens") or 0)
+    )
+    candidates = [
+        ("Input", int(totals.get("input_tokens") or 0), False),
+        ("Output", int(totals.get("output_tokens") or 0), False),
+        ("Cached", int(totals.get("cached_input_tokens") or 0), True),
+        ("Reasoning", int(totals.get("reasoning_output_tokens") or 0), True),
+    ]
+    rows = []
+    for label, count, optional in candidates:
+        if optional and count <= 0:
+            continue
+        pct = f"{round(count / grand * 100)}%" if grand > 0 else "—"
+        rows.append((Text(label), Text(format_tokens_compact(count)), Text(pct, style="dim")))
+    if not rows:
+        return None
+    return _kv_block("Tokens", rows)
+
+
+def _two_columns(blocks: list) -> Table:
+    """Lay a list of breakdown blocks out in two side-by-side columns."""
+    mid = (len(blocks) + 1) // 2
+
+    def column(items: list) -> Group:
+        parts: list = []
+        for index, block in enumerate(items):
+            if index:
+                parts.append(Text(""))
+            parts.append(block)
+        return Group(*parts)
+
+    table = Table(box=None, show_header=False, padding=(0, 4), pad_edge=False)
+    table.add_column()
+    table.add_column()
+    right = blocks[mid:]
+    table.add_row(column(blocks[:mid]), column(right) if right else Text(""))
+    return table
+
+
+def _breakdowns(view: UsageView, width: int = 0):
+    """Secondary facts: the compact one-liner when narrow, breakdown tables when wide."""
+    if width < _WIDE:
+        return _secondary_facts(view)
+    blocks = [
+        block
+        for block in (
+            _providers_block(view),
+            _tiers_block(view),
+            _sources_block(view),
+            _tokens_block(view),
+        )
+        if block is not None
+    ]
+    if not blocks:
+        return None
+    if width >= _VERY_WIDE and len(blocks) > 1:
+        return _two_columns(blocks)
+    stacked: list = []
+    for index, block in enumerate(blocks):
+        if index:
+            stacked.append(Text(""))
+        stacked.append(block)
+    return Group(*stacked)
+
+
+def _context_detail(view: UsageView, width: int = 0) -> Group | None:
     """The demoted session context breakdown (estimated allocation), below the hero."""
     if view.scope_key != "session":
         return None
@@ -387,9 +556,11 @@ def _context_detail(view: UsageView) -> Group | None:
     return Group(
         section_rule("context breakdown [dim](estimated allocation)[/dim]"),
         Text(""),
-        _context_usage_renderable(last_root),
+        _context_usage_renderable(last_root, width),
         Text(""),
-        _breakdown_section(breakdown, input_tokens=int(last_root.get("input_tokens") or 0)),
+        _breakdown_section(
+            breakdown, input_tokens=int(last_root.get("input_tokens") or 0), width=width
+        ),
     )
 
 
@@ -401,28 +572,39 @@ def _empty_state(view: UsageView) -> Text:
     return Text(f"No usage recorded for {view.window_label.lower()}.", style="dim")
 
 
-def _usage_body_sections(view: UsageView) -> list:
-    """Everything below the tab row, as a flat list of renderables."""
+def _usage_body_sections(view: UsageView, width: int = 0) -> list:
+    """Everything below the tab row, as a flat list of renderables.
+
+    ``width`` is the inner content width; the section helpers size their bars,
+    columns and tables to it, so the same body grows from a tight single column on
+    a narrow terminal to a richer multi-section layout on a wide one.
+    """
     if view.is_empty:
         return [_empty_state(view)]
     parts: list = [_hero_band(view)]
-    chart = _daily_chart(view)
+    chart = _daily_chart(view, width)
     if chart is not None:
         parts += [Text(""), chart]
     if view.models:
-        parts += [Text(""), Text("By model", style="bold"), _model_bars(view)]
-    facts = _secondary_facts(view)
+        parts += [Text(""), Text("By model", style="bold"), _model_bars(view, width)]
+    facts = _breakdowns(view, width)
     if facts is not None:
         parts += [Text(""), facts]
-    detail = _context_detail(view)
+    detail = _context_detail(view, width)
     if detail is not None:
         parts += [Text(""), detail]
     return parts
 
 
-def build_usage_body(view: UsageView) -> Group:
-    """Single source of truth: tabs + hero + chart + model bars + facts + detail."""
-    return Group(_scope_tabs(view.scope_key), Text(""), *_usage_body_sections(view))
+def build_usage_body(view: UsageView, width: int | None = None) -> Group:
+    """Single source of truth: tabs + hero + chart + model bars + facts + detail.
+
+    ``width`` defaults to the current terminal's inner width so the static /
+    read-only print path adapts too; callers (and tests) may pin it explicitly.
+    """
+    if width is None:
+        width = max(1, terminal_size(console=console)[0] - 4)
+    return Group(_scope_tabs(view.scope_key), Text(""), *_usage_body_sections(view, width))
 
 
 # --------------------------------------------------------------------------- #
@@ -522,7 +704,7 @@ class UsageScreen(AltScreenApp):
         return term_h, width, inner_width, body_rows, show_footer
 
     def _body_lines(self, view: UsageView, inner_width: int) -> list[Text]:
-        return rendered_text_lines(Group(*_usage_body_sections(view)), inner_width)
+        return rendered_text_lines(Group(*_usage_body_sections(view, inner_width)), inner_width)
 
     def _loading_frame(self, term_h: int, width: int):
         """Placeholder shown while a window scope's data is still loading."""

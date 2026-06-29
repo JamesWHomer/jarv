@@ -295,7 +295,10 @@ def test_usage_session_body_leads_with_hero_stats(monkeypatch):
         },
     }
     view = _session_view_for_test(monkeypatch, usage_dict)
-    rendered = _render_read_only_text(usage_command.build_usage_body(view))
+    # Pin a narrow width so the compact single-column layout (and its one-line
+    # secondary facts) is exercised deterministically, independent of the host
+    # terminal size.
+    rendered = _render_read_only_text(usage_command.build_usage_body(view, width=80))
 
     assert "SPEND" in rendered
     assert "TOKENS" in rendered
@@ -325,7 +328,7 @@ def test_usage_window_body_shows_chart_models_and_facts(monkeypatch):
     assert view.source_path == "usage.jsonl"
     assert view.request_count == 2
 
-    rendered = _render_read_only_text(usage_command.build_usage_body(view))
+    rendered = _render_read_only_text(usage_command.build_usage_body(view, width=80))
     assert "SPEND" in rendered
     assert "Daily spend" in rendered          # >=2 days with spend -> trend chart
     assert "gpt-5.4-mini" in rendered          # top model by spend
@@ -334,6 +337,86 @@ def test_usage_window_body_shows_chart_models_and_facts(monkeypatch):
     assert "1 root / 1 subagent" in rendered
     assert "CONTEXT" not in rendered           # context headroom is session-only
     assert "estimated allocation" not in rendered  # context detail is session-only too
+
+
+def _multi_model_usage_dict():
+    """A session with enough models/providers/tiers to exercise the wide layout."""
+    models = {
+        # Strictly decreasing spend so model ordering is stable; m01 carries a
+        # distinctive request count to prove the per-model Requests column.
+        f"m{i:02d}": {
+            "total_tokens": 1000 - i,
+            "request_count": 4321 if i == 1 else i,
+            "provider_cost_usd": (9 - i) * 1.0,
+            "cost_exact_request_count": 1,
+        }
+        for i in range(1, 9)
+    }
+    return {
+        "totals": {
+            "request_count": 30,
+            "input_tokens": 6000,
+            "output_tokens": 3000,
+            "cached_input_tokens": 1500,
+            "uncached_input_tokens": 4500,
+            "reasoning_output_tokens": 500,
+            "total_tokens": 9000,
+            "provider_cost_usd": 36.0,
+            "cost_exact_request_count": 30,
+        },
+        "models": models,
+        "providers": {
+            "openai": {"total_tokens": 7000, "provider_cost_usd": 30.0, "cost_exact_request_count": 20},
+            "anthropic": {"total_tokens": 2000, "provider_cost_usd": 6.0, "cost_exact_request_count": 10},
+        },
+        "tiers": {
+            "standard": {"provider_cost_usd": 34.0, "cost_exact_request_count": 28},
+            "flex": {"provider_cost_usd": 2.0, "cost_exact_request_count": 2},
+        },
+        "sources": {
+            "root": {"request_count": 20, "provider_cost_usd": 30.0, "cost_exact_request_count": 20},
+            "subagent": {"request_count": 10, "provider_cost_usd": 6.0, "cost_exact_request_count": 10},
+        },
+        "last_root_request": {"model": "m01", "input_tokens": 250},
+    }
+
+
+def test_usage_wide_layout_surfaces_more(monkeypatch):
+    view = _session_view_for_test(monkeypatch, _multi_model_usage_dict())
+
+    narrow = _render_read_only_text(usage_command.build_usage_body(view, width=80))
+    wide = _render_read_only_text(usage_command.build_usage_body(view, width=160))
+
+    # Narrow keeps today's compact layout: only the top 6 models, a one-line
+    # secondary-facts summary, and no per-model request counts.
+    assert "+ 2 more" in narrow
+    assert "m08" not in narrow
+    assert "2 providers" in narrow
+    assert "Providers" not in narrow
+    assert "4,321" not in narrow
+
+    # Wide lists every model, adds the per-model Requests column, and promotes the
+    # secondary facts into provider / tier / source / token breakdown blocks.
+    assert "m08" in wide
+    assert "+ 2 more" not in wide
+    assert "4,321" in wide                    # per-model request count column
+    assert "Providers" in wide
+    assert "anthropic" in wide                # per-provider spend, not just a count
+    assert "Tiers" in wide
+    assert "Tokens" in wide and "Input" in wide and "Output" in wide
+
+    # At >= _VERY_WIDE the blocks sit two-up: a single rendered line carries both a
+    # left-column and a right-column block title.
+    assert any("Providers" in line and "Requests" in line for line in wide.splitlines())
+
+
+def test_usage_model_bars_scale_with_width(monkeypatch):
+    view = _session_view_for_test(monkeypatch, _multi_model_usage_dict())
+    narrow = _render_read_only_text(usage_command._model_bars(view, width=70))
+    wide = _render_read_only_text(usage_command._model_bars(view, width=160))
+    assert max(len(line) for line in wide.splitlines()) > max(
+        len(line) for line in narrow.splitlines()
+    )
 
 
 def test_usage_empty_state_keeps_tabs(monkeypatch):
