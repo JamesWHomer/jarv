@@ -206,7 +206,7 @@ def _help_body() -> Group:
             ("--incognito", "Do not load or save session history", "bold yellow"),
             ("--version", "Print the version and exit", "bold yellow"),
         ],
-        _command_help_rows(["new", "history", "undo", "redo", "sessions", "archive"]),
+        _command_help_rows(["new", "history", "tree", "btw", "undo", "redo", "sessions", "archive"]),
         _command_help_rows(["settings", "config", "set", "unset", "setup"]),
         _command_help_rows(["usage", "update", "help", "about"])
         + [("exit, quit, /exit, /quit", "Leave heads-up mode", "bold cyan")],
@@ -236,7 +236,7 @@ def print_help(*, mode: str | None = None, include_setup_nudge: bool = True) -> 
         mode=mode,
         include_setup_nudge=include_setup_nudge,
         close_hint="q / Esc / Enter  Close",
-        fill_screen=True,
+        fill_screen=False,
     )
 
 
@@ -257,17 +257,19 @@ def _about_body() -> Markdown:
 - `command | jarv <instruction>` - Attach piped stdin as input for a one-shot prompt.
 - `jarv /help` - Show the short command overview. (`jarv help` also works as a permanent alias.)
 - `jarv /about` - Show this detailed overview.
+- `jarv /setup` - Run the setup wizard to choose a provider, enter an API key, and pick a model.
 - `jarv /config` - Show raw config values. The API key is masked.
 - `jarv /set <key> <value>` - Set a config value. Values like `true`, `false`, integers, and floats are coerced.
 - `jarv /unset <key>` - Reset a default config key, or remove a custom key.
 - `jarv /history` - Show recent user and assistant messages.
+- `jarv /tree` - Browse the session as a tree; fork, edit, or resume from any earlier prompt.
 - `jarv /usage` - Show token usage for the current session.
 - `jarv /usage day|week|month` - Show system-wide usage for the last 24h, 7d, or 30d.
 - `jarv /usage --all [--since 24h]` - Show system-wide usage across Jarv sessions.
 - `jarv /undo [n]` - Unsend the last n exchanges (default 1). The removed exchange is pushed onto a redo stack.
 - `jarv /redo [n]` - Restore the last n undone exchanges (default 1). Sending a new message clears the redo stack.
-- `jarv /settings` - Open an interactive settings menu for provider/model, command review, audit, runtime, and updates.
-- `jarv /settings` also controls how read-only commands display: `fullscreen` or `print`.
+- `jarv /btw <question>` - Ask an aside without derailing the main thread.
+- `jarv /settings` - Open an interactive settings menu for provider/model, command review, audit, runtime, updates, and how read-only commands display (`fullscreen` or `print`).
 - `jarv /new` - Start a fresh session on the next message.
 - `jarv /archive` - Archive this terminal's session history and start a fresh one on the next message.
 - `jarv /sessions` / `jarv /session` - List sessions by recency. In an interactive terminal you can scroll through all of them; when stdout is not a TTY (e.g. piped), only the 5 most recent are listed.
@@ -285,7 +287,7 @@ Run `jarv` with no prompt to start an interactive session. Type a prompt and pre
 3. Loads recent conversation history from that session's history file.
 4. Sends your query, recent history, the configured system prompt, and system info to the configured provider backend (OpenAI Responses, Anthropic Messages, Gemini, or an OpenAI-compatible API).
 5. Streams the assistant response in the terminal.
-6. When the model issues tool calls, jarv runs the matching handler and feeds results back into the model. For `run_command`, jarv shows the command, runs it, prints stdout/stderr/exit status, and returns the requested output head and tail. If the command stays alive after output goes idle, jarv temporarily switches that command into an interactive stdin loop.
+6. When the model issues tool calls, jarv runs the matching handler and feeds results back into the model. See "Tools and shell commands" below for how `run_command` output, truncation, and interactive stdin are handled.
 7. Saves the full session history. On future prompts, `max_history` limits only the recent history items sent back as model context.
 
 ## Tools and shell commands
@@ -329,6 +331,7 @@ Each terminal is bound to exactly one session at a time. By default a fresh term
 - `jarv /archive` archives the current session's history and sidecars and removes the terminal's mapping. The next prompt starts a fresh session.
 - `jarv /sessions` / `jarv /session` lists sessions by recency (all in a TTY; 5 most recent when stdout is not a TTY).
 - `jarv /sessions <id>` binds a specific session id (prefix match) to this terminal.
+- `jarv /tree` opens an interactive tree of the session's prompts; from any node you can fork, edit, or resume.
 
 ## Updates
 
@@ -340,10 +343,7 @@ Each terminal is bound to exactly one session at a time. By default a fresh term
 
 ## Files
 
-- Config directory: `{CONFIG_DIR}`
-- Config file: `{CONFIG_FILE}`
-- Session metadata file: `{SESSIONS_FILE}`
-- Session history, artifacts, and retained command outputs: `{SESSIONS_DIR}`
+Everything lives under `{CONFIG_DIR}`: `config.json`, `sessions.json`, and a `sessions/` directory of per-session history, artifact, and retained-output files.
 
 ## Version
 
