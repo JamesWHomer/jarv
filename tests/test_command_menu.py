@@ -28,7 +28,7 @@ def test_menu_entries_carry_display_summary_and_arg_hint():
     assert by_name["settings"].arg_hint == ""
     assert by_name["set"].arg_hint == "<key> <value>"
     assert by_name["set"].takes_rest is True
-    assert by_name["usage"].arg_hint == "[period]"
+    assert by_name["usage"].arg_hint == "[session|day|week|month|all]"
 
 
 def test_filter_empty_query_returns_all_entries():

@@ -11,6 +11,7 @@ from jarv.usage import (
     append_global_usage_record,
     aggregate_usage_records,
     estimate_token_cost_usd,
+    format_tokens_compact,
     known_context_window,
     load_global_usage_records,
     load_usage,
@@ -590,6 +591,18 @@ class UsageRecordingTests(unittest.TestCase):
 
             self.assertEqual(load_global_usage_records(missing_path, warn=False), [])
             self.assertEqual(load_global_usage_records(malformed_path, warn=False), [])
+
+
+class FormatTokensCompactTests(unittest.TestCase):
+    def test_compact_token_formatting(self):
+        self.assertEqual(format_tokens_compact(0), "0")
+        self.assertEqual(format_tokens_compact(None), "0")
+        self.assertEqual(format_tokens_compact(5_200), "5,200")
+        self.assertEqual(format_tokens_compact(9_999), "9,999")
+        self.assertEqual(format_tokens_compact(12_300), "12.3K")
+        self.assertEqual(format_tokens_compact(340_000), "340K")
+        self.assertEqual(format_tokens_compact(1_240_000), "1.24M")
+        self.assertEqual(format_tokens_compact(2_000_000), "2M")
 
 
 if __name__ == "__main__":

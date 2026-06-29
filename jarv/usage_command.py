@@ -1,24 +1,53 @@
-"""Token usage command rendering."""
+"""Token usage command: one interactive screen with a live scope switcher.
 
-from datetime import timedelta
+The session and system-wide code paths are unified behind a single
+:class:`~jarv.usage_view.UsageView` (built in :mod:`jarv.usage_view`) and a single
+body renderer (:func:`build_usage_body`) used by both the interactive
+:class:`UsageScreen` and the static fallback. The screen leads with hero stats
+(spend, tokens, requests, context headroom), a daily-spend trend, and a by-model
+bar chart; ``←/→`` (or ``1-5`` / ``s t w m a``) cycles the scope live.
+"""
+
+from __future__ import annotations
+
+import threading
 
 from rich.console import Group
 from rich.table import Table
 from rich.text import Text
 
-from .display import section_rule
-from .history import load_history, prepare_session_context
-from .read_only_display import show_read_only_command
+from .display import (
+    console,
+    jarv_panel,
+    rendered_text_lines,
+    section_rule,
+    terminal_size,
+)
+from .read_only_display import interactive_terminal, read_only_display_mode
+from .tui_app import AltScreenApp
+from .tui_frame import panel_width, wrap_frame
+from .tui_layout import append_bottom_footer
+from .tui_overlay import (
+    apply_scroll_keys,
+    body_content_rows,
+    clamp_scroll_offset,
+    scroll_position_hint,
+)
 from .usage import (
-    aggregate_usage_records,
     format_cost,
     format_int,
-    global_usage_file,
+    format_tokens_compact,
     known_context_window,
-    load_global_usage_records,
-    load_usage,
     usage_cost_summary,
-    usage_file_for,
+)
+from .usage_view import (
+    SCOPE_KEYS,
+    SCOPES,
+    UsageView,
+    build_usage_view,
+    build_window_views,
+    parse_usage_scope,
+    resolve_scope,
 )
 
 
@@ -40,6 +69,10 @@ _BREAKDOWN_COLORS = {
 
 
 _BAR_FILL_CHARS = " ▏▎▍▌▋▊▉█"
+# Vertical block glyphs for the daily-spend sparkline (index 0 is a blank day).
+_SPARK_CHARS = " ▁▂▃▄▅▆▇█"
+_WEEKDAY_INITIALS = "MTWTFSS"
+_DAILY_MAX_BARS = 30
 
 
 def _smooth_bar(percent: float | None, width: int = 36, color: str = "cyan") -> Text:
@@ -148,11 +181,6 @@ def _breakdown_section(breakdown: dict, *, input_tokens: int) -> Group:
     return Group(bar, Text(""), bd_table)
 
 
-def _plural(value: int, singular: str, plural: str | None = None) -> str:
-    word = singular if value == 1 else (plural or f"{singular}s")
-    return f"{value:,} {word}"
-
-
 def _context_usage_renderable(last_root: dict | None) -> Text:
     if not isinstance(last_root, dict):
         return Text("Unknown until a root request is recorded", style="dim")
@@ -174,295 +202,436 @@ def _context_usage_renderable(last_root: dict | None) -> Text:
     return line
 
 
-def _cost_text(bucket: dict) -> Text:
+def _compact_cost(bucket: dict) -> Text:
+    """A tight per-row cost: just the dollar figure (provenance lives in the hero)."""
     summary = usage_cost_summary(bucket)
-    known_requests = summary["exact_requests"] + summary["estimated_requests"]
-    text = Text()
-    if known_requests or summary["has_tracked_cost"]:
-        text.append(format_cost(summary["total_usd"]), style="bold green")
-        if summary["exact_requests"] and summary["estimated_requests"]:
-            text.append(" mixed", style="dim")
-        elif summary["exact_requests"]:
-            text.append(" exact", style="dim")
-        elif summary["estimated_requests"]:
-            text.append(" estimated", style="dim")
-        else:
-            text.append(" partial", style="dim")
-    else:
-        text.append("Unknown", style="yellow")
-    if summary["unknown_requests"]:
-        text.append(
-            f" + {_plural(summary['unknown_requests'], 'unknown request')}",
-            style="yellow",
-        )
+    if summary["has_tracked_cost"] or summary["exact_requests"] or summary["estimated_requests"]:
+        return Text(format_cost(summary["total_usd"]), style="bold green")
     if summary["contract_requests"]:
-        text.append(
-            f" + {_plural(summary['contract_requests'], 'contract-priced request')}",
-            style="yellow",
-        )
-    return text
+        return Text("contract", style="yellow")
+    return Text("—", style="dim")
 
 
-def _parse_since_value(value: str) -> timedelta | None:
-    raw = value.strip().lower()
-    if len(raw) < 2:
-        return None
-    unit = raw[-1]
-    try:
-        amount = int(raw[:-1])
-    except ValueError:
-        return None
-    if amount <= 0:
-        return None
-    if unit == "h":
-        return timedelta(hours=amount)
-    if unit == "d":
-        return timedelta(days=amount)
-    return None
+# --------------------------------------------------------------------------- #
+# Pure render helpers (UsageView -> renderable)
+# --------------------------------------------------------------------------- #
+def _scope_tabs(active_key: str) -> Text:
+    """Segmented control across the five scopes; the active tab is bracketed cyan."""
+    line = Text(no_wrap=True, overflow="crop")
+    if active_key not in SCOPE_KEYS:
+        # Ad-hoc --all --since window (back-compat CLI shortcut, static only).
+        line.append(f"‹ {resolve_scope(active_key).tab_label} ›", style="bold cyan")
+        line.append("   ")
+    for index, scope in enumerate(SCOPES):
+        if index:
+            line.append("   ")
+        if scope.key == active_key:
+            line.append(f"‹ {scope.tab_label} ›", style="bold cyan")
+        else:
+            line.append(scope.tab_label, style="dim")
+    return line
 
 
-def _parse_global_usage_args(args: list[str] | None) -> tuple[bool, timedelta | None, str, str | None]:
-    args = list(args or [])
-    aliases = {
-        "day": ("last 24h", timedelta(hours=24)),
-        "week": ("last 7d", timedelta(days=7)),
-        "month": ("last 30d", timedelta(days=30)),
-    }
-    if not args:
-        return False, None, "", None
-    if len(args) == 1 and args[0].lower() in aliases:
-        label, since = aliases[args[0].lower()]
-        return True, since, label, None
-    if args[0] != "--all":
-        return False, None, "", "Usage: jarv /usage [--all [--since 24h|7d|30d] | day|week|month]"
-    if len(args) == 1:
-        return True, None, "all time", None
-    if len(args) == 3 and args[1] == "--since":
-        since = _parse_since_value(args[2])
-        if since is None:
-            return False, None, "", "Usage: jarv /usage --all --since 24h|7d|30d"
-        return True, since, f"last {args[2].lower()}", None
-    if len(args) == 2 and args[1].startswith("--since="):
-        raw = args[1].split("=", 1)[1]
-        since = _parse_since_value(raw)
-        if since is None:
-            return False, None, "", "Usage: jarv /usage --all --since 24h|7d|30d"
-        return True, since, f"last {raw.lower()}", None
-    return False, None, "", "Usage: jarv /usage [--all [--since 24h|7d|30d] | day|week|month]"
+def _cost_tag(cost: dict) -> Text:
+    """A tiny provenance tag for the hero spend value."""
+    if cost.get("exact_requests") and cost.get("estimated_requests"):
+        return Text("~mixed", style="dim")
+    if cost.get("estimated_requests"):
+        return Text("~estimated", style="dim")
+    if cost.get("exact_requests"):
+        return Text("exact", style="dim")
+    if cost.get("unknown_requests"):
+        return Text("unknown", style="yellow")
+    if cost.get("contract_requests"):
+        return Text("contract", style="yellow")
+    return Text("")
 
 
-def _token_totals_table(usage: dict, *, exchanges: int | None = None) -> Table:
-    totals = usage.get("totals") if isinstance(usage.get("totals"), dict) else {}
-    request_count = int(totals.get("request_count") or 0)
-    reasoning_tokens = int(totals.get("reasoning_output_tokens") or 0)
-
-    token_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
-    token_table.add_column("Field", style="dim", no_wrap=True)
-    token_table.add_column("Value", no_wrap=False)
-    if exchanges is not None:
-        token_table.add_row("Exchanges", Text(_plural(exchanges, "exchange")))
-    token_table.add_row("Requests", Text(_plural(request_count, "request")))
-    token_table.add_row("Input tokens", Text(format_int(totals.get("input_tokens"))))
-    token_table.add_row("Cached input", Text(format_int(totals.get("cached_input_tokens")), style="cyan"))
-    token_table.add_row("New input", Text(format_int(totals.get("uncached_input_tokens"))))
-    token_table.add_row("Output tokens", Text(format_int(totals.get("output_tokens"))))
-    if reasoning_tokens:
-        token_table.add_row("Reasoning output", Text(format_int(reasoning_tokens), style="green"))
-    token_table.add_row("Total tokens", Text(format_int(totals.get("total_tokens")), style="bold"))
-    token_table.add_row("Tracked cost", _cost_text(totals))
-    return token_table
+def _hero_context(context: dict) -> Group:
+    percent = float(context.get("percent") or 0.0)
+    window = int(context.get("window") or 0)
+    color = _fill_color(percent)
+    value = Text(f"{percent:.0f}% · {format_tokens_compact(window)}", style=f"bold {color}")
+    return Group(value, _smooth_bar(percent, width=14, color=color))
 
 
-def _breakdown_table(buckets: dict, *, kind: str) -> Table:
-    table = Table(box=None, show_header=True, padding=(0, 2), pad_edge=False, header_style="dim")
-    table.add_column(kind, no_wrap=True)
-    table.add_column("Requests", justify="right", no_wrap=True)
-    table.add_column("Tokens", justify="right", no_wrap=True)
-    table.add_column("Cost", justify="right", no_wrap=True)
-
-    rows = sorted(
-        ((name, bucket) for name, bucket in buckets.items() if isinstance(bucket, dict)),
-        key=lambda item: int(item[1].get("total_tokens") or 0),
-        reverse=True,
+def _hero_band(view: UsageView) -> Table:
+    """SPEND / TOKENS / REQUESTS (+ CONTEXT in session scope) as big hero stats."""
+    cost = view.cost
+    has_cost = bool(
+        cost.get("has_tracked_cost")
+        or cost.get("exact_requests")
+        or cost.get("estimated_requests")
     )
-    for name, bucket in rows:
-        cells = [
-            Text(str(name), style="bold magenta" if kind == "Model" else "bold cyan"),
-            Text(format_int(bucket.get("request_count"))),
-            Text(format_int(bucket.get("total_tokens")), style="bold"),
-        ]
-        cells.append(_cost_text(bucket))
-        table.add_row(*cells)
+    table = Table(box=None, show_header=True, header_style="dim", padding=(0, 3), pad_edge=False)
+    table.add_column("SPEND", no_wrap=True)
+    table.add_column("TOKENS", no_wrap=True)
+    table.add_column("REQUESTS", no_wrap=True)
+
+    spend_value = Text(
+        format_cost(cost.get("total_usd")) if has_cost else "—",
+        style="bold green" if has_cost else "dim",
+    )
+    cells = [
+        Group(spend_value, _cost_tag(cost)),
+        Group(Text(format_tokens_compact(view.totals.get("total_tokens")), style="bold"), Text("")),
+        Group(Text(format_int(view.request_count), style="bold"), Text("")),
+    ]
+    if view.context is not None:
+        table.add_column("CONTEXT", no_wrap=True)
+        cells.append(_hero_context(view.context))
+    table.add_row(*cells)
     return table
 
 
-def _cmd_global_usage(since: timedelta | None, window_label: str) -> None:
-    usage_path = global_usage_file()
-    records = load_global_usage_records(since=since, warn=True)
-    usage = aggregate_usage_records(records)
-    totals = usage.get("totals") if isinstance(usage.get("totals"), dict) else {}
-    request_count = int(totals.get("request_count") or 0)
-    subtitle = f"{usage_path} - {window_label}"
-    if request_count <= 0:
-        show_read_only_command(
-            Text(f"No system-wide token usage recorded for {window_label}.", style="dim"),
-            title="usage",
-            subtitle=subtitle,
-            fill_screen=True,
-        )
-        return
+def _daily_chart(view: UsageView) -> Group | None:
+    """A vertical sparkline of daily spend, shown for windows with >=2 days of data."""
+    days = view.daily
+    if len(days) < 2:
+        return None
+    max_spend = max((day.spend_usd for day in days), default=0.0)
+    if max_spend <= 0:
+        return None
 
-    last_request = usage.get("last_request") if isinstance(usage.get("last_request"), dict) else None
-    overview = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
-    overview.add_column("Field", style="dim", no_wrap=True)
-    overview.add_column("Value", no_wrap=False)
-    overview.add_row("Scope", Text("System-wide", style="bold cyan"))
-    overview.add_row("Window", Text(window_label))
-    if last_request:
-        last_model = str(last_request.get("model") or "unknown")
-        overview.add_row("Last model", Text(last_model, style="bold magenta"))
-        overview.add_row(
-            "Last provider",
-            Text(str(last_request.get("provider") or "unknown"), style="bold cyan"),
-        )
-        requested_tier = str(last_request.get("requested_service_tier") or "standard")
-        served_tier = str(last_request.get("served_service_tier") or "")
-        tier_label = (
-            f"{requested_tier} -> {served_tier}"
-            if served_tier and served_tier != requested_tier
-            else served_tier or requested_tier
-        )
-        overview.add_row("Last tier", Text(tier_label, style="bold"))
+    shown = days[-_DAILY_MAX_BARS:]
+    # Spaced bars (with weekday ticks) read best for a short window; a long one
+    # packs the glyphs contiguously so the line never overflows the panel.
+    spaced = len(shown) <= 14
+    gap = " " if spaced else ""
+    bars = Text("  ", no_wrap=True, overflow="crop")
+    for day in shown:
+        if day.spend_usd <= 0:
+            glyph = " "
+        else:
+            step = int(round((day.spend_usd / max_spend) * (len(_SPARK_CHARS) - 1)))
+            glyph = _SPARK_CHARS[max(1, min(len(_SPARK_CHARS) - 1, step))]
+        bars.append(glyph + gap, style="cyan")
 
-    panel_parts: list = [
-        section_rule("system-wide overview"),
-        Text(""),
-        overview,
-        Text(""),
-        section_rule("token totals"),
-        Text(""),
-        _token_totals_table(usage),
-    ]
-    sources = usage.get("sources") if isinstance(usage.get("sources"), dict) else {}
-    if sources:
-        panel_parts += [
-            Text(""),
-            section_rule("by source"),
-            Text(""),
-            _breakdown_table(sources, kind="Source"),
-        ]
-    providers = usage.get("providers") if isinstance(usage.get("providers"), dict) else {}
-    if providers:
-        panel_parts += [
-            Text(""),
-            section_rule("by provider"),
-            Text(""),
-            _breakdown_table(providers, kind="Provider"),
-        ]
-    tiers = usage.get("tiers") if isinstance(usage.get("tiers"), dict) else {}
-    if tiers:
-        panel_parts += [
-            Text(""),
-            section_rule("by processing tier"),
-            Text(""),
-            _breakdown_table(tiers, kind="Tier"),
-        ]
-    models = usage.get("models") if isinstance(usage.get("models"), dict) else {}
-    if models:
-        panel_parts += [
-            Text(""),
-            section_rule("by model"),
-            Text(""),
-            _breakdown_table(models, kind="Model"),
-        ]
+    spend_range = f"{format_cost(0)} – {format_cost(max_spend)}"
+    parts: list = [Text("Daily spend", style="bold")]
+    if spaced:
+        bars.append("   ")
+        bars.append(spend_range, style="dim")
+        parts.append(bars)
+        ticks = Text("  ", no_wrap=True, overflow="crop")
+        for day in shown:
+            ticks.append(_WEEKDAY_INITIALS[day.day.weekday()] + " ", style="dim")
+        parts.append(ticks)
+    else:
+        parts.append(bars)
+        date_range = f"{shown[0].day.strftime('%b %d')} – {shown[-1].day.strftime('%b %d')}"
+        parts.append(Text(f"  {date_range}   ·   {spend_range}", style="dim"))
+    return Group(*parts)
 
-    show_read_only_command(Group(*panel_parts), title="usage", subtitle=subtitle, fill_screen=True)
+
+def _model_bars(view: UsageView) -> Group:
+    """Per-model token-share bars with compact tokens and cost; top 6 then '+k more'."""
+    total_tokens = int(view.totals.get("total_tokens") or 0)
+    top = view.models[:6]
+    table = Table(box=None, show_header=False, padding=(0, 1), pad_edge=False)
+    table.add_column("Model", no_wrap=True, overflow="ellipsis", width=20)
+    table.add_column("Bar", no_wrap=True)
+    table.add_column("Tokens", justify="right", no_wrap=True)
+    table.add_column("Cost", justify="right", no_wrap=True)
+    for name, bucket in top:
+        tokens = int(bucket.get("total_tokens") or 0)
+        share = (tokens / total_tokens * 100) if total_tokens else 0.0
+        table.add_row(
+            Text(name, style="bold magenta"),
+            _smooth_bar(share, width=14, color="cyan"),
+            Text(format_tokens_compact(tokens)),
+            _compact_cost(bucket),
+        )
+    extra = len(view.models) - len(top)
+    if extra > 0:
+        return Group(table, Text(f"  + {extra} more", style="dim"))
+    return Group(table)
+
+
+def _secondary_facts(view: UsageView) -> Text | None:
+    """One dim line: providers · tiers · root/subagent request split."""
+    segments: list[str] = []
+    providers = [str(name) for name in view.providers if name and name != "unknown"]
+    if len(providers) == 1:
+        segments.append(providers[0])
+    elif len(providers) > 1:
+        segments.append(f"{len(providers)} providers")
+    tiers = [str(name) for name in view.tiers if name]
+    if len(tiers) == 1:
+        segments.append(tiers[0])
+    elif len(tiers) > 1:
+        segments.append(f"{len(tiers)} tiers")
+    source_bits: list[str] = []
+    for label in ("root", "subagent"):
+        bucket = view.sources.get(label)
+        count = int(bucket.get("request_count") or 0) if isinstance(bucket, dict) else 0
+        if count:
+            source_bits.append(f"{count} {label}")
+    if source_bits:
+        segments.append(" / ".join(source_bits))
+    if not segments:
+        return None
+    return Text(" · ".join(segments), style="dim")
+
+
+def _context_detail(view: UsageView) -> Group | None:
+    """The demoted session context breakdown (estimated allocation), below the hero."""
+    if view.scope_key != "session":
+        return None
+    last_root = view.last_root
+    if not isinstance(last_root, dict):
+        return None
+    breakdown = last_root.get("context_breakdown")
+    if not (isinstance(breakdown, dict) and any(int(breakdown.get(k, 0) or 0) for k in _BREAKDOWN_KEYS)):
+        return None
+    return Group(
+        section_rule("context breakdown [dim](estimated allocation)[/dim]"),
+        Text(""),
+        _context_usage_renderable(last_root),
+        Text(""),
+        _breakdown_section(breakdown, input_tokens=int(last_root.get("input_tokens") or 0)),
+    )
+
+
+def _empty_state(view: UsageView) -> Text:
+    if view.scope_key == "session":
+        return Text("No token usage recorded for this session yet.", style="dim")
+    if view.scope_key == "all":
+        return Text("No system-wide usage recorded yet.", style="dim")
+    return Text(f"No usage recorded for {view.window_label.lower()}.", style="dim")
+
+
+def _usage_body_sections(view: UsageView) -> list:
+    """Everything below the tab row, as a flat list of renderables."""
+    if view.is_empty:
+        return [_empty_state(view)]
+    parts: list = [_hero_band(view)]
+    chart = _daily_chart(view)
+    if chart is not None:
+        parts += [Text(""), chart]
+    if view.models:
+        parts += [Text(""), Text("By model", style="bold"), _model_bars(view)]
+    facts = _secondary_facts(view)
+    if facts is not None:
+        parts += [Text(""), facts]
+    detail = _context_detail(view)
+    if detail is not None:
+        parts += [Text(""), detail]
+    return parts
+
+
+def build_usage_body(view: UsageView) -> Group:
+    """Single source of truth: tabs + hero + chart + model bars + facts + detail."""
+    return Group(_scope_tabs(view.scope_key), Text(""), *_usage_body_sections(view))
+
+
+# --------------------------------------------------------------------------- #
+# Interactive screen
+# --------------------------------------------------------------------------- #
+_FOOTER_HINT = "←/→ scope   ↑/↓ scroll   q close"
+
+
+class UsageScreen(AltScreenApp):
+    """The interactive /usage view: fixed tab row + scrollable body + fixed footer.
+
+    Scopes switch live (``←/→`` / ``1-5`` / ``s t w m a``); each built
+    :class:`UsageView` is cached per scope so switching back is instant. The four
+    windowed scopes (day/week/month/all) all read the same global JSONL, so on
+    open a background thread reads it *once* and pre-builds every window view (see
+    :meth:`_preload_window_views`). The first paint shows the cheap session scope
+    immediately while that warms, so switching periods later costs no loop-thread
+    I/O. A window scope visited before its preload lands renders a brief loading
+    placeholder rather than blocking the loop.
+    """
+
+    use_mouse_capture = True
+    use_bracketed_paste = False
+    translate_mouse_wheel = True
+    text_mode = False
+    batch_text = False
+    clear_on_resize = False
+    first_paint_label = "usage"
+
+    _DIGIT_SCOPES = {"1": "session", "2": "day", "3": "week", "4": "month", "5": "all"}
+    _LETTER_SCOPES = {"s": "session", "t": "day", "w": "week", "m": "month", "a": "all"}
+
+    def __init__(self, *, initial_scope: str = "session", now=None):
+        super().__init__(console=console)
+        self.scope_key = initial_scope
+        self.offset = 0
+        self._now = now
+        self._cache: dict[str, UsageView] = {}
+        self._cache_lock = threading.Lock()
+        self._preload_thread: threading.Thread | None = None
+        self._preload_done = threading.Event()
+
+    def on_start(self) -> None:
+        self._start_preload()
+
+    def _start_preload(self) -> None:
+        """Warm the windowed-scope cache off the loop thread (started once on open)."""
+        if self._preload_thread is not None:
+            return
+        thread = threading.Thread(
+            target=self._preload_window_views,
+            name="usage-preload",
+            daemon=True,
+        )
+        self._preload_thread = thread
+        thread.start()
+
+    def _preload_window_views(self) -> None:
+        """Read the global JSONL once and cache all window views, then repaint."""
+        try:
+            views = build_window_views(now=self._now)
+            with self._cache_lock:
+                for key, view in views.items():
+                    self._cache.setdefault(key, view)
+        except Exception:
+            pass
+        finally:
+            self._preload_done.set()
+            self.invalidate()
+
+    def _view(self) -> UsageView | None:
+        """Current scope's view, or ``None`` while a window scope is still loading.
+
+        The session scope is cheap, so it is built inline on demand. The windowed
+        scopes are warmed in the background; until that lands they render a loading
+        state (``None``) instead of blocking the loop on file I/O. Once the preload
+        has finished, an inline build is the safety net for the rare case it didn't
+        cache the scope (e.g. it raised).
+        """
+        with self._cache_lock:
+            cached = self._cache.get(self.scope_key)
+        if cached is not None:
+            return cached
+        if self.scope_key == "session" or self._preload_done.is_set():
+            view = build_usage_view(self.scope_key, now=self._now)
+            with self._cache_lock:
+                self._cache.setdefault(self.scope_key, view)
+                return self._cache[self.scope_key]
+        return None
+
+    def _geometry(self) -> tuple[int, int, int, int, bool]:
+        _term_w, term_h = terminal_size(console=console)
+        width = panel_width(_term_w)
+        inner_width = max(1, width - 4)
+        body_rows, show_footer = body_content_rows(term_h)
+        body_rows = max(1, body_rows - 2)  # reserve the fixed tab row + spacer
+        return term_h, width, inner_width, body_rows, show_footer
+
+    def _body_lines(self, view: UsageView, inner_width: int) -> list[Text]:
+        return rendered_text_lines(Group(*_usage_body_sections(view)), inner_width)
+
+    def _loading_frame(self, term_h: int, width: int):
+        """Placeholder shown while a window scope's data is still loading."""
+        body = Group(
+            _scope_tabs(self.scope_key),
+            Text(""),
+            Text("Loading usage…", style="dim"),
+        )
+        return wrap_frame(
+            jarv_panel(
+                body,
+                "usage",
+                subtitle=resolve_scope(self.scope_key).window_label,
+                padding=(0, 1),
+                width=width,
+                height=term_h,
+            )
+        )
+
+    def render(self):
+        term_h, width, inner_width, body_rows, show_footer = self._geometry()
+        view = self._view()
+        if view is None:
+            return self._loading_frame(term_h, width)
+        lines = self._body_lines(view, inner_width)
+        total = len(lines)
+        self.offset = clamp_scroll_offset(self.offset, total, body_rows)
+        start = self.offset
+        end = min(total, start + body_rows)
+
+        parts: list = [_scope_tabs(self.scope_key), Text("")]
+        parts.extend(lines[start:end])
+        if show_footer:
+            position = scroll_position_hint(start, end, total)
+            append_bottom_footer(
+                parts,
+                term_h,
+                Text(
+                    f"{_FOOTER_HINT}   ·   {position}",
+                    style="dim italic",
+                    no_wrap=True,
+                    overflow="crop",
+                ),
+            )
+        subtitle = f"{view.window_label} · {view.source_path}"
+        return wrap_frame(
+            jarv_panel(
+                Group(*parts),
+                "usage",
+                subtitle=subtitle,
+                padding=(0, 1),
+                width=width,
+                height=term_h,
+            )
+        )
+
+    def on_interrupt(self) -> None:
+        self.stop()
+
+    def _set_scope(self, key: str) -> None:
+        if key != self.scope_key:
+            self.scope_key = key
+            self.offset = 0
+
+    def _switch_scope(self, delta: int, repeat: int) -> None:
+        try:
+            index = SCOPE_KEYS.index(self.scope_key)
+        except ValueError:
+            index = SCOPE_KEYS.index("all")
+        index = max(0, min(len(SCOPE_KEYS) - 1, index + delta * max(1, repeat)))
+        self._set_scope(SCOPE_KEYS[index])
+
+    def _scroll(self, key: str, repeat: int) -> None:
+        view = self._view()
+        if view is None:
+            return
+        _term_h, _width, inner_width, body_rows, _show_footer = self._geometry()
+        total = len(self._body_lines(view, inner_width))
+        self.offset = apply_scroll_keys(
+            key, repeat, offset=self.offset, total=total, body_rows=body_rows
+        )
+
+    def on_key(self, key: str, repeat: int) -> None:
+        if key in ("q", "Q", "ESC", "ENTER"):
+            self.stop()
+            return
+        if key in ("LEFT", "RIGHT"):
+            self._switch_scope(-1 if key == "LEFT" else 1, repeat)
+            return
+        target = self._DIGIT_SCOPES.get(key) or self._LETTER_SCOPES.get(key)
+        if target is not None:
+            self._set_scope(target)
+            return
+        if key in ("UP", "DOWN", "PAGEUP", "PAGEDOWN", "HOME", "END"):
+            self._scroll(key, repeat)
 
 
 def cmd_usage(args: list[str] | None = None) -> None:
-    is_global, since, window_label, error = _parse_global_usage_args(args)
+    scope_key, error = parse_usage_scope(args)
     if error is not None:
-        show_read_only_command(Text(error, style="yellow"), title="usage", fill_screen=True)
-        return
-    if is_global:
-        _cmd_global_usage(since, window_label)
+        console.print(jarv_panel(Text(error, style="yellow"), "usage"))
         return
 
-    ctx = prepare_session_context()
-    usage_path = usage_file_for(ctx.history_file)
-    usage = load_usage(usage_path, ctx.session_id)
-    totals = usage.get("totals") if isinstance(usage.get("totals"), dict) else {}
-    request_count = int(totals.get("request_count") or 0)
-    if request_count <= 0:
-        show_read_only_command(
-            Text("No token usage recorded for this session yet.", style="dim"),
-            title="usage",
-            subtitle=str(usage_path),
-            fill_screen=True,
-        )
+    if scope_key in SCOPE_KEYS and interactive_terminal() and read_only_display_mode() != "print":
+        UsageScreen(initial_scope=scope_key).run()
         return
 
-    history = load_history(ctx.history_file)
-    exchanges = sum(1 for item in history if isinstance(item, dict) and item.get("role") == "user")
-    last_request = usage.get("last_request") if isinstance(usage.get("last_request"), dict) else None
-    last_root = usage.get("last_root_request") if isinstance(usage.get("last_root_request"), dict) else None
-    root_model = str((last_root or {}).get("model") or "unknown")
-
-    context_table = Table(box=None, show_header=False, padding=(0, 2), pad_edge=False)
-    context_table.add_column("Field", style="dim", no_wrap=True)
-    context_table.add_column("Value", no_wrap=False)
-    context_table.add_row("Current model", Text(root_model, style="bold magenta"))
-    if last_root:
-        context_table.add_row(
-            "Current provider",
-            Text(str(last_root.get("provider") or "unknown"), style="bold cyan"),
-        )
-        requested_tier = str(last_root.get("requested_service_tier") or "standard")
-        served_tier = str(last_root.get("served_service_tier") or "")
-        tier_label = (
-            f"{requested_tier} -> {served_tier}"
-            if served_tier and served_tier != requested_tier
-            else served_tier or requested_tier
-        )
-        context_table.add_row("Processing tier", Text(tier_label, style="bold"))
-    context_table.add_row("Context usage", _context_usage_renderable(last_root))
-
-    token_table = _token_totals_table(usage, exchanges=exchanges)
-    if last_request is not None:
-        last_line = Text()
-        last_line.append(format_int(last_request.get("input_tokens")), style="bold")
-        last_line.append(" in ", style="dim")
-        last_line.append("(", style="dim")
-        last_line.append(format_int(last_request.get("cached_input_tokens")), style="cyan")
-        last_line.append(" cached", style="dim")
-        last_line.append(") · ", style="dim")
-        last_line.append(format_int(last_request.get("output_tokens")), style="bold")
-        last_line.append(" out", style="dim")
-        token_table.add_row("Last request", last_line)
-
-    breakdown = (last_root or {}).get("context_breakdown")
-    panel_parts: list = [
-        section_rule("session overview"),
-        Text(""),
-        context_table,
-    ]
-    if isinstance(breakdown, dict) and any(breakdown.get(k, 0) for k in _BREAKDOWN_KEYS):
-        panel_parts += [
-            Text(""),
-            section_rule("context breakdown [dim](estimated allocation)[/dim]"),
-            Text(""),
-            _breakdown_section(
-                breakdown,
-                input_tokens=int((last_root or {}).get("input_tokens") or 0),
-            ),
-        ]
-    panel_parts += [
-        Text(""),
-        section_rule("token totals"),
-        Text(""),
-        token_table,
-    ]
-
-    show_read_only_command(Group(*panel_parts), title="usage", subtitle=str(usage_path), fill_screen=True)
-
-
+    view = build_usage_view(scope_key)
+    hint = Text("Scopes: session · day · week · month · all", style="dim italic")
+    body = Group(build_usage_body(view), Text(""), hint)
+    subtitle = f"{view.window_label} · {view.source_path}"
+    console.print(jarv_panel(body, "usage", subtitle=subtitle))
