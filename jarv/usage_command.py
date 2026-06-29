@@ -267,28 +267,46 @@ def _hero_context(context: dict) -> Group:
     return Group(value, _smooth_bar(percent, width=14, color=color))
 
 
-def _hero_band(view: UsageView) -> Table:
-    """SPEND / TOKENS / REQUESTS (+ CONTEXT in session scope) as big hero stats."""
+def _hero_band(view: UsageView, width: int = 0) -> Table:
+    """The big hero stats. SPEND / TOKENS / REQUESTS always; a wide terminal adds
+    derived columns (avg cost per request, cache-hit rate) and widens the gaps so
+    the row spreads across the space instead of clumping at the left. CONTEXT is
+    appended in session scope.
+    """
     cost = view.cost
+    totals = view.totals
     has_cost = bool(
         cost.get("has_tracked_cost")
         or cost.get("exact_requests")
         or cost.get("estimated_requests")
     )
-    table = Table(box=None, show_header=True, header_style="dim", padding=(0, 3), pad_edge=False)
-    table.add_column("SPEND", no_wrap=True)
-    table.add_column("TOKENS", no_wrap=True)
-    table.add_column("REQUESTS", no_wrap=True)
+    wide = width >= _WIDE
+    pad = 8 if width >= _VERY_WIDE else 5 if wide else 3
+    table = Table(box=None, show_header=True, header_style="dim", padding=(0, pad), pad_edge=False)
+    cells: list = []
+
+    def stat(header: str, value: Text, sub: Text | None = None) -> None:
+        table.add_column(header, no_wrap=True)
+        cells.append(Group(value, sub if sub is not None else Text("")))
 
     spend_value = Text(
         format_cost(cost.get("total_usd")) if has_cost else "—",
         style="bold green" if has_cost else "dim",
     )
-    cells = [
-        Group(spend_value, _cost_tag(cost)),
-        Group(Text(format_tokens_compact(view.totals.get("total_tokens")), style="bold"), Text("")),
-        Group(Text(format_int(view.request_count), style="bold"), Text("")),
-    ]
+    stat("SPEND", spend_value, _cost_tag(cost))
+    stat("TOKENS", Text(format_tokens_compact(totals.get("total_tokens")), style="bold"))
+    stat("REQUESTS", Text(format_int(view.request_count), style="bold"))
+
+    if wide:
+        request_count = int(view.request_count or 0)
+        if has_cost and request_count:
+            avg = float(cost.get("total_usd") or 0.0) / request_count
+            stat("AVG / REQ", Text(format_cost(avg), style="bold green"))
+        input_tokens = int(totals.get("input_tokens") or 0)
+        if input_tokens > 0:
+            rate = int(totals.get("cached_input_tokens") or 0) / input_tokens * 100
+            stat("CACHE HIT", Text(f"{rate:.0f}%", style="bold cyan"))
+
     if view.context is not None:
         table.add_column("CONTEXT", no_wrap=True)
         cells.append(_hero_context(view.context))
@@ -581,7 +599,7 @@ def _usage_body_sections(view: UsageView, width: int = 0) -> list:
     """
     if view.is_empty:
         return [_empty_state(view)]
-    parts: list = [_hero_band(view)]
+    parts: list = [_hero_band(view, width)]
     chart = _daily_chart(view, width)
     if chart is not None:
         parts += [Text(""), chart]

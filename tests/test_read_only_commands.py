@@ -388,12 +388,14 @@ def test_usage_wide_layout_surfaces_more(monkeypatch):
     wide = _render_read_only_text(usage_command.build_usage_body(view, width=160))
 
     # Narrow keeps today's compact layout: only the top 6 models, a one-line
-    # secondary-facts summary, and no per-model request counts.
+    # secondary-facts summary, no per-model request counts, and a three-stat hero.
     assert "+ 2 more" in narrow
     assert "m08" not in narrow
     assert "2 providers" in narrow
     assert "Providers" not in narrow
     assert "4,321" not in narrow
+    assert "AVG / REQ" not in narrow
+    assert "CACHE HIT" not in narrow
 
     # Wide lists every model, adds the per-model Requests column, and promotes the
     # secondary facts into provider / tier / source / token breakdown blocks.
@@ -404,6 +406,10 @@ def test_usage_wide_layout_surfaces_more(monkeypatch):
     assert "anthropic" in wide                # per-provider spend, not just a count
     assert "Tiers" in wide
     assert "Tokens" in wide and "Input" in wide and "Output" in wide
+
+    # ...and the hero band gains derived stat columns.
+    assert "AVG / REQ" in wide                # cost per request: $36.00 / 30
+    assert "CACHE HIT" in wide                # cached share of input: 1500 / 6000
 
     # At >= _VERY_WIDE the blocks sit two-up: a single rendered line carries both a
     # left-column and a right-column block title.
