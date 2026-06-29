@@ -1,5 +1,5 @@
 """jarv - a multi-provider AI-powered CLI agent."""
 
-__version__ = "0.41.3"
+__version__ = "0.42.0"
 
 
