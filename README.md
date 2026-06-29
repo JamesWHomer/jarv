@@ -176,9 +176,8 @@ The terminal shows a live progress panel as children run, with a green checkmark
 | `/undo [n]` | Remove last *n* exchanges (default 1) |
 | `/redo [n]` | Restore last *n* undone exchanges (default 1) |
 | `/btw <question>` | Ask an aside without derailing the main thread |
-| `/usage` | Show token usage, cost, and context breakdown for the current session |
-| `/usage day` / `/usage week` / `/usage month` | Show system-wide usage for the last 24h, 7d, or 30d |
-| `/usage --all [--since 24h]` | Show system-wide usage across Jarv sessions |
+| `/usage` | Interactive usage screen — spend, tokens, requests, context headroom, a daily-spend trend, and by-model bars. `←/→` (or `1-5` / `s t w m a`) switches scope live |
+| `/usage <session\|day\|week\|month\|all>` | Open straight to a scope (`day`/`today` = rolling 24h; `all` = full system-wide history) |
 | `/update` | Update Jarv to the latest version for the active install channel |
 
 All commands work both as `jarv /command` (one-shot) and inside heads-up mode. Read-only commands (`/help`, `/about`, `/usage`, and `/config`) use a temporary display by default in interactive terminals; change `read_only_command_display` in `/settings` to print them permanently instead.

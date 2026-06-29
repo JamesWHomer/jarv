@@ -27,7 +27,7 @@ COMMANDS: dict[str, CommandMeta] = {
     "session": CommandMeta(True, needs_nudge=True, summary="List sessions", menu=False),
     "sessions": CommandMeta(True, needs_nudge=True, summary="List sessions"),
     "history": CommandMeta(False, needs_nudge=True, summary="Show recent conversation history"),
-    "usage": CommandMeta(True, summary="Show token usage", arg_hint="[period]"),
+    "usage": CommandMeta(True, summary="Show token usage", arg_hint="[session|day|week|month|all]"),
     "set": CommandMeta(True, needs_nudge=True, mutates_config=True, summary="Set a configuration value", arg_hint="<key> <value>"),
     "unset": CommandMeta(True, needs_nudge=True, mutates_config=True, summary="Reset or remove a configuration value", arg_hint="<key>"),
     "config": CommandMeta(False, summary="Show raw configuration values"),

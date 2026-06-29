@@ -219,8 +219,8 @@ class InteractiveCommandProcess:
     def wait_until_idle(
         self,
         *,
-        idle_seconds: float = 0.5,
-        first_output_grace_seconds: float = 2.0,
+        idle_seconds: float = 2.0,
+        first_output_grace_seconds: float = 5.0,
         wait_seconds: float | None = None,
         check_in_seconds: float | None = None,
         cancellation_token: CancellationToken | None = None,

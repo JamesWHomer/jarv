@@ -881,3 +881,21 @@ def format_cost(value: float | None) -> str:
         return f"${value:.3f}"
     return f"${value:.2f}"
 
+
+def format_tokens_compact(value: int | None) -> str:
+    """Render a token count compactly: ``1.24M`` / ``340K`` / ``5,200``.
+
+    Small counts keep their full comma-grouped form for legibility; only once a
+    value is large enough that the magnitude matters more than the digits does it
+    collapse to a ``K``/``M`` suffix (trailing zeros trimmed)."""
+    n = int(value or 0)
+    if n < 10_000:
+        return f"{n:,}"
+    if n < 1_000_000:
+        thousands = n / 1000
+        if thousands >= 100:
+            return f"{thousands:.0f}K"
+        return f"{thousands:.1f}".rstrip("0").rstrip(".") + "K"
+    millions = n / 1_000_000
+    return f"{millions:.2f}".rstrip("0").rstrip(".") + "M"
+

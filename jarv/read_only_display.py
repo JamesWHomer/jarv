@@ -45,6 +45,19 @@ def _interactive_terminal() -> bool:
     return callable(isatty) and isatty() and console.is_terminal
 
 
+def interactive_terminal() -> bool:
+    """Public alias: True when stdin is a TTY and the console is a terminal.
+
+    Lets other read-only commands (e.g. ``/usage``) reuse the exact same
+    interactive/print decision instead of re-implementing it."""
+    return _interactive_terminal()
+
+
+def read_only_display_mode(config: dict | None = None) -> str:
+    """Public alias for the resolved read-only command display mode."""
+    return _config_display_mode(config)
+
+
 def _setup_nudge() -> Text | None:
     if is_setup_complete():
         return None

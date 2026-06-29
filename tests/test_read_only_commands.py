@@ -1,12 +1,12 @@
 import io
-from datetime import timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from rich.console import Console
 
-from jarv import commands, config as config_module, history, settings_command, usage_command
+from jarv import commands, config as config_module, history, settings_command, usage, usage_command, usage_view
 from jarv.config import DEFAULT_CONFIG, READ_ONLY_COMMAND_DISPLAY_CHOICES, validate_config
 
 
@@ -130,7 +130,7 @@ def test_help_is_compact_and_task_focused():
         "--version",
         "/sessions",
         "/setup [step]",
-        "/usage [period]",
+        "/usage [session|day|week|month|all]",
         "exit, quit, /exit, /quit",
         "/settings",
         "/config",
@@ -241,23 +241,201 @@ def test_reference_docs_cover_every_menu_command():
         assert re.search(pattern, about_text), f"/{name} is missing from /about"
 
 
-def test_usage_empty_state_uses_shared_renderer(monkeypatch):
-    calls = []
-    monkeypatch.setattr(usage_command, "show_read_only_command", lambda body, **kwargs: calls.append(kwargs))
+def _session_view_for_test(monkeypatch, usage_dict, *, context_window=1_000):
+    monkeypatch.setattr(usage_view, "usage_file_for", lambda _history_file: Path("usage.json"))
+    monkeypatch.setattr(usage_view, "load_usage", lambda _usage_path, _session_id: usage_dict)
+    monkeypatch.setattr(usage_view, "known_context_window", lambda _model=None, *a, **k: context_window)
+    monkeypatch.setattr(usage_command, "known_context_window", lambda _model=None, *a, **k: context_window)
+    ctx = SimpleNamespace(history_file=Path("history.json"), session_id="session-id")
+    return usage_view.build_usage_view("session", ctx=ctx)
+
+
+def _window_records():
+    return [
+        {
+            "created_at": "2026-06-29T01:00:00Z",
+            "session_id": "s", "model": "gpt-5.4-mini", "provider": "openai", "source": "root",
+            "served_service_tier": "standard",
+            "input_tokens": 100, "cached_input_tokens": 0, "uncached_input_tokens": 100,
+            "output_tokens": 50, "reasoning_output_tokens": 0, "total_tokens": 150,
+            "provider_cost_usd": 1.5, "cost_status": "exact",
+            "context_breakdown": {"system": 5, "tools": 5, "history": 90, "tool_io": 0, "reasoning": 0},
+        },
+        {
+            "created_at": "2026-06-29T02:00:00Z",
+            "session_id": "s", "model": "claude-sonnet", "provider": "openai", "source": "subagent",
+            "served_service_tier": "standard",
+            "input_tokens": 40, "cached_input_tokens": 0, "uncached_input_tokens": 40,
+            "output_tokens": 10, "reasoning_output_tokens": 0, "total_tokens": 50,
+            "provider_cost_usd": 0.4, "cost_status": "exact",
+        },
+    ]
+
+
+def test_usage_session_body_leads_with_hero_stats(monkeypatch):
+    usage_dict = {
+        "totals": {
+            "request_count": 3,
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "total_tokens": 150,
+            "provider_cost_usd": 1.5,
+            "cost_exact_request_count": 3,
+        },
+        "models": {
+            "root-model": {"total_tokens": 150, "request_count": 3, "provider_cost_usd": 1.5, "cost_exact_request_count": 3},
+        },
+        "providers": {"openai": {"request_count": 3}},
+        "tiers": {"standard": {"request_count": 3}},
+        "sources": {"root": {"request_count": 2}, "subagent": {"request_count": 1}},
+        "last_root_request": {
+            "model": "root-model",
+            "input_tokens": 410,
+            "context_breakdown": {"system": 10, "tools": 20, "history": 70, "tool_io": 0, "reasoning": 0},
+        },
+    }
+    view = _session_view_for_test(monkeypatch, usage_dict)
+    rendered = _render_read_only_text(usage_command.build_usage_body(view))
+
+    assert "SPEND" in rendered
+    assert "TOKENS" in rendered
+    assert "REQUESTS" in rendered
+    assert "CONTEXT" in rendered            # context column is session-only
+    assert "Session" in rendered            # scope tab
+    assert "root-model" in rendered          # by-model bar
+    assert "openai" in rendered              # secondary facts line
+    assert "2 root / 1 subagent" in rendered
+    assert "estimated allocation" in rendered  # demoted context detail
+    # The old flat tables are gone.
+    assert "Current model" not in rendered
+    assert "Token totals" not in rendered
+
+
+def test_usage_window_body_shows_chart_models_and_facts(monkeypatch):
+    monkeypatch.setattr(
+        usage_view,
+        "load_global_usage_records",
+        lambda *, since=None, now=None, warn=True: _window_records(),
+    )
+    monkeypatch.setattr(usage_view, "global_usage_jsonl_file", lambda: Path("usage.jsonl"))
+    now = datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc)
+    view = usage_view.build_usage_view("week", now=now)
+
+    assert view.window_label == "This week"
+    assert view.source_path == "usage.jsonl"
+    assert view.request_count == 2
+
+    rendered = _render_read_only_text(usage_command.build_usage_body(view))
+    assert "SPEND" in rendered
+    assert "Daily spend" in rendered          # >=2 days with spend -> trend chart
+    assert "gpt-5.4-mini" in rendered          # top model by spend
+    assert "Week" in rendered                  # active scope tab
+    assert "openai" in rendered                # provider fact
+    assert "1 root / 1 subagent" in rendered
+    assert "CONTEXT" not in rendered           # context headroom is session-only
+    assert "estimated allocation" not in rendered  # context detail is session-only too
+
+
+def test_usage_empty_state_keeps_tabs(monkeypatch):
+    monkeypatch.setattr(
+        usage_view,
+        "load_global_usage_records",
+        lambda *, since=None, now=None, warn=True: [],
+    )
+    monkeypatch.setattr(usage_view, "global_usage_jsonl_file", lambda: Path("usage.jsonl"))
+    view = usage_view.build_usage_view("week", now=datetime(2026, 6, 30, tzinfo=timezone.utc))
+
+    assert view.is_empty
+    rendered = _render_read_only_text(usage_command.build_usage_body(view))
+    assert "No usage recorded for this week." in rendered
+    assert "Session" in rendered  # tabs stay visible so the user can switch scope
+    assert "Week" in rendered
+
+
+def test_usage_screen_scope_keys_switch_and_reset_offset():
+    screen = usage_command.UsageScreen(initial_scope="session")
+    screen.offset = 7
+
+    screen.on_key("RIGHT", 1)
+    assert screen.scope_key == "day"
+    assert screen.offset == 0
+
+    screen.on_key("a", 1)
+    assert screen.scope_key == "all"
+
+    screen.on_key("LEFT", 1)
+    assert screen.scope_key == "month"
+
+
+def test_usage_screen_close_keys_stop():
+    screen = usage_command.UsageScreen(initial_scope="week")
+    screen._running = True
+    screen.on_key("q", 1)
+    assert screen._running is False
+
+
+def test_usage_screen_preloads_window_views_in_one_read(monkeypatch):
+    calls = {"count": 0}
+
+    def load_records(path=None, *, since=None, now=None, warn=True):
+        calls["count"] += 1
+        return _window_records()
+
+    monkeypatch.setattr(usage_view, "load_global_usage_records", load_records)
+    monkeypatch.setattr(usage_view, "global_usage_jsonl_file", lambda: Path("usage.jsonl"))
+    now = datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc)
+    screen = usage_command.UsageScreen(initial_scope="session", now=now)
+
+    # Before the background preload lands, a window scope renders a loading state
+    # (None) instead of blocking the loop thread on file I/O.
+    screen.scope_key = "week"
+    assert screen._view() is None
+
+    # The preload reads the shared JSONL exactly once and warms every window scope.
+    screen._preload_window_views()
+    assert calls["count"] == 1
+    assert {"day", "week", "month", "all"} <= set(screen._cache)
+
+    # Switching periods now serves straight from the cache: no further reads.
+    screen.scope_key = "month"
+    view = screen._view()
+    assert view is not None and view.scope_key == "month"
+    assert calls["count"] == 1
+
+
+def test_usage_static_fallback_prints_scoped_panel(monkeypatch):
+    view = usage_view.UsageView(
+        scope_key="week",
+        window_label="This week",
+        source_path="usage.jsonl",
+        totals={"total_tokens": 150, "request_count": 2},
+        cost=usage.usage_cost_summary({}),
+        models=[("gpt-5.4-mini", {"total_tokens": 150})],
+        providers={"openai": {}},
+        tiers={"standard": {}},
+        sources={"root": {"request_count": 2}},
+        context=None,
+        daily=[],
+        request_count=2,
+        is_empty=False,
+        last_request=None,
+        last_root=None,
+    )
+    monkeypatch.setattr(usage_command, "build_usage_view", lambda scope_key: view)
+    monkeypatch.setattr(usage_command, "interactive_terminal", lambda: False)
+    out = io.StringIO()
     monkeypatch.setattr(
         usage_command,
-        "prepare_session_context",
-        lambda: SimpleNamespace(history_file=Path("history.json"), session_id="session-id"),
+        "console",
+        Console(file=out, force_terminal=False, color_system=None, width=200),
     )
-    monkeypatch.setattr(usage_command, "usage_file_for", lambda _history_file: Path("usage.json"))
-    monkeypatch.setattr(usage_command, "load_usage", lambda _usage_path, _session_id: {"totals": {}})
 
-    usage_command.cmd_usage()
+    usage_command.cmd_usage(["week"])
 
-    assert len(calls) == 1
-    assert calls[0]["title"] == "usage"
-    assert calls[0]["subtitle"] == "usage.json"
-    assert calls[0]["fill_screen"] is True
+    text = out.getvalue()
+    assert "This week" in text
+    assert "usage.jsonl" in text
+    assert "SPEND" in text
 
 
 def test_usage_breakdown_is_reconciled_to_recorded_input_tokens():
@@ -291,105 +469,3 @@ def test_usage_context_line_has_no_leading_padding_and_shows_remaining(monkeypat
     assert line.startswith("1.6% full")
     assert "(17,316 / 1,050,000)" in line
     assert line.endswith("1,032,684 remaining")
-
-
-def test_session_usage_uses_current_and_exchange_labels(monkeypatch):
-    calls = []
-    usage = {
-        "totals": {
-            "request_count": 1,
-            "input_tokens": 100,
-            "cached_input_tokens": 25,
-            "uncached_input_tokens": 75,
-            "output_tokens": 10,
-            "total_tokens": 110,
-        },
-        "last_request": {
-            "model": "subagent-model",
-            "input_tokens": 20,
-            "cached_input_tokens": 0,
-            "output_tokens": 5,
-        },
-        "last_root_request": {
-            "model": "root-model",
-            "provider": "openai",
-            "input_tokens": 100,
-            "context_breakdown": {
-                "system": 10,
-                "tools": 20,
-                "history": 70,
-                "tool_io": 0,
-                "reasoning": 0,
-            },
-        },
-    }
-    monkeypatch.setattr(
-        usage_command,
-        "show_read_only_command",
-        lambda body, **kwargs: calls.append((body, kwargs)),
-    )
-    monkeypatch.setattr(
-        usage_command,
-        "prepare_session_context",
-        lambda: SimpleNamespace(history_file=Path("history.json"), session_id="session-id"),
-    )
-    monkeypatch.setattr(usage_command, "usage_file_for", lambda _history_file: Path("usage.json"))
-    monkeypatch.setattr(usage_command, "load_usage", lambda _usage_path, _session_id: usage)
-    monkeypatch.setattr(usage_command, "load_history", lambda _history_file: [{"role": "user"}])
-    monkeypatch.setattr(usage_command, "known_context_window", lambda _model: 1_000)
-
-    usage_command.cmd_usage()
-
-    rendered = _render_read_only_text(calls[0][0])
-    assert calls[0][1]["fill_screen"] is True
-    assert "Current model" in rendered
-    assert "Current provider" in rendered
-    assert "Exchanges" in rendered
-    assert "1 exchange" in rendered
-    assert "Last model" not in rendered
-    assert "estimated allocation" in rendered
-
-
-def test_usage_all_since_uses_global_renderer(monkeypatch):
-    calls = []
-    captured = {}
-    monkeypatch.setattr(usage_command, "show_read_only_command", lambda body, **kwargs: calls.append(kwargs))
-    monkeypatch.setattr(usage_command, "global_usage_file", lambda: Path("global-usage.json"))
-
-    def load_records(*, since=None, warn=True):
-        captured["since"] = since
-        captured["warn"] = warn
-        return [
-            {
-                "created_at": "2026-05-29T01:00:00Z",
-                "session_id": "session-id",
-                "model": "test-model",
-                "source": "root",
-                "input_tokens": 10,
-                "cached_input_tokens": 0,
-                "uncached_input_tokens": 10,
-                "output_tokens": 5,
-                "reasoning_output_tokens": 0,
-                "total_tokens": 15,
-            }
-        ]
-
-    monkeypatch.setattr(usage_command, "load_global_usage_records", load_records)
-
-    usage_command.cmd_usage(["--all", "--since", "24h"])
-
-    assert captured["since"] == timedelta(hours=24)
-    assert captured["warn"] is True
-    assert calls[0]["title"] == "usage"
-    assert calls[0]["subtitle"] == "global-usage.json - last 24h"
-    assert calls[0]["fill_screen"] is True
-
-
-def test_usage_day_alias_uses_24_hour_global_window(monkeypatch):
-    captured = {}
-    monkeypatch.setattr(usage_command, "_cmd_global_usage", lambda since, label: captured.update({"since": since, "label": label}))
-
-    usage_command.cmd_usage(["day"])
-
-    assert captured["since"] == timedelta(hours=24)
-    assert captured["label"] == "last 24h"

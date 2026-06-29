@@ -263,9 +263,8 @@ def _about_body() -> Markdown:
 - `jarv /unset <key>` - Reset a default config key, or remove a custom key.
 - `jarv /history` - Show recent user and assistant messages.
 - `jarv /tree` - Browse the session as a tree; fork, edit, or resume from any earlier prompt.
-- `jarv /usage` - Show token usage for the current session.
-- `jarv /usage day|week|month` - Show system-wide usage for the last 24h, 7d, or 30d.
-- `jarv /usage --all [--since 24h]` - Show system-wide usage across Jarv sessions.
+- `jarv /usage` - Open the interactive usage screen. `←/→` (or `1-5` / `s t w m a`) switches scope live between Session, Today, Week, Month, and All.
+- `jarv /usage <session|day|week|month|all>` - Open straight to a scope. `day`/`today` is a rolling 24h window; `all` reads the full system-wide history.
 - `jarv /undo [n]` - Unsend the last n exchanges (default 1). The removed exchange is pushed onto a redo stack.
 - `jarv /redo [n]` - Restore the last n undone exchanges (default 1). Sending a new message clears the redo stack.
 - `jarv /btw <question>` - Ask an aside without derailing the main thread.
