@@ -6,11 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .display import console
-from .paths import CONFIG_DIR
+from .paths import CONFIG_DIR, SESSIONS_DIR, SESSIONS_FILE
 from .unicode_safety import sanitize_json_value
-
-SESSIONS_FILE = CONFIG_DIR / "sessions.json"
-SESSIONS_DIR = CONFIG_DIR / "sessions"
 
 
 def load_history(path: Path) -> list:

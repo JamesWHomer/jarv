@@ -7,14 +7,11 @@ import sys
 
 from .display import console
 from .history import (
-    SESSIONS_DIR,
     forget_current_session,
     load_history,
     prepare_session_context,
 )
-from .config import CONFIG_DIR
 from . import session_store as _session_store
-ARCHIVE_DIR = CONFIG_DIR / "archive"
 
 _SESSION_RENDER_EXPORTS = {
     "_history_visual_lines",
@@ -34,26 +31,6 @@ def __getattr__(name: str):
     return value
 
 
-def _sync_session_store_paths() -> None:
-    _session_store.ARCHIVE_DIR = ARCHIVE_DIR
-    _session_store.SESSIONS_DIR = SESSIONS_DIR
-
-
-def archive_session_files(history_path):
-    _sync_session_store_paths()
-    return _session_store.archive_session_files(history_path)
-
-
-def unarchive_session_files(archived_history_path, session_id: str):
-    _sync_session_store_paths()
-    return _session_store.unarchive_session_files(archived_history_path, session_id)
-
-
-def delete_session_files(history_path) -> None:
-    _sync_session_store_paths()
-    _session_store.delete_session_files(history_path)
-
-
 def cmd_sessions(args: list | None = None) -> None:
     from .session_browser import cmd_sessions as _browser_cmd_sessions
 
@@ -63,7 +40,7 @@ def cmd_archive() -> None:
     session_context = prepare_session_context()
     history_path = session_context.history_file
 
-    archived_history = archive_session_files(history_path)
+    archived_history = _session_store.archive_session_files(history_path)
     if archived_history is not None:
         console.print(f"[bold cyan]▸[/bold cyan] [dim]Session archived to[/dim] [cyan]{archived_history}[/cyan]")
     else:
