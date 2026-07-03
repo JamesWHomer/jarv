@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 import importlib.metadata
 import json
 import shutil
@@ -14,32 +13,6 @@ from .display import console, status_line
 
 UPDATE_CHECK_INTERVAL_HOURS = 24
 UPDATE_FLAG_FILE = CONFIG_DIR / "update_available.txt"
-
-_FACADE_SPECS = {
-    "cmd_archive": ("jarv.session_commands", "cmd_archive"),
-    "cmd_history": ("jarv.session_commands", "cmd_history"),
-    "cmd_sessions": ("jarv.session_commands", "cmd_sessions"),
-    "cmd_settings": ("jarv.settings_command", "cmd_settings"),
-    "cmd_redo": ("jarv.undo_commands", "cmd_redo"),
-    "cmd_undo": ("jarv.undo_commands", "cmd_undo"),
-    "cmd_tree": ("jarv.tree_command", "cmd_tree"),
-    "cmd_usage": ("jarv.usage_command", "cmd_usage"),
-}
-
-
-def __getattr__(name: str):
-    spec = _FACADE_SPECS.get(name)
-    if spec is None:
-        raise AttributeError(name)
-    module_name, attribute = spec
-    value = getattr(importlib.import_module(module_name), attribute)
-    globals()[name] = value
-    return value
-
-
-def __dir__() -> list[str]:
-    return sorted(set(globals()) | set(_FACADE_SPECS))
-
 
 def _fetch_latest_pypi_release() -> tuple[str, str] | None:
     from .update_check import _fetch_latest_pypi_release as fetch

@@ -1,17 +1,17 @@
-from jarv import commands
+import importlib
+
 from jarv.provider import KEY_PATTERNS, LOCAL_PROVIDERS, PROVIDERS
 from jarv.provider_catalog import FALLBACK_PROVIDER_MODELS, PROVIDER_CHOICES
 import ast
 from pathlib import Path
 
 
-def test_command_facade_exports_moved_handlers():
-    assert commands.cmd_sessions.__module__ == "jarv.session_commands"
-    assert commands.cmd_history.__module__ == "jarv.session_commands"
-    assert commands.cmd_usage.__module__ == "jarv.usage_command"
-    assert commands.cmd_settings.__module__ == "jarv.settings_command"
-    assert commands.cmd_undo.__module__ == "jarv.undo_commands"
-    assert commands.cmd_redo.__module__ == "jarv.undo_commands"
+def test_handler_specs_resolve_to_their_defining_modules():
+    from jarv.command_registry import HANDLER_SPECS
+
+    for name, (module_name, attribute) in HANDLER_SPECS.items():
+        handler = getattr(importlib.import_module(module_name), attribute)
+        assert handler.__module__ == module_name, name
 
 
 def test_provider_catalog_covers_setup_choices():
