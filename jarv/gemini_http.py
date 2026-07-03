@@ -78,10 +78,6 @@ def list_models(client, *, max_retries: int = 0) -> dict:
     return {"models": models}
 
 
-def _append_content(contents: list[dict], role: str, parts: list[dict]) -> None:
-    append_grouped(contents, role, parts, content_key="parts")
-
-
 def _json_value(value: Any) -> Any:
     if not isinstance(value, str):
         return value if value is not None else {}
@@ -127,20 +123,22 @@ def to_contents(input_items: list[dict]) -> list[dict]:
         kind = segment[0]
         if kind == "message":
             _, role, item = segment
-            _append_content(
+            append_grouped(
                 contents,
                 "model" if role == "assistant" else "user",
                 [{"text": str(item.get("content") or "")}],
+                content_key="parts",
             )
             continue
         if kind == "reasoning":
             item = segment[1]
             provider_content = item.get("provider_content")
             if isinstance(provider_content, list):
-                _append_content(
+                append_grouped(
                     contents,
                     "model",
                     [dict(part) for part in provider_content if isinstance(part, dict)],
+                    content_key="parts",
                 )
             continue
         if kind == "function_calls":
@@ -171,7 +169,7 @@ def to_contents(input_items: list[dict]) -> list[dict]:
                             **({"id": call_id} if call_id else {}),
                         }
                     })
-            _append_content(contents, "model", parts)
+            append_grouped(contents, "model", parts, content_key="parts")
             continue
         if kind == "function_outputs":
             outputs = segment[1]
@@ -192,7 +190,7 @@ def to_contents(input_items: list[dict]) -> list[dict]:
                 if response_parts:
                     response["parts"] = response_parts
                 parts.append({"functionResponse": response})
-            _append_content(contents, "user", parts)
+            append_grouped(contents, "user", parts, content_key="parts")
     return contents
 
 
