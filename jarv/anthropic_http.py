@@ -105,14 +105,6 @@ def list_models(client, *, max_retries: int = 0) -> dict:
     return {"data": models, "has_more": False}
 
 
-def _append_message(messages: list[dict], role: str, blocks: list[dict]) -> None:
-    append_grouped(messages, role, blocks)
-
-
-def _tool_input(arguments: Any) -> Any:
-    return parse_json_arguments(arguments)
-
-
 def to_messages(input_items: list[dict]) -> list[dict]:
     """Convert Jarv's Responses-style history to Anthropic content blocks."""
     messages: list[dict] = []
@@ -120,7 +112,7 @@ def to_messages(input_items: list[dict]) -> list[dict]:
         kind = segment[0]
         if kind == "message":
             _, role, item = segment
-            _append_message(
+            append_grouped(
                 messages,
                 role,
                 [{"type": "text", "text": str(item.get("content") or "")}],
@@ -136,7 +128,7 @@ def to_messages(input_items: list[dict]) -> list[dict]:
                     if isinstance(block, dict)
                     and block.get("type") in ("thinking", "redacted_thinking")
                 ]
-                _append_message(messages, "assistant", blocks)
+                append_grouped(messages, "assistant", blocks)
             continue
         if kind == "function_calls":
             calls = segment[1]
@@ -147,9 +139,9 @@ def to_messages(input_items: list[dict]) -> list[dict]:
                     "type": "tool_use",
                     "id": call_id,
                     "name": str(call.get("name") or ""),
-                    "input": _tool_input(call.get("arguments")),
+                    "input": parse_json_arguments(call.get("arguments")),
                 })
-            _append_message(messages, "assistant", blocks)
+            append_grouped(messages, "assistant", blocks)
             continue
         if kind == "function_outputs":
             outputs = segment[1]
@@ -160,7 +152,7 @@ def to_messages(input_items: list[dict]) -> list[dict]:
                     "tool_use_id": str(result.get("call_id") or ""),
                     "content": to_anthropic_tool_result_content(result.get("output")),
                 })
-            _append_message(messages, "user", blocks)
+            append_grouped(messages, "user", blocks)
     return messages
 
 

@@ -3,7 +3,6 @@
 import queue
 import sys
 import threading
-import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Iterator
@@ -18,6 +17,7 @@ from .tool_outputs import to_chat_tool_content
 from .unicode_safety import sanitize_json_value
 from .cancellation import CancellationToken, TurnCancelled
 from .http_transport import ProviderHTTPError
+from .http_transport import _sleep as _sleep_for_openai_recovery
 
 
 # ---------------------------------------------------------------------------
@@ -68,20 +68,6 @@ class RetryableStreamError(ProviderError):
 
 _OPENAI_RECOVERY_ATTEMPTS = 16
 _OPENAI_RECOVERY_MAX_DELAY = 2.0
-
-
-def _sleep_for_openai_recovery(
-    delay: float,
-    cancellation_token: CancellationToken | None,
-) -> None:
-    deadline = time.monotonic() + delay
-    while True:
-        if cancellation_token is not None:
-            cancellation_token.throw_if_cancelled()
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return
-        time.sleep(min(remaining, 0.05))
 
 
 def _value(obj: Any, key: str) -> Any:

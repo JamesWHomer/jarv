@@ -52,16 +52,18 @@ def create_client(
 
 
 def response_error(provider: str, response, data: dict | None = None) -> ProviderHTTPError:
+    import httpx
+
     if data is None:
         try:
             data = response.json()
-        except Exception:
+        except (ValueError, httpx.HTTPError, httpx.StreamError):
             data = {}
     error = data.get("error") if isinstance(data, dict) else None
     error = error if isinstance(error, dict) else {}
     try:
         response_text = response.text
-    except Exception:
+    except (ValueError, httpx.HTTPError, httpx.StreamError):
         response_text = ""
     message = str(
         error.get("message")
@@ -224,10 +226,12 @@ def open_stream_response(
         max_retries=max_retries,
     )
     if response.status_code >= 400:
+        import httpx
+
         try:
             response.read()
             data = response.json()
-        except Exception:
+        except (ValueError, httpx.HTTPError, httpx.StreamError):
             data = None
         response.close()
         raise response_error(provider, response, data)
