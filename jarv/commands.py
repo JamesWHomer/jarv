@@ -14,16 +14,11 @@ from .display import console, status_line
 
 UPDATE_CHECK_INTERVAL_HOURS = 24
 UPDATE_FLAG_FILE = CONFIG_DIR / "update_available.txt"
-SESSIONS_FILE = CONFIG_DIR / "sessions.json"
-SESSIONS_DIR = CONFIG_DIR / "sessions"
 
 _FACADE_SPECS = {
-    "archive_session_files": ("jarv.session_commands", "archive_session_files"),
     "cmd_archive": ("jarv.session_commands", "cmd_archive"),
     "cmd_history": ("jarv.session_commands", "cmd_history"),
     "cmd_sessions": ("jarv.session_commands", "cmd_sessions"),
-    "delete_session_files": ("jarv.session_commands", "delete_session_files"),
-    "unarchive_session_files": ("jarv.session_commands", "unarchive_session_files"),
     "cmd_settings": ("jarv.settings_command", "cmd_settings"),
     "cmd_redo": ("jarv.undo_commands", "cmd_redo"),
     "cmd_undo": ("jarv.undo_commands", "cmd_undo"),

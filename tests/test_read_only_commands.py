@@ -195,8 +195,8 @@ def test_help_omits_reference_config_and_path_sections():
     assert "sessions index" not in lower_help
     assert "session data" not in lower_help
     assert str(commands.CONFIG_FILE) not in help_text
-    assert str(commands.SESSIONS_FILE) not in help_text
-    assert str(commands.SESSIONS_DIR) not in help_text
+    assert str(history.SESSIONS_FILE) not in help_text
+    assert str(history.SESSIONS_DIR) not in help_text
 
     removed_config_rows = [
         "api_key",

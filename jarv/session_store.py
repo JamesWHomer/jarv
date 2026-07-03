@@ -2,9 +2,7 @@
 
 from pathlib import Path
 
-from .config import CONFIG_DIR
 from .history import (
-    SESSIONS_DIR,
     artifact_file_for,
     branches_file_for,
     history_file_for_session,
@@ -13,9 +11,8 @@ from .history import (
     redo_file_for,
     utc_now,
 )
+from .paths import ARCHIVE_DIR
 from .usage import usage_file_for
-
-ARCHIVE_DIR = CONFIG_DIR / "archive"
 
 
 def archive_session_files(history_path: Path) -> Path | None:
@@ -67,7 +64,7 @@ def unarchive_session_files(archived_history_path: Path, session_id: str) -> Pat
     for kind in ("artifacts", "reads", "usage", "branches"):
         sib = archived_dir / f"{kind}{archived_tail}.json"
         if sib.exists():
-            sib.rename(SESSIONS_DIR / f"{kind}{restored_suffix}.json")
+            sib.rename(restored_history.parent / f"{kind}{restored_suffix}.json")
     return restored_history
 
 def delete_session_files(history_path: Path) -> None:
