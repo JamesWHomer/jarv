@@ -1,4 +1,9 @@
-from jarv import session_commands
+import json
+from types import SimpleNamespace
+
+from conftest import make_console
+
+from jarv import session_commands, session_store
 
 
 def test_history_visual_lines_include_tool_calls():
@@ -175,3 +180,87 @@ def test_session_row_widths_preserve_message_space_on_small_screens():
 
 def test_session_row_widths_give_extra_space_to_message_on_large_screens():
     assert session_commands._session_row_widths(110) == (28, 7, 71)
+
+
+# --- command paths (cmd_archive / cmd_history) ----------------------------- #
+
+def _setup_session(tmp_path, monkeypatch, history_items):
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    history_file = sessions_dir / "history-abc.json"
+    if history_items is not None:
+        history_file.write_text(json.dumps(history_items), encoding="utf-8")
+    monkeypatch.setattr(
+        session_commands,
+        "prepare_session_context",
+        lambda: SimpleNamespace(history_file=history_file),
+    )
+    console, output = make_console()
+    monkeypatch.setattr(session_commands, "console", console)
+    return history_file, output
+
+
+def test_cmd_archive_moves_history_and_sidecars(tmp_path, monkeypatch):
+    history_file, output = _setup_session(
+        tmp_path, monkeypatch, [{"role": "user", "content": "hello"}]
+    )
+    archive_dir = tmp_path / "archive"
+    monkeypatch.setattr(session_store, "ARCHIVE_DIR", archive_dir)
+    forgotten = []
+    monkeypatch.setattr(
+        session_commands, "forget_current_session", lambda: forgotten.append(True)
+    )
+
+    session_commands.cmd_archive()
+
+    assert not history_file.exists()
+    assert list(archive_dir.glob("history-*.json"))
+    assert forgotten == [True]
+    rendered = output.getvalue()
+    assert "Session archived to" in rendered
+    assert "New session starts" in rendered
+
+
+def test_cmd_archive_without_history_prints_nothing_to_archive(tmp_path, monkeypatch):
+    _, output = _setup_session(tmp_path, monkeypatch, None)
+    monkeypatch.setattr(session_store, "ARCHIVE_DIR", tmp_path / "archive")
+    monkeypatch.setattr(session_commands, "forget_current_session", lambda: None)
+
+    session_commands.cmd_archive()
+
+    assert "No history to archive" in output.getvalue()
+
+
+def test_cmd_history_renders_plain_transcript_when_not_a_tty(tmp_path, monkeypatch):
+    _, output = _setup_session(
+        tmp_path,
+        monkeypatch,
+        [
+            {"role": "user", "content": "check the repo"},
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "run_command",
+                "arguments": '{"command":"git status"}',
+            },
+            {"type": "function_call_output", "call_id": "call_1", "output": "clean"},
+            {"role": "assistant", "content": "All clean."},
+        ],
+    )
+
+    session_commands.cmd_history()
+
+    rendered = output.getvalue()
+    assert "You" in rendered
+    assert "check the repo" in rendered
+    assert "git status" in rendered
+    assert "All clean." in rendered
+    assert "1 exchange(s)" in rendered
+
+
+def test_cmd_history_without_history_prints_no_history(tmp_path, monkeypatch):
+    _, output = _setup_session(tmp_path, monkeypatch, None)
+
+    session_commands.cmd_history()
+
+    assert "No history yet" in output.getvalue()
