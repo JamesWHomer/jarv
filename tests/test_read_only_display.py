@@ -1,7 +1,7 @@
 import io
-from contextlib import contextmanager
 
 import pytest
+from conftest import FakeLive, neutralize_tui_modes
 from rich.console import Console
 from rich.text import Text
 
@@ -18,44 +18,7 @@ class NonTtyStdin:
         return False
 
 
-@contextmanager
-def noop_context(*_args, **_kwargs):
-    yield
-
-
-class FakeLive:
-    instances = []
-
-    def __init__(self, *args, **kwargs):
-        self.args = args
-        self.kwargs = kwargs
-        self.refresh_count = 0
-        FakeLive.instances.append(self)
-
-    def __enter__(self):
-        self._render_once()
-        return self
-
-    def __exit__(self, *_exc):
-        return False
-
-    def _render_once(self):
-        get_renderable = self.kwargs.get("get_renderable")
-        if get_renderable is not None:
-            self.renderable = get_renderable()
-        elif self.args:
-            self.renderable = self.args[0]
-        else:
-            self.renderable = None
-
-    def refresh(self):
-        self.refresh_count += 1
-        self._render_once()
-
-
 def _install_display_harness(monkeypatch, *, width=80, height=24, key="ENTER", force_terminal=True):
-    import jarv.tui_app as tui_app
-
     FakeLive.instances = []
     output = io.StringIO()
     test_console = Console(file=output, force_terminal=force_terminal, width=width, color_system=None)
@@ -75,11 +38,7 @@ def _install_display_harness(monkeypatch, *, width=80, height=24, key="ENTER", f
     monkeypatch.setattr(read_only_display, "_key_available", lambda: True)
 
     # Neutralise the loop's terminal-mode managers (no real terminal under test).
-    monkeypatch.setattr(tui_app, "raw_input_mode", noop_context)
-    monkeypatch.setattr(tui_app, "mouse_capture", noop_context)
-    monkeypatch.setattr(tui_app, "bracketed_paste", noop_context)
-    monkeypatch.setattr(tui_app, "windows_vt_input", noop_context)
-    monkeypatch.setattr(tui_app, "disable_mouse_capture", lambda *a, **k: None)
+    neutralize_tui_modes(monkeypatch)
     return output
 
 

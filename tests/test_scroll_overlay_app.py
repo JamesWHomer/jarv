@@ -6,25 +6,18 @@ tests drive the real single-threaded loop with scripted input.
 """
 
 import io
-from contextlib import contextmanager
-from unittest import mock
 
+from conftest import neutral_terminal_modes
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-import jarv.tui_app as tui_app
 from jarv.tui_overlay import (
     ScrollOverlayState,
     apply_scroll_keys,
     body_content_rows,
     run_scroll_live,
 )
-
-
-@contextmanager
-def _null(*_args, **_kwargs):
-    yield
 
 
 def _drive(keys, *, on_key=None, close_keys=frozenset({"ESC"})):
@@ -50,13 +43,7 @@ def _drive(keys, *, on_key=None, close_keys=frozenset({"ESC"})):
     queue = list(keys)
     console = Console(file=io.StringIO(), force_terminal=True, color_system=None, width=40, height=10)
 
-    with (
-        mock.patch.object(tui_app, "raw_input_mode", _null),
-        mock.patch.object(tui_app, "mouse_capture", _null),
-        mock.patch.object(tui_app, "bracketed_paste", _null),
-        mock.patch.object(tui_app, "windows_vt_input", _null),
-        mock.patch.object(tui_app, "disable_mouse_capture", lambda *a, **k: None),
-    ):
+    with neutral_terminal_modes():
         run_scroll_live(
             render_panel,
             _scroll,
@@ -92,13 +79,7 @@ def test_scroll_overlay_closes_on_keyboard_interrupt():
         return Panel(Text("x"), height=8, width=40)
 
     console = Console(file=io.StringIO(), force_terminal=True, color_system=None, width=40, height=10)
-    with (
-        mock.patch.object(tui_app, "raw_input_mode", _null),
-        mock.patch.object(tui_app, "mouse_capture", _null),
-        mock.patch.object(tui_app, "bracketed_paste", _null),
-        mock.patch.object(tui_app, "windows_vt_input", _null),
-        mock.patch.object(tui_app, "disable_mouse_capture", lambda *a, **k: None),
-    ):
+    with neutral_terminal_modes():
         # Ctrl-C during the read closes the overlay via on_interrupt -> stop().
         run_scroll_live(
             render_panel,

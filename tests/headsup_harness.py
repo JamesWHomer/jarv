@@ -32,6 +32,7 @@ from types import SimpleNamespace
 from typing import Any, Callable
 from unittest import mock
 
+from conftest import neutral_terminal_modes
 from rich.console import Console
 
 from jarv.command_input import TextInput
@@ -167,10 +168,6 @@ def _noop(*_args, **_kwargs) -> None:
     return None
 
 
-def _null_ctx(*_args, **_kwargs):
-    return contextlib.nullcontext()
-
-
 class HeadsupHarness:
     """Context manager that runs a real HeadsupApp loop headlessly."""
 
@@ -237,11 +234,7 @@ class HeadsupHarness:
         stack.enter_context(mock.patch("jarv.headsup._key_available", self._scripted.available))
         stack.enter_context(mock.patch("jarv.headsup.terminal_size", self._holder))
         stack.enter_context(mock.patch("jarv.headsup.disable_mouse_capture", _noop))
-        stack.enter_context(mock.patch("jarv.tui_app.disable_mouse_capture", _noop))
-        stack.enter_context(mock.patch("jarv.tui_app.raw_input_mode", _null_ctx))
-        stack.enter_context(mock.patch("jarv.tui_app.bracketed_paste", _null_ctx))
-        stack.enter_context(mock.patch("jarv.tui_app.windows_vt_input", _null_ctx))
-        stack.enter_context(mock.patch("jarv.tui_app.mouse_capture", _null_ctx))
+        stack.enter_context(neutral_terminal_modes())
         self._stack = stack
 
         self._thread = threading.Thread(target=app.run, name="headsup-harness", daemon=True)

@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from conftest import make_console, wait_for
 from rich.cells import cell_len
 from rich.console import Console
 from rich.text import Text
@@ -24,13 +25,7 @@ class HeadsupTests(unittest.TestCase):
     def _app(self, *, width=50, args=None, config=None):
         ready = threading.Event()
         ready.set()
-        output = io.StringIO()
-        test_console = Console(
-            file=output,
-            force_terminal=False,
-            color_system=None,
-            width=width,
-        )
+        test_console, output = make_console(width=width)
         app = HeadsupApp(
             config or {"provider": "openai", "model": "test-model"},
             client=object(),
@@ -53,12 +48,7 @@ class HeadsupTests(unittest.TestCase):
             pass
 
     def _wait_for(self, predicate, timeout=1.0):
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if predicate():
-                return True
-            time.sleep(0.01)
-        return predicate()
+        return wait_for(predicate, timeout)
 
     def _entry_text(self, app: HeadsupApp) -> str:
         return "\n".join(line.plain for line in app._transcript_lines(100))
@@ -128,13 +118,7 @@ class HeadsupTests(unittest.TestCase):
     def test_render_erases_stale_right_edge_in_terminal_frames(self):
         ready = threading.Event()
         ready.set()
-        output = io.StringIO()
-        test_console = Console(
-            file=output,
-            force_terminal=True,
-            color_system=None,
-            width=80,
-        )
+        test_console, output = make_console(width=80, force_terminal=True)
         app = HeadsupApp(
             {"provider": "openai", "model": "test-model"},
             client=object(),
@@ -2038,13 +2022,7 @@ class HeadsupGoldenFrameTests(unittest.TestCase):
     def _render_lines(self, width, height):
         ready = threading.Event()
         ready.set()
-        output = io.StringIO()
-        test_console = Console(
-            file=output,
-            force_terminal=False,
-            color_system=None,
-            width=width,
-        )
+        test_console, output = make_console(width=width)
         app = HeadsupApp(
             {"provider": "openai", "model": "test-model", "reasoning_effort": "high"},
             client=object(),

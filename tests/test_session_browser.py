@@ -2,6 +2,7 @@ import io
 from collections import deque
 from contextlib import contextmanager
 
+from conftest import SnapshotLive
 from rich.console import Console
 
 from jarv import session_browser
@@ -17,32 +18,8 @@ def noop_context(*_args, **_kwargs):
     yield
 
 
-class FakeLive:
-    instances = []
-
-    def __init__(self, *args, **kwargs):
-        self.args = args
-        self.kwargs = kwargs
-        self.snapshots = []
-        FakeLive.instances.append(self)
-
-    def __enter__(self):
-        self.refresh()
-        return self
-
-    def __exit__(self, *_exc):
-        return False
-
-    def refresh(self):
-        renderable = self.kwargs["get_renderable"]()
-        output = io.StringIO()
-        console = Console(file=output, force_terminal=False, color_system=None, width=100)
-        console.print(renderable)
-        self.snapshots.append(output.getvalue())
-
-
 def _run_sessions_with_keys(monkeypatch, keys):
-    FakeLive.instances = []
+    SnapshotLive.instances = []
     queued = deque(keys)
     loaded_sessions = []
     session_id = "parent-123456789abc"
@@ -68,7 +45,7 @@ def _run_sessions_with_keys(monkeypatch, keys):
     monkeypatch.setattr(session_browser.sys, "stdin", TtyStdin())
     monkeypatch.setattr(session_browser, "console", test_console)
     monkeypatch.setattr(session_browser, "terminal_size", lambda *, console: (100, 24))
-    monkeypatch.setattr(session_browser, "Live", FakeLive)
+    monkeypatch.setattr(session_browser, "Live", SnapshotLive)
     monkeypatch.setattr(session_browser, "mouse_capture", noop_context)
     monkeypatch.setattr(session_browser, "detect_terminal", lambda: ("term-1", "Terminal 1"))
     monkeypatch.setattr(session_browser, "load_sessions", lambda: data)
@@ -90,7 +67,7 @@ def _run_sessions_with_keys(monkeypatch, keys):
 
     session_browser.cmd_sessions([])
     assert not queued
-    return FakeLive.instances[-1], loaded_sessions, output.getvalue()
+    return SnapshotLive.instances[-1], loaded_sessions, output.getvalue()
 
 
 def test_sessions_delete_confirmation_esc_cancels_without_closing(monkeypatch):

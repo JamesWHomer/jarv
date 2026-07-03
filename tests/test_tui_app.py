@@ -12,6 +12,7 @@ import threading
 import time
 from contextlib import contextmanager
 
+from conftest import FakeLive, wait_for
 from rich.text import Text
 
 from jarv import tui_app
@@ -31,35 +32,8 @@ class FakeConsole:
         return True
 
 
-class FakeLive:
-    """Records each painted frame by invoking the app's ``get_renderable``."""
-
-    def __init__(self, get_renderable, console):
-        self._get_renderable = get_renderable
-        self.console = console
-        self.frames: list[Text] = []
-        self.entered = False
-        self.exited = False
-
-    def __enter__(self):
-        self.entered = True
-        return self
-
-    def __exit__(self, *exc):
-        self.exited = True
-        return False
-
-    def refresh(self):
-        self.frames.append(self._get_renderable())
-
-
 def _wait_until(predicate, timeout=1.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.002)
-    return predicate()
+    return wait_for(predicate, timeout, interval=0.002)
 
 
 class ScriptedApp(AltScreenApp):
