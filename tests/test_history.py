@@ -120,5 +120,50 @@ class TerminalDetectionTests(unittest.TestCase):
             history_file.read_text(encoding="utf-8").encode("utf-8")
 
 
+# --- sessions metadata I/O (pytest style) ----------------------------------- #
+
+def test_load_sessions_missing_file_returns_default_shape(tmp_path, monkeypatch):
+    monkeypatch.setattr(history, "SESSIONS_FILE", tmp_path / "sessions.json")
+
+    assert history.load_sessions() == {"terminals": {}, "sessions": {}}
+
+
+def test_load_sessions_malformed_json_returns_default_shape(tmp_path, monkeypatch):
+    sessions_file = tmp_path / "sessions.json"
+    sessions_file.write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(history, "SESSIONS_FILE", sessions_file)
+
+    assert history.load_sessions() == {"terminals": {}, "sessions": {}}
+
+
+def test_load_sessions_non_dict_payload_returns_default_shape(tmp_path, monkeypatch):
+    sessions_file = tmp_path / "sessions.json"
+    sessions_file.write_text("[1, 2, 3]", encoding="utf-8")
+    monkeypatch.setattr(history, "SESSIONS_FILE", sessions_file)
+
+    assert history.load_sessions() == {"terminals": {}, "sessions": {}}
+
+
+def test_load_sessions_wrong_typed_keys_return_default_shape(tmp_path, monkeypatch):
+    sessions_file = tmp_path / "sessions.json"
+    sessions_file.write_text(json.dumps({"terminals": [], "sessions": {}}), encoding="utf-8")
+    monkeypatch.setattr(history, "SESSIONS_FILE", sessions_file)
+
+    assert history.load_sessions() == {"terminals": {}, "sessions": {}}
+
+
+def test_save_then_load_sessions_round_trips(tmp_path, monkeypatch):
+    sessions_file = tmp_path / "sessions.json"
+    monkeypatch.setattr(history, "SESSIONS_FILE", sessions_file)
+    data = {
+        "terminals": {"term-1": "session-1"},
+        "sessions": {"session-1": {"label": "Test", "last_used_at": "2026-01-01T00:00:00Z"}},
+    }
+
+    history.save_sessions(data)
+
+    assert history.load_sessions() == data
+
+
 if __name__ == "__main__":
     unittest.main()
