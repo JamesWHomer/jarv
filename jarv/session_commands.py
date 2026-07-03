@@ -31,11 +31,6 @@ def __getattr__(name: str):
     return value
 
 
-def cmd_sessions(args: list | None = None) -> None:
-    from .session_browser import cmd_sessions as _browser_cmd_sessions
-
-    return _browser_cmd_sessions(args)
-
 def cmd_archive() -> None:
     session_context = prepare_session_context()
     history_path = session_context.history_file
