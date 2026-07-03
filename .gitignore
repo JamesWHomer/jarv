@@ -217,4 +217,7 @@ Feature-Ideas.txt
 /administration
 # Local visualization scripts and generated charts
 /visualize/
-/scripts/
+# Local-only script dirs; release/install scripts stay tracked
+/scripts/benchmark/
+/scripts/interactive/
+/scripts/headsup_tool_server.py
