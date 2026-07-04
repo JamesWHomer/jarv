@@ -37,6 +37,15 @@ def clamp_scroll_offset(offset: int, total: int, body_rows: int) -> int:
     return max(0, min(offset, max_off))
 
 
+def clamp_selection_scroll(offset: int, selected: int, total: int, body_rows: int) -> int:
+    """Scroll offset that keeps ``selected`` visible, clamped to the content."""
+    if selected < offset:
+        offset = selected
+    elif selected >= offset + body_rows:
+        offset = selected - body_rows + 1
+    return clamp_scroll_offset(offset, total, body_rows)
+
+
 def scroll_position_hint(start: int, end: int, total: int) -> str:
     if total:
         return f"{start + 1}-{end} of {total}"

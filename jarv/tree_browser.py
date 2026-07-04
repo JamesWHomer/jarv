@@ -23,7 +23,7 @@ from .session_tree import build_tree, delete_subtree, leaf_of, parent_id_of
 from .tui_app import AltScreenApp
 from .tui_frame import panel_width, wrap_frame
 from .tui_layout import append_bottom_footer, clip_text
-from .tui_overlay import body_content_rows, clamp_scroll_offset
+from .tui_overlay import body_content_rows, clamp_selection_scroll
 
 @dataclass
 class TreeOutcome:
@@ -185,12 +185,7 @@ class TreeBrowserScreen(AltScreenApp):
         )
 
     def _clamp(self, body_rows: int) -> int:
-        off = self.offset
-        if self.selected < off:
-            off = self.selected
-        elif self.selected >= off + body_rows:
-            off = self.selected - body_rows + 1
-        return clamp_scroll_offset(off, len(self.nodes), body_rows)
+        return clamp_selection_scroll(self.offset, self.selected, len(self.nodes), body_rows)
 
     # ------------------------------------------------------------------ #
     # Input

@@ -3,7 +3,6 @@
 import sys
 import threading
 import time
-from contextlib import contextmanager
 from pathlib import Path
 
 from rich import box
@@ -13,7 +12,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from .command_input import _key_available, _read_key_with_repeats, mouse_capture
+from .command_input import _key_available, _read_key_with_repeats
 from .display import console, jarv_panel, terminal_size
 from .tui_app import AltScreenApp
 from .history import (
@@ -34,6 +33,7 @@ from .tui_overlay import (
     apply_scroll_keys,
     body_content_rows,
     clamp_scroll_offset,
+    clamp_selection_scroll,
     scroll_position_hint,
 )
 
@@ -242,6 +242,7 @@ class SessionBrowserScreen(AltScreenApp):
     def __init__(self, *, data, sessions, terminals, rows, current_session_id):
         super().__init__(
             console=console,
+            live_factory=self._browser_live_factory,
             read_key_fn=self._read_browser_key,
             key_available_fn=self._browser_key_available,
             terminal_size_fn=self._browser_terminal_size,
@@ -294,22 +295,15 @@ class SessionBrowserScreen(AltScreenApp):
     def _browser_terminal_size(self, *, console=None):
         return terminal_size(console=console)
 
-    def _screen_context(self):
-        @contextmanager
-        def _ctx():
-            live = Live(
-                get_renderable=self.render,
-                console=console,
-                screen=True,
-                auto_refresh=False,
-                transient=False,
-                vertical_overflow="crop",
-            )
-            with live, mouse_capture():
-                self.live = live
-                yield live
-
-        return _ctx()
+    def _browser_live_factory(self, get_renderable, _console):
+        return Live(
+            get_renderable=get_renderable,
+            console=self.console,
+            screen=True,
+            auto_refresh=False,
+            transient=False,
+            vertical_overflow="crop",
+        )
 
     # ------------------------------------------------------------------ #
     # Lifecycle
@@ -463,15 +457,6 @@ class SessionBrowserScreen(AltScreenApp):
                 return i
         return 0
 
-    def _clamp_offset(self, sel: int, off: int, mv: int, n: int) -> int:
-        if n == 0:
-            return 0
-        if sel < off:
-            return sel
-        if sel >= off + mv:
-            return sel - mv + 1
-        return max(0, min(off, max(0, n - mv)))
-
     def _subtitle(self) -> str:
         n_active = sum(1 for r in self.rows if not r["archived"])
         n_archived = len(self.rows) - n_active
@@ -508,10 +493,16 @@ class SessionBrowserScreen(AltScreenApp):
         hp = Path(hp_str)
         if not hp.exists():
             return [Text("(history file missing)", style="dim")]
-        history = load_history(hp)
-        if not history:
-            return [Text("(empty conversation)", style="dim")]
-        return _history_visual_lines(history, width) or [Text("(empty conversation)", style="dim")]
+        # A history file deleted or corrupted mid-session must not crash the
+        # browser from on_key; degrade to a placeholder line instead (matches
+        # _first_user_snippet/_build_search_text).
+        try:
+            history = load_history(hp)
+            if not history:
+                return [Text("(empty conversation)", style="dim")]
+            return _history_visual_lines(history, width) or [Text("(empty conversation)", style="dim")]
+        except Exception:
+            return [Text("(couldn't read history)", style="dim")]
 
     def _preview_lines(self, sid: str, width: int) -> list[Text]:
         cache_key = (sid, width)
@@ -624,7 +615,7 @@ class SessionBrowserScreen(AltScreenApp):
             show_footer=show_footer,
             has_search=has_search,
         )
-        self.offset = self._clamp_offset(sel, self.offset, mv, n)
+        self.offset = clamp_selection_scroll(self.offset, sel, n, mv)
         start = self.offset
         end = min(n, self.offset + mv)
 
