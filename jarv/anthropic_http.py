@@ -30,6 +30,14 @@ from .unicode_safety import sanitize_json_value
 
 ANTHROPIC_API_URL = "https://api.anthropic.com"
 ANTHROPIC_VERSION = "2023-06-01"
+# Fable-tier safety classifiers may decline a request (HTTP 200 with
+# stop_reason "refusal"). Opting into server-side fallbacks makes the API
+# re-serve the declined request on Opus inside the same call and report the
+# switch on the response. The beta header alone is inert — behaviour only
+# changes on requests whose payload carries "fallbacks".
+FALLBACK_BETA = "server-side-fallback-2026-06-01"
+FALLBACK_MODEL = "claude-opus-4-8"
+_FALLBACK_MODEL_PREFIXES = ("claude-fable", "claude-mythos")
 DEFAULT_MAX_TOKENS = 8192
 DEFAULT_SUBAGENT_MAX_TOKENS = 16384
 _CACHE_CONTROL = {"type": "ephemeral"}
@@ -69,6 +77,7 @@ def create_client(config: dict, api_key: str):
         {
             "x-api-key": api_key,
             "anthropic-version": ANTHROPIC_VERSION,
+            "anthropic-beta": FALLBACK_BETA,
             "content-type": "application/json",
             "user-agent": "jarv",
         },
@@ -252,6 +261,59 @@ def _apply_reasoning(
         payload["max_tokens"] = budget + 1024
 
 
+def _wants_refusal_fallback(config: dict, model: str) -> bool:
+    if not config.get("anthropic_refusal_fallback", True):
+        return False
+    return model.startswith(_FALLBACK_MODEL_PREFIXES) and model != FALLBACK_MODEL
+
+
+def served_by_fallback(response: Any) -> bool:
+    """True when the API reports this message was answered by a fallback model.
+
+    The switch point arrives as a "fallback" content block; sticky-routed
+    non-streaming turns carry no block and are reported only through a
+    "fallback_message" entry in usage.iterations.
+    """
+    if not isinstance(response, dict):
+        return False
+    content = response.get("content")
+    if isinstance(content, list) and any(
+        isinstance(block, dict) and block.get("type") == "fallback"
+        for block in content
+    ):
+        return True
+    usage = response.get("usage")
+    iterations = usage.get("iterations") if isinstance(usage, dict) else None
+    return isinstance(iterations, list) and any(
+        isinstance(entry, dict) and entry.get("type") == "fallback_message"
+        for entry in iterations
+    )
+
+
+def fallback_notice(response: Any) -> str | None:
+    """User-facing note when a request was refused or served by a fallback model."""
+    if not isinstance(response, dict):
+        return None
+    if response.get("stop_reason") == "refusal":
+        details = response.get("stop_details")
+        category = details.get("category") if isinstance(details, dict) else None
+        suffix = f": {category}" if category else ""
+        return f"Anthropic declined this request (safety filter{suffix})."
+    if not served_by_fallback(response):
+        return None
+    served = str(response.get("model") or FALLBACK_MODEL)
+    declined = None
+    for block in response.get("content") or []:
+        if isinstance(block, dict) and block.get("type") == "fallback":
+            source = block.get("from")
+            if isinstance(source, dict) and source.get("model"):
+                declined = str(source["model"])
+            break
+    if declined:
+        return f"Safety filter declined {declined} — this turn was answered by {served}."
+    return f"This turn was answered by {served} (safety fallback)."
+
+
 def build_payload(
     config: dict,
     model: str,
@@ -284,6 +346,8 @@ def build_payload(
     service_tier = provider_service_tier(config, "anthropic")
     if service_tier:
         payload["service_tier"] = service_tier
+    if _wants_refusal_fallback(config, model):
+        payload["fallbacks"] = [{"model": FALLBACK_MODEL}]
     _apply_reasoning(config, payload, model, reasoning)
     if config.get("anthropic_prompt_caching", True):
         _apply_prompt_caching(payload)

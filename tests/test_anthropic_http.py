@@ -3,9 +3,13 @@ import json
 import httpx
 
 from jarv.anthropic_http import (
+    FALLBACK_BETA,
     AnthropicHTTPError,
     build_payload,
+    create_client as create_anthropic_client,
     create_message,
+    fallback_notice,
+    served_by_fallback,
     stream_message,
 )
 from jarv.orchestrator import RUN_COMMAND_TOOL, SPAWN_TOOL
@@ -484,3 +488,164 @@ def test_stream_error_includes_anthropic_error_details():
     assert "401" in message
     assert "authentication_error" in message
     assert "req_123" in message
+
+
+def test_payload_opts_into_refusal_fallback_for_fable_models():
+    payload = build_payload(
+        {}, "claude-fable-5", "system", [], [{"role": "user", "content": "hi"}],
+    )
+    assert payload["fallbacks"] == [{"model": "claude-opus-4-8"}]
+
+    payload = build_payload(
+        {}, "claude-mythos-5", "system", [], [{"role": "user", "content": "hi"}],
+    )
+    assert payload["fallbacks"] == [{"model": "claude-opus-4-8"}]
+
+
+def test_payload_omits_refusal_fallback_for_other_models_and_when_disabled():
+    payload = build_payload(
+        {}, "claude-opus-4-8", "system", [], [{"role": "user", "content": "hi"}],
+    )
+    assert "fallbacks" not in payload
+
+    payload = build_payload(
+        {"anthropic_refusal_fallback": False},
+        "claude-fable-5",
+        "system",
+        [],
+        [{"role": "user", "content": "hi"}],
+    )
+    assert "fallbacks" not in payload
+
+
+def test_client_sends_refusal_fallback_beta_header():
+    client = create_anthropic_client({}, "key")
+    try:
+        assert client.headers["anthropic-beta"] == FALLBACK_BETA
+    finally:
+        client.close()
+
+
+def test_fallback_notice_reports_refusal_with_category():
+    response = {
+        "model": "claude-fable-5",
+        "stop_reason": "refusal",
+        "stop_details": {"type": "refusal", "category": "cyber"},
+        "content": [],
+    }
+    notice = fallback_notice(response)
+    assert "declined" in notice
+    assert "cyber" in notice
+
+
+def test_fallback_notice_reports_downgrade_from_fallback_block():
+    response = {
+        "model": "claude-opus-4-8",
+        "stop_reason": "end_turn",
+        "content": [
+            {
+                "type": "fallback",
+                "from": {"model": "claude-fable-5"},
+                "to": {"model": "claude-opus-4-8"},
+            },
+            {"type": "text", "text": "hi"},
+        ],
+        "usage": {},
+    }
+    assert served_by_fallback(response)
+    notice = fallback_notice(response)
+    assert "claude-fable-5" in notice
+    assert "claude-opus-4-8" in notice
+
+
+def test_fallback_notice_reports_sticky_turn_from_usage_iterations():
+    response = {
+        "model": "claude-opus-4-8",
+        "stop_reason": "end_turn",
+        "content": [{"type": "text", "text": "hi"}],
+        "usage": {"iterations": [{"type": "fallback_message"}]},
+    }
+    assert served_by_fallback(response)
+    assert "claude-opus-4-8" in fallback_notice(response)
+
+
+def test_fallback_notice_is_none_for_ordinary_responses():
+    response = {
+        "model": "claude-fable-5",
+        "stop_reason": "end_turn",
+        "content": [{"type": "text", "text": "hi"}],
+        "usage": {},
+    }
+    assert not served_by_fallback(response)
+    assert fallback_notice(response) is None
+
+
+def test_stream_carries_fallback_block_into_final_response():
+    events = [
+        ("message_start", {
+            "type": "message_start",
+            "message": {
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-opus-4-8",
+                "content": [],
+                "usage": {"input_tokens": 5, "output_tokens": 0},
+            },
+        }),
+        ("content_block_start", {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {
+                "type": "fallback",
+                "from": {"model": "claude-fable-5"},
+                "to": {"model": "claude-opus-4-8"},
+            },
+        }),
+        ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+        ("content_block_start", {
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {"type": "text", "text": ""},
+        }),
+        ("content_block_delta", {
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "text_delta", "text": "answered by opus"},
+        }),
+        ("content_block_stop", {"type": "content_block_stop", "index": 1}),
+        ("message_delta", {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": 4},
+        }),
+        ("message_stop", {"type": "message_stop"}),
+    ]
+
+    def handler(_request):
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_sse(events),
+        )
+
+    client = _client(handler)
+    try:
+        normalized = list(_stream_anthropic(
+            client,
+            {},
+            "claude-fable-5",
+            "system",
+            [],
+            [{"role": "user", "content": "hi"}],
+        ))
+    finally:
+        client.close()
+
+    done = normalized[-1]
+    assert isinstance(done, StreamDone)
+    assert done.response["output_text"] == "answered by opus"
+    assert served_by_fallback(done.response)
+    notice = fallback_notice(done.response)
+    assert "claude-fable-5" in notice
+    assert "claude-opus-4-8" in notice

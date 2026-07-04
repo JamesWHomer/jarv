@@ -44,6 +44,7 @@ from .provider import (
     TextDelta,
     ToolCallDone,
     ToolCallStarted,
+    provider_response_notice,
     stream_response,
 )
 from .response_items import to_response_input_item
@@ -564,6 +565,18 @@ class _TurnRenderer:
             return
         if self.interactive:
             console.print(tool_complete_indicator(status_text))
+
+    def note_provider_notice(self, text: str) -> None:
+        """Surface a provider-reported condition (e.g. safety fallback) to the user."""
+        if not text or self.interactive_continuation:
+            return
+        self.status_items.append(status_history_item(text, "notice", self.metadata))
+        if self.ui is not None:
+            _ui_call(self.ui, "show_notice", Text(f"⚠ {text}", style="yellow"))
+        elif self.interactive:
+            console.print(Text(f"⚠ {text}", style="yellow"))
+        else:
+            print(text, file=sys.stderr)
 
     def note_tool_call_started(self, item_id: str, call_id: str, name: str) -> None:
         if self.interactive_continuation:
@@ -1167,6 +1180,9 @@ def run_agent(
                 )
             renderer.complete_tool_phase()
             renderer.complete_response_phase()
+            fallback_note = provider_response_notice(config, final_response)
+            if fallback_note:
+                renderer.note_provider_notice(fallback_note)
             if renderer.got_text:
                 if pending_interactive_command is not None:
                     pass
