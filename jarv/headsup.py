@@ -28,7 +28,7 @@ from .command_input import (
     enable_mouse_wheel_reporting,
     strip_sgr_mouse_sequences,
 )
-from .command_menu import MenuEntry, filter_entries, menu_entries
+from .command_menu import MenuEntry, argument_entries, filter_entries, menu_entries
 from .command_registry import COMMANDS, parse_command_alias
 from .agent_ui import (
     _THINKING_FRAMES,
@@ -98,9 +98,18 @@ _FULLSCREEN_SLASH_COMMANDS = frozenset({
     "/usage",
 })
 
-# Most rows the slash-command autocomplete menu shows at once before it windows
-# around the selection and appends a "+N more" tail.
-_SLASH_MENU_MAX_ROWS = 6
+# Rows the slash-command autocomplete menu shows at once before it windows
+# around the selection and appends a "+N more" tail: roughly a third of the
+# body on tall terminals, clamped between these two bounds.
+_SLASH_MENU_MIN_ROWS = 6
+_SLASH_MENU_MAX_ROWS = 10
+
+# Key hints painted beside the popup's bottom row (in the row the regular
+# footer hints occupy while the popup is closed). The short form steps in when
+# the popup leaves little room; below that the row stays blank rather than
+# showing hints cropped mid-word.
+_SLASH_MENU_HINTS = "↑↓ select   Tab complete   Enter run   Esc close"
+_SLASH_MENU_HINTS_SHORT = "↑↓ · Tab · Enter · Esc"
 
 _COMMAND_CONFIRM_YES = frozenset({"1", "c", "cmd", "command", "run", "y", "yes"})
 _SESSION_SWITCHING_SLASH_COMMANDS = frozenset({
@@ -556,6 +565,9 @@ class HeadsupApp(AltScreenApp):
         self._prompt_history_draft = ""
         self._slash_menu_index = 0
         self._slash_menu_scroll = 0
+        # Esc hides the popup for the exact draft it was dismissed on; any edit
+        # changes the buffer and so re-enables it (no reset bookkeeping needed).
+        self._slash_menu_dismissed_for: str | None = None
         self._prompt_notice: RenderableType | None = None
         self._usage_status_cache: tuple[float, int, object, str | None, Text] | None = None
 
@@ -637,13 +649,13 @@ class HeadsupApp(AltScreenApp):
                 self._complete_answer()
                 return
             menu_matches = self._slash_menu_matches()
-            if menu_matches and not self._draft_is_complete_command():
-                # While a *partial* command is being typed, Enter mirrors Tab so
-                # a draft like "/sett" completes to the highlighted command
-                # instead of running as an unknown one. A fully typed command
-                # (e.g. "/usage") falls through to run immediately rather than
-                # gaining a trailing space — see _draft_is_complete_command.
-                self._slash_menu_accept(menu_matches[self._slash_menu_index])
+            if menu_matches and not self._menu_enter_submits_draft():
+                # While a *partial* token is being typed, Enter accepts the
+                # highlighted entry: a draft like "/sett" runs /settings instead
+                # of an unknown command, and "/usage d" runs "/usage day". A
+                # fully typed command or argument ("/usage", "/usage day") falls
+                # through to run exactly as typed — see _menu_enter_submits_draft.
+                self._slash_menu_accept(menu_matches[self._slash_menu_index], run=True)
                 return
             raw_query = self._pastes.expand(str(self.editor.get("buffer", "")))
             query = raw_query.strip("\r\n")
@@ -665,6 +677,12 @@ class HeadsupApp(AltScreenApp):
             if self._answer_request is not None:
                 self._cancel_answer()
                 return
+            if self._slash_menu_matches():
+                # Layered dismissal: close the popup first and keep the draft.
+                # The next edit changes the buffer and reopens it.
+                self._slash_menu_dismissed_for = str(self.editor.get("buffer", ""))
+                self.refresh()
+                return
             if self._handle_prompt_dismiss():
                 self.stop()
             return
@@ -679,7 +697,9 @@ class HeadsupApp(AltScreenApp):
             menu_matches = self._slash_menu_matches()
             if menu_matches:
                 if key == "TAB":
-                    self._slash_menu_accept(menu_matches[self._slash_menu_index])
+                    # Tab only completes text into the box — it never runs the
+                    # command; Enter is the sole key that executes.
+                    self._slash_menu_accept(menu_matches[self._slash_menu_index], run=False)
                 elif key == "UP":
                     self._slash_menu_index = max(0, self._slash_menu_index - repeat)
                 else:
@@ -705,8 +725,10 @@ class HeadsupApp(AltScreenApp):
             self.scroll_offset = 0
             self._clear_prompt_notice()
             self._exit_armed = False
-            # Re-typing always re-highlights the top match.
+            # Re-typing always re-highlights the top match and reopens a
+            # dismissed popup.
             self._slash_menu_index = 0
+            self._slash_menu_dismissed_for = None
 
     def on_tick(self) -> None:
         now = time.perf_counter()
@@ -747,19 +769,22 @@ class HeadsupApp(AltScreenApp):
             # docks it onto the field, and the input box drops its own top so that
             # docking edge serves as it.
             menu_lines = self._slash_menu_box(inner_width, layout)
+            menu_open = bool(menu_lines)
             prompt_lines = self._prompt_lines(
-                inner_width, max_lines=layout.max_prompt_rows, menu_open=bool(menu_lines)
+                inner_width, max_lines=layout.max_prompt_rows, menu_open=menu_open
             )
-            if menu_lines:
+            if menu_open:
                 footer = box_tab_top(inner_width, cell_len(menu_lines[0].plain))
             else:
                 footer = self._footer_line(inner_width)
-            rows = _transcript_rows_for(layout.body_height, len(prompt_lines))
             # Opening the popup makes the input box one row shorter (the divider
-            # replaces its top border), so the body has one more row to give the
-            # transcript. The popup is painted over the bottom of the body, so that
-            # extra row lands underneath it -- nothing already on screen moves.
-            intro_height = rows - (1 if menu_lines else 0)
+            # replaces its top border). That freed row is *not* given to the
+            # transcript -- it becomes the popup's hint row, sitting exactly where
+            # the footer hints sit while the popup is closed -- so the transcript
+            # keeps the same height and nothing already on screen moves.
+            rows = _transcript_rows_for(
+                layout.body_height, len(prompt_lines) + (1 if menu_open else 0)
+            )
             transcript = self._transcript_lines(inner_width)
             visible, self.scroll_offset = window_transcript(transcript, rows, self.scroll_offset)
             show_intro = (
@@ -770,14 +795,14 @@ class HeadsupApp(AltScreenApp):
             )
             outro_started_at = self._outro_started_at
 
-        # The intro is drawn at the stable (popup-closed) height so its centred
-        # logo and seeded starfield never re-roll or jump as the popup opens; the
-        # freed bottom row is padded out and then covered by the popup overlay.
+        # The transcript height is the same whether the popup is open or closed,
+        # so the intro's centred logo and seeded starfield never re-roll or jump
+        # as the popup opens.
         intro = None
         if show_intro:
             intro = render_intro(
                 inner_width,
-                intro_height,
+                rows,
                 time.perf_counter() - self._idle_anim_started_at,
             )
         elif outro_started_at:
@@ -785,19 +810,29 @@ class HeadsupApp(AltScreenApp):
             if exit_progress < 1.0:
                 intro = render_intro(
                     inner_width,
-                    intro_height,
+                    rows,
                     time.perf_counter() - self._idle_anim_started_at,
                     exit=exit_progress,
                 )
         if intro is not None:
             visible = intro + [Text("")] * max(0, rows - len(intro))
 
-        # Paint the slash popup over the bottom of the body so it replaces the
-        # stars beneath it and docks seamlessly onto the input box below.
-        visible = overlay_menu(
-            visible, menu_lines, rows=rows, width=inner_width, console=self.console
-        )
-        parts = assemble_body(visible, footer, prompt_lines, layout.body_height, rows)
+        body_rows = rows
+        if menu_open:
+            # The row freed by the input box's dropped top edge carries the
+            # popup's key hints; the popup's bottom row is overlaid onto its left
+            # cells, so the hints read beside the popup -- in the very cells the
+            # footer hints occupy while the popup is closed.
+            popup_width = cell_len(menu_lines[0].plain)
+            visible = [Text("")] * max(0, rows - len(visible)) + list(visible)
+            visible.append(self._slash_menu_hint_row(inner_width, popup_width))
+            body_rows = rows + 1
+            # Paint the slash popup over the bottom of the body so it replaces the
+            # stars beneath it and docks seamlessly onto the input box below.
+            visible = overlay_menu(
+                visible, menu_lines, rows=body_rows, width=inner_width, console=self.console
+            )
+        parts = assemble_body(visible, footer, prompt_lines, layout.body_height, body_rows)
         subtitle = self._panel_subtitle(layout.panel_width)
         return build_frame(
             parts,
@@ -1688,31 +1723,48 @@ class HeadsupApp(AltScreenApp):
     # ------------------------------------------------------------------ #
     # Slash-command autocomplete menu (derived state above the input box)
     # ------------------------------------------------------------------ #
-    def _slash_menu_query(self) -> str | None:
-        """The command token being typed, or None when the menu is inactive.
+    def _slash_menu_context(self) -> tuple[str | None, str] | None:
+        """What the menu is completing: ``(command, query)``, or None when closed.
 
-        Active means the draft is a single line starting with ``/`` with no
-        whitespace yet (still typing the command name) and we are not answering
-        an agent question. Returns the text after the leading ``/``.
+        ``command`` is None while the command token itself is being typed
+        (query is the text after the leading ``/``). Once the draft reads
+        ``/name <partial>`` for a command with declared argument choices,
+        ``command`` is its name and ``query`` the partial first argument. Any
+        further whitespace (a second argument, or a space after a complete
+        first one) closes the menu, as does answering an agent question or an
+        Esc dismissal of this exact draft.
         """
         if self._answer_request is not None:
             return None
         buffer = str(self.editor.get("buffer", ""))
-        if not buffer.startswith("/"):
+        if not buffer.startswith("/") or "\n" in buffer:
+            return None
+        if buffer == self._slash_menu_dismissed_for:
             return None
         rest = buffer[1:]
-        if any(ch.isspace() for ch in rest):
+        if not any(ch.isspace() for ch in rest):
+            return (None, rest)
+        name, _, remainder = rest.partition(" ")
+        arg = remainder.lstrip()
+        if not name or any(ch.isspace() for ch in arg):
             return None
-        return rest
+        name = name.lower()
+        if not argument_entries(name):
+            return None
+        return (name, arg)
+
+    def _slash_menu_entries(self, command: str | None) -> list[MenuEntry]:
+        return menu_entries() if command is None else argument_entries(command)
 
     def _slash_menu_matches(self) -> list[MenuEntry]:
         """Visible menu entries for the current draft (clamps the highlight)."""
-        query = self._slash_menu_query()
-        if query is None:
+        context = self._slash_menu_context()
+        if context is None:
             self._slash_menu_index = 0
             self._slash_menu_scroll = 0
             return []
-        matches = filter_entries(menu_entries(), query)
+        command, query = context
+        matches = filter_entries(self._slash_menu_entries(command), query)
         if not matches:
             self._slash_menu_index = 0
             self._slash_menu_scroll = 0
@@ -1720,23 +1772,46 @@ class HeadsupApp(AltScreenApp):
         self._slash_menu_index = max(0, min(self._slash_menu_index, len(matches) - 1))
         return matches
 
-    def _slash_menu_accept(self, entry: MenuEntry) -> None:
+    def _menu_enter_submits_draft(self) -> bool:
+        """Whether Enter should submit the draft as typed instead of accepting.
+
+        True when there is nothing left to complete: the draft is exactly a
+        recognised command with no arguments ("/usage" runs immediately rather
+        than gaining a trailing space), the argument token typed so far exactly
+        names a choice ("/usage day"), or the argument position is still empty
+        ("/usage " submits plain /usage rather than force-picking a choice).
+        """
+        context = self._slash_menu_context()
+        if context is None:
+            return True
+        command, query = context
+        if command is None:
+            return self._draft_is_complete_command()
+        if not query:
+            return True
+        needle = query.lower()
+        return any(entry.name.lower() == needle for entry in argument_entries(command))
+
+    def _slash_menu_accept(self, entry: MenuEntry, *, run: bool) -> None:
+        """Complete ``entry`` into the box; with ``run`` (Enter), execute it too.
+
+        Only entries marked ``runs_on_enter`` execute — the rest ("/usage ",
+        "/set model ") still expect input, so accepting them just fills the box
+        and lets the menu move on to the next token (or close).
+        """
         self._slash_menu_index = 0
         self._slash_menu_scroll = 0
-        if not entry.takes_rest:
-            # No parameters possible: run it now, exactly as submitting the
-            # command text would.
-            self._record_prompt_history(entry.display)
+        if run and entry.runs_on_enter:
+            command = entry.insert.strip()
+            self._record_prompt_history(command)
             initialize_text_editor(self.editor, "")
             self._pastes.clear()
             self._clear_prompt_notice()
             self._exit_armed = False
-            if self._handle_query(entry.display) == "exit":
+            if self._handle_query(command) == "exit":
                 self.stop()
             return
-        # Parameters possible: drop "/name " into the box so the user can finish
-        # the line. The trailing space makes the menu close (query becomes None).
-        initialize_text_editor(self.editor, entry.display + " ")
+        initialize_text_editor(self.editor, entry.insert)
         self._clear_prompt_notice()
         self._exit_armed = False
         self.refresh()
@@ -1755,22 +1830,28 @@ class HeadsupApp(AltScreenApp):
         matches = self._slash_menu_matches()
         if not matches:
             return []
-        query = self._slash_menu_query() or ""
+        context = self._slash_menu_context()
+        query = context[1] if context else ""
         selected = self._slash_menu_index
 
-        prefix_width = 3  # " › " / "   "
         gap = 2
         # The box may grow at most to the field's content area (its width minus a
         # border + gutter on each side); within that it shrinks to fit its rows.
+        # Rows carry no selection prefix -- the caret lives in the box's left
+        # gutter (see below) so each command's "/" sits in the same column as the
+        # input field's draft slash.
         max_content = max(1, width - 4)
         labels = [
             entry.display + (f" {entry.arg_hint}" if entry.arg_hint else "")
             for entry in matches
         ]
         name_col = max((cell_len(label) for label in labels), default=0)
-        name_col = max(1, min(name_col, max(1, max_content - prefix_width - gap - 8)))
+        name_col = max(1, min(name_col, max(1, max_content - gap - 8)))
 
-        available = max(1, min(_SLASH_MENU_MAX_ROWS, max(1, layout.body_height - 3)))
+        # A taller terminal earns a taller window: about a third of the body,
+        # clamped between the min and max row counts.
+        max_rows = max(_SLASH_MENU_MIN_ROWS, min(_SLASH_MENU_MAX_ROWS, layout.body_height // 3))
+        available = max(1, min(max_rows, max(1, layout.body_height - 3)))
         total = len(matches)
         windowed = total > available
         if not windowed:
@@ -1790,15 +1871,17 @@ class HeadsupApp(AltScreenApp):
             start = max(0, min(start, total - count))
             self._slash_menu_scroll = start
 
-        rows = [
-            self._slash_menu_row(
-                matches[index],
+        rows: list[tuple[Text, bool]] = [
+            (
+                self._slash_menu_row(
+                    matches[index],
+                    index == selected,
+                    query,
+                    name_col,
+                    gap,
+                    max_content,
+                ),
                 index == selected,
-                query,
-                name_col,
-                prefix_width,
-                gap,
-                max_content,
             )
             for index in range(start, start + count)
         ]
@@ -1809,13 +1892,19 @@ class HeadsupApp(AltScreenApp):
         # vanishes mid-scroll and jostles the layout.
         if windowed:
             hidden = total - (start + count)
-            tail = f"   +{hidden} more" if hidden > 0 else "   no more"
-            rows.append(Text(tail, style="dim", no_wrap=True, overflow="crop"))
+            tail = f"+{hidden} more" if hidden > 0 else "no more"
+            rows.append((Text(tail, style="dim", no_wrap=True, overflow="crop"), False))
         # Shrink-wrap the box to its widest row so it stays compact and left of the
-        # transcript, then frame each row to that one width.
-        content = max(1, min(max((cell_len(row.plain) for row in rows), default=1), max_content))
+        # transcript, then frame each row to that one width. The selected row's
+        # caret is painted into the box gutter, so command text (and its leading
+        # "/") starts at the same column as the input field's draft.
+        content = max(1, min(max((cell_len(row.plain) for row, _ in rows), default=1), max_content))
         box_width = content + 4
-        return [box_top(box_width)] + [box_row(row, box_width) for row in rows]
+        framed = [box_top(box_width)]
+        for row, is_selected in rows:
+            gutter = Text("›", style="bold cyan") if is_selected else " "
+            framed.append(box_row(row, box_width, gutter=gutter))
+        return framed
 
     def _slash_menu_row(
         self,
@@ -1823,12 +1912,10 @@ class HeadsupApp(AltScreenApp):
         selected: bool,
         query: str,
         name_col: int,
-        prefix_width: int,
         gap: int,
         width: int,
     ) -> Text:
         line = Text(no_wrap=True, overflow="crop")
-        line.append(" › " if selected else "   ", style="bold cyan" if selected else "")
 
         # Keep the command (and its leading "/") aqua on every row — including
         # the selected one, which used to render bright white. The match accent
@@ -1837,11 +1924,9 @@ class HeadsupApp(AltScreenApp):
         accent_style = "bold bright_cyan" if selected else "bold cyan"
         display = entry.display
         needle = query.lower()
-        pos = entry.name.lower().find(needle) if needle else -1
+        pos = display.lower().find(needle) if needle else -1
         if pos >= 0:
-            # Offset by 1 for the leading "/" in display so the matched portion
-            # of the command name is accented.
-            a_start, a_end = 1 + pos, 1 + pos + len(needle)
+            a_start, a_end = pos, pos + len(needle)
             line.append(display[:a_start], style=base_style)
             line.append(display[a_start:a_end], style=accent_style)
             line.append(display[a_end:], style=base_style)
@@ -1855,12 +1940,31 @@ class HeadsupApp(AltScreenApp):
             label_len += 1 + cell_len(entry.arg_hint)
 
         line.append(" " * max(1, name_col + gap - label_len))
-        summary_avail = max(0, width - prefix_width - name_col - gap)
+        summary_avail = max(0, width - name_col - gap)
         # The summary stays an even dim on every row; the highlighted row is marked
-        # by its " › " caret and brighter command, not a white summary that would
+        # by its gutter caret and brighter command, not a white summary that would
         # make the selected row read as a different colour from the rest.
         line.append(clip_text(entry.summary, summary_avail), style="dim")
         return line
+
+    def _slash_menu_hint_row(self, width: int, popup_width: int) -> Text:
+        """The popup's key hints, painted beside its bottom row.
+
+        This row sits where the regular footer hints sit while the popup is
+        closed; the popup's bottom row is overlaid onto its left cells, so the
+        hints start just past the popup's right border. When the popup leaves
+        too little room even for the short form, the row stays blank -- a
+        mid-word crop would read worse than no hints.
+        """
+        pad = popup_width + 2
+        available = width - pad
+        for hints in (_SLASH_MENU_HINTS, _SLASH_MENU_HINTS_SHORT):
+            if cell_len(hints) <= available:
+                line = Text(no_wrap=True, overflow="crop")
+                line.append(" " * pad)
+                line.append(hints, style="dim italic")
+                return line
+        return Text("")
 
     def _scroll_transcript(self, delta: int) -> None:
         self.scroll_offset = max(0, self.scroll_offset + delta)

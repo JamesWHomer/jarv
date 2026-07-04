@@ -384,12 +384,22 @@ def _styled_line(text: str, style: str) -> Text:
     return line
 
 
-def box_row(content: Text, width: int, *, style: str = PROMPT_BOX_BORDER_STYLE) -> Text:
+def box_row(
+    content: Text,
+    width: int,
+    *,
+    style: str = PROMPT_BOX_BORDER_STYLE,
+    gutter: Text | str = " ",
+) -> Text:
     """Frame one content line between the box's side borders.
 
     The content is padded with a one-cell gutter inside each border (dropped only
     when the box is too narrow for it) and clipped to fit, so every row in the
     box -- popup suggestion or input line -- lines its borders up exactly.
+
+    ``gutter`` replaces the single left gutter cell; the slash-command popup puts
+    its selection caret there so command text starts at the same column as the
+    input field's draft (and its leading ``/`` lines up with the drafts's).
     """
     content_width = max(1, width - 4)
     has_gutter = width >= 4
@@ -398,7 +408,10 @@ def box_row(content: Text, width: int, *, style: str = PROMPT_BOX_BORDER_STYLE) 
     line = Text(no_wrap=True, overflow="crop")
     line.append("│", style=style)
     if has_gutter:
-        line.append(" ")
+        if isinstance(gutter, Text):
+            line.append_text(gutter)
+        else:
+            line.append(gutter)
     line.append_text(body)
     padding = max(0, content_width - cell_len(body.plain))
     if padding:

@@ -120,12 +120,22 @@ def _handle_heads_up_slash_command(
     if not handled:
         console = _console()
         console.print(f"[red]Unknown command:[/red] {command}")
+        _print_command_suggestions(command)
         if unknown_help_hint:
             console.print("[dim]Run [bold]/help[/bold] for a list of commands.[/dim]")
         return config, client
     if args is not None and command in CONFIG_MUTATING_COMMANDS:
         return _reload_heads_up_runtime(config, client, args)
     return config, client
+
+
+def _print_command_suggestions(command: str) -> None:
+    from .command_registry import suggest_commands
+
+    suggestions = suggest_commands(command)
+    if suggestions:
+        formatted = ", ".join(f"[bold]/{name}[/bold]" for name in suggestions)
+        _console().print(f"[dim]Did you mean {formatted}?[/dim]")
 
 
 def _maybe_command(first_word: str, rest: list[str]) -> tuple[bool, str, list[str]] | None:
@@ -279,6 +289,7 @@ def main() -> None:
             return
         if not _run_slash_command(command, query_parts[1:]):
             console.print(f"[red]Unknown command:[/red] {command}")
+            _print_command_suggestions(command)
             console.print("[dim]Run [bold]jarv /help[/bold] for a list of commands.[/dim]")
         return
 
