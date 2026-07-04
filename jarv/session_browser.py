@@ -30,7 +30,9 @@ from .session_store import archive_session_files, delete_session_files, unarchiv
 from .tui_frame import panel_width
 from .tui_layout import append_bottom_footer, clip_text
 from .tui_overlay import (
+    SELECTION_KEYS,
     apply_scroll_keys,
+    apply_selection_keys,
     body_content_rows,
     clamp_scroll_offset,
     clamp_selection_scroll,
@@ -1012,29 +1014,13 @@ class SessionBrowserScreen(AltScreenApp):
         sel = self._selected_pos(visible) if visible else 0
         cur = visible[sel] if visible else None
 
-        if key in ("UP", "LEFT"):
-            if visible:
-                self.selected_sid = visible[max(0, sel - repeat_count)]["sid"]
-            self.ghost_sid = None
-        elif key in ("DOWN", "RIGHT"):
-            if visible:
-                self.selected_sid = visible[min(n_vis - 1, sel + repeat_count)]["sid"]
-            self.ghost_sid = None
-        elif key == "HOME":
-            if visible:
-                self.selected_sid = visible[0]["sid"]
-            self.ghost_sid = None
-        elif key == "END":
-            if visible:
-                self.selected_sid = visible[n_vis - 1]["sid"]
-            self.ghost_sid = None
-        elif key == "PAGEUP":
-            if visible:
-                self.selected_sid = visible[max(0, sel - (self._max_vis() * repeat_count))]["sid"]
-            self.ghost_sid = None
-        elif key == "PAGEDOWN":
-            if visible:
-                self.selected_sid = visible[min(n_vis - 1, sel + (self._max_vis() * repeat_count))]["sid"]
+        nav_key = {"LEFT": "UP", "RIGHT": "DOWN"}.get(key, key)
+        if nav_key in SELECTION_KEYS:
+            nav = apply_selection_keys(
+                nav_key, repeat_count, selected=sel, total=n_vis, page=self._max_vis()
+            )
+            if nav is not None:
+                self.selected_sid = visible[nav]["sid"]
             self.ghost_sid = None
         elif key == "ENTER":
             if cur is not None:

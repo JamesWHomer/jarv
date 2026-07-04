@@ -23,7 +23,7 @@ from .session_tree import build_tree, delete_subtree, leaf_of, parent_id_of
 from .tui_app import AltScreenApp
 from .tui_frame import panel_width, wrap_frame
 from .tui_layout import append_bottom_footer, clip_text
-from .tui_overlay import body_content_rows, clamp_selection_scroll
+from .tui_overlay import apply_selection_keys, body_content_rows, clamp_selection_scroll
 
 @dataclass
 class TreeOutcome:
@@ -214,24 +214,15 @@ class TreeBrowserScreen(AltScreenApp):
             self.flash = None
 
         node = self.nodes[self.selected]
-        if key == "UP":
-            self.selected = max(0, self.selected - repeat)
-        elif key == "DOWN":
-            self.selected = min(n - 1, self.selected + repeat)
+        nav = apply_selection_keys(key, repeat, selected=self.selected, total=n, page=self._page())
+        if nav is not None:
+            self.selected = nav
         elif key == "LEFT":
             if node.parent is not None:
                 self.selected = self.index_by_id[id(node.parent)]
         elif key == "RIGHT":
             if node.children:
                 self.selected = self.index_by_id[id(node.children[0])]
-        elif key == "HOME":
-            self.selected = 0
-        elif key == "END":
-            self.selected = n - 1
-        elif key == "PAGEUP":
-            self.selected = max(0, self.selected - self._page() * repeat)
-        elif key == "PAGEDOWN":
-            self.selected = min(n - 1, self.selected + self._page() * repeat)
         elif key in ("ENTER", "o", "O"):
             if node.children:
                 # Enter on a parent used to silently resume its leaf, which read

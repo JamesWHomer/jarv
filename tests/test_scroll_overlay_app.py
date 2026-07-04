@@ -15,8 +15,10 @@ from rich.text import Text
 from jarv.tui_overlay import (
     ScrollOverlayState,
     apply_scroll_keys,
+    apply_selection_keys,
     body_content_rows,
     run_scroll_live,
+    scroll_key_delta,
 )
 
 
@@ -99,3 +101,30 @@ def test_scroll_overlay_custom_on_key_can_close():
         [("x", 1)], on_key=lambda key, repeat, st: True, close_keys=frozenset()
     )
     assert rendered  # painted at least once before closing
+
+
+def test_apply_selection_keys_clamps_at_both_ends():
+    assert apply_selection_keys("UP", 5, selected=2, total=10, page=4) == 0
+    assert apply_selection_keys("DOWN", 5, selected=8, total=10, page=4) == 9
+    assert apply_selection_keys("HOME", 1, selected=7, total=10, page=4) == 0
+    assert apply_selection_keys("END", 1, selected=0, total=10, page=4) == 9
+
+
+def test_apply_selection_keys_multiplies_page_by_repeat():
+    assert apply_selection_keys("PAGEDOWN", 2, selected=0, total=100, page=10) == 20
+    assert apply_selection_keys("PAGEUP", 2, selected=25, total=100, page=10) == 5
+
+
+def test_apply_selection_keys_ignores_non_nav_keys_and_empty_lists():
+    assert apply_selection_keys("ENTER", 1, selected=0, total=10, page=4) is None
+    assert apply_selection_keys("x", 1, selected=0, total=10, page=4) is None
+    assert apply_selection_keys("UP", 1, selected=0, total=0, page=4) is None
+
+
+def test_scroll_key_delta_maps_page_and_wheel_keys():
+    assert scroll_key_delta("PAGEUP", 1) == 5
+    assert scroll_key_delta("PAGEDOWN", 2) == -10
+    assert scroll_key_delta("MOUSE_WHEEL_UP", 2) == 6
+    assert scroll_key_delta("MOUSE_WHEEL_PAGEDOWN", 1) == -5
+    assert scroll_key_delta("UP", 1) is None
+    assert scroll_key_delta("ENTER", 1) is None

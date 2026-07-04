@@ -78,6 +78,7 @@ from .tui_frame import (
     window_transcript,
 )
 from .tui_layout import clip_text
+from .tui_overlay import scroll_key_delta
 from .usage import format_cost, known_context_window, load_usage, usage_cost_summary, usage_file_for
 
 
@@ -667,23 +668,9 @@ class HeadsupApp(AltScreenApp):
             if self._handle_prompt_dismiss():
                 self.stop()
             return
-        if key == "PAGEUP":
-            self._scroll_transcript(5 * repeat)
-            return
-        if key == "PAGEDOWN":
-            self._scroll_transcript(-5 * repeat)
-            return
-        if key == "MOUSE_WHEEL_UP":
-            self._scroll_transcript(3 * repeat)
-            return
-        if key == "MOUSE_WHEEL_DOWN":
-            self._scroll_transcript(-3 * repeat)
-            return
-        if key == "MOUSE_WHEEL_PAGEUP":
-            self._scroll_transcript(5 * repeat)
-            return
-        if key == "MOUSE_WHEEL_PAGEDOWN":
-            self._scroll_transcript(-5 * repeat)
+        scroll_delta = scroll_key_delta(key, repeat)
+        if scroll_delta is not None:
+            self._scroll_transcript(scroll_delta)
             return
         if key in {"UP", "DOWN", "TAB"}:
             # The autocomplete menu owns these keys whenever it is open, taking
