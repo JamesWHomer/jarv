@@ -753,12 +753,24 @@ def record_response_usage(
             return
         requested_model = model
         served_model = _value(response, "model")
+        provider_name = str(provider or "").lower()
         if (
-            str(provider or "").lower() == "openrouter"
+            provider_name == "openrouter"
             and isinstance(served_model, str)
             and served_model.strip()
         ):
             model = served_model.strip()
+        elif (
+            provider_name == "anthropic"
+            and isinstance(served_model, str)
+            and served_model.strip()
+        ):
+            # A safety-classifier refusal fallback bills at the fallback
+            # model's own rates, so attribute the turn to the serving model.
+            from .anthropic_http import served_by_fallback
+
+            if served_by_fallback(response):
+                model = served_model.strip()
 
         token_usage = usage_from_response(response)
         if token_usage is None:

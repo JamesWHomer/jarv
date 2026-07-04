@@ -157,6 +157,15 @@ def response_output_text(response: Any) -> str:
     return "".join(chunks)
 
 
+def provider_response_notice(config: dict, response: Any) -> str | None:
+    """Provider-reported condition the user should see (e.g. a safety fallback)."""
+    if get_backend(config) != "anthropic":
+        return None
+    from .anthropic_http import fallback_notice
+
+    return fallback_notice(response)
+
+
 def _has_reasoning_signal(obj: Any) -> bool:
     """Return True when a provider stream object exposes reasoning/thinking data."""
     if obj is None:

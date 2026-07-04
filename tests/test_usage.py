@@ -287,6 +287,59 @@ class UsageRecordingTests(unittest.TestCase):
         self.assertEqual(usage["last_request"]["provider_cost_usd"], 7.125)
         self.assertEqual(usage["totals"]["cost_exact_request_count"], 1)
 
+    def test_anthropic_fallback_attributes_usage_to_serving_model(self):
+        with TemporaryDirectory() as tmp:
+            usage_path = Path(tmp) / "usage-test.json"
+            response = {
+                "model": "claude-opus-4-8",
+                "content": [
+                    {
+                        "type": "fallback",
+                        "from": {"model": "claude-fable-5"},
+                        "to": {"model": "claude-opus-4-8"},
+                    },
+                    {"type": "text", "text": "hi"},
+                ],
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            }
+
+            record_response_usage(
+                usage_path,
+                "session-id",
+                "claude-fable-5",
+                response=response,
+                source="root",
+                provider="anthropic",
+                record_global=False,
+            )
+            usage = load_usage(usage_path, "session-id")
+
+        self.assertEqual(usage["last_request"]["model"], "claude-opus-4-8")
+        self.assertEqual(usage["last_request"]["requested_model"], "claude-fable-5")
+
+    def test_anthropic_without_fallback_keeps_requested_model(self):
+        with TemporaryDirectory() as tmp:
+            usage_path = Path(tmp) / "usage-test.json"
+            response = {
+                "model": "claude-fable-5-20260601",
+                "content": [{"type": "text", "text": "hi"}],
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            }
+
+            record_response_usage(
+                usage_path,
+                "session-id",
+                "claude-fable-5",
+                response=response,
+                source="root",
+                provider="anthropic",
+                record_global=False,
+            )
+            usage = load_usage(usage_path, "session-id")
+
+        self.assertEqual(usage["last_request"]["model"], "claude-fable-5")
+        self.assertNotIn("requested_model", usage["last_request"])
+
     def test_openrouter_zero_cost_for_priced_model_is_estimated(self):
         with TemporaryDirectory() as tmp:
             usage_path = Path(tmp) / "usage-test.json"
