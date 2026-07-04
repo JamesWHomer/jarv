@@ -62,7 +62,6 @@ def _openai_strict_schema(schema: Any) -> Any:
 
 
 _ANTHROPIC_UNSUPPORTED_SCHEMA_KEYS = {
-    "additionalProperties",
     "exclusiveMaximum",
     "exclusiveMinimum",
     "maximum",
@@ -84,11 +83,14 @@ def anthropic_tool_schema(schema: Any) -> Any:
     if not isinstance(schema, dict):
         return deepcopy(schema)
 
-    return {
+    out = {
         key: anthropic_tool_schema(value)
         for key, value in schema.items()
         if key not in _ANTHROPIC_UNSUPPORTED_SCHEMA_KEYS
     }
+    if out.get("type") == "object" or "properties" in out:
+        out["additionalProperties"] = False
+    return out
 
 
 def strict_openai_tools(tools: list[dict]) -> list[dict]:
