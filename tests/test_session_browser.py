@@ -1,8 +1,7 @@
 import io
 from collections import deque
-from contextlib import contextmanager
 
-from conftest import SnapshotLive
+from conftest import SnapshotLive, neutralize_tui_modes
 from rich.console import Console
 
 from jarv import session_browser
@@ -11,11 +10,6 @@ from jarv import session_browser
 class TtyStdin:
     def isatty(self):
         return True
-
-
-@contextmanager
-def noop_context(*_args, **_kwargs):
-    yield
 
 
 def _run_sessions_with_keys(monkeypatch, keys):
@@ -42,11 +36,11 @@ def _run_sessions_with_keys(monkeypatch, keys):
         height=24,
     )
 
+    neutralize_tui_modes(monkeypatch)
     monkeypatch.setattr(session_browser.sys, "stdin", TtyStdin())
     monkeypatch.setattr(session_browser, "console", test_console)
     monkeypatch.setattr(session_browser, "terminal_size", lambda *, console: (100, 24))
     monkeypatch.setattr(session_browser, "Live", SnapshotLive)
-    monkeypatch.setattr(session_browser, "mouse_capture", noop_context)
     monkeypatch.setattr(session_browser, "detect_terminal", lambda: ("term-1", "Terminal 1"))
     monkeypatch.setattr(session_browser, "load_sessions", lambda: data)
     monkeypatch.setattr(session_browser, "save_sessions", lambda _data: None)
