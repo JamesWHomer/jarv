@@ -738,59 +738,42 @@ class _TurnRenderer:
             )
 
 
-def run_agent(
-    query: str,
-    config: dict,
-    client=None,
-    propagate_keyboard_interrupt: bool = False,
-    new_session: bool = False,
-    incognito: bool = False,
-    heads_up: bool = False,
-    ui=None,
-) -> AgentRunResult:
-    config = dict(config)
-    config["tool_call_display"] = resolve_tool_call_display(
-        config,
-        heads_up=heads_up,
-    )
-    interactive = sys.stdout.isatty() and ui is None
-    history: list = []
-    metadata: dict = {}
-    session_context = None
-    artifact_file = None
-    artifact_store = None
-    reads_file = None
-    retained_store = None
-    usage_path = None
-    persistence = SessionPersistence(incognito=incognito)
-    active_tool_call = None
-    pending_status_history_items: list[dict] = []
-    # The terminal-control help line is sent on the first interactive waiting
-    # prompt of the session only; later prompts carry just state.
-    interactive_help = {"sent": False}
-    cancellation_token = CancellationToken()
-    renderer = _TurnRenderer(
-        ui=ui,
-        interactive=interactive,
-        status_items=pending_status_history_items,
-        metadata=metadata,
-    )
-    _ui_call(ui, "bind_cancel_token", cancellation_token)
-    _ui_call(ui, "start_turn", query, config)
-    renderer.start_response_wait_now()
+class TurnCheckpointer:
+    """Persists partial turn state when a run errors or is cancelled.
 
-    def _flush_error_state() -> None:
-        if pending_status_history_items:
-            history.extend(pending_status_history_items)
-            pending_status_history_items.clear()
+    Reads the always-synced ``persistence.history`` / ``renderer.metadata``
+    instead of closing over run-locals that are rebound during session prep.
+    ``active_tool_call`` mirrors the tool currently executing so a cancel can
+    distinguish "may have made partial changes" from "never ran".
+    """
+
+    def __init__(self, *, persistence: SessionPersistence, renderer: _TurnRenderer,
+                 status_items: list[dict]):
+        self.persistence = persistence
+        self.renderer = renderer
+        self.status_items = status_items  # shared pending_status_history_items list
+        self.active_tool_call = None
+
+    def flush_status_items(self) -> None:
+        if self.status_items:
+            self.persistence.history.extend(self.status_items)
+            self.status_items.clear()
+
+    def flush_error_state(self) -> None:
+        self.flush_status_items()
+        history = self.persistence.history
+        renderer = self.renderer
         if renderer.reply_text and not renderer.tool_calls:
-            history.append({"role": "assistant", "content": renderer.reply_text, **metadata})
-        persistence.save()
+            history.append(
+                {"role": "assistant", "content": renderer.reply_text, **renderer.metadata}
+            )
+        self.persistence.save()
 
-    def _checkpoint_cancelled_turn() -> None:
-        if pending_status_history_items:
-            history.extend(pending_status_history_items)
-            pending_status_history_items.clear()
+    def checkpoint_cancelled_turn(self) -> None:
+        self.flush_status_items()
+        history = self.persistence.history
+        renderer = self.renderer
+        metadata = renderer.metadata
 
         recorded_reasoning_ids = {
             str(item.get("id"))
@@ -818,8 +801,8 @@ def run_agent(
             if isinstance(item, dict) and item.get("type") == "function_call"
         }
         active_call_id = (
-            str(active_tool_call.call_id)
-            if active_tool_call is not None else None
+            str(self.active_tool_call.call_id)
+            if self.active_tool_call is not None else None
         )
         for item in renderer.tool_calls:
             if str(item.call_id) in recorded_call_ids:
@@ -853,7 +836,211 @@ def run_agent(
             "content": "[Turn cancelled by user.]",
             **metadata,
         })
-        persistence.save_turn()
+        self.persistence.save_turn()
+
+
+def _advance_interactive_continuation(
+    pending: PendingRunCommand,
+    renderer: _TurnRenderer,
+    input_items: list,
+    *,
+    config: dict,
+    cancellation_token: CancellationToken,
+    retained_store,
+    ui,
+    interactive_help: dict,
+) -> tuple[list, "PendingRunCommand | None"]:
+    """One model->stdin->process round of a held-open interactive command.
+
+    Returns ``(new input items, still-pending command or None)``. The model's
+    control reply and the next prompt stay in the live conversation only;
+    history keeps just the one collapsed run_command record.
+    """
+    if renderer.tool_calls:
+        # A stray mid-interaction tool call: remind and re-prompt without
+        # touching the process.
+        return (
+            input_items + [{
+                "role": "user",
+                "content": _interactive_tool_call_reminder(),
+            }],
+            pending,
+        )
+    # Capture the decision time now (before ``_continue`` adds the process
+    # wait) so it lands on this step's "·N.Ns" marker.
+    decision_seconds = max(0.0, time.perf_counter() - renderer.thought_started)
+    terminal_reply = renderer.reply_text
+    input_items = input_items + [{
+        "role": "assistant",
+        "content": terminal_reply,
+    }]
+    snapshot, terminal_action, terminal_kind = _continue_interactive_command(
+        pending,
+        terminal_reply,
+        config=config,
+        cancellation_token=cancellation_token,
+    )
+    _record_interactive_input(pending, terminal_kind, terminal_action)
+    # Grow the single open card in place instead of printing a fresh box:
+    # append this step's stdin marker + delta output and let the footer
+    # resolve to the new waiting/exit state.
+    pending.card.add_step(
+        _interaction_marker_text(terminal_kind, terminal_action),
+        snapshot.to_delta_command_result().full_model_output(),
+        decision_seconds,
+        exited=snapshot.exited,
+        exit_code=snapshot.exit_code if snapshot.exited else None,
+        check_in=bool(getattr(snapshot, "check_in", False)),
+    )
+    _refresh_interactive_card(ui, pending)
+    if snapshot.exited:
+        _close_interactive_card_live(pending)
+        final_output = _format_finished_interactive_output(
+            pending,
+            snapshot,
+            retained_store,
+        )
+        input_items = input_items + [{
+            "role": "user",
+            "content": _run_command_final_prompt(final_output),
+        }]
+        _finalize_interactive_record(pending, final_output)
+        return input_items, None
+    include_help = not interactive_help["sent"]
+    interactive_help["sent"] = True
+    waiting_prompt = _run_command_waiting_prompt(snapshot, include_help=include_help)
+    return (
+        input_items + [{
+            "role": "user",
+            "content": waiting_prompt,
+        }],
+        pending,
+    )
+
+
+def _build_tool_hooks(
+    *,
+    config: dict,
+    history: list,
+    usage_path,
+    session_id: str,
+    cancellation_token: CancellationToken,
+    retained_store,
+    ui,
+    interactive_help: dict,
+    root_node,
+    artifact_store,
+    client,
+) -> ToolExecutionHooks:
+    """Wire the tool-execution callbacks for a run.
+
+    The dispatch functions are referenced as module globals at call time so
+    tests patching ``jarv.agent._dispatch_*`` keep intercepting.
+    """
+    from .session_render import tool_call_card_from_args
+
+    def _on_tool_error(message: str) -> None:
+        if ui is not None:
+            _ui_call(ui, "show_error", message)
+        else:
+            console.print(f"[red]{message}[/red]")
+
+    def _on_parallel_read(_item, read_args: dict) -> None:
+        _print_tool_card(
+            tool_call_card_from_args(
+                "read",
+                read_args,
+                display_mode=get_setting(config, "tool_call_display"),
+            ),
+            config,
+            ui=ui,
+        )
+
+    def _on_parallel_web_search(_item, search_args: dict) -> None:
+        _print_tool_card(
+            tool_call_card_from_args(
+                "web_search",
+                search_args,
+                display_mode=get_setting(config, "tool_call_display"),
+            ),
+            config,
+            ui=ui,
+        )
+
+    return ToolExecutionHooks(
+        on_parallel_read=_on_parallel_read,
+        on_parallel_web_search=_on_parallel_web_search,
+        run_command=lambda args: _dispatch_run_command_with_ui(
+            args,
+            config,
+            history,
+            usage_path=usage_path,
+            session_id=session_id,
+            cancellation_token=cancellation_token,
+            retained_store=retained_store,
+            ui=ui,
+            interactive_help=interactive_help,
+        ),
+        run_spawn=lambda args: _dispatch_spawn_with_ui(
+            args,
+            root_node,
+            artifact_store,
+            client,
+            config,
+            cancellation_token=cancellation_token,
+            retained_store=retained_store,
+            ui=ui,
+        ),
+        run_ask_user=lambda args: _dispatch_ask_user(args, config, ui=ui),
+        on_tool_error=_on_tool_error,
+    )
+
+
+def run_agent(
+    query: str,
+    config: dict,
+    client=None,
+    propagate_keyboard_interrupt: bool = False,
+    new_session: bool = False,
+    incognito: bool = False,
+    heads_up: bool = False,
+    ui=None,
+) -> AgentRunResult:
+    config = dict(config)
+    config["tool_call_display"] = resolve_tool_call_display(
+        config,
+        heads_up=heads_up,
+    )
+    interactive = sys.stdout.isatty() and ui is None
+    history: list = []
+    metadata: dict = {}
+    session_context = None
+    artifact_file = None
+    artifact_store = None
+    reads_file = None
+    retained_store = None
+    usage_path = None
+    persistence = SessionPersistence(incognito=incognito)
+    persistence.history = history
+    pending_status_history_items: list[dict] = []
+    # The terminal-control help line is sent on the first interactive waiting
+    # prompt of the session only; later prompts carry just state.
+    interactive_help = {"sent": False}
+    cancellation_token = CancellationToken()
+    renderer = _TurnRenderer(
+        ui=ui,
+        interactive=interactive,
+        status_items=pending_status_history_items,
+        metadata=metadata,
+    )
+    checkpointer = TurnCheckpointer(
+        persistence=persistence,
+        renderer=renderer,
+        status_items=pending_status_history_items,
+    )
+    _ui_call(ui, "bind_cancel_token", cancellation_token)
+    _ui_call(ui, "start_turn", query, config)
+    renderer.start_response_wait_now()
 
     sigint_cancel_scope = cancel_token_on_sigint(cancellation_token)
     try:
@@ -925,11 +1112,6 @@ def run_agent(
         while True:
             renderer.begin_turn(pending_interactive_command)
 
-            def append_status_history_items() -> None:
-                if pending_status_history_items:
-                    history.extend(pending_status_history_items)
-                    pending_status_history_items.clear()
-
             renderer.ensure_response_wait()
 
             # Keep the full tool list on every turn, including interactive
@@ -996,144 +1178,48 @@ def run_agent(
                     print(renderer.reply_text)
 
             if pending_interactive_command is not None:
-                append_status_history_items()
-                if renderer.tool_calls:
-                    kwargs["input"] = kwargs["input"] + [{
-                        "role": "user",
-                        "content": _interactive_tool_call_reminder(),
-                    }]
-                    continue
-                # The model's control reply and the next prompt stay in the live
-                # ``kwargs["input"]`` conversation only; history keeps just the one
-                # collapsed run_command record (rewritten via the helpers below).
-                # Capture the decision time now (before ``_continue`` adds the
-                # process wait) so it lands on this step's "·N.Ns" marker.
-                decision_seconds = max(
-                    0.0, time.perf_counter() - renderer.thought_started
-                )
-                terminal_reply = renderer.reply_text
-                kwargs["input"] = kwargs["input"] + [{
-                    "role": "assistant",
-                    "content": terminal_reply,
-                }]
-                snapshot, terminal_action, terminal_kind = _continue_interactive_command(
-                    pending_interactive_command,
-                    terminal_reply,
-                    config=config,
-                    cancellation_token=cancellation_token,
-                )
-                _record_interactive_input(
-                    pending_interactive_command,
-                    terminal_kind,
-                    terminal_action,
-                )
-                # Grow the single open card in place instead of printing a fresh
-                # box: append this step's stdin marker + delta output and let the
-                # footer resolve to the new waiting/exit state.
-                pending_interactive_command.card.add_step(
-                    _interaction_marker_text(terminal_kind, terminal_action),
-                    snapshot.to_delta_command_result().full_model_output(),
-                    decision_seconds,
-                    exited=snapshot.exited,
-                    exit_code=snapshot.exit_code if snapshot.exited else None,
-                    check_in=bool(getattr(snapshot, "check_in", False)),
-                )
-                _refresh_interactive_card(ui, pending_interactive_command)
-                if snapshot.exited:
-                    _close_interactive_card_live(pending_interactive_command)
-                    final_output = _format_finished_interactive_output(
+                checkpointer.flush_status_items()
+                kwargs["input"], pending_interactive_command = (
+                    _advance_interactive_continuation(
                         pending_interactive_command,
-                        snapshot,
-                        retained_store,
-                    )
-                    kwargs["input"] = kwargs["input"] + [{
-                        "role": "user",
-                        "content": _run_command_final_prompt(final_output),
-                    }]
-                    _finalize_interactive_record(
-                        pending_interactive_command,
-                        final_output,
-                    )
-                    pending_interactive_command = None
-                else:
-                    include_help = not interactive_help["sent"]
-                    interactive_help["sent"] = True
-                    waiting_prompt = _run_command_waiting_prompt(
-                        snapshot, include_help=include_help
-                    )
-                    kwargs["input"] = kwargs["input"] + [{
-                        "role": "user",
-                        "content": waiting_prompt,
-                    }]
-                continue
-
-            if renderer.tool_calls:
-                from .session_render import tool_call_card_from_args
-
-                print_mode_spacer(config)
-                append_status_history_items()
-
-                def _on_tool_error(message: str) -> None:
-                    if ui is not None:
-                        _ui_call(ui, "show_error", message)
-                    else:
-                        console.print(f"[red]{message}[/red]")
-
-                def _on_parallel_read(_item, read_args: dict) -> None:
-                    _print_tool_card(
-                        tool_call_card_from_args(
-                            "read",
-                            read_args,
-                            display_mode=get_setting(config, "tool_call_display"),
-                        ),
-                        config,
-                        ui=ui,
-                    )
-
-                def _on_parallel_web_search(_item, search_args: dict) -> None:
-                    _print_tool_card(
-                        tool_call_card_from_args(
-                            "web_search",
-                            search_args,
-                            display_mode=get_setting(config, "tool_call_display"),
-                        ),
-                        config,
-                        ui=ui,
-                    )
-
-                tool_hooks = ToolExecutionHooks(
-                    on_parallel_read=_on_parallel_read,
-                    on_parallel_web_search=_on_parallel_web_search,
-                    run_command=lambda args: _dispatch_run_command_with_ui(
-                        args,
-                        config,
-                        history,
-                        usage_path=usage_path,
-                        session_id=session_context.session_id,
+                        renderer,
+                        kwargs["input"],
+                        config=config,
                         cancellation_token=cancellation_token,
                         retained_store=retained_store,
                         ui=ui,
                         interactive_help=interactive_help,
-                    ),
-                    run_spawn=lambda args: _dispatch_spawn_with_ui(
-                        args,
-                        root_node,
-                        artifact_store,
-                        client,
-                        config,
-                        cancellation_token=cancellation_token,
-                        retained_store=retained_store,
-                        ui=ui,
-                    ),
-                    run_ask_user=lambda args: _dispatch_ask_user(args, config, ui=ui),
-                    on_tool_error=_on_tool_error,
+                    )
+                )
+                continue
+
+            if renderer.tool_calls:
+                print_mode_spacer(config)
+                checkpointer.flush_status_items()
+
+                tool_hooks = _build_tool_hooks(
+                    config=config,
+                    history=history,
+                    usage_path=usage_path,
+                    session_id=session_context.session_id,
+                    cancellation_token=cancellation_token,
+                    retained_store=retained_store,
+                    ui=ui,
+                    interactive_help=interactive_help,
+                    root_node=root_node,
+                    artifact_store=artifact_store,
+                    client=client,
                 )
 
-                active_tool_call = renderer.tool_calls[0] if renderer.tool_calls else None
+                checkpointer.active_tool_call = (
+                    renderer.tool_calls[0] if renderer.tool_calls else None
+                )
 
                 def _execute_tools(_new_input, append_tool_result):
-                    nonlocal active_tool_call, web_search_read_nudge_sent
-                    active_tool_call = renderer.tool_calls[0] if renderer.tool_calls else None
+                    nonlocal web_search_read_nudge_sent
+                    checkpointer.active_tool_call = (
+                        renderer.tool_calls[0] if renderer.tool_calls else None
+                    )
                     result = execute_tool_calls(
                         renderer.tool_calls,
                         node=root_node,
@@ -1147,7 +1233,7 @@ def run_agent(
                         web_search_read_nudge_sent=web_search_read_nudge_sent,
                     )
                     web_search_read_nudge_sent = result.web_search_read_nudge_sent
-                    active_tool_call = None
+                    checkpointer.active_tool_call = None
                     return result
 
                 kwargs["input"], _exec_result = run_tool_execution_round(
@@ -1167,7 +1253,7 @@ def run_agent(
                         pending_interactive_command, history
                     )
             else:
-                append_status_history_items()
+                checkpointer.flush_status_items()
                 history.append({"role": "assistant", "content": renderer.reply_text, **metadata})
                 persistence.save_turn()
                 _print_agent_usage_if_enabled(
@@ -1193,7 +1279,7 @@ def run_agent(
             if callable(getattr(pending, "unregister_cancel", None)):
                 pending.unregister_cancel()
         if session_context is not None:
-            _checkpoint_cancelled_turn()
+            checkpointer.checkpoint_cancelled_turn()
         return AgentRunResult(cancelled=True, prompt=query)
     except (ProviderError, Exception) as e:
         _close_interactive_card_live(locals().get("pending_interactive_command"))
@@ -1204,7 +1290,7 @@ def run_agent(
         else:
             style = "red"
             console.print(f"[{style}]{label}:[/{style}] {escape(str(e))}")
-        _flush_error_state()
+        checkpointer.flush_error_state()
         return AgentRunResult(error=str(e))
     finally:
         sigint_cancel_scope.__exit__(None, None, None)
