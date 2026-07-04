@@ -102,7 +102,10 @@ def test_payload_preserves_signed_thinking_and_tool_history():
         "cache_control": {"type": "ephemeral"},
     }
     assert payload["messages"][2]["content"][0]["type"] == "tool_result"
-    assert payload["tools"][0]["input_schema"] == {"type": "object"}
+    assert payload["tools"][0]["input_schema"] == {
+        "type": "object",
+        "additionalProperties": False,
+    }
     assert payload["tools"][0]["strict"] is True
     assert "input_examples" not in payload["tools"][0]
 
@@ -165,6 +168,7 @@ def test_anthropic_omits_custom_input_examples():
 
     assert payload["tools"][0]["strict"] is True
     assert "input_examples" not in payload["tools"][0]
+    assert payload["tools"][0]["input_schema"]["additionalProperties"] is False
 
 
 def test_anthropic_tool_schema_omits_integer_bounds_without_mutating_tool():
@@ -206,11 +210,11 @@ def test_anthropic_tool_schema_omits_array_and_string_constraints():
     task = child["properties"]["task"]
     deps = child["properties"]["deps"]
 
-    assert "additionalProperties" not in schema
+    assert schema["additionalProperties"] is False
     assert children["type"] == "array"
     assert "minItems" not in children
     assert "maxItems" not in children
-    assert "additionalProperties" not in child
+    assert child["additionalProperties"] is False
     assert label["type"] == "string"
     assert "minLength" not in label
     assert "maxLength" not in label
