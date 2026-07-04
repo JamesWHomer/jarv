@@ -1257,6 +1257,59 @@ class HeadsupTests(unittest.TestCase):
         self.assertEqual(len(heights), 2)
         self.assertEqual(heights[0], heights[1])
 
+    def test_slash_menu_open_does_not_shift_the_transcript(self):
+        # Opening the popup used to hand the footer-hint row to the transcript,
+        # dragging every line down one row. The transcript must keep the same
+        # height (and its lines the same screen rows) whether the popup is open
+        # or closed; the freed row carries the popup's own key hints instead.
+        app, test_console, output = self._app(width=80)
+        anchor = "anchor " * 10  # long enough to peek out past the popup
+        app.add_user_message(anchor.strip())
+
+        closed = self._rendered_text(app, test_console, output, width=80, height=20).splitlines()
+        initialize_text_editor(app.editor, "/se")
+        opened = self._rendered_text(app, test_console, output, width=80, height=20).splitlines()
+
+        def anchor_rows(lines):
+            return [idx for idx, line in enumerate(lines) if "anchor" in line]
+
+        self.assertTrue(anchor_rows(closed))
+        self.assertEqual(anchor_rows(closed), anchor_rows(opened))
+
+    def test_slash_menu_shows_key_hints_beside_popup_when_room_allows(self):
+        # On a wide terminal the row beside the popup's bottom edge teaches the
+        # menu keys -- in the very cells the footer hints use while it's closed.
+        app, test_console, output = self._app(width=160)
+
+        closed = self._rendered_text(app, test_console, output, width=160, height=20)
+        self.assertIn("Enter send", closed)
+
+        initialize_text_editor(app.editor, "/se")
+        opened = self._rendered_text(app, test_console, output, width=160, height=20)
+        self.assertIn("Tab complete", opened)
+        self.assertNotIn("Enter send", opened)
+
+    def test_slash_menu_slash_column_aligns_with_input_draft(self):
+        # The popup's commands and the input field's draft share a column: the
+        # selection caret lives in the box gutter, so every "/" lines up.
+        from jarv.tui_frame import compute_layout
+
+        app, _test_console, _output = self._app(width=80)
+        initialize_text_editor(app.editor, "/se")
+        layout = compute_layout(80, 20)
+        width = layout.inner_width
+
+        popup = app._slash_menu_box(width, layout)
+        field = app._prompt_lines(width, max_lines=layout.max_prompt_rows, menu_open=True)
+
+        selected_row = popup[1].plain
+        unselected_row = popup[2].plain
+        self.assertEqual(selected_row[1], "›")   # caret in the gutter
+        self.assertEqual(selected_row.index("/"), 2)
+        self.assertEqual(unselected_row[1], " ")
+        self.assertEqual(unselected_row.index("/"), 2)
+        self.assertEqual(field[0].plain.index("/"), 2)
+
     def test_slash_menu_is_a_compact_box_docked_onto_the_input_field(self):
         # The popup is compact and left-aligned (no wider than the field, sized to
         # its rows, open at the bottom), and the footer docks it onto the
@@ -1311,7 +1364,7 @@ class HeadsupTests(unittest.TestCase):
         for selected in (True, False):
             row = app._slash_menu_row(
                 matches[0], selected, "se", name_col=12,
-                prefix_width=3, gap=2, width=60,
+                gap=2, width=60,
             )
             summary_styles = {
                 str(span.style) for span in row.spans
@@ -1417,17 +1470,18 @@ class HeadsupTests(unittest.TestCase):
         last_label = app._slash_menu_matches()[-1].display
         self.assertIn(last_label, "\n".join(line.plain for line in bottom_popup))
 
-    def test_slash_menu_tab_runs_parameterless_command(self):
+    def test_slash_menu_tab_completes_without_running(self):
+        # Tab is completion only -- it fills the box with the highlighted
+        # command but never executes it; Enter is the key that runs.
         app, _test_console, _output = self._app()
         handled = []
         app._handle_query = handled.append
-        initialize_text_editor(app.editor, "/settings")
+        initialize_text_editor(app.editor, "/sett")
 
         app.on_key("TAB", 1)
 
-        self.assertEqual(handled, ["/settings"])
-        self.assertEqual(app.editor["buffer"], "")
-        self.assertEqual(app._prompt_history[-1], "/settings")
+        self.assertEqual(handled, [])
+        self.assertEqual(app.editor["buffer"], "/settings")
 
     def test_slash_menu_tab_fills_box_for_parameterized_command(self):
         app, _test_console, _output = self._app()
@@ -1439,8 +1493,11 @@ class HeadsupTests(unittest.TestCase):
 
         self.assertEqual(handled, [])
         self.assertEqual(app.editor["buffer"], "/usage ")
-        # The trailing space closes the menu so the user can type arguments.
-        self.assertEqual(app._slash_menu_matches(), [])
+        # The menu stays open, moving on to the command's argument choices.
+        self.assertEqual(
+            [entry.name for entry in app._slash_menu_matches()],
+            ["session", "day", "week", "month", "all"],
+        )
 
     def test_slash_menu_enter_accepts_highlighted_entry(self):
         app, _test_console, _output = self._app()
@@ -1467,12 +1524,91 @@ class HeadsupTests(unittest.TestCase):
         self.assertEqual(app.editor["buffer"], "")
         self.assertEqual(app._prompt_history[-1], "/usage")
 
-    def test_slash_menu_inactive_once_draft_has_arguments(self):
+    def test_slash_menu_argument_mode_filters_choices(self):
+        # A command with declared argument choices keeps the menu open on the
+        # first argument token and filters the choices the same way.
         app, _test_console, _output = self._app()
-        initialize_text_editor(app.editor, "/set model")
+        initialize_text_editor(app.editor, "/usage d")
 
-        self.assertIsNone(app._slash_menu_query())
+        self.assertEqual(app._slash_menu_context(), ("usage", "d"))
+        self.assertEqual(
+            [entry.name for entry in app._slash_menu_matches()], ["day"]
+        )
+
+    def test_slash_menu_argument_mode_enter_runs_completed_command(self):
+        app, _test_console, _output = self._app()
+        handled = []
+        app._handle_query = handled.append
+        initialize_text_editor(app.editor, "/usage d")
+
+        app.on_key("ENTER", 1)
+
+        self.assertEqual(handled, ["/usage day"])
+        self.assertEqual(app.editor["buffer"], "")
+        self.assertEqual(app._prompt_history[-1], "/usage day")
+
+    def test_slash_menu_argument_mode_enter_submits_bare_command_untyped(self):
+        # "/usage " with nothing typed at the argument position must not
+        # force-pick a highlighted choice -- Enter submits the draft as typed.
+        app, _test_console, _output = self._app()
+        handled = []
+        app._handle_query = handled.append
+        initialize_text_editor(app.editor, "/usage ")
+
+        self.assertTrue(app._slash_menu_matches())
+        app.on_key("ENTER", 1)
+
+        self.assertEqual(handled, ["/usage "])
+        self.assertEqual(app.editor["buffer"], "")
+
+    def test_slash_menu_argument_mode_set_key_expects_a_value(self):
+        # Accepting a /set key completes "/set <key> " (value still expected)
+        # rather than running; the menu then closes for the free-form value.
+        app, _test_console, _output = self._app()
+        handled = []
+        app._handle_query = handled.append
+        initialize_text_editor(app.editor, "/set mod")
+
+        matches = app._slash_menu_matches()
+        self.assertTrue(any(entry.name == "model" for entry in matches))
+        while app._slash_menu_matches()[app._slash_menu_index].name != "model":
+            app.on_key("DOWN", 1)
+        app.on_key("ENTER", 1)
+
+        self.assertEqual(handled, [])
+        self.assertEqual(app.editor["buffer"], "/set model ")
         self.assertEqual(app._slash_menu_matches(), [])
+
+    def test_slash_menu_inactive_for_free_form_arguments(self):
+        # Commands without declared choices close the menu at the first space,
+        # as does a completed argument followed by a space.
+        app, _test_console, _output = self._app()
+
+        initialize_text_editor(app.editor, "/btw how do I")
+        self.assertIsNone(app._slash_menu_context())
+        self.assertEqual(app._slash_menu_matches(), [])
+
+        initialize_text_editor(app.editor, "/usage day ")
+        self.assertIsNone(app._slash_menu_context())
+        self.assertEqual(app._slash_menu_matches(), [])
+
+    def test_slash_menu_esc_dismisses_until_the_draft_changes(self):
+        app, _test_console, _output = self._app()
+        initialize_text_editor(app.editor, "/se")
+        self.assertTrue(app._slash_menu_matches())
+
+        app.on_key("ESC", 1)
+
+        # The popup is gone but the draft survives -- Esc closed the menu, it
+        # did not fall through to the draft-clearing prompt dismissal.
+        self.assertEqual(app._slash_menu_matches(), [])
+        self.assertEqual(app.editor["buffer"], "/se")
+        self.assertFalse(app._exit_armed)
+
+        # Typing edits the draft, which reopens the menu.
+        app.on_key(TextInput("t"), 1)
+        self.assertEqual(app.editor["buffer"], "/set")
+        self.assertTrue(app._slash_menu_matches())
 
     def test_slash_menu_selected_command_is_aqua_including_slash(self):
         app, _test_console, _output = self._app()
@@ -1485,17 +1621,17 @@ class HeadsupTests(unittest.TestCase):
             selected=True,
             query="se",
             name_col=12,
-            prefix_width=3,
             gap=2,
             width=60,
         )
         display = matches[0].display
-        # The command (offsets 3..3+len after the "   "/" › " prefix), leading
-        # "/" included, is painted in the cyan family — never bright white.
+        # The command starts the row (the caret lives in the box gutter, not the
+        # row) and, leading "/" included, is painted in the cyan family — never
+        # bright white.
         command_spans = [
             str(span.style)
             for span in row.spans
-            if 3 <= span.start < 3 + len(display)
+            if span.start < len(display)
         ]
         self.assertTrue(command_spans)
         for style in command_spans:
