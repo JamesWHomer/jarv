@@ -332,6 +332,81 @@ def _accumulate_tool_delta(accumulators: dict[int, dict], tc_delta) -> None:
 # Backend: OpenAI Responses API
 # ---------------------------------------------------------------------------
 
+def _recover_openai_stream(
+    client,
+    response_id: str | None,
+    stream_error: Exception,
+    *,
+    yielded_tool_call_ids: set[str],
+    yielded_reasoning_ids: set[str],
+    cancellation_token: CancellationToken | None,
+) -> Iterator:
+    """Poll ``retrieve_response`` after a dropped Responses stream.
+
+    Yields the not-yet-seen tail of the recovered response followed by
+    ``StreamDone``, or raises ``ProviderError``/``RetryableStreamError`` with
+    the recovery details appended to ``stream_error``.
+    """
+    # Call-time import: tests patch jarv.openai_http.retrieve_response.
+    from .openai_http import retrieve_response
+
+    last_recovery_status: str | None = None
+    last_retrieval_error: Exception | None = None
+    if response_id:
+        recovered_response = None
+        for attempt in range(_OPENAI_RECOVERY_ATTEMPTS):
+            if cancellation_token is not None:
+                cancellation_token.throw_if_cancelled()
+            try:
+                candidate = retrieve_response(
+                    client,
+                    response_id,
+                    cancellation_token=cancellation_token,
+                )
+            except Exception as retrieval_error:
+                last_retrieval_error = retrieval_error
+                candidate = None
+            else:
+                last_retrieval_error = None
+                status = _value(candidate, "status")
+                last_recovery_status = str(status) if status is not None else None
+            if candidate is not None and _is_response_complete(candidate):
+                recovered_response = candidate
+                break
+            if attempt < _OPENAI_RECOVERY_ATTEMPTS - 1:
+                _sleep_for_openai_recovery(
+                    min(0.25 * (2 ** attempt), _OPENAI_RECOVERY_MAX_DELAY),
+                    cancellation_token,
+                )
+        if recovered_response is not None:
+            yield from _events_from_recovered_response(
+                recovered_response,
+                yielded_tool_call_ids,
+                yielded_reasoning_ids,
+            )
+            yield StreamDone(response=recovered_response)
+            return
+    recovery_details = []
+    if response_id is None:
+        recovery_details.append("response id was not observed")
+    elif last_retrieval_error is not None:
+        recovery_details.append(
+            f"last retrieval error: {last_retrieval_error}"
+        )
+    elif last_recovery_status is not None:
+        recovery_details.append(
+            f"last recovery status: {last_recovery_status}"
+        )
+    else:
+        recovery_details.append("response retrieval returned no usable result")
+    message = (
+        f"{stream_error}; recovery failed ({'; '.join(recovery_details)})"
+    )
+    if isinstance(stream_error, ProviderHTTPError):
+        raise ProviderError(message) from stream_error
+    raise RetryableStreamError(message) from stream_error
+
+
 def _stream_responses_api(
     client, model, instructions, tools, input_items, reasoning=None, prompt_cache_key=None,
     service_tier: str | None = None,
@@ -339,7 +414,6 @@ def _stream_responses_api(
 ) -> Iterator:
     from .openai_http import (
         build_responses_payload,
-        retrieve_response,
         stream_response as stream_openai_response,
     )
 
@@ -436,61 +510,14 @@ def _stream_responses_api(
     except Exception as stream_error:
         if cancellation_token is not None:
             cancellation_token.throw_if_cancelled()
-        last_recovery_status: str | None = None
-        last_retrieval_error: Exception | None = None
-        if response_id:
-            recovered_response = None
-            for attempt in range(_OPENAI_RECOVERY_ATTEMPTS):
-                if cancellation_token is not None:
-                    cancellation_token.throw_if_cancelled()
-                try:
-                    candidate = retrieve_response(
-                        client,
-                        response_id,
-                        cancellation_token=cancellation_token,
-                    )
-                except Exception as retrieval_error:
-                    last_retrieval_error = retrieval_error
-                    candidate = None
-                else:
-                    last_retrieval_error = None
-                    status = _value(candidate, "status")
-                    last_recovery_status = str(status) if status is not None else None
-                if candidate is not None and _is_response_complete(candidate):
-                    recovered_response = candidate
-                    break
-                if attempt < _OPENAI_RECOVERY_ATTEMPTS - 1:
-                    _sleep_for_openai_recovery(
-                        min(0.25 * (2 ** attempt), _OPENAI_RECOVERY_MAX_DELAY),
-                        cancellation_token,
-                    )
-            if recovered_response is not None:
-                yield from _events_from_recovered_response(
-                    recovered_response,
-                    yielded_tool_call_ids,
-                    yielded_reasoning_ids,
-                )
-                yield StreamDone(response=recovered_response)
-                return
-        recovery_details = []
-        if response_id is None:
-            recovery_details.append("response id was not observed")
-        elif last_retrieval_error is not None:
-            recovery_details.append(
-                f"last retrieval error: {last_retrieval_error}"
-            )
-        elif last_recovery_status is not None:
-            recovery_details.append(
-                f"last recovery status: {last_recovery_status}"
-            )
-        else:
-            recovery_details.append("response retrieval returned no usable result")
-        message = (
-            f"{stream_error}; recovery failed ({'; '.join(recovery_details)})"
+        yield from _recover_openai_stream(
+            client,
+            response_id,
+            stream_error,
+            yielded_tool_call_ids=yielded_tool_call_ids,
+            yielded_reasoning_ids=yielded_reasoning_ids,
+            cancellation_token=cancellation_token,
         )
-        if isinstance(stream_error, ProviderHTTPError):
-            raise ProviderError(message) from stream_error
-        raise RetryableStreamError(message) from stream_error
 
 
 # ---------------------------------------------------------------------------
