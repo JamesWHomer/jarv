@@ -78,6 +78,49 @@ def apply_scroll_keys(
     return offset
 
 
+SELECTION_KEYS = frozenset({"UP", "DOWN", "HOME", "END", "PAGEUP", "PAGEDOWN"})
+
+
+def apply_selection_keys(
+    key: str,
+    repeat_count: int,
+    *,
+    selected: int,
+    total: int,
+    page: int,
+) -> int | None:
+    """New selection index for standard list-navigation keys; None if unhandled."""
+    if total <= 0 or key not in SELECTION_KEYS:
+        return None
+    if key == "UP":
+        return max(0, selected - repeat_count)
+    if key == "DOWN":
+        return min(total - 1, selected + repeat_count)
+    if key == "HOME":
+        return 0
+    if key == "END":
+        return total - 1
+    if key == "PAGEUP":
+        return max(0, selected - (page * repeat_count))
+    return min(total - 1, selected + (page * repeat_count))
+
+
+_SCROLL_KEY_STEPS = {
+    "PAGEUP": 5,
+    "PAGEDOWN": -5,
+    "MOUSE_WHEEL_UP": 3,
+    "MOUSE_WHEEL_DOWN": -3,
+    "MOUSE_WHEEL_PAGEUP": 5,
+    "MOUSE_WHEEL_PAGEDOWN": -5,
+}
+
+
+def scroll_key_delta(key: str, repeat_count: int) -> int | None:
+    """Signed line delta for page/wheel scroll keys; None if not a scroll key."""
+    step = _SCROLL_KEY_STEPS.get(key)
+    return None if step is None else step * repeat_count
+
+
 class ScrollOverlayApp(AltScreenApp):
     """Read-only scrollable alternate-screen overlay on the shared loop.
 
