@@ -191,12 +191,29 @@ def _delete_paste_aware(chars: list[str], pastes: PasteRegistry, index: int) -> 
     return index
 
 
+def _terminal_stream():
+    """Return the real terminal stdout, unwrapping Rich's Live redirection.
+
+    An active Rich ``Live`` (every full-screen view) replaces ``sys.stdout``
+    with a ``FileProxy`` that line-buffers writes and feeds complete lines
+    through ``console.print`` -- which interprets raw control sequences instead
+    of passing them to the terminal. The terminal-mode writers below all run
+    *inside* an active Live, so they must write to the proxied-over file or
+    their DECSET enables never reach the terminal at all: the terminal then
+    stays in alternate-scroll mode and the mouse wheel arrives as arrow keys
+    (the "heads-up wheel never scrolls" bug).
+    """
+    stdout = sys.stdout
+    proxied = getattr(stdout, "rich_proxied_file", None)
+    return stdout if proxied is None else proxied
+
+
 @contextmanager
 def mouse_capture():
     """Capture terminal mouse input while a full-screen view is active."""
     global _MOUSE_CAPTURE_ACTIVE_DEPTH
 
-    if not sys.stdout.isatty():
+    if not _terminal_stream().isatty():
         with _windows_virtual_terminal_input():
             yield
         return
@@ -204,8 +221,9 @@ def mouse_capture():
     with _windows_virtual_terminal_input():
         if _MOUSE_CAPTURE_ACTIVE_DEPTH == 0:
             disable_mouse_capture()
-            sys.stdout.write(MOUSE_CAPTURE_ENABLE)
-            sys.stdout.flush()
+            stream = _terminal_stream()
+            stream.write(MOUSE_CAPTURE_ENABLE)
+            stream.flush()
         _MOUSE_CAPTURE_ACTIVE_DEPTH += 1
         try:
             yield
@@ -217,10 +235,11 @@ def mouse_capture():
 
 def disable_mouse_capture() -> None:
     """Best-effort reset for terminal mouse reporting modes."""
-    if not sys.stdout.isatty():
+    stream = _terminal_stream()
+    if not stream.isatty():
         return
-    sys.stdout.write(MOUSE_CAPTURE_DISABLE)
-    sys.stdout.flush()
+    stream.write(MOUSE_CAPTURE_DISABLE)
+    stream.flush()
 
 
 def enable_mouse_wheel_reporting() -> None:
@@ -233,11 +252,16 @@ def enable_mouse_wheel_reporting() -> None:
     no Windows console modes, so it composes with ``windows_vt_input`` -- letting a
     VT-input view (heads-up) read both bracketed pastes and SGR mouse wheel events
     from the same stream. Tear down with :func:`disable_mouse_capture`.
+
+    Callers run inside an active ``Live`` (heads-up enables this in
+    ``on_start``), so the escapes go through :func:`_terminal_stream` -- writing
+    them to the Live-proxied ``sys.stdout`` would silently drop them.
     """
-    if not sys.stdout.isatty():
+    stream = _terminal_stream()
+    if not stream.isatty():
         return
-    sys.stdout.write(MOUSE_CAPTURE_ENABLE)
-    sys.stdout.flush()
+    stream.write(MOUSE_CAPTURE_ENABLE)
+    stream.flush()
 
 
 def _restore_terminal_modes_atexit() -> None:
@@ -249,12 +273,13 @@ def _restore_terminal_modes_atexit() -> None:
     could leave the user's shell with a hidden cursor or paste mode stuck on.
     Showing the cursor and disabling paste at exit is idempotent and safe.
     """
-    if not sys.stdout.isatty():
+    stream = _terminal_stream()
+    if not stream.isatty():
         return
     try:
-        sys.stdout.write(CURSOR_SHOW)
-        sys.stdout.write(BRACKETED_PASTE_DISABLE)
-        sys.stdout.flush()
+        stream.write(CURSOR_SHOW)
+        stream.write(BRACKETED_PASTE_DISABLE)
+        stream.flush()
     except Exception:
         pass
 
@@ -266,16 +291,18 @@ atexit.register(_restore_terminal_modes_atexit)
 @contextmanager
 def bracketed_paste():
     """Ask terminals to wrap pasted text so editable views can preserve it."""
-    if not sys.stdout.isatty():
+    stream = _terminal_stream()
+    if not stream.isatty():
         yield
         return
-    sys.stdout.write(BRACKETED_PASTE_ENABLE)
-    sys.stdout.flush()
+    stream.write(BRACKETED_PASTE_ENABLE)
+    stream.flush()
     try:
         yield
     finally:
-        sys.stdout.write(BRACKETED_PASTE_DISABLE)
-        sys.stdout.flush()
+        stream = _terminal_stream()
+        stream.write(BRACKETED_PASTE_DISABLE)
+        stream.flush()
 
 
 def _stdin_isatty() -> bool:

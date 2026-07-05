@@ -106,6 +106,8 @@ def show_read_only_command(
         console_ref=console,
         live_cls=Live,
         terminal_size_fn=terminal_size,
-        read_key_fn=_read_key_with_repeats,
+        # Resolved at call time (tests patch the module symbol); raw
+        # MOUSE_WHEEL_* tokens match ScrollOverlayApp's own reader config.
+        read_key_fn=lambda: _read_key_with_repeats(translate_mouse_wheel=False),
         key_available_fn=_key_available,
     )

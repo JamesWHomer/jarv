@@ -45,6 +45,17 @@ from .settings_command import (
 )
 
 
+# Real mouse capture delivers the wheel as MOUSE_WHEEL_* tokens; the settings
+# screen is selection-driven, so fold them onto the arrow/page keys every mode
+# (list, editor, reset prompt) already understands.
+_WHEEL_NAV_KEYS = {
+    "MOUSE_WHEEL_UP": "UP",
+    "MOUSE_WHEEL_DOWN": "DOWN",
+    "MOUSE_WHEEL_PAGEUP": "PAGEUP",
+    "MOUSE_WHEEL_PAGEDOWN": "PAGEDOWN",
+}
+
+
 class SettingsApp(AltScreenApp):
     """The /settings screen on the single-threaded alt-screen loop."""
 
@@ -130,6 +141,7 @@ class SettingsApp(AltScreenApp):
     # Key handling
     # ------------------------------------------------------------------ #
     def on_key(self, key: str, repeat: int) -> None:
+        key = _WHEEL_NAV_KEYS.get(key, key)
         # Serialize every state mutation against the catalog refresher thread
         # (which also takes ``self.lock``) so a repaint never observes a
         # half-applied change.

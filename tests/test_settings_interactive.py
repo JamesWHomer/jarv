@@ -62,6 +62,17 @@ def test_settings_esc_exits_from_main_screen(monkeypatch):
     assert app.stop_calls
 
 
+def test_settings_wheel_moves_selection(monkeypatch):
+    # Real mouse capture delivers MOUSE_WHEEL_* tokens; they fold onto the
+    # arrow keys so the wheel walks the settings list.
+    app, _console = _make_app(monkeypatch, dict(DEFAULT_CONFIG))
+
+    app.on_key("MOUSE_WHEEL_DOWN", 1)
+    assert app.selected == 1
+    app.on_key("MOUSE_WHEEL_UP", 1)
+    assert app.selected == 0
+
+
 def test_settings_esc_returns_from_unchanged_compact_editor(monkeypatch):
     config = dict(DEFAULT_CONFIG)
     app, _console = _make_app(monkeypatch, config)

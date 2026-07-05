@@ -41,16 +41,24 @@ def _osc52_sequence(text: str) -> str:
 
 
 def _osc52_copy(text: str, *, write=None) -> bool:
+    stream = None
     if write is None:
-        if not sys.stdout.isatty():
+        # Unwrap Rich Live's stdout proxy: copies are triggered from inside
+        # full-screen views, and the proxy line-buffers/interprets raw escapes
+        # instead of passing them to the terminal.
+        stream = sys.stdout
+        proxied = getattr(stream, "rich_proxied_file", None)
+        if proxied is not None:
+            stream = proxied
+        if not stream.isatty():
             return False
-        write = sys.stdout.write
+        write = stream.write
     try:
         write(_osc52_sequence(text))
     except Exception:
         return False
     try:
-        sys.stdout.flush()
+        (stream if stream is not None else sys.stdout).flush()
     except Exception:
         pass
     return True

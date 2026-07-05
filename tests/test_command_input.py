@@ -293,6 +293,56 @@ def test_mouse_capture_disables_mouse_motion_tracking():
     assert "\x1b[?1003l" in command_input.MOUSE_CAPTURE_DISABLE
 
 
+class FakeRichFileProxy:
+    """Mimic ``rich.file_proxy.FileProxy``: an active Live installs this over
+    ``sys.stdout``. It exposes the wrapped file as ``rich_proxied_file`` and
+    swallows raw control writes into a line buffer (they never reach the
+    terminal), which is exactly why the mode writers must unwrap it."""
+
+    def __init__(self, file):
+        self.rich_proxied_file = file
+        self.writes = []
+
+    def write(self, text):
+        self.writes.append(text)
+
+    def flush(self):
+        pass
+
+    def isatty(self):
+        return self.rich_proxied_file.isatty()
+
+
+def test_mouse_mode_writers_bypass_rich_stdout_proxy(monkeypatch):
+    real = FakeStdout(is_tty=True)
+    proxy = FakeRichFileProxy(real)
+    monkeypatch.setattr(command_input.sys, "stdout", proxy)
+
+    command_input.enable_mouse_wheel_reporting()
+    command_input.disable_mouse_capture()
+
+    assert proxy.writes == []
+    assert real.writes == [
+        command_input.MOUSE_CAPTURE_ENABLE,
+        command_input.MOUSE_CAPTURE_DISABLE,
+    ]
+
+
+def test_bracketed_paste_bypasses_rich_stdout_proxy(monkeypatch):
+    real = FakeStdout(is_tty=True)
+    proxy = FakeRichFileProxy(real)
+    monkeypatch.setattr(command_input.sys, "stdout", proxy)
+
+    with command_input.bracketed_paste():
+        pass
+
+    assert proxy.writes == []
+    assert real.writes == [
+        command_input.BRACKETED_PASTE_ENABLE,
+        command_input.BRACKETED_PASTE_DISABLE,
+    ]
+
+
 def test_windows_console_mouse_wheel_record_returns_mouse_token(monkeypatch):
     import ctypes
 

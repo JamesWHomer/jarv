@@ -128,3 +128,14 @@ def test_scroll_key_delta_maps_page_and_wheel_keys():
     assert scroll_key_delta("MOUSE_WHEEL_PAGEDOWN", 1) == -5
     assert scroll_key_delta("UP", 1) is None
     assert scroll_key_delta("ENTER", 1) is None
+
+
+def test_apply_scroll_keys_takes_three_line_wheel_steps():
+    # Raw wheel tokens scroll 3 lines per event (heads-up parity), clamped at
+    # both ends; the wheel-page variants take page-sized steps like PgUp/PgDn.
+    assert apply_scroll_keys("MOUSE_WHEEL_DOWN", 1, offset=0, total=50, body_rows=10) == 3
+    assert apply_scroll_keys("MOUSE_WHEEL_UP", 2, offset=10, total=50, body_rows=10) == 4
+    assert apply_scroll_keys("MOUSE_WHEEL_UP", 5, offset=3, total=50, body_rows=10) == 0
+    assert apply_scroll_keys("MOUSE_WHEEL_DOWN", 50, offset=0, total=50, body_rows=10) == 40
+    assert apply_scroll_keys("MOUSE_WHEEL_PAGEDOWN", 1, offset=0, total=50, body_rows=10) == 9
+    assert apply_scroll_keys("MOUSE_WHEEL_PAGEUP", 1, offset=20, total=50, body_rows=10) == 11

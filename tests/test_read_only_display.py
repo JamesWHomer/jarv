@@ -27,7 +27,7 @@ def _install_display_harness(monkeypatch, *, width=80, height=24, key="ENTER", f
     monkeypatch.setattr(read_only_display, "terminal_size", lambda *, console: (width, height))
     monkeypatch.setattr(read_only_display, "Live", FakeLive)
 
-    def read_key_with_repeats():
+    def read_key_with_repeats(**_kwargs):
         if key == "KeyboardInterrupt":
             raise KeyboardInterrupt
         return key, 1
