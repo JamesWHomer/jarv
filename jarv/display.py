@@ -55,6 +55,7 @@ TOOL_CARD_STYLES = {
     "run_command": (">", "Command", "yellow"),
     "web_search": ("\u2315", "Web search", "green"),
     "read": ("\u2261", "Read", "cyan"),
+    "edit": ("\u00b1", "Edit", "bright_yellow"),
     "spawn": ("\u21b3", "Subagent", "magenta"),
     "ask_user": ("?", "Ask user", "blue"),
 }

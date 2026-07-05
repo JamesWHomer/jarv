@@ -15,7 +15,7 @@ DEFAULT_SYSTEM_PROMPT = (
     "run `jarv /help` before answering. Do not invent unsupported commands."
 )
 
-TOOL_NAMES = ("run_command", "web_search", "read", "spawn", "ask_user")
+TOOL_NAMES = ("run_command", "web_search", "read", "edit", "spawn", "ask_user")
 READ_ONLY_COMMAND_DISPLAY_CHOICES = ("fullscreen", "print")
 LEGACY_READ_ONLY_COMMAND_DISPLAY_CHOICES = ("auto", "inline")
 TOOL_CALL_DISPLAY_CHOICES = ("fullscreen", "print", "auto")
@@ -31,6 +31,7 @@ SETTINGS_TOOL_LABELS = {
     "run_command": ("Run commands", "execute shell commands"),
     "web_search": ("Web search", "search the web"),
     "read": ("Read", "read files, URLs, artifacts, and retained output"),
+    "edit": ("Edit files", "make exact text replacements in files"),
     "spawn": ("Subagents", "fan out work to parallel subagents"),
     "ask_user": ("Ask user", "pause to request clarification"),
 }
@@ -67,7 +68,7 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
     ConfigField("context_window_fallback", 128_000, validator="positive_int", about="Context window when model metadata is unknown."),
     ConfigField("max_stdin_chars", 200_000, validator="positive_int", label="Stdin limit", section="runtime", desc="piped stdin chars attached to one-shot prompts", ui_kind="int", about="Maximum piped stdin characters attached to a one-shot prompt."),
     ConfigField("max_tool_output_chars", 20_000, validator="positive_int", label="Tool output limit", section="runtime", desc="tool output chars returned to the model", ui_kind="int", about="Maximum generic tool output characters returned to the model and the default combined head/tail budget for `run_command`."),
-    ConfigField("disabled_tools", [], validator="disabled_tools", about="Tool names omitted from root agents and subagents. Use `/settings` to toggle `run_command`, `web_search`, `read`, `spawn`, and `ask_user`."),
+    ConfigField("disabled_tools", [], validator="disabled_tools", about="Tool names omitted from root agents and subagents. Use `/settings` to toggle `run_command`, `web_search`, `read`, `edit`, `spawn`, and `ask_user`."),
     ConfigField("command_timeout", 60, validator="positive_int", label="Command timeout", section="runtime", desc="kill non-interactive commands; check in during interactive commands", ui_kind="int", about="Seconds before a non-interactive shell command is killed, or before an interactive command asks the model what to do next."),
     ConfigField("web_timeout", 15, validator="positive_int", label="Web timeout", section="runtime", desc="seconds before web requests are cancelled", ui_kind="int", about="Seconds before a web search or URL read is killed."),
     ConfigField(
@@ -82,7 +83,7 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
         settings_choices=SETTINGS_SAFETY_CHOICES,
         about="Command confirmation level. `all` = confirm every command, `risky` = confirm only dangerous commands, `none` = no confirmation.",
     ),
-    ConfigField("audit", True, validator="bool", label="Auditor", section="command review", desc="LLM reviews flagged commands first", ui_kind="bool", about="When `true`, flagged commands are sent to a fast LLM auditor (uses extra tokens)."),
+    ConfigField("audit", True, validator="bool", label="Auditor", section="command review", desc="LLM reviews flagged commands first", ui_kind="bool", about="When `true`, flagged commands are sent to a fast LLM auditor (uses extra tokens). Applies to `run_command` only; flagged `edit` calls show a diff for manual approval."),
     ConfigField("auditor_auto_approve", True, validator="bool", label="Audit auto-accept", section="command review", desc="auto-run commands the auditor marks safe", ui_kind="bool", about="When `true`, the auditor auto-approves commands it deems safe. When `false`, the auditor only shows a recommendation."),
     ConfigField("auditor_model", "", label="Auditor model", section="command review", desc="use the active model unless overridden", ui_kind="text", empty="default", about="Model used for the auditor. Empty = use the active model."),
     ConfigField("system_prompt", DEFAULT_SYSTEM_PROMPT, label="System prompt", section="behaviour", desc="instructions sent before each request", ui_kind="text", multiline=True, about="Instructions sent to the model before each request."),

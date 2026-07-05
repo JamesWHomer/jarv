@@ -65,6 +65,7 @@ from .orchestrator import (
     prepare_run_command,
     spawn_tool_output,
 )
+from .edit_tool import EDIT_TOOL, dispatch_edit_tool
 from .read_tool import read_tool_for_config
 from .retained_outputs import (
     RetainedOutputStore,
@@ -96,6 +97,7 @@ def build_agent_tools(config: dict) -> list[dict]:
         WEB_SEARCH_TOOL,
         SPAWN_TOOL,
         read_tool_for_config(config),
+        EDIT_TOOL,
         ASK_USER_TOOL,
     ]
     return filter_enabled_tools(tools, config)
@@ -950,7 +952,10 @@ def _build_tool_hooks(
     The dispatch functions are referenced as module globals at call time so
     tests patching ``jarv.agent._dispatch_*`` keep intercepting.
     """
-    from .session_render import tool_call_card_from_args
+    import json
+
+    from .session_render import tool_call_card, tool_call_card_from_args
+    from .tool_outputs import summarize_tool_output
 
     def _on_tool_error(message: str) -> None:
         if ui is not None:
@@ -980,9 +985,29 @@ def _build_tool_hooks(
             ui=ui,
         )
 
+    def _run_edit(edit_args: dict) -> str:
+        output = dispatch_edit_tool(
+            edit_args,
+            config=config,
+            cancellation_token=cancellation_token,
+        )
+        # Card prints after dispatch so any confirmation panel appears first
+        # and the card reflects done/failed status.
+        _print_tool_card(
+            tool_call_card(
+                {"name": "edit", "arguments": json.dumps(edit_args, ensure_ascii=True)},
+                summarize_tool_output(output),
+                display_mode=get_setting(config, "tool_call_display"),
+            ),
+            config,
+            ui=ui,
+        )
+        return output
+
     return ToolExecutionHooks(
         on_parallel_read=_on_parallel_read,
         on_parallel_web_search=_on_parallel_web_search,
+        run_edit=_run_edit,
         run_command=lambda args: _dispatch_run_command_with_ui(
             args,
             config,

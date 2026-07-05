@@ -259,7 +259,8 @@ Run `jarv` with no prompt to start an interactive session. Type a prompt and pre
 
 ## Tools and shell commands
 
-- The root model can see five tools: `run_command`, `web_search`, `read`, `spawn`, and `ask_user`. The enabled subset is controlled from `/settings`.
+- The root model can see six tools: `run_command`, `web_search`, `read`, `edit`, `spawn`, and `ask_user`. The enabled subset is controlled from `/settings`.
+- `edit(path, old_text, new_text, replace_all)` makes an exact string replacement in an existing UTF-8 text file; `old_text` must match exactly once unless `replace_all` is true. Edits are gated by `command_safety` with a diff preview.
 - `read(input, offset, size)` pages through retained command output, visible artifacts, HTTP(S) URLs, local text files, and embedded-text PDFs using Unicode character offsets. Consecutive reads run concurrently.
 - Direct local and HTTP(S) image reads (`png`, `jpeg`, `webp`, plus provider-supported `gif`) are returned as native image input when the active model advertises image capability in Jarv's cached provider/OpenRouter catalog. Image reads ignore `offset` and `size`, are capped at 10 MiB, and fall back to a text "no image capability" result when the selected model route is text-only or unknown.
 - `web_search` supports any positive result count and a non-negative result offset. URL reads preserve HTTP(S) links as absolute URLs.

@@ -109,6 +109,7 @@ _TOOL_ACTIVITY_LABELS = {
     "run_command": ("Writing command", "Wrote command"),
     "spawn": ("Planning parallel tasks", "Planned parallel tasks"),
     "read": ("Selecting content", "Selected content"),
+    "edit": ("Writing edit", "Wrote edit"),
     "ask_user": ("Writing question", "Wrote question"),
     "web_search": ("Writing web search", "Wrote web search"),
 }

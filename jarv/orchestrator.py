@@ -16,6 +16,7 @@ from .artifacts import ArtifactStore
 from .cancellation import CancellationToken, TurnCancelled
 from .config import DEFAULT_CONFIG, TOOL_NAMES, get_setting
 from .context_budget import trim_turn_input
+from .edit_tool import EDIT_TOOL, dispatch_edit_tool
 from .safety import check_command
 from .anthropic_http import DEFAULT_SUBAGENT_MAX_TOKENS
 from .provider import (
@@ -233,6 +234,7 @@ class ToolExecutionHooks:
     on_parallel_read: Callable[[object, dict], None] | None = None
     on_parallel_web_search: Callable[[object, dict], None] | None = None
     run_command: Callable[[dict], str] | None = None
+    run_edit: Callable[[dict], str] | None = None
     run_spawn: Callable[[dict], str] | None = None
     run_ask_user: Callable[[dict], str] | None = None
     on_tool_error: Callable[[str], None] | None = None
@@ -567,6 +569,7 @@ def build_subagent_tools(sterile: bool, config: dict | None = None) -> list[dict
         RUN_COMMAND_TOOL,
         WEB_SEARCH_TOOL,
         read_tool_for_config(config),
+        EDIT_TOOL,
     ], config)
     tools.append(FINISH_TOOL)
     if not sterile and tool_enabled(config, "spawn"):
@@ -625,6 +628,13 @@ def dispatch_tool(
             visible_labels=node.visible_labels,
             artifact_store=store,
             retained_store=retained_store or RetainedOutputStore(),
+            config=config,
+            cancellation_token=cancellation_token,
+        )
+
+    if name == "edit":
+        return dispatch_edit_tool(
+            args,
             config=config,
             cancellation_token=cancellation_token,
         )
@@ -753,6 +763,8 @@ def execute_tool_calls(
                 if result.pending_command is not None and not result.pending_command.call_id:
                     result.pending_command.call_id = str(item.call_id)
                 output = output.output
+        elif item.name == "edit" and hooks.run_edit is not None:
+            output = hooks.run_edit(args)
         elif item.name == "spawn" and hooks.run_spawn is not None:
             output = hooks.run_spawn(args)
         elif item.name == "ask_user" and hooks.run_ask_user is not None:
