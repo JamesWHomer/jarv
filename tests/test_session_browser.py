@@ -12,7 +12,7 @@ class TtyStdin:
         return True
 
 
-def _run_sessions_with_keys(monkeypatch, keys):
+def _run_sessions_with_keys(monkeypatch, keys, extra_sessions=None):
     SnapshotLive.instances = []
     queued = deque(keys)
     loaded_sessions = []
@@ -27,6 +27,8 @@ def _run_sessions_with_keys(monkeypatch, keys):
             }
         },
     }
+    if extra_sessions:
+        data["sessions"].update(extra_sessions)
     output = io.StringIO()
     test_console = Console(
         file=output,
@@ -62,6 +64,25 @@ def _run_sessions_with_keys(monkeypatch, keys):
     session_browser.cmd_sessions([])
     assert not queued
     return SnapshotLive.instances[-1], loaded_sessions, output.getvalue()
+
+
+def test_sessions_wheel_moves_selection(monkeypatch):
+    # Raw MOUSE_WHEEL_* tokens (real mouse capture) fold onto selection
+    # movement: wheel-down selects the next row, Enter loads it.
+    _live, loaded_sessions, output = _run_sessions_with_keys(
+        monkeypatch,
+        [("MOUSE_WHEEL_DOWN", 1), "ENTER"],
+        extra_sessions={
+            "second-23456789abcd": {
+                "label": "Second session",
+                "last_used_at": "2026-06-21T00:00:00Z",
+                "first_user_snippet": "hi again",
+            }
+        },
+    )
+
+    assert loaded_sessions == ["second-23456789abcd"]
+    assert "Loaded" in output
 
 
 def test_sessions_delete_confirmation_esc_cancels_without_closing(monkeypatch):

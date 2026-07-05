@@ -288,7 +288,21 @@ class SessionBrowserScreen(AltScreenApp):
         text_mode = self.search_active and self.preview_sid is None
         return _read_key_with_repeats(
             text_mode=text_mode,
-            repeatable=() if text_mode else ("UP", "DOWN", "LEFT", "RIGHT", "PAGEUP", "PAGEDOWN"),
+            repeatable=()
+            if text_mode
+            else (
+                "UP",
+                "DOWN",
+                "LEFT",
+                "RIGHT",
+                "PAGEUP",
+                "PAGEDOWN",
+                "MOUSE_WHEEL_UP",
+                "MOUSE_WHEEL_DOWN",
+            ),
+            # Raw wheel tokens: the list maps them onto selection movement and
+            # the preview takes 3-line steps (see on_key / _on_key_preview).
+            translate_mouse_wheel=False,
         )
 
     def _browser_key_available(self) -> bool:
@@ -1014,7 +1028,14 @@ class SessionBrowserScreen(AltScreenApp):
         sel = self._selected_pos(visible) if visible else 0
         cur = visible[sel] if visible else None
 
-        nav_key = {"LEFT": "UP", "RIGHT": "DOWN"}.get(key, key)
+        nav_key = {
+            "LEFT": "UP",
+            "RIGHT": "DOWN",
+            "MOUSE_WHEEL_UP": "UP",
+            "MOUSE_WHEEL_DOWN": "DOWN",
+            "MOUSE_WHEEL_PAGEUP": "PAGEUP",
+            "MOUSE_WHEEL_PAGEDOWN": "PAGEDOWN",
+        }.get(key, key)
         if nav_key in SELECTION_KEYS:
             nav = apply_selection_keys(
                 nav_key, repeat_count, selected=sel, total=n_vis, page=self._max_vis()
@@ -1094,7 +1115,18 @@ class SessionBrowserScreen(AltScreenApp):
                 self.preview_sid = visible_now[pos]["sid"]
                 self.selected_sid = self.preview_sid
                 self.preview_offset = 0
-        elif key in ("UP", "DOWN", "PAGEUP", "PAGEDOWN", "HOME", "END"):
+        elif key in (
+            "UP",
+            "DOWN",
+            "PAGEUP",
+            "PAGEDOWN",
+            "HOME",
+            "END",
+            "MOUSE_WHEEL_UP",
+            "MOUSE_WHEEL_DOWN",
+            "MOUSE_WHEEL_PAGEUP",
+            "MOUSE_WHEEL_PAGEDOWN",
+        ):
             term_w, term_h = terminal_size(console=console)
             inner_width = max(1, term_w - 4)
             total = len(self._preview_lines(self.preview_sid, inner_width))

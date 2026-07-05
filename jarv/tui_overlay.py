@@ -52,6 +52,11 @@ def scroll_position_hint(start: int, end: int, total: int) -> str:
     return "0"
 
 
+# Lines per raw MOUSE_WHEEL_UP/DOWN event -- the same step the heads-up
+# transcript takes (see _SCROLL_KEY_STEPS below), so text views feel identical.
+_WHEEL_SCROLL_LINES = 3
+
+
 def apply_scroll_keys(
     key: str,
     repeat_count: int,
@@ -67,10 +72,14 @@ def apply_scroll_keys(
         return max(0, offset - repeat_count)
     if key == "DOWN":
         return min(max_off, offset + repeat_count)
-    if key == "PAGEUP":
+    if key in ("PAGEUP", "MOUSE_WHEEL_PAGEUP"):
         return max(0, offset - (page * repeat_count))
-    if key == "PAGEDOWN":
+    if key in ("PAGEDOWN", "MOUSE_WHEEL_PAGEDOWN"):
         return min(max_off, offset + (page * repeat_count))
+    if key == "MOUSE_WHEEL_UP":
+        return max(0, offset - (_WHEEL_SCROLL_LINES * repeat_count))
+    if key == "MOUSE_WHEEL_DOWN":
+        return min(max_off, offset + (_WHEEL_SCROLL_LINES * repeat_count))
     if key == "HOME":
         return 0
     if key == "END":
@@ -135,7 +144,9 @@ class ScrollOverlayApp(AltScreenApp):
     batch_text = False
     use_bracketed_paste = False
     use_mouse_capture = True
-    translate_mouse_wheel = True
+    # Raw MOUSE_WHEEL_* tokens so apply_scroll_keys takes 3-line steps (parity
+    # with the heads-up transcript) instead of 1-line arrow presses.
+    translate_mouse_wheel = False
     clear_on_resize = True
     first_paint_label = "scroll-overlay"
 
