@@ -98,13 +98,14 @@ jarv --timeout 120 --system "You are a poet" "write me a haiku"
 
 ## How it works
 
-Jarv uses a multi-provider tool-calling agent loop (OpenAI Responses API, Anthropic Messages, Gemini, and OpenAI-compatible endpoints). The root model can call five tools:
+Jarv uses a multi-provider tool-calling agent loop (OpenAI Responses API, Anthropic Messages, Gemini, and OpenAI-compatible endpoints). The root model can call six tools:
 
 | Tool | Purpose |
 | --- | --- |
 | `run_command` | Execute a shell command, including simple interactive stdin prompts |
 | `web_search` | Search the web through DuckDuckGo's public HTML endpoint |
 | `read` | Page through command output, artifacts, URLs, or local files |
+| `edit` | Make an exact string replacement in an existing text file |
 | `spawn` | Fan out work to parallel subagents, each with their own tool access |
 | `ask_user` | Ask you a question and wait for a reply |
 
@@ -133,6 +134,8 @@ Before executing a shell command, jarv can prompt you for confirmation. The `com
 | `risky` (default) | Prompts for confirmation when a command matches dangerous patterns — recursive deletion, privilege escalation, network exfiltration, disk formatting, credential access, force pushes, and more. |
 | `all` | Every command requires your explicit approval before running. |
 | `none` | Commands run immediately with no confirmation prompt. |
+
+The same levels gate `edit` calls: risky edits (files outside the working directory, hidden files, secrets, system paths) show a diff preview for approval under `risky`, every edit does under `all`.
 
 Set the level in the settings menu (`jarv /settings`) or at any time with:
 

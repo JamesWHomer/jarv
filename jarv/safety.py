@@ -212,14 +212,17 @@ def _build_confirmation_body(command: str, reason: str) -> Group:
     return Group(*parts)
 
 
-def prompt_confirmation(command: str, reason: str) -> bool:
-    """Ask the user to approve a risky command.  Returns True if approved."""
-    body = _build_confirmation_body(command, reason)
-
+def prompt_panel_confirmation(
+    body,
+    *,
+    subtitle: str = "confirm to run",
+    question: str = "Allow this command?",
+) -> bool:
+    """Show a safety panel with a y/N prompt.  Returns True if approved."""
     console.print()
-    console.print(jarv_panel(body, title="safety", subtitle="confirm to run", padding=(1, 2)))
+    console.print(jarv_panel(body, title="safety", subtitle=subtitle, padding=(1, 2)))
 
-    prompt = "[bold]Allow this command?[/bold] [dim]\\[y/N][/dim] [bold cyan]\u203a[/bold cyan] "
+    prompt = f"[bold]{question}[/bold] [dim]\\[y/N][/dim] [bold cyan]\u203a[/bold cyan] "
     try:
         choice = console.input(prompt).strip().lower()
     except EOFError:
@@ -232,6 +235,16 @@ def prompt_confirmation(command: str, reason: str) -> bool:
     else:
         console.print("[red]  \u2717 denied[/red]\n")
     return approved
+
+
+def approval_lock() -> threading.Lock:
+    """Lock serializing interactive approval prompts across tool workers."""
+    return _APPROVAL_LOCK
+
+
+def prompt_confirmation(command: str, reason: str) -> bool:
+    """Ask the user to approve a risky command.  Returns True if approved."""
+    return prompt_panel_confirmation(_build_confirmation_body(command, reason))
 
 
 def check_command(

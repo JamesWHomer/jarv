@@ -159,7 +159,7 @@ def test_tool_cards_use_consistent_terminal_safe_symbols():
         width=80,
     )
 
-    for tool_name in ("run_command", "web_search", "spawn", "read", "ask_user"):
+    for tool_name in ("run_command", "web_search", "spawn", "read", "edit", "ask_user"):
         test_console.print(tool_card(tool_name, "body"))
 
     rendered = stream.getvalue()
@@ -167,6 +167,7 @@ def test_tool_cards_use_consistent_terminal_safe_symbols():
     assert "\u2315 Web search" in rendered
     assert "\u21b3 Subagent" in rendered
     assert "\u2261 Read" in rendered
+    assert "\u00b1 Edit" in rendered
     assert "? Ask user" in rendered
 
 

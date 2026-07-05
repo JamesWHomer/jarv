@@ -84,12 +84,58 @@ def _next_visible_history_item(history: list, start_index: int) -> dict | None:
     return None
 
 
+_EDIT_SNIPPET_MAX_LINES = 3
+
+
+def _edit_snippet_lines(text: str, prefix: str, style: str) -> list[Text]:
+    lines = text.splitlines() or [""]
+    shown = [
+        Text(prefix + line, style=style)
+        for line in lines[:_EDIT_SNIPPET_MAX_LINES]
+    ]
+    hidden = len(lines) - _EDIT_SNIPPET_MAX_LINES
+    if hidden > 0:
+        shown.append(
+            Text(f"  … {hidden} more line{'s' if hidden != 1 else ''}", style="dim italic")
+        )
+    return shown
+
+
+def _edit_result_summary(output: str) -> str:
+    """Condense an [EDIT RESULT] block into one line, e.g. '1 replacement  •  120 → 118 lines'."""
+    replacements = ""
+    lines_info = ""
+    for line in output.splitlines():
+        if line.startswith("Replacements: "):
+            replacements = line.removeprefix("Replacements: ").strip()
+        elif line.startswith("Lines: "):
+            lines_info = line.removeprefix("Lines: ").strip()
+    parts = []
+    if replacements:
+        suffix = "" if replacements == "1" else "s"
+        parts.append(f"{replacements} replacement{suffix}")
+    if lines_info:
+        before, _, rest = lines_info.partition(" -> ")
+        after = rest.split(" ")[0] if rest else ""
+        if before and after:
+            parts.append(f"{before} → {after} lines")
+    return "  •  ".join(parts)
+
+
 def _tool_call_renderable(item: dict, output: str = "", *, display_mode: str = "fullscreen"):
     name = str(item.get("name") or "unknown")
     args, raw_arguments = _tool_call_arguments(item)
     failed = (
         args is None
-        or output.startswith(("[error:", "[tool argument error:", "[unknown tool:"))
+        or output.startswith(
+            (
+                "[error:",
+                "[tool argument error:",
+                "[unknown tool:",
+                "[edit error:",
+                "[edit denied",
+            )
+        )
         or "cancelled by user" in output
     )
     status = "failed" if failed else "done"
@@ -128,6 +174,26 @@ def _tool_call_renderable(item: dict, output: str = "", *, display_mode: str = "
             style="dim",
         )
         body = Group(read_path, read_meta)
+    elif name == "edit" and args is not None:
+        parts: list = [
+            Text(str(args.get("path", "")), no_wrap=True, overflow="ellipsis")
+        ]
+        parts.extend(_edit_snippet_lines(str(args.get("old_text", "")), "- ", "red"))
+        parts.extend(_edit_snippet_lines(str(args.get("new_text", "")), "+ ", "green"))
+        if output.startswith("[EDIT RESULT]"):
+            summary = _edit_result_summary(output)
+            if summary:
+                parts.append(Text(summary, style="dim"))
+        elif output:
+            parts.append(output_renderable(output))
+        return tool_card(
+            name,
+            Group(*parts),
+            metadata="replace all" if args.get("replace_all") else "",
+            status=status,
+            status_style=status_style,
+            display_mode=display_mode,
+        )
     elif name == "web_search" and args is not None:
         body = Text(str(args.get("query", "")))
         return tool_card(

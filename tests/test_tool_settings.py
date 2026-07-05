@@ -74,8 +74,8 @@ def test_disabled_tools_are_filtered_for_root_and_subagents():
         "disabled_tools": ["run_command", "web_search", "spawn"],
     }
 
-    assert _tool_names(build_agent_tools(config)) == ["read", "ask_user"]
-    assert _tool_names(build_subagent_tools(False, config)) == ["read", "finish"]
+    assert _tool_names(build_agent_tools(config)) == ["read", "edit", "ask_user"]
+    assert _tool_names(build_subagent_tools(False, config)) == ["read", "edit", "finish"]
 
 
 def test_tool_builders_include_read_image_description_for_capable_model(monkeypatch):
