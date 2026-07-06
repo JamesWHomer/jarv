@@ -27,6 +27,23 @@ def _system_prompt_row(config):
     )
 
 
+def test_project_context_settings_rows_present():
+    config = dict(DEFAULT_CONFIG)
+    rows = {
+        row["key"]: row for row in settings_command._settings_rows(config)
+    }
+
+    toggle = rows["project_context"]
+    assert toggle["kind"] == "bool"
+    assert toggle["section"] == "behaviour"
+    assert settings_command._settings_value_text(toggle, config).plain == "on"
+
+    limit = rows["project_context_max_chars"]
+    assert limit["kind"] == "int"
+    assert limit["section"] == "runtime"
+    assert settings_command._settings_value_text(limit, config).plain == "16000"
+
+
 def test_system_prompt_row_shows_status_instead_of_contents():
     config = dict(DEFAULT_CONFIG)
     row = _system_prompt_row(config)

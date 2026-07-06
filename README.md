@@ -125,6 +125,12 @@ Image reads (`png`, `jpeg`, `webp`, and provider-supported `gif`) are returned a
 
 Web search and URL reads need no extra API key. `web_search` pages through DuckDuckGo results; URL reads preserve links as absolute URLs, don't execute JavaScript, cap responses at 2 MiB, and mark fetched pages as untrusted content.
 
+### Project context
+
+At the start of each request, jarv looks for a project instructions file — `JARV.md`, then `AGENTS.md`, then `CLAUDE.md` — starting in the working directory and walking up to the git root (outside a repository, only the working directory is checked). The first match is injected into the system prompt, together with the current git branch, clean/dirty status, and the last five commits, so the model starts aware of the project it is in.
+
+Disable with `project_context`; cap the injected file size with `project_context_max_chars`. Git info is skipped silently when git is not installed or the directory is not a repository.
+
 ### Command safety
 
 Before executing a shell command, jarv can prompt you for confirmation. The `command_safety` config key controls this:
@@ -219,6 +225,7 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 | `context_window_fallback` | `128000` | Context window when model metadata is unknown. |
 | `max_stdin_chars` | `200000` | Maximum piped stdin characters attached to a one-shot prompt. |
 | `max_tool_output_chars` | `20000` | Maximum generic tool output characters returned to the model. It also supplies the default head/tail budget for `run_command`. |
+| `project_context_max_chars` | `16000` | Maximum project-context file characters injected into the system prompt (longer files are truncated head+tail). |
 | `disabled_tools` | `[]` | Tool names omitted from root agents and subagents. Configure these from the Tools section in `/settings`. |
 | `command_timeout` | `60` | Seconds before non-interactive shell commands are killed, or before interactive commands check in again. |
 | `web_timeout` | `15` | Seconds before a web search or URL read is killed. |
@@ -233,6 +240,7 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 | `tool_call_display` | `"auto"` | Tool-call layout: `auto` selects `print` for one-shot runs and `fullscreen` in heads-up mode; explicit modes override it. |
 | `print_usage_after_agent` | `false` | Print a compact token usage line after each completed agent run. |
 | `system_prompt` | `"You are Jarv..."` | System instructions sent with each request. |
+| `project_context` | `true` | Read `JARV.md`/`AGENTS.md`/`CLAUDE.md` and git branch, status, and recent commits into the system prompt. |
 
 Processing tier choices depend on the active provider. OpenAI, OpenRouter, and Gemini offer all three choices where the selected model supports them. Anthropic offers Standard and Priority; its Priority mode uses committed Priority capacity when available and otherwise falls back to Standard. Other providers remain on Standard.
 
@@ -253,6 +261,8 @@ All state is stored in `~/.jarv/` (on Windows, `%USERPROFILE%\.jarv\`):
 ├── usage.json                       # future system-wide token usage ledger
 └── archive/                         # archived sessions
 ```
+
+Project context files (`JARV.md`, `AGENTS.md`, `CLAUDE.md`) live in your repositories, not in `~/.jarv/`; jarv only reads them, never writes them.
 
 `max_history` counts stored items, not exchanges or tokens. User messages, assistant messages, reasoning items, function calls, and function call outputs each count as one item.
 

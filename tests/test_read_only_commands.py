@@ -88,7 +88,7 @@ def test_settings_groups_account_and_behaviour_rows_in_requested_order():
     ] == ["Provider", "API key", "Processing tier", "Base URL"]
     assert [
         row["label"] for row in rows if row["section"] == "behaviour"
-    ] == ["Model", "Reasoning effort", "System prompt"]
+    ] == ["Model", "Reasoning effort", "System prompt", "Project context"]
 
     unsupported_rows = settings_command._settings_rows(
         {**DEFAULT_CONFIG, "provider": "groq"}

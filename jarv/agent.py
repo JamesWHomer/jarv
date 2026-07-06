@@ -137,6 +137,7 @@ from .agent_ui import (
     thought_complete_indicator,
 )
 from .context_budget import build_input
+from .project_context import build_project_context
 from .response_items import to_response_input_item
 from .safety import check_command
 from .shell import InteractiveCommandProcess
@@ -1034,6 +1035,14 @@ def _build_tool_hooks(
     )
 
 
+def build_instructions(config: dict) -> str:
+    instructions = config["system_prompt"] + f"\n\nSystem info:\n{get_system_info()}"
+    project_context = build_project_context(config)
+    if project_context:
+        instructions += "\n\n" + project_context
+    return instructions
+
+
 def run_agent(
     query: str,
     config: dict,
@@ -1122,10 +1131,7 @@ def run_agent(
 
         history.append({"role": "user", "content": query, "id": new_frame_id(), **metadata})
 
-        instructions = (
-            config["system_prompt"]
-            + f"\n\nSystem info:\n{get_system_info()}"
-        )
+        instructions = build_instructions(config)
         tools = build_agent_tools(config)
         input_items = build_input(
             history,
