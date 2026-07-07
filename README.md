@@ -1,13 +1,24 @@
 # jarv
 
-A multi-provider AI-powered CLI agent that can run shell commands, fan out work to parallel subagents, and keep track of conversation history across terminal sessions.
+**An AI agent that behaves like a shell tool.** Pipe into it, script it, and point it at any model — cloud or local. Jarv runs commands, edits files, searches the web, and fans work out to parallel subagents, from a single binary with three dependencies.
 
 ```bash
-jarv                                    # start an interactive session
-jarv whats the meaning of life?         # one-shot question
+git diff | jarv review this patch       # pipe anything in, like any other unix tool
+jarv what process is using port 8080?   # one-shot: answers (running commands if needed), then exits
 jarv commit all these files             # let it run commands to do the job
-jarv refactor the auth module           # complex tasks get split across subagents
+jarv                                    # start an interactive session
 ```
+
+![jarv interactive session](https://github.com/user-attachments/assets/d56b491b-4498-43f9-a93b-cfee7aee4791)
+
+## Why jarv?
+
+The official vendor CLIs (Claude Code, Codex CLI, Gemini CLI) are strong interactive coding agents for their own models. Jarv makes different trade-offs:
+
+- **Scriptable first.** One-shot mode and piped stdin are core, not an afterthought: `rg TODO . | jarv group these by subsystem` works the way you'd expect a Unix tool to. Use it in scripts, aliases, and pipelines.
+- **Any model, including local.** OpenAI, Anthropic, Gemini, OpenRouter, Groq, DeepSeek, Together, and Fireworks — or fully local with Ollama, LM Studio, and vLLM. Switch per run with `--provider`/`-m`. No lock-in, no subscription.
+- **Lightweight.** A standalone binary, or a small Python package with three runtime dependencies. No Node runtime.
+- **A terminal agent, not just a coding agent.** Each terminal window is bound to its own persistent session, so jarv doubles as a general assistant that remembers context per window — with undo/redo, a forkable history tree, and usage tracking built in.
 
 ## Install
 
@@ -69,8 +80,6 @@ jarv> /new
 - During a response, Esc or Ctrl+C stops further work, checkpoints the turn in history/context, and restores the prompt for editing. Use `/undo` to remove the turn.
 - At the prompt, Esc or Ctrl+C clears existing text; press either again on an empty prompt to exit.
 - You can also exit with `exit`, `quit`, or `/exit`.
-
-![jarv interactive session](https://github.com/user-attachments/assets/d56b491b-4498-43f9-a93b-cfee7aee4791)
 
 ### Flags
 
