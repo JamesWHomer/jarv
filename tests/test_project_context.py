@@ -270,7 +270,7 @@ def test_disabled_project_context_skips_everything(tmp_path, monkeypatch):
 def test_build_instructions_appends_project_context(monkeypatch):
     from jarv import agent
 
-    monkeypatch.setattr(agent, "get_system_info", lambda: "SI")
+    monkeypatch.setattr(agent, "get_system_info", lambda cwd=None: "SI")
     monkeypatch.setattr(agent, "build_project_context", lambda config: "PC")
 
     assert agent.build_instructions({"system_prompt": "SP"}) == "SP\n\nSystem info:\nSI\n\nPC"
@@ -279,7 +279,7 @@ def test_build_instructions_appends_project_context(monkeypatch):
 def test_build_instructions_without_project_context(monkeypatch):
     from jarv import agent
 
-    monkeypatch.setattr(agent, "get_system_info", lambda: "SI")
+    monkeypatch.setattr(agent, "get_system_info", lambda cwd=None: "SI")
     monkeypatch.setattr(agent, "build_project_context", lambda config: "")
 
     assert agent.build_instructions({"system_prompt": "SP"}) == "SP\n\nSystem info:\nSI"

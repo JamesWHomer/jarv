@@ -1,7 +1,9 @@
+import os
 import unittest
 import platform
 import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -12,12 +14,17 @@ from jarv.shell import (
     COMMAND_OUTPUT_UNSET,
     CommandResult,
     InteractiveCommandProcess,
+    ShellState,
     compact_command_output,
     execute_command,
     resolve_command_output_window,
     truncate_command_output,
     truncate_model_output,
 )
+
+
+def _state_temp_files() -> set:
+    return set(Path(tempfile.gettempdir()).glob("jarv-shell-state-*"))
 
 
 class ShellOutputLimitTests(unittest.TestCase):
@@ -172,5 +179,128 @@ class ShellOutputLimitTests(unittest.TestCase):
         self.assertTrue(snapshot.check_in)
         self.assertGreaterEqual(snapshot.elapsed_seconds, 0.8)
         self.assertIn("tick", snapshot.stdout_delta)
+
+
+class ShellStateTests(unittest.TestCase):
+    def test_shell_state_persists_cwd(self):
+        state = ShellState.initial()
+        with TemporaryDirectory() as tmp:
+            result = execute_command(f'cd "{tmp}"', shell_state=state)
+
+            self.assertEqual(result.exit_code, 0)
+            self.assertTrue(os.path.samefile(state.cwd, tmp))
+
+            if platform.system() == "Windows":
+                follow = execute_command("(Get-Location).Path", shell_state=state)
+            else:
+                follow = execute_command("pwd", shell_state=state)
+            self.assertTrue(os.path.samefile(follow.stdout.strip(), tmp))
+
+    def test_shell_state_persists_env_var(self):
+        state = ShellState.initial()
+        if platform.system() == "Windows":
+            set_cmd = "$env:JARV_TEST_VALUE = 'hello-123'"
+            get_cmd = "$env:JARV_TEST_VALUE"
+        else:
+            set_cmd = "export JARV_TEST_VALUE=hello-123"
+            get_cmd = 'printf "%s" "$JARV_TEST_VALUE"'
+
+        execute_command(set_cmd, shell_state=state)
+        follow = execute_command(get_cmd, shell_state=state)
+
+        self.assertIn("hello-123", follow.stdout)
+        self.assertIsInstance(state.env, dict)
+        self.assertEqual(state.env.get("JARV_TEST_VALUE"), "hello-123")
+        self.assertFalse(
+            any(key.upper().startswith("JARV_STATE_") for key in state.env)
+        )
+        if platform.system() == "Windows":
+            self.assertTrue(any(key.lower() == "systemroot" for key in state.env))
+
+    def test_shell_state_env_value_with_newline_survives(self):
+        state = ShellState.initial()
+        if platform.system() == "Windows":
+            set_cmd = '$env:JARV_TEST_NL = "a" + [char]10 + "b"'
+        else:
+            set_cmd = "export JARV_TEST_NL=\"$(printf 'a\\nb')\""
+
+        execute_command(set_cmd, shell_state=state)
+
+        self.assertIsInstance(state.env, dict)
+        self.assertEqual(state.env.get("JARV_TEST_NL"), "a\nb")
+
+    def test_exit_code_preserved_with_shell_state(self):
+        state = ShellState.initial()
+        if platform.system() == "Windows":
+            command = 'cmd /c "exit 5"'
+        else:
+            command = "sh -c 'exit 5'"
+
+        result = execute_command(command, shell_state=state)
+
+        self.assertEqual(result.exit_code, 5)
+
+    def test_exit_in_command_keeps_previous_state(self):
+        state = ShellState.initial()
+        initial_cwd = state.cwd
+
+        result = execute_command("exit 3", shell_state=state)
+
+        self.assertEqual(result.exit_code, 3)
+        if platform.system() == "Windows":
+            # The appended capture never ran, so nothing was recorded.
+            self.assertIsNone(state.env)
+            self.assertEqual(state.cwd, initial_cwd)
+
+    def test_timed_out_command_keeps_state(self):
+        state = ShellState.initial()
+        initial_cwd = state.cwd
+        before = _state_temp_files()
+        if platform.system() == "Windows":
+            command = "Start-Sleep -Seconds 5"
+        else:
+            command = "sleep 5"
+
+        result = execute_command(command, timeout=0.3, shell_state=state)
+
+        self.assertTrue(result.timed_out)
+        self.assertEqual(state.cwd, initial_cwd)
+        self.assertIsNone(state.env)
+        self.assertEqual(_state_temp_files(), before)
+
+    def test_interactive_process_applies_state_on_exit(self):
+        state = ShellState.initial()
+        with TemporaryDirectory() as tmp:
+            process = InteractiveCommandProcess.start(
+                f'cd "{tmp}"', shell_state=state
+            )
+            try:
+                snapshot = process.wait_until_idle(idle_seconds=0.2)
+            finally:
+                process.kill_tree()
+
+            self.assertTrue(snapshot.exited)
+            self.assertTrue(os.path.samefile(state.cwd, tmp))
+
+    def test_shell_state_copy_is_independent(self):
+        state = ShellState("original", {"A": "1"})
+        clone = state.copy()
+        clone.cwd = "changed"
+        clone.env["A"] = "2"
+
+        self.assertEqual(state.cwd, "original")
+        self.assertEqual(state.env, {"A": "1"})
+        self.assertIsNone(ShellState("x", None).copy().env)
+
+    def test_execute_command_without_state_unchanged(self):
+        before = _state_temp_files()
+
+        result = execute_command("echo hi")
+
+        self.assertIn("hi", result.stdout)
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(_state_temp_files(), before)
+
+
 if __name__ == "__main__":
     unittest.main()

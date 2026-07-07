@@ -1202,6 +1202,91 @@ class HeadsupTests(unittest.TestCase):
             "[Pasted text #1 +2 lines][Pasted text #2 +2 lines]",
         )
 
+    def test_ctrl_v_attaches_clipboard_image_as_chip(self):
+        app, _test_console, _output = self._app()
+        image = SimpleNamespace(path=Path("C:/tmp/jarv/image-1.png"), media_type="image/png")
+        capability = SimpleNamespace(supported=True, reason="")
+
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)), patch(
+            "jarv.headsup.read_clipboard_image", return_value=image
+        ), patch("jarv.headsup.get_image_output_capability", return_value=capability):
+            for char in "look: ":
+                app._apply_editor_key(char, 1)
+            app.on_key("CTRL_V", 1)
+
+        self.assertEqual(app.editor["buffer"], "look: [Image #1]")
+        self.assertIn("Image attached", app._prompt_notice.plain)
+
+        # Submitting expands the chip to a file reference the read tool resolves.
+        calls: list[str] = []
+        app._run_agent_query = calls.append
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)):
+            app.on_key("ENTER", 1)
+
+        self.assertEqual(calls, [f"look: [attached image: {image.path}]"])
+        self.assertEqual(app.editor["buffer"], "")
+
+    def test_ctrl_v_image_chip_deletes_atomically(self):
+        app, _test_console, _output = self._app()
+        image = SimpleNamespace(path=Path("/tmp/shot.png"), media_type="image/png")
+        capability = SimpleNamespace(supported=True, reason="")
+
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)), patch(
+            "jarv.headsup.read_clipboard_image", return_value=image
+        ), patch("jarv.headsup.get_image_output_capability", return_value=capability):
+            app.on_key("CTRL_V", 1)
+            self.assertEqual(app.editor["buffer"], "[Image #1]")
+            app.on_key("BACKSPACE", 1)
+
+        self.assertEqual(app.editor["buffer"], "")
+
+    def test_ctrl_v_warns_when_model_lacks_image_capability(self):
+        app, _test_console, _output = self._app()
+        image = SimpleNamespace(path=Path("/tmp/shot.png"), media_type="image/png")
+        capability = SimpleNamespace(supported=False, reason="no image capability")
+
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)), patch(
+            "jarv.headsup.read_clipboard_image", return_value=image
+        ), patch("jarv.headsup.get_image_output_capability", return_value=capability):
+            app.on_key("ALT_V", 1)
+
+        self.assertEqual(app.editor["buffer"], "[Image #1]")
+        self.assertIn("can't view images", app._prompt_notice.plain)
+
+    def test_ctrl_v_falls_back_to_clipboard_text(self):
+        app, _test_console, _output = self._app()
+
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)), patch(
+            "jarv.headsup.read_clipboard_image", return_value=None
+        ), patch("jarv.headsup.read_clipboard_text", return_value="hello world"):
+            app.on_key("CTRL_V", 1)
+
+        self.assertEqual(app.editor["buffer"], "hello world")
+
+    def test_ctrl_v_with_empty_clipboard_sets_notice(self):
+        app, _test_console, _output = self._app()
+
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)), patch(
+            "jarv.headsup.read_clipboard_image", return_value=None
+        ), patch("jarv.headsup.read_clipboard_text", return_value=None):
+            app.on_key("CTRL_V", 1)
+
+        self.assertEqual(app.editor["buffer"], "")
+        self.assertIn("Nothing to paste", app._prompt_notice.plain)
+
+    def test_ctrl_v_is_ignored_while_answering(self):
+        app, _test_console, _output = self._app()
+        app._answer_request = {"label": "> ", "answer": None}
+        reads: list[str] = []
+
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)), patch(
+            "jarv.headsup.read_clipboard_image", side_effect=lambda: reads.append("read")
+        ):
+            app.on_key("CTRL_V", 1)
+
+        self.assertEqual(reads, [])
+        self.assertEqual(app.editor["buffer"], "")
+
     def test_multiline_prompt_arrows_move_between_editor_rows(self):
         app, _test_console, _output = self._app()
         initialize_text_editor(app.editor, "first\nsecond", multiline=True)

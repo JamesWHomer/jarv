@@ -140,7 +140,7 @@ from .context_budget import build_input
 from .project_context import build_project_context
 from .response_items import to_response_input_item
 from .safety import check_command
-from .shell import InteractiveCommandProcess
+from .shell import InteractiveCommandProcess, get_session_shell_state
 
 
 @dataclass(frozen=True)
@@ -206,14 +206,15 @@ def _agent_check_run_command(prepared, config: dict, **kwargs):
 
 
 from .interactive_command import (
+    _TERMINAL_REPLY_INSTRUCTIONS,
     _attach_interactive_output_item,
     _continue_interactive_command,
     _finalize_interactive_record,
-    _first_terminal_action,
     _format_elapsed_seconds,
     _format_finished_interactive_output,
     _interaction_marker_text,
     _interactive_check_in_seconds,
+    _interactive_max_rounds,
     _interactive_tool_call_reminder,
     _parse_terminal_control,
     _record_interactive_input,
@@ -281,6 +282,7 @@ def _dispatch_run_command_with_ui(
     retained_store=None,
     ui=None,
     interactive_help=None,
+    shell_state=None,
 ):
     prepared = prepare_run_command(args, config)
     if isinstance(prepared, str):
@@ -335,7 +337,7 @@ def _dispatch_run_command_with_ui(
                 vertical_overflow="crop",
             )
             live.start()
-        process = InteractiveCommandProcess.start(prepared.cmd)
+        process = InteractiveCommandProcess.start(prepared.cmd, shell_state=shell_state)
         unregister_cancel = (
             cancellation_token.register(process.kill_tree)
             if cancellation_token is not None else None
@@ -383,8 +385,16 @@ def _dispatch_run_command_with_ui(
     if interactive_help is not None:
         include_help = not interactive_help.get("sent", False)
         interactive_help["sent"] = True
+    initial_output = snapshot.to_delta_command_result().to_model_output(
+        head_chars=prepared.head_chars,
+        tail_chars=prepared.tail_chars,
+    )
+    if initial_output.strip() and initial_output.strip() != "(no output)":
+        pending.transcript_segments.append(initial_output)
     return RunCommandDispatchResult(
-        _run_command_waiting_prompt(snapshot, include_help=include_help),
+        _run_command_waiting_prompt(
+            snapshot, include_help=include_help, prepared=prepared
+        ),
         pending,
     )
 
@@ -872,6 +882,30 @@ def _advance_interactive_continuation(
     control reply and the next prompt stay in the live conversation only;
     history keeps just the one collapsed run_command record.
     """
+    pending.rounds += 1
+    max_rounds = _interactive_max_rounds(config)
+    if pending.rounds > max_rounds:
+        # Every round is a full model call; without a cap a check-in/<WAIT>
+        # ping-pong burns tokens indefinitely.
+        note = (
+            f"[interactive command aborted: {max_rounds} interaction rounds "
+            "reached (interactive_max_rounds); the process was killed]"
+        )
+        if pending.card is not None:
+            pending.card.add_step(
+                Text(note, style="dim red"), "", None, exited=True,
+            )
+            _refresh_interactive_card(ui, pending)
+        _close_interactive_card_live(pending)
+        try:
+            pending.process.kill_tree()
+        except Exception:
+            pass
+        _finalize_interactive_record(pending, note)
+        if callable(pending.unregister_cancel):
+            pending.unregister_cancel()
+            pending.unregister_cancel = None
+        return input_items + [{"role": "user", "content": note}], None
     if renderer.tool_calls:
         # A stray mid-interaction tool call: remind and re-prompt without
         # touching the process.
@@ -890,13 +924,34 @@ def _advance_interactive_continuation(
         "role": "assistant",
         "content": terminal_reply,
     }]
-    snapshot, terminal_action, terminal_kind = _continue_interactive_command(
-        pending,
-        terminal_reply,
-        config=config,
-        cancellation_token=cancellation_token,
+    snapshot, terminal_action, terminal_kind, parse_note = (
+        _continue_interactive_command(
+            pending,
+            terminal_reply,
+            config=config,
+            cancellation_token=cancellation_token,
+        )
     )
-    _record_interactive_input(pending, terminal_kind, terminal_action)
+    if snapshot is None:
+        # Malformed reply or a blocked stdin line: nothing touched the
+        # process; tell the model why and re-prompt.
+        return (
+            input_items + [{
+                "role": "user",
+                "content": (
+                    f"[terminal reply not applied] {terminal_action}\n\n"
+                    f"{_TERMINAL_REPLY_INSTRUCTIONS}"
+                ),
+            }],
+            pending,
+        )
+    delta_text = "" if snapshot.exited else (
+        snapshot.to_delta_command_result().to_model_output(
+            head_chars=pending.prepared.head_chars,
+            tail_chars=pending.prepared.tail_chars,
+        )
+    )
+    _record_interactive_input(pending, terminal_kind, terminal_action, delta_text)
     # Grow the single open card in place instead of printing a fresh box:
     # append this step's stdin marker + delta output and let the footer
     # resolve to the new waiting/exit state.
@@ -924,7 +979,13 @@ def _advance_interactive_continuation(
         return input_items, None
     include_help = not interactive_help["sent"]
     interactive_help["sent"] = True
-    waiting_prompt = _run_command_waiting_prompt(snapshot, include_help=include_help)
+    statuses = (f"Note: {parse_note}.",) if parse_note else ()
+    waiting_prompt = _run_command_waiting_prompt(
+        snapshot,
+        include_help=include_help,
+        prepared=pending.prepared,
+        statuses=statuses,
+    )
     return (
         input_items + [{
             "role": "user",
@@ -1019,6 +1080,7 @@ def _build_tool_hooks(
             retained_store=retained_store,
             ui=ui,
             interactive_help=interactive_help,
+            shell_state=root_node.shell_state,
         ),
         run_spawn=lambda args: _dispatch_spawn_with_ui(
             args,
@@ -1036,7 +1098,10 @@ def _build_tool_hooks(
 
 
 def build_instructions(config: dict) -> str:
-    instructions = config["system_prompt"] + f"\n\nSystem info:\n{get_system_info()}"
+    # Advertise the persisted shell cwd so later heads-up prompts in the same
+    # process stay truthful after the model has cd'd elsewhere.
+    system_info = get_system_info(cwd=get_session_shell_state().cwd)
+    instructions = config["system_prompt"] + f"\n\nSystem info:\n{system_info}"
     project_context = build_project_context(config)
     if project_context:
         instructions += "\n\n" + project_context
@@ -1127,6 +1192,7 @@ def run_agent(
             usage_path=usage_path,
             session_id=session_context.session_id,
             incognito=incognito,
+            shell_state=get_session_shell_state(),
         )
 
         history.append({"role": "user", "content": query, "id": new_frame_id(), **metadata})
@@ -1237,6 +1303,16 @@ def run_agent(
                         ui=ui,
                         interactive_help=interactive_help,
                     )
+                )
+                # Continuation rounds grow the input without passing through a
+                # tool round, so trim here too or a chatty command overflows
+                # the context.
+                kwargs["input"] = trim_turn_input(
+                    kwargs["input"],
+                    model=config["model"],
+                    config=config,
+                    instructions=kwargs["instructions"],
+                    tools=kwargs["tools"],
                 )
                 continue
 

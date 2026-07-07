@@ -904,6 +904,39 @@ def test_read_key_maps_windows_bracketed_paste_to_text_input(monkeypatch):
         command_input._PENDING_KEYS.clear()
 
 
+def test_read_key_maps_posix_ctrl_v_and_alt_v(monkeypatch):
+    stdin = _install_posix_input(monkeypatch, "\x16")
+    assert command_input._read_key(text_mode=True) == "CTRL_V"
+    assert stdin.remaining == ""
+
+    stdin = _install_posix_input(monkeypatch, "\x1bv")
+    assert command_input._read_key(text_mode=True) == "ALT_V"
+    assert stdin.remaining == ""
+
+
+def test_read_key_maps_windows_ctrl_v_and_alt_v(monkeypatch):
+    # Ctrl+V arrives as a raw \x16 when the terminal doesn't own the paste
+    # binding; Alt+V arrives ESC-prefixed under VT input and is the fallback
+    # for terminals (Windows Terminal) whose paste action swallows Ctrl+V.
+    for sequence, expected in {"\x16": "CTRL_V", "\x1bv": "ALT_V"}.items():
+        chars = deque(sequence)
+        fake_msvcrt = SimpleNamespace(
+            getwch=chars.popleft,
+            kbhit=lambda chars=chars: bool(chars),
+        )
+        command_input._PENDING_KEYS.clear()
+        monkeypatch.setattr(command_input.sys, "platform", "win32")
+        monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+        command_input._WINDOWS_MOUSE_CAPTURE_DEPTH = 0
+        try:
+            assert command_input._read_key(text_mode=True) == expected
+            assert not chars
+            assert not command_input._PENDING_KEYS
+        finally:
+            command_input._WINDOWS_MOUSE_CAPTURE_DEPTH = 0
+            command_input._PENDING_KEYS.clear()
+
+
 def test_read_key_maps_windows_modified_arrows(monkeypatch):
     # With VT input enabled, Windows delivers modified arrows as xterm-style
     # CSI sequences (ESC [ 1 ; <mod> <final>) which must decode to the same
@@ -1146,6 +1179,17 @@ def test_paste_registry_duplicate_span_matches_adjacent_marker():
     assert registry.duplicate_span(buffer, 0, "a\nb") == (0, len(marker))
     # Different content never matches.
     assert registry.duplicate_span(buffer, len(marker), "x\ny") is None
+
+
+def test_paste_registry_attach_registers_synthetic_chip():
+    registry = command_input.PasteRegistry()
+    marker = registry.attach("Image", "[attached image: /tmp/shot.png]")
+
+    assert marker == "[Image #1]"
+    assert registry.expand(f"see {marker}") == "see [attached image: /tmp/shot.png]"
+    assert registry.marker_spans(marker) == [(0, len(marker))]
+    # The counter is shared with collapsed pastes so markers never collide.
+    assert registry.collapse("a\nb") == "[Pasted text #2 +2 lines]"
 
 
 def test_paste_registry_prune_drops_absent_markers():

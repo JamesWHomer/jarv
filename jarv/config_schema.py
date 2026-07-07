@@ -71,6 +71,7 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
     ConfigField("project_context_max_chars", 16_000, validator="positive_int", label="Project context limit", section="runtime", desc="project file chars injected into the prompt", ui_kind="int", about="Maximum project-context file characters injected into the system prompt (longer files are truncated head+tail)."),
     ConfigField("disabled_tools", [], validator="disabled_tools", about="Tool names omitted from root agents and subagents. Use `/settings` to toggle `run_command`, `web_search`, `read`, `edit`, `spawn`, and `ask_user`."),
     ConfigField("command_timeout", 60, validator="positive_int", label="Command timeout", section="runtime", desc="kill non-interactive commands; check in during interactive commands", ui_kind="int", about="Seconds before a non-interactive shell command is killed, or before an interactive command asks the model what to do next."),
+    ConfigField("interactive_max_rounds", 40, validator="positive_int", label="Interactive rounds", section="runtime", desc="model rounds before an interactive command is aborted", ui_kind="int", about="Maximum model interaction rounds (stdin replies, waits, check-ins) for one interactive command before jarv kills the process. Each round is a model call."),
     ConfigField("web_timeout", 15, validator="positive_int", label="Web timeout", section="runtime", desc="seconds before web requests are cancelled", ui_kind="int", about="Seconds before a web search or URL read is killed."),
     ConfigField(
         "command_safety",
