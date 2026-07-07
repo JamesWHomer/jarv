@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "jarv"
 version = "0.45.0"
-description = "A multi-provider AI-powered CLI agent"
+description = "Scriptable, multi-provider AI agent for the terminal — pipe into it, script it, run it on any model, cloud or local"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [{name = "James W Homer"}]
-keywords = ["cli", "agent", "openai", "anthropic", "gemini", "openrouter", "llm", "assistant"]
+keywords = ["cli", "agent", "ai-agent", "terminal", "shell", "openai", "anthropic", "gemini", "openrouter", "ollama", "local-llm", "llm", "assistant"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
