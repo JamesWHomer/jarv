@@ -1,7 +1,10 @@
+import codecs
+import json
 import os
 import platform
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -15,6 +18,209 @@ from .display import output_renderable, console
 
 COMMAND_OUTPUT_UNSET = object()
 MAX_COMMAND_OUTPUT_WINDOW_CHARS = 200_000
+
+_STATE_CWD_FILE_VAR = "JARV_STATE_CWD_FILE"
+_STATE_ENV_FILE_VAR = "JARV_STATE_ENV_FILE"
+
+# Fires even if the command calls `exit`; POSIX guarantees an EXIT trap that
+# doesn't itself exit leaves the shell's exit status untouched. `env -0`
+# survives values containing newlines.
+_POSIX_STATE_TRAP = (
+    "trap 'pwd > \"$JARV_STATE_CWD_FILE\"; "
+    "env -0 > \"$JARV_STATE_ENV_FILE\"' EXIT\n"
+)
+
+# Appended after the user command. `$?`/`$LASTEXITCODE` are snapshotted first
+# and re-raised at the end because the appended statements would otherwise
+# decide the process exit code. Known corner: a native exe mid-command followed
+# by a final successful cmdlet re-raises the stale native exit code.
+# BOM-less UTF-8 via .NET; `Out-File`/`>` would write UTF-16 in PowerShell 5.1.
+_POWERSHELL_STATE_CAPTURE = """
+$__jarvOk = $?
+$__jarvExit = $LASTEXITCODE
+try {
+    $__jarvUtf8 = New-Object System.Text.UTF8Encoding($false)
+    [IO.File]::WriteAllText($env:JARV_STATE_CWD_FILE, (Get-Location).Path, $__jarvUtf8)
+    $__jarvVars = @{}
+    foreach ($__jarvE in [System.Environment]::GetEnvironmentVariables().GetEnumerator()) {
+        $__jarvVars[[string]$__jarvE.Key] = [string]$__jarvE.Value
+    }
+    [IO.File]::WriteAllText($env:JARV_STATE_ENV_FILE, (ConvertTo-Json -InputObject $__jarvVars -Compress), $__jarvUtf8)
+} catch { }
+if ($__jarvExit -is [int]) { exit $__jarvExit } elseif ($__jarvOk) { exit 0 } else { exit 1 }
+"""
+
+
+@dataclass
+class ShellState:
+    """Shell state replayed into each run_command invocation.
+
+    ``env is None`` means inherit jarv's own environment; after the first
+    successful capture it holds the full environment of the last shell.
+    """
+
+    cwd: str
+    env: dict[str, str] | None = None
+
+    @classmethod
+    def initial(cls) -> "ShellState":
+        return cls(cwd=os.getcwd(), env=None)
+
+    def copy(self) -> "ShellState":
+        return ShellState(self.cwd, dict(self.env) if self.env is not None else None)
+
+
+_session_shell_state: ShellState | None = None
+_session_shell_state_lock = threading.Lock()
+
+
+def get_session_shell_state() -> ShellState:
+    """The shell state shared by every root run_command in this process.
+
+    Module-level rather than per ``run_agent`` call because heads-up mode runs
+    one ``run_agent`` per user prompt in the same process.
+    """
+    global _session_shell_state
+    with _session_shell_state_lock:
+        if _session_shell_state is None:
+            _session_shell_state = ShellState.initial()
+        return _session_shell_state
+
+
+@dataclass
+class ShellStateCapture:
+    """Parses the cwd/env dump a wrapped shell command leaves behind."""
+
+    cwd_path: str
+    env_path: str
+    windows: bool
+    _applied: bool = False
+
+    def apply(self, state: ShellState) -> None:
+        """Fold the dumped cwd/env into ``state``; keep old values on any failure."""
+        if self._applied:
+            return
+        self._applied = True
+        try:
+            cwd = self._read_cwd()
+            if cwd is not None:
+                state.cwd = cwd
+        except Exception:
+            pass
+        try:
+            env = self._read_env()
+            if env is not None:
+                state.env = env
+        except Exception:
+            pass
+
+    def cleanup(self) -> None:
+        for path in (self.cwd_path, self.env_path):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    def _read_cwd(self) -> str | None:
+        with open(self.cwd_path, encoding="utf-8-sig") as f:
+            text = f.read().strip()
+        # isdir also rejects PowerShell provider paths like HKCU:\...
+        if text and os.path.isdir(text):
+            return text
+        return None
+
+    def _read_env(self) -> dict[str, str] | None:
+        with open(self.env_path, encoding="utf-8-sig") as f:
+            text = f.read()
+        if self.windows:
+            data = json.loads(text)
+            if not isinstance(data, dict):
+                return None
+            env = {
+                key: value
+                for key, value in data.items()
+                if isinstance(key, str) and isinstance(value, str)
+            }
+        else:
+            env = {}
+            for entry in text.split("\0"):
+                key, sep, value = entry.partition("=")
+                if sep and key:
+                    env[key] = value
+        env = {
+            key: value
+            for key, value in env.items()
+            # Drop our plumbing vars and cmd.exe's hidden =C: drive-cwd
+            # entries, which subprocess rejects in an env= mapping.
+            if not key.startswith("=")
+            and key.upper() not in (_STATE_CWD_FILE_VAR, _STATE_ENV_FILE_VAR)
+        }
+        return env or None
+
+
+@dataclass
+class ShellInvocation:
+    """Popen arguments for one shell command plus state replay/capture plumbing."""
+
+    popen_args: list[str] | str
+    cwd: str | None
+    env: dict[str, str] | None
+    capture: ShellStateCapture | None
+
+
+def _shell_popen_args(command: str, windows: bool) -> list[str] | str:
+    if windows:
+        # Match the shell we advertise to the model in get_system_info().
+        # subprocess with shell=True uses cmd.exe on Windows, which breaks
+        # PowerShell commands like Get-ChildItem.
+        return [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+        ]
+    return command
+
+
+def build_shell_invocation(command: str, state: ShellState | None) -> ShellInvocation:
+    """Build the Popen invocation, wrapping the command for state capture.
+
+    With ``state=None`` the command runs exactly as before: unwrapped,
+    inheriting jarv's cwd and environment.
+    """
+    windows = platform.system() == "Windows"
+    if state is None:
+        return ShellInvocation(_shell_popen_args(command, windows), None, None, None)
+
+    cwd_fd, cwd_path = tempfile.mkstemp(prefix="jarv-shell-state-")
+    env_fd, env_path = tempfile.mkstemp(prefix="jarv-shell-state-")
+    os.close(cwd_fd)
+    os.close(env_fd)
+
+    # File paths travel via the environment, never string interpolation, so
+    # they need no quoting inside the wrapper.
+    env = dict(state.env) if state.env is not None else dict(os.environ)
+    env[_STATE_CWD_FILE_VAR] = cwd_path
+    env[_STATE_ENV_FILE_VAR] = env_path
+
+    if not os.path.isdir(state.cwd):
+        # The tracked directory disappeared; heal rather than fail every
+        # subsequent Popen.
+        state.cwd = os.getcwd()
+
+    if windows:
+        wrapped = command + "\n" + _POWERSHELL_STATE_CAPTURE
+    else:
+        wrapped = _POSIX_STATE_TRAP + command
+
+    return ShellInvocation(
+        _shell_popen_args(wrapped, windows),
+        state.cwd,
+        env,
+        ShellStateCapture(cwd_path, env_path, windows),
+    )
 
 
 @dataclass
@@ -99,9 +305,17 @@ class InteractiveCommandSnapshot:
 class InteractiveCommandProcess:
     """A command process whose stdin can be driven across model turns."""
 
-    def __init__(self, command: str, proc: subprocess.Popen):
+    def __init__(
+        self,
+        command: str,
+        proc: subprocess.Popen,
+        shell_state: ShellState | None = None,
+        capture: ShellStateCapture | None = None,
+    ):
         self.command = command
         self.proc = proc
+        self._shell_state = shell_state
+        self._capture = capture
         self._stdout_parts: list[str] = []
         self._stderr_parts: list[str] = []
         self._stdout_consumed = 0
@@ -124,52 +338,76 @@ class InteractiveCommandProcess:
         self._stderr_thread.start()
 
     @classmethod
-    def start(cls, command: str) -> "InteractiveCommandProcess":
-        if platform.system() == "Windows":
-            shell_command = [
-                "powershell.exe",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-Command",
-                command,
-            ]
-            proc = subprocess.Popen(
-                shell_command,
-                shell=False,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
-            )
-        else:
-            proc = subprocess.Popen(
-                command,
-                shell=True,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                preexec_fn=os.setsid,
-            )
-        return cls(command, proc)
+    def start(
+        cls,
+        command: str,
+        shell_state: ShellState | None = None,
+    ) -> "InteractiveCommandProcess":
+        invocation = build_shell_invocation(command, shell_state)
+        # Unbuffered binary pipes: the reader threads decode incrementally and
+        # a single read returns whatever bytes are available, so output can be
+        # drained quickly when the process exits (text mode forced per-char
+        # reads to stay responsive).
+        try:
+            if platform.system() == "Windows":
+                proc = subprocess.Popen(
+                    invocation.popen_args,
+                    shell=False,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    bufsize=0,
+                    cwd=invocation.cwd,
+                    env=invocation.env,
+                    creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+                )
+            else:
+                proc = subprocess.Popen(
+                    invocation.popen_args,
+                    shell=True,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    bufsize=0,
+                    cwd=invocation.cwd,
+                    env=invocation.env,
+                    preexec_fn=os.setsid,
+                )
+        except Exception:
+            if invocation.capture is not None:
+                invocation.capture.cleanup()
+            raise
+        return cls(command, proc, shell_state, invocation.capture)
 
     def _read_stream(self, stream, target: list[str]) -> None:
         if stream is None:
             return
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        pending_cr = ""
+
+        def emit(text: str) -> None:
+            if not text:
+                return
+            with self._lock:
+                target.append(text)
+                self._last_output_at = time.monotonic()
+
         try:
             while True:
-                chunk = stream.read(1)
-                if chunk == "":
+                chunk = stream.read(8192)
+                if not chunk:
+                    tail = pending_cr + decoder.decode(b"", final=True)
+                    emit(tail.replace("\r\n", "\n"))
                     return
-                with self._lock:
-                    target.append(chunk)
-                    self._last_output_at = time.monotonic()
+                text = pending_cr + decoder.decode(chunk)
+                pending_cr = ""
+                if text.endswith("\r"):
+                    # Hold a trailing CR so a \r\n split across chunks still
+                    # collapses to \n; a lone CR (progress-bar redraw) flushes
+                    # with the next chunk.
+                    pending_cr = "\r"
+                    text = text[:-1]
+                emit(text.replace("\r\n", "\n"))
         except Exception:
             return
 
@@ -223,6 +461,7 @@ class InteractiveCommandProcess:
         first_output_grace_seconds: float = 5.0,
         wait_seconds: float | None = None,
         check_in_seconds: float | None = None,
+        require_output: bool = False,
         cancellation_token: CancellationToken | None = None,
     ) -> InteractiveCommandSnapshot:
         start = time.monotonic()
@@ -235,8 +474,12 @@ class InteractiveCommandProcess:
             if cancellation_token is not None:
                 cancellation_token.throw_if_cancelled()
             if self.proc.poll() is not None:
-                self._stdout_thread.join(timeout=0.2)
-                self._stderr_thread.join(timeout=0.2)
+                # Bounded drain window so output the process wrote just before
+                # exiting still lands in the final snapshot.
+                deadline = time.monotonic() + 2.0
+                for thread in (self._stdout_thread, self._stderr_thread):
+                    thread.join(timeout=max(0.0, deadline - time.monotonic()))
+                self._finalize_shell_state()
                 return self.snapshot(consume=True)
             now = time.monotonic()
             with self._lock:
@@ -253,13 +496,12 @@ class InteractiveCommandProcess:
                     check_in=True,
                     check_in_after=check_in_seconds,
                 )
-            if (
-                wait_seconds is None
-                and not saw_output_during_wait
-                and now - start < first_output_grace_seconds
-            ):
-                time.sleep(0.02)
-                continue
+            if wait_seconds is None and not saw_output_during_wait:
+                # ``require_output`` (bare <WAIT>) holds past the grace window:
+                # only new output, exit, or the check-in interval end the wait.
+                if require_output or now - start < first_output_grace_seconds:
+                    time.sleep(0.02)
+                    continue
             if idle_for >= idle_seconds and (
                 wait_seconds is None or saw_output_during_wait
             ):
@@ -269,8 +511,12 @@ class InteractiveCommandProcess:
     def write_stdin(self, text: str) -> None:
         if self._stdin_closed or self.proc.stdin is None:
             return
+        data = text
+        if platform.system() == "Windows":
+            # The pipe is binary now; keep the CRLF translation text mode did.
+            data = data.replace("\r\n", "\n").replace("\n", "\r\n")
         try:
-            self.proc.stdin.write(text)
+            self.proc.stdin.write(data.encode("utf-8"))
             self.proc.stdin.flush()
         except (BrokenPipeError, OSError, ValueError):
             self._stdin_closed = True
@@ -288,6 +534,9 @@ class InteractiveCommandProcess:
         if self.proc.poll() is not None:
             return
         if platform.system() == "Windows":
+            # Windows has no direct SIGINT for another process group: this is
+            # CTRL_BREAK (usually terminates rather than interrupts), and the
+            # fallback kills the tree outright.
             try:
                 self.proc.send_signal(signal.CTRL_BREAK_EVENT)
                 return
@@ -302,6 +551,20 @@ class InteractiveCommandProcess:
     def kill_tree(self) -> None:
         if self.proc.poll() is None:
             _kill_process_tree(self.proc)
+        # Cancel path: a killed shell never wrote the state files, so drop the
+        # capture (keeping the previous state) and remove the temp files.
+        capture, self._capture = self._capture, None
+        if capture is not None:
+            capture.cleanup()
+
+    def _finalize_shell_state(self) -> None:
+        """Apply and discard the state capture once the process has exited."""
+        capture, self._capture = self._capture, None
+        if capture is None:
+            return
+        if self._shell_state is not None:
+            capture.apply(self._shell_state)
+        capture.cleanup()
 
 
 def resolve_command_output_window(
@@ -418,6 +681,7 @@ def execute_command(
     command: str,
     timeout: int | float = 60,
     cancellation_token: CancellationToken | None = None,
+    shell_state: ShellState | None = None,
 ) -> CommandResult:
     try:
         timeout = float(timeout)
@@ -426,38 +690,33 @@ def execute_command(
     except (TypeError, ValueError):
         timeout = 60
 
+    invocation = None
     try:
+        invocation = build_shell_invocation(command, shell_state)
         if platform.system() == "Windows":
-            # Match the shell we advertise to the model in get_system_info().
-            # subprocess with shell=True uses cmd.exe on Windows, which breaks
-            # PowerShell commands like Get-ChildItem.
-            shell_command = [
-                "powershell.exe",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-Command",
-                command,
-            ]
             proc = subprocess.Popen(
-                shell_command,
+                invocation.popen_args,
                 shell=False,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                cwd=invocation.cwd,
+                env=invocation.env,
                 creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
             )
         else:
             proc = subprocess.Popen(
-                command,
+                invocation.popen_args,
                 shell=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                cwd=invocation.cwd,
+                env=invocation.env,
                 preexec_fn=os.setsid,
             )
         unregister = (
@@ -476,6 +735,8 @@ def execute_command(
                     stdout, stderr = proc.communicate(timeout=min(0.05, remaining))
                     if cancellation_token is not None:
                         cancellation_token.throw_if_cancelled()
+                    if invocation.capture is not None and shell_state is not None:
+                        invocation.capture.apply(shell_state)
                     return CommandResult(command, stdout or "", stderr or "", proc.returncode, timeout=timeout)
                 except subprocess.TimeoutExpired:
                     continue
@@ -484,6 +745,8 @@ def execute_command(
             proc.wait()
             raise
         except subprocess.TimeoutExpired:
+            # Killed mid-flight: the state files are unwritten, keep the
+            # previous shell state.
             _kill_process_tree(proc)
             stdout, stderr = proc.communicate()
             return CommandResult(command, stdout or "", stderr or "", proc.returncode, timed_out=True, timeout=timeout)
@@ -495,6 +758,9 @@ def execute_command(
         raise
     except Exception as e:
         return CommandResult(command, "", f"[error: {e}]", None, timeout=timeout)
+    finally:
+        if invocation is not None and invocation.capture is not None:
+            invocation.capture.cleanup()
 
 
 def display_command_result(result: CommandResult) -> None:

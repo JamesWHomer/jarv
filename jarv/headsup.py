@@ -18,7 +18,7 @@ from rich.markdown import Markdown
 from rich.text import Text
 
 from .cancellation import CancellationToken, TurnCancelled
-from .clipboard import copy_to_clipboard
+from .clipboard import copy_to_clipboard, read_clipboard_image, read_clipboard_text
 from .command_input import (
     PasteRegistry,
     TextInput,
@@ -48,6 +48,7 @@ from .display import (
 )
 from .history import forget_current_session, load_history, prepare_session_context
 from .intro_animation import render_intro
+from .model_catalog import get_image_output_capability
 from .session_render import (
     _history_content_to_str,
     _status_renderable,
@@ -686,6 +687,9 @@ class HeadsupApp(AltScreenApp):
             if self._handle_prompt_dismiss():
                 self.stop()
             return
+        if key in ("CTRL_V", "ALT_V"):
+            self._paste_from_system_clipboard()
+            return
         scroll_delta = scroll_key_delta(key, repeat)
         if scroll_delta is not None:
             self._scroll_transcript(scroll_delta)
@@ -1071,6 +1075,62 @@ class HeadsupApp(AltScreenApp):
                 Text("Couldn't reach the clipboard.", style="yellow")
             )
         return True
+
+    def _paste_from_system_clipboard(self) -> None:
+        """Handle Ctrl+V / Alt+V: attach a copied image, else paste text.
+
+        Terminals only deliver clipboard *text* through the input stream, so a
+        copied image never arrives as a paste -- the keystroke itself is the
+        cue to read the OS clipboard directly. An image is materialised as a
+        file and inserted as an ``[Image #N]`` chip whose submitted expansion
+        is a reference to that file; the read tool turns local image files into
+        image blocks for vision-capable models. With no image on the clipboard
+        the key pastes the clipboard's text instead, which covers terminals
+        that pass Ctrl+V through without handling it. (Reading the clipboard
+        can shell out -- ~a second on Windows -- and briefly blocks the loop,
+        like the nested modal reads do.)
+        """
+        if self._answer_request is not None:
+            return
+        image = read_clipboard_image()
+        if image is not None:
+            marker = self._pastes.attach("Image", f"[attached image: {image.path}]")
+            buffer, cursor = self._editor_buffer_cursor()
+            self.editor["buffer"] = buffer[:cursor] + marker + buffer[cursor:]
+            self.editor["cursor"] = cursor + len(marker)
+            self.editor["preferred_visual_column"] = None
+            self.editor["selection_anchor"] = None
+            self._after_clipboard_paste()
+            capability = get_image_output_capability(self.config)
+            if capability.supported:
+                self.set_prompt_notice(
+                    Text(f"Image attached: {image.path.name}", style="dim")
+                )
+            else:
+                self.set_prompt_notice(
+                    Text(
+                        "Image attached, but the active model can't view images "
+                        f"({capability.reason}).",
+                        style="yellow",
+                    )
+                )
+            return
+        text = read_clipboard_text()
+        if text:
+            changed, _ = self._apply_editor_key(TextInput(text), 1)
+            if changed:
+                self._after_clipboard_paste()
+            return
+        self.set_prompt_notice(Text("Nothing to paste on the clipboard.", style="yellow"))
+
+    def _after_clipboard_paste(self) -> None:
+        """The same draft-changed bookkeeping on_key does after an editor key."""
+        self._reset_prompt_history_navigation()
+        self.scroll_offset = 0
+        self._clear_prompt_notice()
+        self._exit_armed = False
+        self._slash_menu_index = 0
+        self._slash_menu_dismissed_for = None
 
     def _apply_editor_key(self, key: str, repeat: int) -> tuple[bool, bool]:
         if isinstance(key, TextInput):

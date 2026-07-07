@@ -19,7 +19,7 @@ from jarv.provider import (
     ToolCallDone,
 )
 from jarv.cancellation import CancellationToken, TurnCancelled
-from jarv.shell import CommandResult
+from jarv.shell import CommandResult, ShellState
 
 
 class OrchestratorTests(unittest.TestCase):
@@ -184,6 +184,67 @@ class OrchestratorTests(unittest.TestCase):
         self.assertTrue(output.endswith("z" * 30))
         self.assertIn("26 characters omitted from the middle", output)
         self.assertNotIn("truncated to 10 characters", output)
+
+    def test_run_command_uses_node_shell_state(self):
+        state = ShellState(cwd="C:/somewhere", env=None)
+        node = AgentNode(
+            label="child",
+            depth=1,
+            parent_label="root",
+            task="do work",
+            sterile=True,
+            shell_state=state,
+        )
+        command_result = CommandResult("echo ok", "ok", "", 0)
+
+        with (
+            patch("jarv.orchestrator.check_command", return_value=(True, "")),
+            patch(
+                "jarv.orchestrator.execute_command",
+                return_value=command_result,
+            ) as execute,
+        ):
+            dispatch_tool(
+                "run_command",
+                {"command": "echo ok"},
+                node,
+                ArtifactStore(),
+                client=None,
+                config=DEFAULT_CONFIG,
+            )
+
+        self.assertIs(execute.call_args.kwargs["shell_state"], state)
+
+    def test_spawn_children_get_independent_shell_state_copies(self):
+        parent = AgentNode(
+            label="root",
+            depth=0,
+            parent_label=None,
+            task="root",
+            sterile=False,
+            shell_state=ShellState(cwd="C:/proj", env={"A": "1"}),
+        )
+        seen_nodes = []
+
+        def record_node(node, *args, **kwargs):
+            seen_nodes.append(node)
+            return ("long", "tldr")
+
+        with patch("jarv.orchestrator.run_subagent_loop", side_effect=record_node):
+            spawn_batch(
+                parent,
+                [{"label": "child", "task": "work"}],
+                ArtifactStore(),
+                client=None,
+                config=DEFAULT_CONFIG,
+            )
+
+        self.assertEqual(len(seen_nodes), 1)
+        child_state = seen_nodes[0].shell_state
+        self.assertIsNot(child_state, parent.shell_state)
+        self.assertIsNot(child_state.env, parent.shell_state.env)
+        self.assertEqual(child_state.cwd, parent.shell_state.cwd)
+        self.assertEqual(child_state.env, parent.shell_state.env)
 
     def test_spawn_rejects_invalid_deps_and_non_boolean_sterile(self):
         parent = AgentNode(

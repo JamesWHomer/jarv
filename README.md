@@ -77,6 +77,7 @@ jarv> /new
 
 - Type a prompt and press Enter.
 - Slash commands start with `/` — type `/help` to list them.
+- Ctrl+V (or Alt+V if your terminal owns Ctrl+V, e.g. Windows Terminal) attaches a copied image or image file as an `[Image #N]` chip for image-capable models.
 - During a response, Esc or Ctrl+C stops further work, checkpoints the turn in history/context, and restores the prompt for editing. Use `/undo` to remove the turn.
 - At the prompt, Esc or Ctrl+C clears existing text; press either again on an empty prompt to exit.
 - You can also exit with `exit`, `quit`, or `/exit`.
@@ -237,6 +238,7 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 | `project_context_max_chars` | `16000` | Maximum project-context file characters injected into the system prompt (longer files are truncated head+tail). |
 | `disabled_tools` | `[]` | Tool names omitted from root agents and subagents. Configure these from the Tools section in `/settings`. |
 | `command_timeout` | `60` | Seconds before non-interactive shell commands are killed, or before interactive commands check in again. |
+| `interactive_max_rounds` | `40` | Model interaction rounds allowed for one interactive command before Jarv kills the process. |
 | `web_timeout` | `15` | Seconds before a web search or URL read is killed. |
 | `command_safety` | `"risky"` | Command confirmation level: `all` (confirm every command), `risky` (confirm dangerous commands only), `none` (no confirmation). |
 | `audit` | `true` | LLM auditor for flagged commands. |

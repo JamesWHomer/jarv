@@ -269,6 +269,7 @@ Run `jarv` with no prompt to start an interactive session. Type a prompt and pre
 - Shell commands run only when the model calls `run_command`.
 - On Windows, `run_command` uses PowerShell.
 - On other platforms, `run_command` uses the system shell.
+- Shell state (current directory, environment variables, activated venv) persists across `run_command` calls. Subagents inherit a snapshot of the parent's state at spawn; their changes do not propagate back. State is kept in memory only and resets when jarv exits. If a command is killed (timeout/interrupt) or ends with `exit` on Windows, the state from before that command is kept.
 - If a command is still running and appears to be waiting for input, jarv asks the model for terminal input instead of printing the assistant response as chat. Plain text is sent with Enter; the interactive prompt also exposes temporary controls such as wait, interrupt, EOF, Enter, Tab, Escape, and arrow keys only while they are relevant.
 - During the interactive loop, `command_timeout` is a check-in interval. If the command keeps running past it, jarv asks the model what to do next and includes elapsed/idle time instead of killing the process.
 - Interactive command output is delta-only. Each terminal input/output step is displayed separately, and jarv sends only the new stdout/stderr since the previous interaction back to the model.

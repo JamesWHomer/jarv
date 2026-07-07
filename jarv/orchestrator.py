@@ -36,6 +36,7 @@ from .shell import (
     COMMAND_OUTPUT_UNSET,
     MAX_COMMAND_OUTPUT_WINDOW_CHARS,
     InteractiveCommandProcess,
+    ShellState,
     execute_command,
     resolve_command_output_window,
     truncate_model_output,
@@ -61,7 +62,9 @@ RUN_COMMAND_TOOL = {
     "name": "run_command",
     "description": (
         "Run a shell command and return its output. If the process waits for stdin, "
-        "Jarv may continue it interactively."
+        "Jarv may continue it interactively. Shell state persists between calls: "
+        "the working directory (cd), environment variables, and activated "
+        "virtualenvs carry over to the next run_command."
     ),
     "parameters": {
         "type": "object",
@@ -202,6 +205,7 @@ class AgentNode:
     usage_path: Path | None = None
     session_id: str | None = None
     incognito: bool = False
+    shell_state: ShellState | None = None
 
 
 def tool_enabled(config: dict, name: str) -> bool:
@@ -258,6 +262,11 @@ class PendingRunCommand:
     # place as the interaction proceeds so history holds one collapsed record.
     output_item: dict | None = None
     input_markers: list = field(default_factory=list)
+    # Marker/output segments interleaved in send order; the stored record is
+    # rebuilt from these so a mid-interaction checkpoint keeps the output too.
+    transcript_segments: list = field(default_factory=list)
+    # Model interaction rounds so far, checked against interactive_max_rounds.
+    rounds: int = 0
     # The growing transcript card and (inline only) the persistent Rich ``Live``
     # kept open for the whole interactive session, plus the live-display depth
     # context manager that wraps it. Heads-up mode leaves ``live``/``live_depth_cm``
@@ -342,12 +351,14 @@ def execute_run_command(
     *,
     cancellation_token: CancellationToken | None = None,
     retained_store: RetainedOutputStore | None = None,
+    shell_state: ShellState | None = None,
 ) -> tuple[str, object, str | None]:
     """Execute a prepared shell command and return model output plus shell metadata."""
     result = execute_command(
         prepared.cmd,
         config.get("command_timeout", 60),
         cancellation_token=cancellation_token,
+        shell_state=shell_state,
     )
     output, output_id = format_run_command_output(
         result,
@@ -382,6 +393,7 @@ def run_command_tool_output(
     cancellation_token: CancellationToken | None = None,
     retained_store: RetainedOutputStore | None = None,
     incognito: bool = False,
+    shell_state: ShellState | None = None,
 ) -> str:
     """Validate, safety-check, execute, and retain output for run_command."""
     prepared = prepare_run_command(args, config)
@@ -403,6 +415,7 @@ def run_command_tool_output(
         config,
         cancellation_token=cancellation_token,
         retained_store=retained_store,
+        shell_state=shell_state,
     )
     return output
 
@@ -620,6 +633,7 @@ def dispatch_tool(
             cancellation_token=cancellation_token,
             retained_store=retained_store,
             incognito=node.incognito,
+            shell_state=node.shell_state,
         )
 
     if name == "read":
@@ -789,6 +803,16 @@ def execute_tool_calls(
         output = _maybe_truncate_tool_output(item.name, output, config)
         append_tool_result(item, output)
         if result.pending_command is not None:
+            # The turn now belongs to the held-open interactive command; answer
+            # the remaining calls instead of silently dropping them so the
+            # model knows they never ran.
+            for skipped in tool_calls[item_index + 1:]:
+                append_tool_result(
+                    skipped,
+                    "[skipped: an interactive run_command is waiting for "
+                    "terminal input; this call was not executed — re-issue it "
+                    "after the command finishes]",
+                )
             return result
         item_index += 1
 
@@ -1051,6 +1075,12 @@ def spawn_batch(
             usage_path=child_usage_path,
             session_id=child_session_id,
             incognito=parent.incognito,
+            # Children inherit a snapshot; their cd/env changes never propagate
+            # back, so parallel siblings cannot race on shared state.
+            shell_state=(
+                parent.shell_state.copy()
+                if parent.shell_state is not None else None
+            ),
         ))
 
     if observer is not None:

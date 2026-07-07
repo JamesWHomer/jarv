@@ -647,12 +647,14 @@ def _print_agent_usage_if_enabled(
             console.print(usage_line)
 
 
-def get_system_info() -> str:
+def get_system_info(cwd: str | None = None) -> str:
     shell = get_shell_name()
     parts = [
         f"OS: {platform.system()} {platform.release()}",
-        f"CWD: {os.getcwd()}",
+        f"CWD: {cwd or os.getcwd()}",
         f"Shell: {shell}",
+        "Shell state (cwd, environment variables, activated venv) persists "
+        "across run_command calls in this session.",
     ]
     if platform.system() == "Windows" and "PowerShell 5.1" in shell:
         parts.append("Shell syntax: Windows PowerShell 5.1; `&&` is not supported. Use `;` or `if ($?) { ... }`.")

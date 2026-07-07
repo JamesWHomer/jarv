@@ -114,6 +114,20 @@ class PasteRegistry:
         self._pastes[marker] = text
         return marker
 
+    def attach(self, label: str, expansion: str) -> str:
+        """Register a synthetic chip whose submitted text the caller supplies.
+
+        Used for content that never travelled through the input stream -- a
+        clipboard image saved to a file pastes as an ``[Image #N]`` chip that
+        expands to a reference to that file. The marker shares the counter and
+        all the span machinery with collapsed pastes, so it is styled, deleted,
+        and expanded exactly like a ``[Pasted text]`` chip.
+        """
+        self._count += 1
+        marker = f"[{label} #{self._count}]"
+        self._pastes[marker] = expansion
+        return marker
+
     def expand(self, text: str) -> str:
         """Restore any placeholder markers in ``text`` to their pasted content."""
         for marker, original in self._pastes.items():
@@ -634,6 +648,8 @@ def _windows_key_from_virtual_key(
         return "CTRL_F"
     if char == "\x13":
         return "CTRL_S"
+    if char == "\x16":
+        return "CTRL_V"
     if char in ("\x08", "\x7f"):
         return "BACKSPACE"
     if char == "\x03":
@@ -1134,10 +1150,10 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
     """Read a single keypress and return a normalised token.
 
     Returns one of: UP, DOWN, LEFT, RIGHT, HOME, END, PAGEUP, PAGEDOWN,
-    ENTER, ESC, TAB, CTRL_F, CTRL_N, CTRL_S, BACKSPACE, DELETE, the modified
-    arrows CTRL_LEFT/CTRL_RIGHT (word-wise) and SHIFT_LEFT/SHIFT_RIGHT/
-    CTRL_SHIFT_LEFT/CTRL_SHIFT_RIGHT (selection), or the raw character. Raises
-    KeyboardInterrupt on Ctrl-C.  When ``text_mode`` is True, the convenience q/Q → ESC mapping is
+    ENTER, ESC, TAB, CTRL_F, CTRL_N, CTRL_S, CTRL_V, ALT_V, BACKSPACE, DELETE,
+    the modified arrows CTRL_LEFT/CTRL_RIGHT (word-wise) and SHIFT_LEFT/
+    SHIFT_RIGHT/CTRL_SHIFT_LEFT/CTRL_SHIFT_RIGHT (selection), or the raw
+    character. Raises KeyboardInterrupt on Ctrl-C.  When ``text_mode`` is True, the convenience q/Q → ESC mapping is
     disabled so a search query can include those letters. When
     ``translate_mouse_wheel`` is False, SGR wheel input returns MOUSE_WHEEL_*
     tokens instead of arrow/page navigation tokens.
@@ -1213,6 +1229,11 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
                         "H": "HOME", "F": "END",
                         "5": "PAGEUP", "6": "PAGEDOWN", "3": "DELETE",
                     }.get(ch3, "OTHER")
+                if ch2 in ("v", "V"):
+                    # Alt+V (ESC-prefixed under VT input): the image-paste
+                    # fallback for terminals whose own paste binding swallows
+                    # Ctrl+V (Windows Terminal).
+                    return "ALT_V"
                 _PENDING_KEYS.appendleft(ch2)
             return "ESC"
         if ch == "[":
@@ -1233,6 +1254,8 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
             return "CTRL_F"
         if ch == "\x13":
             return "CTRL_S"
+        if ch == "\x16":
+            return "CTRL_V"
         if ch in ("\x08", "\x7f"):
             return "BACKSPACE"
         if ch == "\x03":
@@ -1285,6 +1308,9 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
                         "H": "HOME", "F": "END",
                         "5": "PAGEUP", "6": "PAGEDOWN", "3": "DELETE",
                     }.get(ch3, "OTHER")
+                if ch2 in ("v", "V"):
+                    # Alt+V (ESC-prefixed): image-paste fallback binding.
+                    return "ALT_V"
                 return "ESC"
             if ch == "\r":
                 return "ENTER"
@@ -1298,6 +1324,8 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
                 return "CTRL_F"
             if ch == "\x13":
                 return "CTRL_S"
+            if ch == "\x16":
+                return "CTRL_V"
             if ch in ("\x7f", "\x08"):
                 return "BACKSPACE"
             if ch == "\x03":
