@@ -9,7 +9,7 @@ jarv commit all these files             # let it run commands to do the job
 jarv                                    # start an interactive session
 ```
 
-![jarv interactive session](https://github.com/user-attachments/assets/d56b491b-4498-43f9-a93b-cfee7aee4791)
+![jarv interactive session](https://github.com/JamesWHomer/jarv/releases/download/readme-assets/hero.gif)
 
 ## Why jarv?
 
@@ -43,7 +43,7 @@ To upgrade:
 jarv /update
 ```
 
-![jarv update demo](https://github.com/user-attachments/assets/5dbbb528-6b6f-4d04-bc2d-d68652e67fc9)
+![jarv update demo](https://github.com/JamesWHomer/jarv/releases/download/readme-assets/update.gif)
 
 ## Usage
 
@@ -63,6 +63,8 @@ git diff | jarv review this patch
 cat README.md | jarv summarize this
 rg TODO . | jarv group these by subsystem
 ```
+
+![jarv one-shot and piped stdin](https://github.com/JamesWHomer/jarv/releases/download/readme-assets/oneshot.gif)
 
 ### Heads-up mode
 
@@ -175,7 +177,7 @@ The terminal shows a live progress panel as children run, with a green checkmark
 
 ## Commands
 
-![jarv slash commands](https://github.com/user-attachments/assets/ed723bce-229e-47db-82a4-c26af2c623ad)
+![jarv slash commands](https://github.com/JamesWHomer/jarv/releases/download/readme-assets/commands.gif)
 
 | Command | Description |
 | --- | --- |
@@ -213,7 +215,7 @@ Each terminal is automatically bound to its own session. Jarv identifies termina
 - `/tree` opens the session as a navigable tree — fork, edit, or resume from any earlier prompt.
 - `/undo` and `/redo` let you step through recent exchanges.
 
-![jarv session undo](https://github.com/user-attachments/assets/957729b0-3925-461d-a65c-25cf030ffaa6)
+![jarv session undo](https://github.com/JamesWHomer/jarv/releases/download/readme-assets/undo.gif)
 
 ## Config
 

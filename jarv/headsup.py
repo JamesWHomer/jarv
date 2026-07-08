@@ -492,6 +492,99 @@ class HeadsupAgentUI:
         self._last_stream_refresh_at = time.perf_counter() if now is None else now
 
 
+def _update_outcome_lines(outcome) -> tuple[Text, list[Text]]:
+    """Heads-up rendering of an UpdateOutcome: final status line + notices.
+
+    The restart hints differ from the CLI's on purpose: here the user is
+    already inside jarv, so "run jarv again" reads wrong — the hint says to
+    restart/exit instead.
+    """
+    if outcome.kind in ("updated", "staged"):
+        version = f"v{outcome.latest}" if outcome.latest else "the new version"
+        line = Text("✓ ", style="bold green")
+        if outcome.kind == "updated":
+            line.append(f"Updated to {version}", style="green")
+            line.append(" — restart jarv to start using it.", style="dim")
+        else:
+            line.append(f"Update to {version} staged", style="green")
+            line.append(" — exit jarv and run it again to finish.", style="dim")
+        return line, []
+    if outcome.kind == "current":
+        detail = f" ({outcome.detail})" if outcome.detail else ""
+        return Text(f"✓ {outcome.message}{detail}", style="dim"), []
+    details = [
+        Text(line, style="dim")
+        for line in (outcome.detail or "").splitlines()
+        if line.strip()
+    ]
+    if outcome.kind == "editable":
+        return Text(f"⚠ {outcome.message}", style="yellow"), details
+    line = Text("✗ ", style="bold red")
+    line.append(outcome.message, style="red")
+    return line, details
+
+
+class _UpdateTask:
+    """One background /update run, shown as a live status line in the transcript.
+
+    The update flow blocks on the network and the installer subprocess for up
+    to minutes, so it runs on a daemon worker thread while the loop keeps the
+    UI responsive; on_tick animates the spinner between stage changes, the same
+    way agent-turn wait statuses animate. A single status entry is upserted in
+    place from stage to stage and finalized with the outcome.
+    """
+
+    def __init__(self, app: "HeadsupApp"):
+        self.app = app
+        self.done = False
+        self._stage = "Checking for updates"
+        self._stage_started_at = time.perf_counter()
+        self._status_index: int | None = None
+
+    def start(self) -> None:
+        self._paint()
+        threading.Thread(target=self._worker, name="headsup-update", daemon=True).start()
+
+    def refresh_animation(self) -> None:
+        """Advance the spinner; called from the loop's on_tick."""
+        self._paint()
+
+    def _worker(self) -> None:
+        from .commands import UpdateOutcome, perform_update
+
+        try:
+            outcome = perform_update(self._set_stage)
+        except Exception as exc:  # a failed update must never take the UI down
+            outcome = UpdateOutcome("failed", "Update failed.", detail=str(exc))
+        self._finish(outcome)
+
+    def _set_stage(self, text: str) -> None:
+        with self.app.lock:
+            self._stage = text
+            self._stage_started_at = time.perf_counter()
+        self._paint()
+
+    def _paint(self) -> None:
+        with self.app.lock:
+            if self.done:
+                return
+            elapsed = int(max(0.0, time.perf_counter() - self._stage_started_at))
+            frame = _THINKING_FRAMES[int(time.perf_counter() * 10) % len(_THINKING_FRAMES)]
+            self._status_index = self.app.upsert_status(
+                self._status_index,
+                Text(f"{frame}  {self._stage}…  {elapsed}s"),
+            )
+
+    def _finish(self, outcome) -> None:
+        summary, details = _update_outcome_lines(outcome)
+        with self.app.lock:
+            self.done = True
+            self._status_index = self.app.upsert_status(self._status_index, summary)
+        for line in details:
+            self.app.add_notice(line)
+        self.app._update_finished(self)
+
+
 class HeadsupApp(AltScreenApp):
     # Heads-up keeps its own SGR-mouse handling, so it disables Rich/terminal
     # mouse capture rather than letting the base app capture the mouse.
@@ -546,6 +639,7 @@ class HeadsupApp(AltScreenApp):
         self._last_anim_frame = 0.0
         self._agent_busy = False
         self._agent_thread: threading.Thread | None = None
+        self._update_task: _UpdateTask | None = None
         self._queued_queries: deque[tuple[str, Callable | None]] = deque()
         self._answer_request: dict | None = None
         self._answer_request_completed: dict = {}
@@ -751,11 +845,15 @@ class HeadsupApp(AltScreenApp):
             self._outro_started_at = 0.0
             repaint = True
         ui = self._active_ui
-        if ui is not None and ui.has_active_animation():
-            if now - self._last_wait_tick >= 0.2:
-                self._last_wait_tick = now
-                # Recomputes the spinner text in place (and invalidates).
+        update_task = self._update_task
+        animating = (ui is not None and ui.has_active_animation()) or update_task is not None
+        if animating and now - self._last_wait_tick >= 0.2:
+            self._last_wait_tick = now
+            # Recomputes the spinner text in place (and invalidates).
+            if ui is not None and ui.has_active_animation():
                 ui._refresh_wait_statuses()
+            if update_task is not None:
+                update_task.refresh_animation()
         if repaint:
             self.invalidate()
 
@@ -1307,6 +1405,12 @@ class HeadsupApp(AltScreenApp):
         if command == "/btw":
             self._run_btw(rest)
             return
+        if command == "/update":
+            # Blocks on the network and the installer for up to minutes, so it
+            # runs like an agent turn — worker thread plus a live status entry —
+            # instead of freezing the loop in the captured-output path below.
+            self._start_update()
+            return
         if command in _FULLSCREEN_SLASH_COMMANDS or (
             command in {"/session", "/sessions"} and not rest
         ):
@@ -1496,6 +1600,21 @@ class HeadsupApp(AltScreenApp):
                     self._agent_thread = None
             if next_query is not None:
                 self._start_agent_thread(next_query, next_complete)
+
+    def _start_update(self) -> None:
+        """Run /update in the background with live progress in the transcript."""
+        with self.lock:
+            if self._update_task is not None:
+                self.add_notice(Text("An update is already running.", style="yellow"))
+                return
+            task = _UpdateTask(self)
+            self._update_task = task
+        task.start()
+
+    def _update_finished(self, task: _UpdateTask) -> None:
+        with self.lock:
+            if self._update_task is task:
+                self._update_task = None
 
     def _cancel_active_turn(self, *, clear_queue: bool = False) -> bool:
         with self.lock:
