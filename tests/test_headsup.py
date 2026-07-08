@@ -1911,7 +1911,6 @@ class HeadsupTests(unittest.TestCase):
             ("/setup", ["provider"], True),
             ("/help", [], True),
             ("/about", [], True),
-            ("/update", [], False),
             ("/new", [], False),
             ("/archive", [], False),
             ("/session", ["abc123"], False),
@@ -1993,6 +1992,97 @@ class HeadsupTests(unittest.TestCase):
                                 for entry in app.entries
                             )
                         )
+
+    def test_update_runs_on_worker_thread_with_live_status(self):
+        from jarv.commands import UpdateOutcome
+
+        handled = []
+        app, _test_console, _output = self._app()
+        app.handle_slash = lambda *call: handled.append(call)
+
+        def fake_perform_update(stage):
+            stage("Installing v9.9.9 into active Python environment")
+            return UpdateOutcome("updated", "Updated successfully.", latest="9.9.9")
+
+        with patch("jarv.commands.perform_update", fake_perform_update):
+            app._run_slash("/update", [])
+            self.assertTrue(self._wait_for(lambda: app._update_task is None))
+
+        # /update never goes through the blocking captured-output slash path.
+        self.assertEqual(handled, [])
+        # The whole run lives in one status entry that resolves in place.
+        self.assertEqual(
+            sum(1 for entry in app.entries if entry.kind == "status"), 1
+        )
+        text = self._entry_text(app)
+        self.assertIn("Updated to v9.9.9", text)
+        self.assertIn("restart jarv", text)
+
+    def test_update_animates_spinner_while_stage_runs(self):
+        from jarv.commands import UpdateOutcome
+
+        app, _test_console, _output = self._app()
+        release = threading.Event()
+
+        def slow_update(stage):
+            release.wait(timeout=5.0)
+            return UpdateOutcome("current", "Already up to date.", detail="v1.0.0")
+
+        with patch("jarv.commands.perform_update", slow_update):
+            app._run_slash("/update", [])
+            try:
+                first = self._entry_text(app)
+                self.assertIn("Checking for updates", first)
+                app._last_wait_tick = 0.0
+                with patch(
+                    "jarv.headsup.time.perf_counter",
+                    return_value=time.perf_counter() + 5.0,
+                ):
+                    app.on_tick()
+                # The loop tick advanced the elapsed timer past zero.
+                self.assertRegex(
+                    self._entry_text(app), r"Checking for updates…\s+[1-9]\d*s"
+                )
+            finally:
+                release.set()
+            self.assertTrue(self._wait_for(lambda: app._update_task is None))
+        self.assertIn("Already up to date. (v1.0.0)", self._entry_text(app))
+
+    def test_update_failure_reports_error_and_clears_task(self):
+        app, _test_console, _output = self._app()
+
+        def broken_update(_stage):
+            raise RuntimeError("network exploded")
+
+        with patch("jarv.commands.perform_update", broken_update):
+            app._run_slash("/update", [])
+            self.assertTrue(self._wait_for(lambda: app._update_task is None))
+
+        text = self._entry_text(app)
+        self.assertIn("Update failed.", text)
+        self.assertIn("network exploded", text)
+
+    def test_second_update_while_running_is_rejected(self):
+        from jarv.commands import UpdateOutcome
+
+        app, _test_console, _output = self._app()
+        release = threading.Event()
+
+        def slow_update(_stage):
+            release.wait(timeout=5.0)
+            return UpdateOutcome("updated", "Updated successfully.", latest="9.9.9")
+
+        with patch("jarv.commands.perform_update", slow_update):
+            app._run_slash("/update", [])
+            try:
+                self.assertIsNotNone(app._update_task)
+                app._run_slash("/update", [])
+                self.assertIn(
+                    "An update is already running.", self._entry_text(app)
+                )
+            finally:
+                release.set()
+            self.assertTrue(self._wait_for(lambda: app._update_task is None))
 
     def test_quick_slash_command_does_not_capture_live_frame(self):
         calls = []

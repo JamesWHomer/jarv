@@ -5,6 +5,9 @@ import json
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import __version__
@@ -434,71 +437,97 @@ def _fallback_tool_manager() -> str | None:
     return None
 
 
-def _cmd_update_standalone() -> int:
-    from .standalone import (
-        fetch_release_manifest,
-        install_standalone_asset,
-        normalize_architecture,
-        normalize_platform,
-        select_release_asset,
-    )
+@dataclass(frozen=True)
+class UpdateOutcome:
+    """Result of an update attempt, independent of how it is displayed.
 
-    manifest = fetch_release_manifest()
-    if manifest is None:
-        console.print("[bold red]✗[/bold red] [red]Could not reach GitHub Releases.[/red]")
-        return 1
-    latest = str(manifest["version"])
-    if not _is_newer_version(latest, __version__):
-        console.print(f"[bold green]✓[/bold green] [green]Already up to date.[/green] [dim](v{__version__})[/dim]")
-        return 0
-    asset = select_release_asset(manifest)
-    if asset is None:
-        console.print("[bold red]✗[/bold red] [red]No standalone release asset matches this system.[/red]")
-        console.print(
-            f"[dim]Needed platform={normalize_platform()} architecture={normalize_architecture()}.[/dim]"
-        )
-        return 1
+    ``kind`` is one of ``updated`` / ``staged`` / ``current`` / ``editable`` /
+    ``failed``; ``message`` is the one-line plain-text summary and ``detail``
+    an optional multi-line elaboration. Presenters (the CLI printer below, the
+    heads-up transcript) own their styling and restart hints.
+    """
 
-    console.print(f"[bold cyan]↓[/bold cyan] Update found [dim](v{__version__} → v{latest})[/dim]. Installing…")
-    try:
-        with console.status("[dim]Downloading and verifying standalone binary…[/dim]", spinner="dots"):
-            result = install_standalone_asset(asset)
-    except Exception as exc:
-        console.print("[bold red]✗[/bold red] [red]Update failed:[/red]")
-        console.print(str(exc), style="dim")
-        return 1
+    kind: str
+    message: str
+    detail: str = ""
+    latest: str | None = None
 
-    UPDATE_FLAG_FILE.unlink(missing_ok=True)
-    if result == "staged":
-        console.print("[bold green]✓[/bold green] [green]Update staged.[/green] [dim]Close this process, then run jarv again to use the new version.[/dim]")
-    else:
-        console.print("[bold green]✓[/bold green] [green]Updated successfully.[/green] [dim]Run jarv again to use the new version.[/dim]")
-    return 0
+    @property
+    def ok(self) -> bool:
+        return self.kind in ("updated", "staged", "current")
 
 
-def cmd_update() -> int:
+#: Reports a long-running update stage ("Checking for updates", "Installing
+#: v1.2.3 into …"); each call supersedes the previous stage.
+UpdateStage = Callable[[str], None]
+
+
+def perform_update(stage: UpdateStage) -> UpdateOutcome:
+    """Run the update through the active install channel, reporting stages.
+
+    UI-agnostic: all long waits (network, installer subprocess) happen between
+    ``stage`` calls, so callers can run this on a worker thread and render
+    progress however suits them.
+    """
     from .standalone import is_standalone_install
 
     if is_standalone_install():
-        return _cmd_update_standalone()
+        return _perform_standalone_update(stage)
+    return _perform_python_update(stage)
 
-    console.print("[dim]⟳ Checking for updates…[/dim]")
+
+def _perform_standalone_update(stage: UpdateStage) -> UpdateOutcome:
+    from . import standalone
+
+    stage("Checking for updates")
+    manifest = standalone.fetch_release_manifest()
+    if manifest is None:
+        return UpdateOutcome("failed", "Could not reach GitHub Releases.")
+    latest = str(manifest["version"])
+    if not _is_newer_version(latest, __version__):
+        return UpdateOutcome("current", "Already up to date.", detail=f"v{__version__}", latest=latest)
+    asset = standalone.select_release_asset(manifest)
+    if asset is None:
+        return UpdateOutcome(
+            "failed",
+            "No standalone release asset matches this system.",
+            detail=(
+                f"Needed platform={standalone.normalize_platform()} "
+                f"architecture={standalone.normalize_architecture()}."
+            ),
+            latest=latest,
+        )
+
+    stage(f"Downloading and verifying v{latest}")
+    try:
+        result = standalone.install_standalone_asset(asset)
+    except Exception as exc:
+        return UpdateOutcome("failed", "Update failed.", detail=str(exc), latest=latest)
+
+    UPDATE_FLAG_FILE.unlink(missing_ok=True)
+    if result == "staged":
+        return UpdateOutcome("staged", "Update staged.", latest=latest)
+    return UpdateOutcome("updated", "Updated successfully.", latest=latest)
+
+
+def _perform_python_update(stage: UpdateStage) -> UpdateOutcome:
+    stage("Checking for updates")
     release = _fetch_latest_pypi_release()
     if release is None:
-        console.print("[bold red]✗[/bold red] [red]Could not reach PyPI.[/red]")
-        return 1
+        return UpdateOutcome("failed", "Could not reach PyPI.")
     latest, package_spec = release
     if not _is_newer_version(latest, __version__):
         detail = f"v{__version__}"
         if latest != __version__:
             detail += f", PyPI v{latest}"
-        console.print(f"[bold green]✓[/bold green] [green]Already up to date.[/green] [dim]({detail})[/dim]")
-        return 0
+        return UpdateOutcome("current", "Already up to date.", detail=detail, latest=latest)
     if _is_editable_install():
-        console.print("[bold yellow]⚠[/bold yellow] [yellow]Editable install detected; automatic update skipped.[/yellow]")
-        console.print("[dim]Update the source checkout, then reinstall it with your development workflow.[/dim]")
-        return 1
-    console.print(f"[bold cyan]↓[/bold cyan] Update found [dim](v{__version__} → v{latest})[/dim]. Installing…")
+        return UpdateOutcome(
+            "editable",
+            "Editable install detected; automatic update skipped.",
+            detail="Update the source checkout, then reinstall it with your development workflow.",
+            latest=latest,
+        )
 
     manager = _installation_manager()
     install_target = {
@@ -506,42 +535,106 @@ def cmd_update() -> int:
         "pipx": "pipx tool environment",
         "uv": "uv tool environment",
     }[manager]
-    with console.status(f"[dim]Installing release into {install_target}…[/dim]", spinner="dots"):
-        result = _run_update_install(manager, package_spec)
+    stage(f"Installing v{latest} into {install_target}")
+    result = _run_update_install(manager, package_spec)
     if manager == "pip" and _is_externally_managed_error(result):
         fallback = _fallback_tool_manager()
-        if fallback:
-            console.print(f"[dim]System Python detected — retrying with {fallback}…[/dim]")
-            with console.status(f"[dim]Installing release with {fallback}…[/dim]", spinner="dots"):
-                result = _run_update_install(fallback, package_spec)
-            manager = fallback
-        else:
-            console.print("[bold red]✗[/bold red] [red]Update failed:[/red] pip is blocked by your system Python (PEP 668).")
-            console.print("[dim]Install uv or pipx, then reinstall Jarv as an isolated tool.[/dim]")
-            console.print(f"  [bold]uv tool install {package_spec}[/bold]")
-            return 1
+        if fallback is None:
+            return UpdateOutcome(
+                "failed",
+                "Update failed: pip is blocked by your system Python (PEP 668).",
+                detail=(
+                    "Install uv or pipx, then reinstall Jarv as an isolated tool:\n"
+                    f"  uv tool install {package_spec}"
+                ),
+                latest=latest,
+            )
+        stage(f"System Python detected — retrying with {fallback}")
+        result = _run_update_install(fallback, package_spec)
+        manager = fallback
 
     installed = (
         _installed_version() if manager == "pip" else _tool_installed_version(manager)
     ) if result.returncode == 0 else None
-    if result.returncode == 0:
-        if installed == latest:
-            UPDATE_FLAG_FILE.unlink(missing_ok=True)
-            console.print("[bold green]✓[/bold green] [green]Updated successfully.[/green] [dim]Run jarv again to use the new version.[/dim]")
-            return 0
+    if result.returncode == 0 and installed == latest:
+        UPDATE_FLAG_FILE.unlink(missing_ok=True)
+        return UpdateOutcome("updated", "Updated successfully.", latest=latest)
 
-    console.print("[bold red]✗[/bold red] [red]Update failed:[/red]")
-    output = "\n".join(
-        filter(None, [(result.stdout or "").strip(), (result.stderr or "").strip()])
-    )
     if result.returncode == 0:
-        output = (
+        detail = (
             f"Expected jarv {latest}, but this process still sees {installed or 'an unknown version'}. "
             f"The {manager} installation may not own the jarv command on PATH."
         )
-    if output:
-        console.print(output, style="dim")
-    return 1
+    else:
+        detail = "\n".join(
+            filter(None, [(result.stdout or "").strip(), (result.stderr or "").strip()])
+        )
+    return UpdateOutcome("failed", "Update failed.", detail=detail, latest=latest)
+
+
+@contextmanager
+def _console_update_stages():
+    """Yield an UpdateStage that renders each stage as a console spinner."""
+    active: list = []
+
+    def _stop() -> None:
+        if active:
+            active.pop().__exit__(None, None, None)
+
+    def stage(text: str) -> None:
+        _stop()
+        status = console.status(f"[dim]{text}…[/dim]", spinner="dots")
+        status.__enter__()
+        active.append(status)
+
+    try:
+        yield stage
+    finally:
+        _stop()
+
+
+_UPDATE_OUTCOME_STYLES = {
+    "updated": ("✓", "green"),
+    "staged": ("✓", "green"),
+    "current": ("✓", "green"),
+    "editable": ("⚠", "yellow"),
+    "failed": ("✗", "red"),
+}
+
+_UPDATE_RESTART_HINTS = {
+    "updated": "Run jarv again to use the new version.",
+    "staged": "Close this process, then run jarv again to use the new version.",
+}
+
+
+def _print_update_outcome(outcome: UpdateOutcome) -> int:
+    icon, style = _UPDATE_OUTCOME_STYLES[outcome.kind]
+    line = f"[bold {style}]{icon}[/bold {style}] [{style}]{outcome.message}[/{style}]"
+    hint = _UPDATE_RESTART_HINTS.get(outcome.kind)
+    if hint:
+        line += f" [dim]{hint}[/dim]"
+    elif outcome.kind == "current" and outcome.detail:
+        line += f" [dim]({outcome.detail})[/dim]"
+    console.print(line)
+    if outcome.kind in ("editable", "failed") and outcome.detail:
+        console.print(outcome.detail, style="dim")
+    return 0 if outcome.ok else 1
+
+
+def _cmd_update_standalone() -> int:
+    with _console_update_stages() as stage:
+        outcome = _perform_standalone_update(stage)
+    return _print_update_outcome(outcome)
+
+
+def cmd_update() -> int:
+    from .standalone import is_standalone_install
+
+    if is_standalone_install():
+        return _cmd_update_standalone()
+    with _console_update_stages() as stage:
+        outcome = _perform_python_update(stage)
+    return _print_update_outcome(outcome)
 
 
 def cmd_new() -> None:
