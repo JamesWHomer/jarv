@@ -1184,9 +1184,10 @@ class HeadsupApp(AltScreenApp):
         is a reference to that file; the read tool turns local image files into
         image blocks for vision-capable models. With no image on the clipboard
         the key pastes the clipboard's text instead, which covers terminals
-        that pass Ctrl+V through without handling it. (Reading the clipboard
-        can shell out -- ~a second on Windows -- and briefly blocks the loop,
-        like the nested modal reads do.)
+        that pass Ctrl+V through without handling it. (On Windows the
+        clipboard is read in-process via the Win32 API, so this is effectively
+        instant; macOS/Linux shell out to fast helpers, and only exotic
+        Windows bitmap formats fall back to a slow PowerShell read.)
         """
         if self._answer_request is not None:
             return

@@ -1188,8 +1188,31 @@ def test_paste_registry_attach_registers_synthetic_chip():
     assert marker == "[Image #1]"
     assert registry.expand(f"see {marker}") == "see [attached image: /tmp/shot.png]"
     assert registry.marker_spans(marker) == [(0, len(marker))]
-    # The counter is shared with collapsed pastes so markers never collide.
-    assert registry.collapse("a\nb") == "[Pasted text #2 +2 lines]"
+    # Numbering is per label: a text chip doesn't bump the image numbers.
+    assert registry.collapse("a\nb") == "[Pasted text #1 +2 lines]"
+    assert registry.attach("Image", "x") == "[Image #2]"
+
+
+def test_paste_registry_reuses_numbers_after_delete():
+    registry = command_input.PasteRegistry()
+    assert registry.attach("Image", "one") == "[Image #1]"
+
+    # Chip deleted from the buffer: the number is reclaimed by the next paste.
+    registry.prune("")
+    assert registry.attach("Image", "two") == "[Image #1]"
+
+    # With #1 and #3 live, the gap is filled first.
+    third = registry.attach("Image", "three")
+    fourth = registry.attach("Image", "four")
+    assert (third, fourth) == ("[Image #2]", "[Image #3]")
+    registry.prune(f"[Image #1] {fourth}")
+    assert registry.attach("Image", "five") == "[Image #2]"
+
+    # Collapsed text pastes reclaim numbers the same way.
+    marker = registry.collapse("a\nb")
+    assert marker == "[Pasted text #1 +2 lines]"
+    registry.prune("[Image #1]")
+    assert registry.collapse("c\nd\ne") == "[Pasted text #1 +3 lines]"
 
 
 def test_paste_registry_prune_drops_absent_markers():

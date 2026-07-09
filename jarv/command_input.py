@@ -102,15 +102,38 @@ class PasteRegistry:
     """
 
     _pastes: dict[str, str] = field(default_factory=dict)
-    _count: int = 0
+
+    def _next_number(self, label: str) -> int:
+        """Smallest positive number no live ``label`` marker is using.
+
+        Derived from the live markers rather than a running counter so chip
+        numbers are reclaimed: paste an image, delete the chip, paste another
+        and the new chip is ``#1`` again instead of ``#2``.
+        """
+        prefix = f"[{label} #"
+        used = set()
+        for marker in self._pastes:
+            if not marker.startswith(prefix):
+                continue
+            digits = ""
+            for char in marker[len(prefix):]:
+                if not char.isdigit():
+                    break
+                digits += char
+            if digits:
+                used.add(int(digits))
+        number = 1
+        while number in used:
+            number += 1
+        return number
 
     def collapse(self, text: str) -> str | None:
         """Return a placeholder marker for a multi-line paste, else ``None``."""
         line_count = len(text.splitlines())
         if line_count < 2:
             return None
-        self._count += 1
-        marker = f"[Pasted text #{self._count} +{line_count} lines]"
+        number = self._next_number("Pasted text")
+        marker = f"[Pasted text #{number} +{line_count} lines]"
         self._pastes[marker] = text
         return marker
 
@@ -119,12 +142,11 @@ class PasteRegistry:
 
         Used for content that never travelled through the input stream -- a
         clipboard image saved to a file pastes as an ``[Image #N]`` chip that
-        expands to a reference to that file. The marker shares the counter and
-        all the span machinery with collapsed pastes, so it is styled, deleted,
-        and expanded exactly like a ``[Pasted text]`` chip.
+        expands to a reference to that file. The marker shares the numbering
+        scheme and all the span machinery with collapsed pastes, so it is
+        styled, deleted, and expanded exactly like a ``[Pasted text]`` chip.
         """
-        self._count += 1
-        marker = f"[{label} #{self._count}]"
+        marker = f"[{label} #{self._next_number(label)}]"
         self._pastes[marker] = expansion
         return marker
 
@@ -138,7 +160,6 @@ class PasteRegistry:
     def clear(self) -> None:
         """Forget every stored paste (call when the draft is sent or cleared)."""
         self._pastes.clear()
-        self._count = 0
 
     def prune(self, text: str) -> None:
         """Forget markers that no longer appear in ``text`` (call after an edit)."""

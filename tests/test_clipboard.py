@@ -114,34 +114,171 @@ def test_image_file_reference_accepts_only_supported_image_files(tmp_path):
     assert clipboard._image_file_reference("  ") is None
 
 
-def test_windows_clipboard_image_uses_copied_file_reference(tmp_path):
+def test_windows_powershell_clipboard_image_uses_copied_file_reference(tmp_path):
     copied = tmp_path / "photo.jpg"
     copied.write_bytes(b"fake")
     stdout = f"file:{tmp_path / 'ignore.txt'}\nfile:{copied}\n".encode("utf-8")
     with patch.object(clipboard, "_run_paste", return_value=_completed(stdout)):
-        image = clipboard._windows_clipboard_image(tmp_path)
+        image = clipboard._windows_powershell_clipboard_image(tmp_path)
     assert image == ClipboardImage(copied, "image/jpeg")
 
 
-def test_windows_clipboard_image_saves_bitmap_to_target(tmp_path):
+def test_windows_powershell_clipboard_image_saves_bitmap_to_target(tmp_path):
     def fake_run(cmd, *, env=None):
         target = Path(env["JARV_CLIPBOARD_TARGET"])
         target.write_bytes(b"png-bytes")
         return _completed(b"saved\n")
 
     with patch.object(clipboard, "_run_paste", fake_run):
-        image = clipboard._windows_clipboard_image(tmp_path)
+        image = clipboard._windows_powershell_clipboard_image(tmp_path)
     assert image is not None
     assert image.media_type == "image/png"
     assert image.path.parent == tmp_path
     assert image.path.read_bytes() == b"png-bytes"
 
 
-def test_windows_clipboard_image_returns_none_without_image(tmp_path):
+def test_windows_powershell_clipboard_image_returns_none_without_image(tmp_path):
     with patch.object(clipboard, "_run_paste", return_value=_completed(b"")):
-        assert clipboard._windows_clipboard_image(tmp_path) is None
+        assert clipboard._windows_powershell_clipboard_image(tmp_path) is None
     with patch.object(clipboard, "_run_paste", return_value=None):
+        assert clipboard._windows_powershell_clipboard_image(tmp_path) is None
+
+
+def test_windows_clipboard_image_prefers_native_reader(tmp_path):
+    native_result = ClipboardImage(tmp_path / "native.png", "image/png")
+    with patch.object(
+        clipboard, "_windows_native_clipboard_image", return_value=native_result
+    ), patch.object(clipboard, "_run_paste") as run_paste:
+        assert clipboard._windows_clipboard_image(tmp_path) == native_result
+        run_paste.assert_not_called()
+
+    # A native "no image" verdict is final: no subprocess is spawned, which is
+    # what keeps a plain text Ctrl+V paste instant.
+    with patch.object(
+        clipboard, "_windows_native_clipboard_image", return_value=None
+    ), patch.object(clipboard, "_run_paste") as run_paste:
         assert clipboard._windows_clipboard_image(tmp_path) is None
+        run_paste.assert_not_called()
+
+    # Only an unsupported-format verdict reaches the PowerShell fallback.
+    with patch.object(
+        clipboard,
+        "_windows_native_clipboard_image",
+        return_value=clipboard._WINDOWS_NATIVE_UNSUPPORTED,
+    ), patch.object(
+        clipboard, "_windows_powershell_clipboard_image", return_value=None
+    ) as fallback:
+        assert clipboard._windows_clipboard_image(tmp_path) is None
+        fallback.assert_called_once_with(tmp_path)
+
+
+# --------------------------------------------------------------------------- #
+# DIB -> PNG encoding (the native Windows bitmap path)
+# --------------------------------------------------------------------------- #
+
+
+def _bitmapinfoheader(
+    width: int,
+    height: int,
+    bit_count: int,
+    compression: int = 0,
+    clr_used: int = 0,
+) -> bytes:
+    import struct
+
+    return struct.pack(
+        "<IiiHHIIiiII", 40, width, height, 1, bit_count, compression, 0, 0, 0, clr_used, 0
+    )
+
+
+def _decode_png(png: bytes):
+    import struct
+    import zlib
+
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+    offset = 8
+    chunks: dict[bytes, bytes] = {}
+    while offset < len(png):
+        length, tag = struct.unpack_from(">I4s", png, offset)
+        chunks[tag] = chunks.get(tag, b"") + png[offset + 8 : offset + 8 + length]
+        offset += 12 + length
+    width, height, depth, color_type = struct.unpack_from(">IIBB", chunks[b"IHDR"], 0)
+    assert depth == 8
+    raw = zlib.decompress(chunks[b"IDAT"])
+    channels = 4 if color_type == 6 else 3
+    stride = width * channels + 1
+    rows = []
+    for row in range(height):
+        line = raw[row * stride : (row + 1) * stride]
+        assert line[0] == 0  # filter: none
+        rows.append(bytes(line[1:]))
+    return width, height, color_type, rows
+
+
+def test_dib_to_png_32bpp_bottom_up_opaque():
+    # 2x2, BI_RGB, alpha bytes all zero -> treated as opaque RGB.
+    # Logical image: top row red, green; bottom row blue, white (pixels BGRA).
+    bottom = bytes([255, 0, 0, 0, 255, 255, 255, 0])  # blue, white
+    top = bytes([0, 0, 255, 0, 0, 255, 0, 0])  # red, green
+    png = clipboard._dib_to_png(_bitmapinfoheader(2, 2, 32) + bottom + top)
+    assert png is not None
+    width, height, color_type, rows = _decode_png(png)
+    assert (width, height, color_type) == (2, 2, 2)
+    assert rows[0] == bytes([255, 0, 0, 0, 255, 0])
+    assert rows[1] == bytes([0, 0, 255, 255, 255, 255])
+
+
+def test_dib_to_png_32bpp_top_down_keeps_alpha():
+    # Negative height = top-down; a nonzero alpha byte keeps the channel.
+    top = bytes([0, 0, 255, 255, 0, 255, 0, 128])
+    bottom = bytes([255, 0, 0, 64, 255, 255, 255, 255])
+    png = clipboard._dib_to_png(_bitmapinfoheader(2, -2, 32) + top + bottom)
+    assert png is not None
+    width, height, color_type, rows = _decode_png(png)
+    assert (width, height, color_type) == (2, 2, 6)
+    assert rows[0] == bytes([255, 0, 0, 255, 0, 255, 0, 128])
+    assert rows[1] == bytes([0, 0, 255, 64, 255, 255, 255, 255])
+
+
+def test_dib_to_png_24bpp_pads_rows():
+    # Width 1 at 24bpp: 3 pixel bytes + 1 padding byte per stored row.
+    bottom = bytes([255, 0, 0]) + b"\x00"  # blue
+    top = bytes([0, 0, 255]) + b"\x00"  # red
+    png = clipboard._dib_to_png(_bitmapinfoheader(1, 2, 24) + bottom + top)
+    assert png is not None
+    width, height, color_type, rows = _decode_png(png)
+    assert (width, height, color_type) == (1, 2, 2)
+    assert rows[0] == bytes([255, 0, 0])
+    assert rows[1] == bytes([0, 0, 255])
+
+
+def test_dib_to_png_32bpp_bitfields_standard_masks():
+    import struct
+
+    masks = struct.pack("<III", 0x00FF0000, 0x0000FF00, 0x000000FF)
+    pixel = bytes([255, 0, 0, 0])  # blue, zero alpha -> opaque
+    png = clipboard._dib_to_png(_bitmapinfoheader(1, 1, 32, compression=3) + masks + pixel)
+    assert png is not None
+    width, height, color_type, rows = _decode_png(png)
+    assert (width, height, color_type) == (1, 1, 2)
+    assert rows[0] == bytes([0, 0, 255])
+
+
+def test_dib_to_png_rejects_unsupported_dibs():
+    # Palette bitmaps, non-standard bitfield masks, RLE, and truncated data
+    # are all left to the fallback decoder.
+    import struct
+
+    assert clipboard._dib_to_png(b"short") is None
+    palette = _bitmapinfoheader(1, 1, 8) + b"\x00" * 8
+    assert clipboard._dib_to_png(palette) is None
+    rle = _bitmapinfoheader(1, 1, 24, compression=1) + b"\x00" * 4
+    assert clipboard._dib_to_png(rle) is None
+    odd_masks = struct.pack("<III", 0x000000FF, 0x0000FF00, 0x00FF0000)
+    bgr_swapped = _bitmapinfoheader(1, 1, 32, compression=3) + odd_masks + b"\x00" * 4
+    assert clipboard._dib_to_png(bgr_swapped) is None
+    truncated = _bitmapinfoheader(4, 4, 32) + b"\x00" * 8
+    assert clipboard._dib_to_png(truncated) is None
 
 
 def test_linux_image_from_targets_prefers_bitmap(tmp_path):
