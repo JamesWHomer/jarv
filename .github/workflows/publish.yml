@@ -234,7 +234,9 @@ jobs:
             --asset-dir binary-assets \
             --output-dir release-assets \
             --installer scripts/install.sh \
-            --installer scripts/install.ps1
+            --installer scripts/install.ps1 \
+            --installer scripts/uninstall.sh \
+            --installer scripts/uninstall.ps1
 
       - uses: actions/upload-artifact@v7
         with:

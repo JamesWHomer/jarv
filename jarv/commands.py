@@ -179,7 +179,7 @@ def _help_body() -> Group:
         ],
         _command_help_rows(["new", "history", "tree", "btw", "undo", "redo", "sessions", "archive"]),
         _command_help_rows(["settings", "config", "set", "unset", "setup"]),
-        _command_help_rows(["usage", "update", "help", "about"])
+        _command_help_rows(["usage", "update", "uninstall", "help", "about"])
         + [("exit, quit, /exit, /quit", "Leave heads-up mode", "bold cyan")],
     ]
     for group_index, rows in enumerate(groups):
@@ -245,6 +245,7 @@ def _about_body() -> Markdown:
 - `jarv /sessions` / `jarv /session` - List sessions by recency. In an interactive terminal you can scroll through all of them; when stdout is not a TTY (e.g. piped), only the 5 most recent are listed.
 - `jarv /sessions <id>` - Bind this terminal to a specific session id (prefix match).
 - `jarv /update` - Update Jarv through the active install channel. Standalone builds update from GitHub Releases; Python installs update through pip, pipx, or uv.
+- `jarv /uninstall [--purge]` - Uninstall Jarv or show the command for its package manager. User data is kept unless `--purge` is supplied.
 
 ## Heads-up mode
 
