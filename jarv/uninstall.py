@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ntpath
 import os
 import shutil
 import subprocess
@@ -13,7 +14,7 @@ from pathlib import Path
 
 from .clipboard import clipboard_image_dir
 from .display import console
-from .paths import CONFIG_DIR
+from .paths import CONFIG_DIR, UNINSTALL_RESULT_FILE
 
 
 @dataclass(frozen=True)
@@ -21,6 +22,19 @@ class InstallChannel:
     kind: str
     executable: Path
     manual_command: str | None = None
+
+
+@dataclass(frozen=True)
+class UninstallOutcome:
+    """What ``run_uninstall`` did: exit status plus whether anything was removed.
+
+    ``destructive`` is True when the binary was removed/staged for removal or
+    user data was purged — callers that keep running afterwards (heads-up mode)
+    must exit so they don't re-persist purged data or delay the staged script.
+    """
+
+    status: int
+    destructive: bool = False
 
 
 def _path_parts(path: Path) -> list[str]:
@@ -68,6 +82,25 @@ def _normalized_path_entry(value: str | Path) -> str:
     return str(value).strip().rstrip("\\/").casefold()
 
 
+def _path_value_contains(raw_value: str | None, directory: Path) -> bool:
+    """Whether a raw registry PATH value contains ``directory``.
+
+    REG_EXPAND_SZ entries come back unexpanded, so ``%VAR%`` forms are also
+    compared after expansion.
+    """
+    if not raw_value:
+        return False
+    wanted = _normalized_path_entry(directory)
+    for part in str(raw_value).split(";"):
+        if not part.strip():
+            continue
+        if _normalized_path_entry(part) == wanted:
+            return True
+        if "%" in part and _normalized_path_entry(ntpath.expandvars(part)) == wanted:
+            return True
+    return False
+
+
 def _windows_user_path_contains(directory: Path) -> bool:
     if sys.platform != "win32":
         return False
@@ -78,12 +111,7 @@ def _windows_user_path_contains(directory: Path) -> bool:
             value, _kind = winreg.QueryValueEx(key, "Path")
     except (ImportError, FileNotFoundError, OSError):
         return False
-    wanted = _normalized_path_entry(directory)
-    return any(
-        _normalized_path_entry(part) == wanted
-        for part in str(value).split(";")
-        if part.strip()
-    )
+    return _path_value_contains(str(value), directory)
 
 
 def _powershell_literal(value: str | Path) -> str:
@@ -127,6 +155,7 @@ param([Parameter(Mandatory=$true)][int]$ParentPid)
 $ErrorActionPreference = "SilentlyContinue"
 $Executable = {_powershell_literal(executable)}
 $InstallDir = {_powershell_literal(install_dir)}
+$ResultFile = {_powershell_literal(UNINSTALL_RESULT_FILE)}
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 Wait-Process -Id $ParentPid -ErrorAction SilentlyContinue
@@ -135,34 +164,60 @@ for ($Attempt = 0; $Attempt -lt 20; $Attempt++) {{
   if (-not (Test-Path -LiteralPath $Executable)) {{ break }}
   Start-Sleep -Milliseconds 500
 }}
-if ((Test-Path -LiteralPath $InstallDir) -and
-    -not (Get-ChildItem -LiteralPath $InstallDir -Force | Select-Object -First 1)) {{
-  Remove-Item -LiteralPath $InstallDir -Force -ErrorAction SilentlyContinue
-}}
-{path_cleanup}{purge_cleanup}
+if (Test-Path -LiteralPath $Executable) {{
+  # Another jarv instance may still hold the file. Leave PATH and user data
+  # untouched and let the next launch surface the failure.
+  $Payload = '{{"status":"failed","message":"The previous uninstall could not remove jarv.exe (another instance may have been running). PATH and user data were left unchanged."}}'
+  New-Item -ItemType Directory -Path (Split-Path -Parent $ResultFile) -Force | Out-Null
+  Set-Content -LiteralPath $ResultFile -Value $Payload -Encoding UTF8
+}} else {{
+  if ((Test-Path -LiteralPath $InstallDir) -and
+      -not (Get-ChildItem -LiteralPath $InstallDir -Force | Select-Object -First 1)) {{
+    Remove-Item -LiteralPath $InstallDir -Force -ErrorAction SilentlyContinue
+  }}
+{path_cleanup}{purge_cleanup}}}
 Remove-Item -LiteralPath $ScriptDir -Recurse -Force -ErrorAction SilentlyContinue
 """.strip(),
         encoding="utf-8",
     )
 
+    from .standalone import _windows_updater_creation_flags
+
     powershell = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
+    command = [
+        powershell,
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script),
+        "-ParentPid",
+        str(os.getpid()),
+    ]
+    popen_kwargs = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    with suppress(OSError):
+        UNINSTALL_RESULT_FILE.unlink(missing_ok=True)
     try:
-        return subprocess.Popen(
-            [
-                powershell,
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(script),
-                "-ParentPid",
-                str(os.getpid()),
-            ],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            close_fds=True,
-        )
+        try:
+            return subprocess.Popen(
+                command,
+                creationflags=_windows_updater_creation_flags(),
+                **popen_kwargs,
+            )
+        except OSError as exc:
+            if getattr(exc, "winerror", None) != 5:
+                raise
+            return subprocess.Popen(
+                command,
+                creationflags=_windows_updater_creation_flags(allow_breakaway=False),
+                **popen_kwargs,
+            )
     except Exception:
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise
@@ -201,14 +256,14 @@ def _print_manager_instructions(channel: InstallChannel) -> None:
     console.print(f"  [bold cyan]{channel.manual_command}[/bold cyan]")
 
 
-def cmd_uninstall(args: list[str] | None = None) -> int:
+def run_uninstall(args: list[str] | None = None) -> UninstallOutcome:
     """Uninstall Jarv, or print the command for its owning package manager."""
     args = list(args or [])
     unknown = [arg for arg in args if arg not in {"--purge", "--yes"}]
     if unknown:
         console.print("[bold red]Usage:[/bold red] jarv /uninstall [--purge] [--yes]")
         console.print(f"[red]Unknown argument:[/red] {unknown[0]}")
-        return 2
+        return UninstallOutcome(2)
 
     purge = "--purge" in args
     assume_yes = "--yes" in args
@@ -218,13 +273,13 @@ def cmd_uninstall(args: list[str] | None = None) -> int:
         _print_manager_instructions(channel)
         if not purge:
             console.print("[dim]User data in ~/.jarv is kept.[/dim]")
-            return 0
+            return UninstallOutcome(0)
         console.print("[yellow]Purge will delete ~/.jarv and cached clipboard images now.[/yellow]")
         if not _confirm(assume_yes=assume_yes):
-            return 1
+            return UninstallOutcome(1)
         _purge_user_data()
         console.print("[bold cyan]✓[/bold cyan] User data removed. Run the command above to uninstall Jarv.")
-        return 0
+        return UninstallOutcome(0, destructive=True)
 
     executable = channel.executable
     install_dir = executable.parent
@@ -240,7 +295,7 @@ def cmd_uninstall(args: list[str] | None = None) -> int:
         console.print("  Keep user data in ~/.jarv")
 
     if not _confirm(assume_yes=assume_yes):
-        return 1
+        return UninstallOutcome(1)
 
     if sys.platform == "win32":
         try:
@@ -251,19 +306,26 @@ def cmd_uninstall(args: list[str] | None = None) -> int:
             )
         except OSError as exc:
             console.print(f"[red]Could not stage the uninstaller:[/red] {exc}")
-            return 1
+            return UninstallOutcome(1)
         console.print("[bold cyan]✓[/bold cyan] Uninstall staged — completes a moment after Jarv exits.")
-        console.print("[dim]If it does not complete, use the standalone uninstall.ps1 script.[/dim]")
-        return 0
+        console.print(
+            "[dim]If it does not complete, run: "
+            "irm https://github.com/JamesWHomer/jarv/releases/latest/download/uninstall.ps1 | iex[/dim]"
+        )
+        return UninstallOutcome(0, destructive=True)
 
     try:
         executable.unlink()
     except OSError as exc:
         console.print(f"[red]Could not remove {executable}:[/red] {exc}")
-        return 1
+        return UninstallOutcome(1)
     with suppress(OSError):
         install_dir.rmdir()
     if purge:
         _purge_user_data()
     console.print("[bold cyan]✓[/bold cyan] Uninstalled.")
-    return 0
+    return UninstallOutcome(0, destructive=True)
+
+
+def cmd_uninstall(args: list[str] | None = None) -> int:
+    return run_uninstall(args).status
