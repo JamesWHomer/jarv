@@ -5,7 +5,10 @@ from rich.console import Console
 
 from jarv import display
 from jarv.display import (
+    clip_middle,
+    clip_tail,
     display_output,
+    hidden_lines_hint,
     output_display_line_limit,
     output_display_split,
     terminal_size,
@@ -98,7 +101,7 @@ def test_display_output_shows_head_tail_and_omitted_middle(monkeypatch):
     assert "Line 38\n" not in rendered
     assert "Line 39\n" in rendered
     assert "Line 40\n" in rendered
-    assert "... 33 lines omitted from the middle ..." in rendered
+    assert "… 33 lines hidden …" in rendered
 
 
 def test_display_output_does_not_truncate_output_within_screen_budget(monkeypatch):
@@ -115,7 +118,7 @@ def test_display_output_does_not_truncate_output_within_screen_budget(monkeypatc
 
     rendered = stream.getvalue()
     assert rendered.count("Line ") == 8
-    assert "omitted from the middle" not in rendered
+    assert "lines hidden" not in rendered
 
 
 def test_output_display_limit_is_one_third_of_screen_height(monkeypatch):
@@ -130,6 +133,38 @@ def test_output_display_split_biases_toward_head():
     assert (head_lines, tail_lines) == (13, 6)
     assert head_lines > tail_lines
     assert head_lines + tail_lines + 1 == 20
+
+
+def test_hidden_lines_hint_variants():
+    assert hidden_lines_hint(33).plain == "… 33 lines hidden …"
+    assert hidden_lines_hint(1).plain == "… 1 line hidden …"
+    assert hidden_lines_hint(5, where="above").plain == "↑ 5 earlier lines hidden"
+    assert hidden_lines_hint(2, where="below").plain == "… 2 more lines"
+    assert (
+        hidden_lines_hint(4, where="above", suffix="full reply will print when done").plain
+        == "↑ 4 earlier lines hidden — full reply will print when done"
+    )
+
+
+def test_clip_middle_keeps_both_ends():
+    lines = [f"Line {n}" for n in range(1, 41)]
+
+    head, tail, hidden = clip_middle(lines, 8)
+
+    assert head == lines[:5]
+    assert tail == lines[-2:]
+    assert hidden == 33
+    assert clip_middle(lines, 40) == (lines, [], 0)
+
+
+def test_clip_tail_keeps_newest_lines():
+    lines = [f"Line {n}" for n in range(1, 11)]
+
+    tail, hidden = clip_tail(lines, 4)
+
+    assert tail == lines[-4:]
+    assert hidden == 6
+    assert clip_tail(lines, 10) == (lines, 0)
 
 
 def test_tool_card_uses_shared_neutral_shell_and_tool_accent():
@@ -169,6 +204,27 @@ def test_tool_cards_use_consistent_terminal_safe_symbols():
     assert "\u2261 Read" in rendered
     assert "\u00b1 Edit" in rendered
     assert "? Ask user" in rendered
+
+
+def test_print_tool_card_shows_failed_and_running_pills():
+    stream = io.StringIO()
+    test_console = Console(
+        file=stream,
+        force_terminal=False,
+        color_system=None,
+        width=80,
+    )
+
+    test_console.print(
+        tool_card("read", "missing.txt", status="failed", status_style="red")
+    )
+    test_console.print(
+        tool_card("run_command", "> sleep 5", status="running 3s", status_style="blue")
+    )
+
+    rendered = stream.getvalue()
+    assert "✗ failed" in rendered
+    assert "● running 3s" in rendered
 
 
 def test_fullscreen_tool_card_uses_box_and_right_status():

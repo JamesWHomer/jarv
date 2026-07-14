@@ -17,6 +17,7 @@ from .config import DEFAULT_CONFIG, get_setting
 
 
 DUCKDUCKGO_HTML_URL = "https://html.duckduckgo.com/html/"
+SEARCH_ENGINE_LABEL = "DuckDuckGo"
 from .pdf_extract import PDF_MAGIC, is_pdf_bytes, is_pdf_media_type
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_REDIRECTS = 5

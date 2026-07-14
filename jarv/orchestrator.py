@@ -42,7 +42,7 @@ from .shell import (
     resolve_command_output_window,
     truncate_model_output,
 )
-from .tool_outputs import ToolOutput
+from .tool_outputs import ToolOutput, summarize_tool_output
 from .turn_loop import collect_stream_response, run_tool_execution_round
 from .turn_records import (
     append_reasoning_input_items,
@@ -236,8 +236,8 @@ class ToolBatchResult:
 class ToolExecutionHooks:
     """Optional root-agent UI hooks; subagents leave these unset and use dispatch_tool."""
 
-    on_parallel_read: Callable[[object, dict], None] | None = None
-    on_parallel_web_search: Callable[[object, dict], None] | None = None
+    on_parallel_read: Callable[[object, dict, str], None] | None = None
+    on_parallel_web_search: Callable[[object, dict, str], None] | None = None
     run_command: Callable[[dict], str] | None = None
     run_edit: Callable[[dict], str] | None = None
     run_spawn: Callable[[dict], str] | None = None
@@ -731,12 +731,22 @@ def execute_tool_calls(
             )
             for safe_item, batch_result in zip(group, batch_results):
                 output = batch_result.output
+                # Hooks get the pre-nudge output: the web_search read nudge
+                # appended below is model-facing and must not reach the card.
                 if safe_item.name == "read" and batch_result.args is not None:
                     if hooks.on_parallel_read is not None:
-                        hooks.on_parallel_read(safe_item, batch_result.args)
+                        hooks.on_parallel_read(
+                            safe_item,
+                            batch_result.args,
+                            summarize_tool_output(output),
+                        )
                 elif safe_item.name == "web_search" and batch_result.args is not None:
                     if hooks.on_parallel_web_search is not None:
-                        hooks.on_parallel_web_search(safe_item, batch_result.args)
+                        hooks.on_parallel_web_search(
+                            safe_item,
+                            batch_result.args,
+                            summarize_tool_output(output),
+                        )
                     if not result.web_search_read_nudge_sent:
                         output = append_web_search_read_nudge(output)
                         result.web_search_read_nudge_sent = True

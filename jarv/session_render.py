@@ -1,31 +1,28 @@
 """Pure rendering helpers for session history views."""
 
 import json
+import re
 
 from rich.console import Group
 from rich.markdown import Markdown
 from rich.text import Text
 
-from .display import flatten_headings, output_renderable, rendered_text_lines, tool_card
-from .tool_outputs import summarize_tool_output
+from .display import (
+    flatten_headings,
+    hidden_lines_hint,
+    output_renderable,
+    rendered_text_lines,
+    tool_card,
+)
+from .tool_outputs import (
+    flatten_content_text,
+    summarize_tool_output,
+    tool_output_failed,
+)
+from .web import SEARCH_ENGINE_LABEL
 
-def _history_content_to_str(content) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        chunks: list[str] = []
-        for c in content:
-            if isinstance(c, dict):
-                if c.get("type") == "text" and isinstance(c.get("text"), str):
-                    chunks.append(c["text"])
-                elif "content" in c and isinstance(c["content"], str):
-                    chunks.append(c["content"])
-                else:
-                    chunks.append(f"[{c.get('type', 'item')}]")
-            else:
-                chunks.append(str(c))
-        return "\n".join(chunks)
-    return str(content)
+# Kept as an alias: headsup.py and session_tree.py import this name.
+_history_content_to_str = flatten_content_text
 
 
 def _markdown_to_text_lines(content: str, width: int) -> list[Text]:
@@ -95,10 +92,87 @@ def _edit_snippet_lines(text: str, prefix: str, style: str) -> list[Text]:
     ]
     hidden = len(lines) - _EDIT_SNIPPET_MAX_LINES
     if hidden > 0:
-        shown.append(
-            Text(f"  … {hidden} more line{'s' if hidden != 1 else ''}", style="dim italic")
-        )
+        shown.append(Text("  ").append_text(hidden_lines_hint(hidden, where="below")))
     return shown
+
+
+def _format_byte_size(count: int) -> str:
+    if count < 1024:
+        return f"{count} B"
+    if count < 1024 * 1024:
+        return f"{count / 1024:.0f} KB"
+    return f"{count / (1024 * 1024):.1f} MB"
+
+
+def _read_result_summary(output: str) -> str:
+    """Condense a [READ RESULT] header into one line, e.g. '4,096 of 45,120 chars · more available'.
+
+    Parses header lines only — the content chunk after the first blank line is
+    never touched, so file contents can never leak into the card.
+    """
+    if not output.startswith("[READ RESULT]"):
+        return ""
+    returned = total = image_bytes = None
+    eof = media_type = ""
+    for line in output.splitlines():
+        if not line.strip():
+            break
+        for label, target in (
+            ("Returned size: ", "returned"),
+            ("Total size: ", "total"),
+            ("Image bytes: ", "image_bytes"),
+        ):
+            if line.startswith(label):
+                value = line.removeprefix(label).strip()
+                if value.isdigit():
+                    if target == "returned":
+                        returned = int(value)
+                    elif target == "total":
+                        total = int(value)
+                    else:
+                        image_bytes = int(value)
+        if line.startswith("EOF: "):
+            eof = line.removeprefix("EOF: ").strip()
+        elif line.startswith("Image media type: "):
+            media_type = line.removeprefix("Image media type: ").strip()
+    if media_type:
+        size = f"  •  {_format_byte_size(image_bytes)}" if image_bytes is not None else ""
+        return f"image {media_type}{size}"
+    if returned is None:
+        return ""
+    if eof == "true" or total is None:
+        return f"{returned:,} chars  •  EOF"
+    return f"{returned:,} of {total:,} chars  •  more available"
+
+
+_WEB_RESULT_TITLE_RE = re.compile(r"^\d+\. (.+)$")
+
+
+def _web_search_result_summary(output: str) -> tuple[str, list[str]]:
+    """Parse '<N> results' and the top result titles from web_search output."""
+    titles: list[str] = []
+    count = 0
+    for line in output.splitlines():
+        match = _WEB_RESULT_TITLE_RE.match(line)
+        if match is None:
+            continue
+        count += 1
+        if len(titles) < 3:
+            titles.append(match.group(1))
+    if count == 0:
+        return "", []
+    return f"{count} result{'s' if count != 1 else ''}", titles
+
+
+def _read_args_metadata(args: dict) -> str:
+    parts: list[str] = []
+    offset = args.get("offset")
+    if isinstance(offset, int) and not isinstance(offset, bool) and offset:
+        parts.append(f"offset {offset:,}")
+    size = args.get("size")
+    if isinstance(size, int) and not isinstance(size, bool):
+        parts.append(f"size {size:,}")
+    return "  •  ".join(parts)
 
 
 def _edit_result_summary(output: str) -> str:
@@ -122,24 +196,22 @@ def _edit_result_summary(output: str) -> str:
     return "  •  ".join(parts)
 
 
+def _error_line(output: str) -> Text:
+    first = output.splitlines()[0] if output else ""
+    return Text(first, style="dim red")
+
+
 def _tool_call_renderable(item: dict, output: str = "", *, display_mode: str = "fullscreen"):
+    """Render a tool call as one card: header (icon \u00b7 metadata \u00b7 status pill),
+    an input summary, and an optional result preview. Every tool goes through
+    the single ``tool_card`` call at the end so the card contract cannot drift
+    per tool."""
     name = str(item.get("name") or "unknown")
     args, raw_arguments = _tool_call_arguments(item)
-    failed = (
-        args is None
-        or output.startswith(
-            (
-                "[error:",
-                "[tool argument error:",
-                "[unknown tool:",
-                "[edit error:",
-                "[edit denied",
-            )
-        )
-        or "cancelled by user" in output
-    )
+    failed = args is None or tool_output_failed(output)
     status = "failed" if failed else "done"
     status_style = "red" if failed else "green"
+    metadata = ""
 
     if name == "run_command" and args is not None:
         command_line = Text("> ", style="bold yellow")
@@ -147,65 +219,48 @@ def _tool_call_renderable(item: dict, output: str = "", *, display_mode: str = "
         body: object = command_line
         if output:
             body = Group(command_line, output_renderable(output))
-        metadata = ""
-        if isinstance(args.get("head_chars"), int) and isinstance(args.get("tail_chars"), int):
-            metadata = (
-                f"model window {args['head_chars']:,} / "
-                f"{args['tail_chars']:,} chars"
-            )
-        return tool_card(
-            name,
-            body,
-            metadata=metadata,
-            status=status,
-            status_style=status_style,
-            display_mode=display_mode,
-        )
-
-    if name == "read" and args is not None:
-        read_path = Text(
-            str(args.get("input", "")),
-            no_wrap=True,
-            overflow="ellipsis",
-        )
-        read_meta = Text(
-            f"offset {args.get('offset', 0)!r}  \u2022  "
-            f"size {args.get('size', 'default')!r}",
-            style="dim",
-        )
-        body = Group(read_path, read_meta)
-    elif name == "edit" and args is not None:
+    elif name == "read" and args is not None:
         parts: list = [
-            Text(str(args.get("path", "")), no_wrap=True, overflow="ellipsis")
+            Text(str(args.get("input", "")), no_wrap=True, overflow="ellipsis")
         ]
+        if failed and output:
+            parts.append(_error_line(output))
+        else:
+            summary = _read_result_summary(output)
+            if summary:
+                parts.append(Text(summary, style="dim"))
+        body = Group(*parts)
+        metadata = _read_args_metadata(args)
+    elif name == "edit" and args is not None:
+        parts = [Text(str(args.get("path", "")), no_wrap=True, overflow="ellipsis")]
         parts.extend(_edit_snippet_lines(str(args.get("old_text", "")), "- ", "red"))
         parts.extend(_edit_snippet_lines(str(args.get("new_text", "")), "+ ", "green"))
         if output.startswith("[EDIT RESULT]"):
             summary = _edit_result_summary(output)
             if summary:
                 parts.append(Text(summary, style="dim"))
+        elif failed and output:
+            parts.append(_error_line(output))
         elif output:
             parts.append(output_renderable(output))
-        return tool_card(
-            name,
-            Group(*parts),
-            metadata="replace all" if args.get("replace_all") else "",
-            status=status,
-            status_style=status_style,
-            display_mode=display_mode,
-        )
+        body = Group(*parts)
+        metadata = "replace all" if args.get("replace_all") else ""
     elif name == "web_search" and args is not None:
-        body = Text(str(args.get("query", "")))
-        return tool_card(
-            name,
-            body,
-            metadata="DuckDuckGo",
-            status=status,
-            status_style=status_style,
-            display_mode=display_mode,
-        )
+        parts = [Text(str(args.get("query", "")))]
+        if failed and output:
+            parts.append(_error_line(output))
+        else:
+            summary, titles = _web_search_result_summary(output)
+            if summary:
+                parts.append(Text(summary, style="dim"))
+                for title in titles:
+                    parts.append(
+                        Text(f"  {title}", style="dim", no_wrap=True, overflow="ellipsis")
+                    )
+        body = Group(*parts)
+        metadata = SEARCH_ENGINE_LABEL
     elif name == "ask_user" and args is not None:
-        parts: list = [Markdown(flatten_headings(str(args.get("question", ""))))]
+        parts = [Markdown(flatten_headings(str(args.get("question", ""))))]
         if output:
             answer = Text("> ", style="bold cyan")
             answer.append(output)
@@ -240,10 +295,13 @@ def _tool_call_renderable(item: dict, output: str = "", *, display_mode: str = "
         body = Group(*lines) if lines else Text(raw_arguments, style="dim")
     else:
         body = Text(raw_arguments, style="dim")
+        if output:
+            body = Group(body, output_renderable(output))
 
     return tool_card(
         name,
         body,
+        metadata=metadata,
         status=status,
         status_style=status_style,
         display_mode=display_mode,
@@ -255,10 +313,17 @@ def tool_call_card(item: dict, output: str = "", *, display_mode: str = "fullscr
     return _tool_call_renderable(item, output, display_mode=display_mode)
 
 
-def tool_call_card_from_args(name: str, args: dict, *, display_mode: str = "fullscreen"):
+def tool_call_card_from_args(
+    name: str,
+    args: dict,
+    *,
+    output: str = "",
+    display_mode: str = "fullscreen",
+):
     """Render a live tool card from parsed tool arguments."""
     return tool_call_card(
         {"name": name, "arguments": json.dumps(args, ensure_ascii=True)},
+        output,
         display_mode=display_mode,
     )
 

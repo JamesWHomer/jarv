@@ -307,14 +307,13 @@ def _dispatch_run_command_with_ui(
         return denial
 
     display_mode = get_setting(config, "tool_call_display")
-    metadata_text = f"model window {prepared.head_chars:,} / {prepared.tail_chars:,} chars"
     # One growing transcript box for the whole interactive session. Inline mode
     # holds a Rich ``Live`` open across turns so each model step appends in place
     # rather than re-printing a fresh box; heads-up re-renders the same card into
     # its live-tool slot. The card starts in its "running" state.
     card = InteractiveCommandCard(
         prepared.cmd,
-        metadata_text,
+        "",
         display_mode,
         time.perf_counter(),
     )
@@ -1036,22 +1035,24 @@ def _build_tool_hooks(
         else:
             console.print(f"[red]{message}[/red]")
 
-    def _on_parallel_read(_item, read_args: dict) -> None:
+    def _on_parallel_read(_item, read_args: dict, output: str) -> None:
         _print_tool_card(
             tool_call_card_from_args(
                 "read",
                 read_args,
+                output=output,
                 display_mode=get_setting(config, "tool_call_display"),
             ),
             config,
             ui=ui,
         )
 
-    def _on_parallel_web_search(_item, search_args: dict) -> None:
+    def _on_parallel_web_search(_item, search_args: dict, output: str) -> None:
         _print_tool_card(
             tool_call_card_from_args(
                 "web_search",
                 search_args,
+                output=output,
                 display_mode=get_setting(config, "tool_call_display"),
             ),
             config,

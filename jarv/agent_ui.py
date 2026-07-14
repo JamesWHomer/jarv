@@ -19,9 +19,10 @@ from .cancellation import CancellationToken, TurnCancelled
 from .command_input import read_editable_line
 from .config import DEFAULT_CONFIG, get_setting
 from .display import (
+    clip_middle,
     console,
     flatten_headings,
-    output_display_split,
+    hidden_lines_hint,
     output_renderable,
     rendered_text_lines,
     terminal_size,
@@ -197,7 +198,7 @@ class InteractiveCommandCard:
     """One growing transcript box for a whole interactive ``run_command`` session.
 
     Replaces the old "one fresh box per model step" rendering: the ``> command``
-    header and ``model window`` metadata are drawn once and each model step appends
+    header is drawn once and each model step appends
     a compact ``stdin> …`` marker (with the model's per-step decision time) plus the
     new delta output. The footer animates while the model decides the next input and
     resolves to ``exit N`` on completion. One instance is shared between the inline
@@ -330,14 +331,9 @@ class InteractiveCommandCard:
             # header and footer, which are added outside ``lines``.
             term_h = options.size.height
             budget = max(8, term_h - 8)
-            if len(lines) > budget:
-                head_n, tail_n = output_display_split(budget)
-                hidden = len(lines) - head_n - tail_n
-                lines = (
-                    lines[:head_n]
-                    + [Text(f"… {hidden} earlier lines hidden …", style="dim italic")]
-                    + lines[-tail_n:]
-                )
+            head, tail, hidden = clip_middle(lines, budget)
+            if hidden > 0:
+                lines = head + [hidden_lines_hint(hidden)] + tail
         body_items = list(lines)
         if footer is not None:
             body_items.append(footer)
@@ -435,9 +431,10 @@ class TailMarkdown:
         hidden = max(0, len(lines) - content_budget)
         if hidden:
             lines = lines[-content_budget:] if content_budget else []
-            hint = Text(
-                f"↑ {hidden} earlier line{'s' if hidden != 1 else ''} hidden — full reply will print when done",
-                style="dim italic",
+            hint = hidden_lines_hint(
+                hidden,
+                where="above",
+                suffix="full reply will print when done",
             )
             yield from console.render(hint, options)
         else:

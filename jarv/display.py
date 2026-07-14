@@ -255,10 +255,15 @@ def tool_card(
             status_text.append("\u25cf ", style=status_style)
         status_text.append(status)
 
+    # Print mode stays quiet on success (the default state) but still signals
+    # failures and in-flight work; fullscreen always shows the pill.
+    show_status = bool(status) and (
+        display_mode == "fullscreen" or status_style != "green"
+    )
     header = ToolCardHeader(
         title,
         metadata_text,
-        status_text if display_mode == "fullscreen" else Text(),
+        status_text if show_status else Text(),
     )
     content = Group(header, body)
     if display_mode == "fullscreen":
@@ -292,6 +297,42 @@ def output_display_split(line_limit: int) -> tuple[int, int]:
     return head_lines, tail_lines
 
 
+def hidden_lines_hint(hidden: int, *, where: str = "middle", suffix: str = "") -> Text:
+    """The one dim-italic hint used everywhere display output is cropped.
+
+    ``where`` names which part of the content was dropped relative to what is
+    shown: ``"middle"`` (head+tail kept), ``"above"`` (tail kept), or
+    ``"below"`` (head kept).
+    """
+    plural = "s" if hidden != 1 else ""
+    if where == "above":
+        message = f"↑ {hidden} earlier line{plural} hidden"
+    elif where == "below":
+        message = f"… {hidden} more line{plural}"
+    else:
+        message = f"… {hidden} line{plural} hidden …"
+    if suffix:
+        message += f" — {suffix}"
+    return Text(message, style="dim italic")
+
+
+def clip_middle(lines: list, line_limit: int) -> tuple[list, list, int]:
+    """Split ``lines`` into (head, tail, hidden) keeping both ends."""
+    if len(lines) <= line_limit:
+        return lines, [], 0
+    head_count, tail_count = output_display_split(line_limit)
+    hidden = len(lines) - head_count - tail_count
+    return lines[:head_count], lines[-tail_count:], hidden
+
+
+def clip_tail(lines: list, line_limit: int) -> tuple[list, int]:
+    """Split ``lines`` into (tail, hidden) keeping only the newest lines."""
+    if len(lines) <= line_limit:
+        return lines, 0
+    hidden = len(lines) - line_limit
+    return lines[hidden:], hidden
+
+
 def output_renderable(output: str, *, max_lines: int | None = None) -> RenderableType:
     lines = output.splitlines()
     line_limit = (
@@ -299,16 +340,12 @@ def output_renderable(output: str, *, max_lines: int | None = None) -> Renderabl
         if max_lines is None
         else max(DISPLAY_MIN_LINE_LIMIT, int(max_lines))
     )
-    if len(lines) > line_limit:
-        head_lines, tail_lines = output_display_split(line_limit)
-        hidden = len(lines) - head_lines - tail_lines
+    head, tail, hidden = clip_middle(lines, line_limit)
+    if hidden > 0:
         return Group(
-            Text("\n".join(lines[:head_lines]), style="dim"),
-            Text(
-                f"... {hidden} lines omitted from the middle ...",
-                style="dim italic",
-            ),
-            Text("\n".join(lines[-tail_lines:]), style="dim"),
+            Text("\n".join(head), style="dim"),
+            hidden_lines_hint(hidden),
+            Text("\n".join(tail), style="dim"),
         )
     return Text(output, style="dim")
 

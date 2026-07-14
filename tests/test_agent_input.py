@@ -114,7 +114,7 @@ class AgentInputTests(unittest.TestCase):
         self.assertNotIn("\u256f\n\n\u256d", rendered)
         self.assertIn("\u256f\n\u256d", rendered)
 
-    def test_run_command_displays_resolved_output_parameters(self):
+    def test_run_command_card_omits_model_facing_window_detail(self):
         stream = io.StringIO()
         test_console = Console(
             file=stream,
@@ -134,7 +134,7 @@ class AgentInputTests(unittest.TestCase):
             )
 
         output = stream.getvalue()
-        self.assertIn("model window 12,000 / 10,000 chars", output)
+        self.assertNotIn("model window", output)
         self.assertNotIn("(requested)", output)
         self.assertNotIn("(default)", output)
 
@@ -1405,11 +1405,10 @@ class AgentInputTests(unittest.TestCase):
             self.assertIn(f"stdin> go {step}", full)
         self.assertIn("ROOM 0 line", full)
         self.assertIn("ROOM 8 line 3", full)
-        self.assertNotIn("earlier lines hidden", full)
-        self.assertNotIn("omitted from the middle", full)
+        self.assertNotIn("lines hidden", full)
 
         # Inline cannot scroll, so it still collapses the middle to a window.
-        self.assertIn("earlier lines hidden", inline)
+        self.assertIn("lines hidden", inline)
 
     def test_inline_card_fits_render_console_when_os_height_diverges(self):
         # Regression: the inline card cropped against ``os.get_terminal_size()``
@@ -1448,7 +1447,7 @@ class AgentInputTests(unittest.TestCase):
         # keeps the tail), and Rich's own ellipsis line never appears.
         self.assertIn("ROOM 11 line 4", rendered)
         self.assertIn("Idle on stdin", rendered)
-        self.assertIn("earlier lines hidden", rendered)
+        self.assertIn("lines hidden", rendered)
         self.assertNotIn(
             "...", [line.strip() for line in rendered.splitlines()]
         )
@@ -1519,6 +1518,62 @@ class AgentInputTests(unittest.TestCase):
         self.assertTrue(captured["outputs"][0].endswith("alpha"))
         self.assertTrue(captured["outputs"][1].endswith("beta"))
 
+    def test_root_failed_read_card_shows_failure_in_print_mode(self):
+        # Regression: live read cards used to render green "done" even when the
+        # read failed, because the UI hook never received the tool output.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            history_file = root / "history.json"
+            context = SessionContext(
+                session_id="session-id",
+                session_label="test session",
+                history_file=history_file,
+                now=datetime(2026, 5, 21, tzinfo=timezone.utc),
+            )
+            stream_count = 0
+
+            def fake_stream_response(*args, **_kwargs):
+                nonlocal stream_count
+                stream_count += 1
+                if stream_count == 1:
+                    yield ToolCallDone(
+                        id="fc_1",
+                        call_id="call_1",
+                        name="read",
+                        arguments=json.dumps({"input": str(root / "missing.txt")}),
+                    )
+                else:
+                    yield TextDelta("done")
+                yield StreamDone(response=None)
+
+            stream = io.StringIO()
+            card_console = Console(
+                file=stream,
+                force_terminal=False,
+                color_system=None,
+                width=100,
+            )
+            with (
+                patch("jarv.agent.prepare_session_context", return_value=context),
+                patch(
+                    "jarv.agent.stream_response",
+                    side_effect=fake_stream_response,
+                ),
+                patch("jarv.agent_ui.console", new=card_console),
+                patch("jarv.agent.sys.stdout", new=io.StringIO()),
+            ):
+                result = run_agent(
+                    "read the file",
+                    DEFAULT_CONFIG,
+                    client=object(),
+                    incognito=True,
+                )
+
+        self.assertIsNone(result.error)
+        rendered = stream.getvalue()
+        self.assertIn("✗ failed", rendered)
+        self.assertIn("[read error", rendered)
+
     def test_root_adds_web_search_read_nudge_once_per_history(self):
         with TemporaryDirectory() as tmp:
             history_file = Path(tmp) / "history.json"
@@ -1577,6 +1632,73 @@ class AgentInputTests(unittest.TestCase):
             sum(output.count(WEB_SEARCH_READ_NUDGE) for output in captured["outputs"]),
             1,
         )
+
+    def test_web_search_card_shows_results_but_never_the_model_nudge(self):
+        # The hook fires before the model-facing read nudge is appended, so the
+        # card gets the result preview without leaking "[Jarv tool note: ...]".
+        with TemporaryDirectory() as tmp:
+            history_file = Path(tmp) / "history.json"
+            context = SessionContext(
+                session_id="session-id",
+                session_label="test session",
+                history_file=history_file,
+                now=datetime(2026, 5, 21, tzinfo=timezone.utc),
+            )
+            stream_count = 0
+
+            def fake_stream_response(*args, **_kwargs):
+                nonlocal stream_count
+                stream_count += 1
+                if stream_count == 1:
+                    yield ToolCallDone(
+                        id="fc_1",
+                        call_id="call_1",
+                        name="web_search",
+                        arguments=json.dumps({"query": "python packaging"}),
+                    )
+                else:
+                    yield TextDelta("done")
+                yield StreamDone(response=None)
+
+            def fake_web(_name, _args, *_pos, **_kwargs):
+                return "\n".join([
+                    "Query: python packaging",
+                    "Offset: 0",
+                    "Source pages: 1",
+                    "",
+                    "1. First Title",
+                    "URL: https://one.example",
+                    "",
+                    "2. Second Title",
+                    "URL: https://two.example",
+                ])
+
+            stream = io.StringIO()
+            card_console = Console(
+                file=stream,
+                force_terminal=False,
+                color_system=None,
+                width=100,
+            )
+            with (
+                patch("jarv.agent.prepare_session_context", return_value=context),
+                patch("jarv.agent.stream_response", side_effect=fake_stream_response),
+                patch("jarv.orchestrator.dispatch_web_tool", side_effect=fake_web),
+                patch("jarv.agent_ui.console", new=card_console),
+                patch("jarv.agent.sys.stdout", new=io.StringIO()),
+            ):
+                result = run_agent(
+                    "search the web",
+                    DEFAULT_CONFIG,
+                    client=object(),
+                    incognito=True,
+                )
+
+        self.assertIsNone(result.error)
+        rendered = stream.getvalue()
+        self.assertIn("2 results", rendered)
+        self.assertIn("First Title", rendered)
+        self.assertNotIn("Jarv tool note", rendered)
 
     def test_root_keeps_run_command_as_parallel_boundary(self):
         with TemporaryDirectory() as tmp:

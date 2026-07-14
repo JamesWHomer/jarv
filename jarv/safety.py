@@ -11,7 +11,7 @@ from rich.markup import escape
 from rich.text import Text
 
 from .cancellation import CancellationToken, TurnCancelled
-from .display import console, jarv_panel, live_display_depth
+from .display import console, hidden_lines_hint, jarv_panel, live_display_depth
 
 SAFETY_LEVELS = ("all", "risky", "none")
 DEFAULT_SAFETY_LEVEL = "risky"
@@ -174,9 +174,7 @@ def _build_confirmation_body(command: str, reason: str) -> Group:
                 for ln in context_before[:2]:
                     parts.append(Text.assemble(("  ", ""), (ln, "dim")))
                 hidden = len(context_before) - 3
-                parts.append(Text.from_markup(
-                    f"  [dim italic]\u2026 {hidden} more line{'s' if hidden != 1 else ''} \u2026[/dim italic]"
-                ))
+                parts.append(Text("  ").append_text(hidden_lines_hint(hidden)))
                 parts.append(Text.assemble(("  ", ""), (context_before[-1], "dim")))
             parts.append(Text(""))
 
@@ -199,9 +197,7 @@ def _build_confirmation_body(command: str, reason: str) -> Group:
                 for ln in context_after[:2]:
                     parts.append(Text.assemble(("  ", ""), (ln, "dim")))
                 hidden = len(context_after) - 3
-                parts.append(Text.from_markup(
-                    f"  [dim italic]\u2026 {hidden} more line{'s' if hidden != 1 else ''} \u2026[/dim italic]"
-                ))
+                parts.append(Text("  ").append_text(hidden_lines_hint(hidden)))
                 parts.append(Text.assemble(("  ", ""), (context_after[-1], "dim")))
     else:
         # Fallback: no individual line matched (pattern spans lines)
