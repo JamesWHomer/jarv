@@ -18,6 +18,8 @@ from typing import Any
 
 from packaging.version import Version
 
+from .paths import CONFIG_DIR
+
 
 GITHUB_OWNER = "JamesWHomer"
 GITHUB_REPO = "jarv"
@@ -25,6 +27,9 @@ GITHUB_RELEASE_BASE = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases
 LATEST_MANIFEST_URL = f"{GITHUB_RELEASE_BASE}/latest/download/release-manifest.json"
 MANIFEST_TIMEOUT_SECONDS = 10
 DOWNLOAD_TIMEOUT_SECONDS = 60
+WINDOWS_UPDATE_RESULT_FILE = CONFIG_DIR / "update-result.json"
+WINDOWS_UPDATE_RETRY_COUNT = 40
+WINDOWS_UPDATE_RETRY_DELAY_MS = 250
 
 
 @dataclass(frozen=True)
@@ -181,44 +186,166 @@ def extract_executable(archive_path: Path, destination_dir: Path, *, windows: bo
     return executable
 
 
-def _stage_windows_updater(source: Path, target: Path) -> subprocess.Popen:
+def _windows_updater_creation_flags(*, allow_breakaway: bool = True) -> int:
+    # Windows PowerShell can exit before processing ``-File`` when started with
+    # DETACHED_PROCESS. CREATE_NO_WINDOW isolates it from the console while
+    # still allowing the handoff script to run after Jarv exits.
+    flags = (
+        getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+    )
+    if allow_breakaway:
+        flags |= getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
+    return flags
+
+
+def _stage_windows_updater(
+    source: Path,
+    target: Path,
+    expected_version: str,
+) -> subprocess.Popen:
     script = source.parent / "jarv-update.ps1"
     script.write_text(
         """
 param(
   [Parameter(Mandatory=$true)][string]$Source,
   [Parameter(Mandatory=$true)][string]$Target,
-  [Parameter(Mandatory=$true)][int]$ParentPid
+  [Parameter(Mandatory=$true)][int]$ParentPid,
+  [Parameter(Mandatory=$true)][string]$ExpectedVersion,
+  [Parameter(Mandatory=$true)][string]$ResultFile,
+  [Parameter(Mandatory=$true)][int]$RetryCount,
+  [Parameter(Mandatory=$true)][int]$RetryDelayMs
 )
 $ErrorActionPreference = "Stop"
-Wait-Process -Id $ParentPid -ErrorAction SilentlyContinue
-Copy-Item -LiteralPath $Source -Destination $Target -Force
-& $Target --version | Out-Null
-Remove-Item -LiteralPath (Split-Path -Parent $Source) -Recurse -Force -ErrorAction SilentlyContinue
+
+function Write-UpdateResult {
+  param(
+    [Parameter(Mandatory=$true)][string]$Status,
+    [Parameter(Mandatory=$true)][string]$Message
+  )
+  $payload = @{
+    status = $Status
+    version = $ExpectedVersion
+    message = $Message
+  } | ConvertTo-Json -Compress
+  $temporaryResult = "$ResultFile.tmp"
+  Set-Content -LiteralPath $temporaryResult -Value $payload -Encoding UTF8
+  Move-Item -LiteralPath $temporaryResult -Destination $ResultFile -Force
+}
+
+try {
+  Wait-Process -Id $ParentPid -ErrorAction SilentlyContinue
+  $installed = $false
+  $lastError = $null
+
+  for ($attempt = 1; $attempt -le $RetryCount; $attempt++) {
+    try {
+      Copy-Item -LiteralPath $Source -Destination $Target -Force
+      $actualVersion = (& $Target --version 2>&1 | Out-String).Trim()
+      if ($LASTEXITCODE -ne 0) {
+        throw "The updated executable exited with code $LASTEXITCODE."
+      }
+      $expectedOutput = "jarv $ExpectedVersion"
+      if ($actualVersion -ne $expectedOutput) {
+        throw "Expected '$expectedOutput' but got '$actualVersion'."
+      }
+      $installed = $true
+      break
+    }
+    catch {
+      $lastError = $_.Exception.Message
+      if ($attempt -lt $RetryCount) {
+        Start-Sleep -Milliseconds $RetryDelayMs
+      }
+    }
+  }
+
+  if (-not $installed) {
+    throw "Could not replace or verify '$Target' after $RetryCount attempts. $lastError"
+  }
+
+  Write-UpdateResult -Status "updated" -Message "Updated successfully to v$ExpectedVersion."
+  $temporaryRoot = Split-Path -Parent (Split-Path -Parent $Source)
+  Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+catch {
+  $message = "Update to v$ExpectedVersion failed: $($_.Exception.Message)"
+  try {
+    Write-UpdateResult -Status "failed" -Message $message
+  }
+  catch {}
+  exit 1
+}
 """.strip(),
         encoding="utf-8",
     )
     powershell = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
-    return subprocess.Popen(
-        [
-            powershell,
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(script),
-            "-Source",
-            str(source),
-            "-Target",
-            str(target),
-            "-ParentPid",
-            str(os.getpid()),
-        ],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        close_fds=True,
-    )
+    WINDOWS_UPDATE_RESULT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    WINDOWS_UPDATE_RESULT_FILE.unlink(missing_ok=True)
+    command = [
+        powershell,
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script),
+        "-Source",
+        str(source),
+        "-Target",
+        str(target),
+        "-ParentPid",
+        str(os.getpid()),
+        "-ExpectedVersion",
+        expected_version,
+        "-ResultFile",
+        str(WINDOWS_UPDATE_RESULT_FILE),
+        "-RetryCount",
+        str(WINDOWS_UPDATE_RETRY_COUNT),
+        "-RetryDelayMs",
+        str(WINDOWS_UPDATE_RETRY_DELAY_MS),
+    ]
+    popen_kwargs = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    try:
+        return subprocess.Popen(
+            command,
+            creationflags=_windows_updater_creation_flags(),
+            **popen_kwargs,
+        )
+    except OSError as exc:
+        if getattr(exc, "winerror", None) != 5:
+            raise
+        return subprocess.Popen(
+            command,
+            creationflags=_windows_updater_creation_flags(allow_breakaway=False),
+            **popen_kwargs,
+        )
+
+
+def consume_windows_update_result(
+    result_file: str | Path | None = None,
+) -> dict[str, str] | None:
+    path = Path(result_file or WINDOWS_UPDATE_RESULT_FILE)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        return None
+    except Exception:
+        path.unlink(missing_ok=True)
+        return None
+    path.unlink(missing_ok=True)
+    if not isinstance(payload, dict) or payload.get("status") not in {"updated", "failed"}:
+        return None
+    return {
+        "status": str(payload["status"]),
+        "version": str(payload.get("version") or ""),
+        "message": str(payload.get("message") or ""),
+    }
 
 
 def install_standalone_asset(
@@ -235,7 +362,7 @@ def install_standalone_asset(
         download_asset(asset, archive)
         extracted = extract_executable(archive, temp_dir / "extract", windows=is_windows)
         if is_windows:
-            _stage_windows_updater(extracted, target)
+            _stage_windows_updater(extracted, target, asset.version)
             return "staged"
         os.replace(extracted, target)
         return "installed"
