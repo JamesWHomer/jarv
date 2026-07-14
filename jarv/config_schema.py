@@ -92,6 +92,7 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
     ConfigField("project_context", True, validator="bool", label="Project context", section="behaviour", desc="read JARV.md/AGENTS.md and git status into the prompt", ui_kind="bool", about="When `true`, jarv reads JARV.md/AGENTS.md/CLAUDE.md from the working directory (walking up to the git root) plus git branch, status, and recent commits into the system prompt on every request."),
     ConfigField("max_subagent_depth", 4, validator="non_negative_int", label="Max depth", section="subagents", desc="maximum nested spawn depth", ui_kind="int", about="Maximum recursion depth for `spawn` (root is 0)."),
     ConfigField("subagent_thread_pool_max_workers", 8, validator="positive_int", label="Parallel workers", section="subagents", desc="subagents per spawn batch", ui_kind="int", about="Max parallel children in one `spawn` batch."),
+    ConfigField("subagent_timeout", 600, validator="positive_int", label="Spawn timeout", section="subagents", desc="seconds allowed for one spawn batch", ui_kind="int", about="Maximum runtime in seconds for one `spawn` batch before unfinished subagents are cancelled."),
     ConfigField("check_updates", True, validator="bool", label="Update checks", section="updates", desc="background check on one-shot runs", ui_kind="bool", about="When `true`, a one-shot `jarv <question>` run fires a non-blocking background update check."),
     ConfigField(
         "read_only_command_display",

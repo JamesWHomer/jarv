@@ -196,6 +196,7 @@ When the model calls `spawn`, Jarv runs N child agents in parallel. Each child o
 - **Parallel by default** — all children in a `spawn` call run concurrently in a thread pool.
 - **Artifacts** — each child's output is stored as a named artifact. The parent (or siblings that declare a dependency) can fetch the full content.
 - **Recursive** — children can themselves spawn further children, up to `max_subagent_depth` levels deep (default 4). Children are sterile by default; the parent must explicitly allow further spawning.
+- **Bounded** — a `spawn` batch cancels unfinished children after `subagent_timeout` seconds (default 600) instead of waiting forever.
 - **Transcript scope** — child-agent transcripts are discarded. Root history stores the parent `spawn`/`read` tool calls and returned outputs.
 - **Session-scoped** — artifacts persist for the active session and are available on later prompts until you start a new session or archive.
 
@@ -275,6 +276,7 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 | `auditor_model` | `""` | Auditor model. Empty uses the active `model`. |
 | `max_subagent_depth` | `4` | Maximum nesting depth for spawned subagents. |
 | `subagent_thread_pool_max_workers` | `8` | Max parallel subagents per `spawn` call. |
+| `subagent_timeout` | `600` | Maximum runtime in seconds for one `spawn` batch before unfinished subagents are cancelled. |
 | `check_updates` | `true` | Background update check on startup (non-blocking, throttled to once per 24h; PyPI for Python installs, GitHub Releases for standalone installs). |
 | `read_only_command_display` | `"fullscreen"` | Display mode for `/help`, `/about`, `/usage`, and `/config`: temporary `fullscreen` view or permanent `print` output. |
 | `tool_call_display` | `"auto"` | Tool-call layout: `auto` selects `print` for one-shot runs and `fullscreen` in heads-up mode; explicit modes override it. |

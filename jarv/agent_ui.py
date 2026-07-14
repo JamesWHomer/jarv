@@ -830,6 +830,13 @@ def _dispatch_spawn_with_ui(
     observer = PanelObserver()
 
     class SpawnPanel:
+        @property
+        def finished(self) -> bool:
+            with lock:
+                return bool(states) and all(
+                    state["status"] != "running" for state in states.values()
+                )
+
         def __rich_console__(self, con, options):
             now = time.perf_counter()
             frame = _THINKING_FRAMES[int(now * 10) % len(_THINKING_FRAMES)]
@@ -928,3 +935,4 @@ def _dispatch_spawn_with_ui(
         live.update(SpawnPanel())
 
     print_mode_spacer(config)
+    return output

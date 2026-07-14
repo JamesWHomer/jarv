@@ -986,6 +986,29 @@ class HeadsupTests(unittest.TestCase):
         self.assertFalse(ui._refresh_wait_statuses())
         self.assertFalse(app._dirty)
 
+    def test_spawn_panel_keeps_headsup_refresh_active_until_finished(self):
+        app, _test_console, _output = self._app()
+        ui = HeadsupAgentUI(app)
+
+        SpawnPanel = type("SpawnPanel", (), {})
+        running = SpawnPanel()
+        running.finished = False
+        ui.show_tool_card(running)
+
+        self.assertTrue(ui.has_active_animation())
+        app._dirty = False
+        self.assertTrue(ui._refresh_wait_statuses())
+        self.assertTrue(app._dirty)
+
+        finished = SpawnPanel()
+        finished.finished = True
+        ui.show_tool_card(finished)
+
+        self.assertFalse(ui.has_active_animation())
+        app._dirty = False
+        self.assertFalse(ui._refresh_wait_statuses())
+        self.assertFalse(app._dirty)
+
     def test_interactive_command_card_grows_in_one_headsup_slot(self):
         app, _test_console, _output = self._app()
         ui = HeadsupAgentUI(app)
