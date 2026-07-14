@@ -2,9 +2,11 @@ import re
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
-from rich.console import Group
+from rich.console import Group, RenderableType
 from rich.markup import escape
 from rich.text import Text
 
@@ -212,17 +214,98 @@ def _build_confirmation_body(command: str, reason: str) -> Group:
     return Group(*parts)
 
 
-def prompt_panel_confirmation(
-    body,
-    *,
-    subtitle: str = "confirm to run",
-    question: str = "Allow this command?",
-) -> bool:
-    """Show a safety panel with a y/N prompt.  Returns True if approved."""
-    console.print()
-    console.print(jarv_panel(body, title="safety", subtitle=subtitle, padding=(1, 2)))
+@dataclass
+class ConfirmRequest:
+    """One user-approval request, routed to the registered confirm handler.
 
-    prompt = f"[bold]{question}[/bold] [dim]\\[y/N][/dim] [bold cyan]\u203a[/bold cyan] "
+    ``body`` is the pre-styled panel interior (reason line plus command or
+    diff); ``command``/``reason``/``kind`` ride along as plain strings for
+    tests and logging. ``audit_state`` is the auditor thread's mutable state
+    dict (``{"done", "allow", "reason"[, "cancelled"]}``) that the display
+    polls while the auditor runs; ``None`` means a plain confirm.
+    """
+
+    body: RenderableType
+    question: str = "Allow this command?"
+    subtitle: str = "confirm to run"
+    kind: str = "command"  # "command" | "stdin" | "edit"
+    command: str | None = None
+    reason: str | None = None
+    audit_state: dict | None = None
+    auto_approve: bool = True
+    cancellation_token: CancellationToken | None = None
+
+
+ConfirmHandler = Callable[[ConfirmRequest], bool]
+
+_confirm_handler: ConfirmHandler | None = None
+_confirm_handler_lock = threading.Lock()
+
+
+def set_confirm_handler(handler: ConfirmHandler) -> None:
+    """Register how approval questions reach the user.
+
+    The display owner (the heads-up app) registers a handler for its lifetime;
+    prompts from any worker thread then render inside its display instead of
+    fighting it for the console and keyboard. No handler means the console
+    fallbacks below own the prompt (inline/one-shot mode).
+    """
+    global _confirm_handler
+    with _confirm_handler_lock:
+        _confirm_handler = handler
+
+
+def clear_confirm_handler() -> None:
+    global _confirm_handler
+    with _confirm_handler_lock:
+        _confirm_handler = None
+
+
+def confirm_handler_active() -> bool:
+    with _confirm_handler_lock:
+        return _confirm_handler is not None
+
+
+def _get_confirm_handler() -> ConfirmHandler | None:
+    with _confirm_handler_lock:
+        return _confirm_handler
+
+
+def request_confirmation(request: ConfirmRequest) -> bool:
+    """Route one approval request to the user.  Returns True if approved.
+
+    A handler crash denies the request rather than propagating: a broken
+    prompt must never take the whole turn down (the run_command dispatch
+    chain has no exception guard around the safety gate). Cancellation still
+    propagates so ESC/Ctrl+C end the turn as usual.
+    """
+    handler = _get_confirm_handler()
+    if handler is not None:
+        try:
+            return bool(handler(request))
+        except (KeyboardInterrupt, TurnCancelled):
+            raise
+        except Exception:
+            return False
+    if request.audit_state is None:
+        return _console_confirm(request)
+    poll = _audit_poll_without_live if live_display_depth() > 0 else _live_audit_poll
+    return poll(
+        request.body,
+        request.audit_state,
+        auto_approve=request.auto_approve,
+        cancellation_token=request.cancellation_token,
+    )
+
+
+def _console_confirm(request: ConfirmRequest) -> bool:
+    """Inline fallback: safety panel plus y/N prompt on the shared console."""
+    console.print()
+    console.print(
+        jarv_panel(request.body, title="safety", subtitle=request.subtitle, padding=(1, 2))
+    )
+
+    prompt = f"[bold]{request.question}[/bold] [dim]\\[y/N][/dim] [bold cyan]\u203a[/bold cyan] "
     try:
         choice = console.input(prompt).strip().lower()
     except EOFError:
@@ -237,14 +320,46 @@ def prompt_panel_confirmation(
     return approved
 
 
+def prompt_panel_confirmation(
+    body,
+    *,
+    subtitle: str = "confirm to run",
+    question: str = "Allow this command?",
+    kind: str = "command",
+    command: str | None = None,
+    reason: str | None = None,
+) -> bool:
+    """Show a safety panel with a y/N prompt.  Returns True if approved."""
+    return request_confirmation(ConfirmRequest(
+        body=body,
+        question=question,
+        subtitle=subtitle,
+        kind=kind,
+        command=command,
+        reason=reason,
+    ))
+
+
 def approval_lock() -> threading.Lock:
     """Lock serializing interactive approval prompts across tool workers."""
     return _APPROVAL_LOCK
 
 
-def prompt_confirmation(command: str, reason: str) -> bool:
+def prompt_confirmation(
+    command: str,
+    reason: str,
+    *,
+    kind: str = "command",
+    question: str = "Allow this command?",
+) -> bool:
     """Ask the user to approve a risky command.  Returns True if approved."""
-    return prompt_panel_confirmation(_build_confirmation_body(command, reason))
+    return prompt_panel_confirmation(
+        _build_confirmation_body(command, reason),
+        question=question,
+        kind=kind,
+        command=command,
+        reason=reason,
+    )
 
 
 def check_command(
@@ -383,8 +498,9 @@ def _audit_gate(
 
     body = _build_confirmation_body(command, reason)
 
-    # Non-interactive fallback
-    if not sys.stdout.isatty():
+    # Non-interactive fallback. Skipped when a handler owns the display: the
+    # heads-up app can prompt even though stdout is its alt screen.
+    if not confirm_handler_active() and not sys.stdout.isatty():
         console.print()
         console.print(jarv_panel(body, title="safety", subtitle="confirm to run", padding=(1, 2)))
         allow, auditor_reason = audit_command(
@@ -427,20 +543,14 @@ def _audit_gate(
     thread.start()
 
     auto_approve = (config or {}).get("auditor_auto_approve", True)
-    if live_display_depth() > 0:
-        approved = _audit_poll_without_live(
-            body,
-            audit_state,
-            auto_approve=auto_approve,
-            cancellation_token=cancellation_token,
-        )
-    else:
-        approved = _live_audit_poll(
-            body,
-            audit_state,
-            auto_approve=auto_approve,
-            cancellation_token=cancellation_token,
-        )
+    approved = request_confirmation(ConfirmRequest(
+        body=body,
+        command=command,
+        reason=reason,
+        audit_state=audit_state,
+        auto_approve=auto_approve,
+        cancellation_token=cancellation_token,
+    ))
 
     if approved:
         return True, ""

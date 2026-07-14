@@ -18,6 +18,7 @@ from jarv.cancellation import CancellationToken, TurnCancelled
 from jarv.shell import InteractiveCommandSnapshot
 from jarv.command_input import TextInput
 from jarv.headsup import HeadsupAgentUI, HeadsupApp
+from jarv.safety import ConfirmRequest, confirm_handler_active
 from jarv.text_editor import initialize_text_editor
 
 
@@ -731,6 +732,141 @@ class HeadsupTests(unittest.TestCase):
         self.assertIn("What next?", rendered)
         self.assertIn("> nothing", rendered)
         self.assertNotIn("answer> nothing", rendered)
+
+    def test_confirm_safety_request_collects_yes_in_answer_box(self):
+        app, _test_console, _output = self._app()
+        app._foreground_input_active = True
+        request = ConfirmRequest(
+            body=Text("$ taskkill /f /im notepad.exe"),
+            command="taskkill /f /im notepad.exe",
+            reason="process termination (taskkill)",
+        )
+        result = {}
+
+        def confirm():
+            result["approved"] = app._confirm_safety_request(request)
+
+        thread = threading.Thread(target=confirm)
+        thread.start()
+        self.assertTrue(self._wait_for(lambda: app._answer_request is not None))
+
+        initialize_text_editor(app.editor, "y")
+        app._complete_answer()
+        thread.join(timeout=1.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertTrue(result["approved"])
+        self.assertIsNone(app._answer_request)
+        tool_entries = [entry for entry in app.entries if entry.kind == "tool"]
+        self.assertEqual(len(tool_entries), 1)
+        rendered = self._entry_text(app)
+        self.assertIn("Safety", rendered)
+        self.assertIn("taskkill", rendered)
+        self.assertIn("approved", rendered)
+
+    def test_confirm_safety_request_denies_on_other_answer(self):
+        app, _test_console, _output = self._app()
+        app._foreground_input_active = True
+        request = ConfirmRequest(body=Text("$ rm -rf /"), command="rm -rf /")
+        result = {}
+
+        def confirm():
+            result["approved"] = app._confirm_safety_request(request)
+
+        thread = threading.Thread(target=confirm)
+        thread.start()
+        self.assertTrue(self._wait_for(lambda: app._answer_request is not None))
+
+        initialize_text_editor(app.editor, "n")
+        app._complete_answer()
+        thread.join(timeout=1.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertFalse(result["approved"])
+        self.assertIn("denied", self._entry_text(app))
+
+    def test_confirm_safety_request_auto_approves_on_auditor_allow(self):
+        app, _test_console, _output = self._app()
+        app._foreground_input_active = True
+        request = ConfirmRequest(
+            body=Text("$ taskkill /f"),
+            audit_state={"done": True, "allow": True, "reason": "scoped kill"},
+            auto_approve=True,
+        )
+
+        # The auditor has already allowed: no answer prompt should open, so a
+        # direct call must return without blocking.
+        approved = app._confirm_safety_request(request)
+
+        self.assertTrue(approved)
+        self.assertIsNone(app._answer_request)
+        rendered = self._entry_text(app)
+        self.assertIn("auditor", rendered)
+        self.assertIn("scoped kill", rendered)
+        self.assertIn("approved", rendered)
+
+    def test_confirm_safety_request_auditor_defer_prompts_user(self):
+        app, _test_console, _output = self._app()
+        app._foreground_input_active = True
+        request = ConfirmRequest(
+            body=Text("$ rm -rf /"),
+            audit_state={"done": True, "allow": False, "reason": "destructive"},
+            auto_approve=True,
+        )
+        result = {}
+
+        def confirm():
+            result["approved"] = app._confirm_safety_request(request)
+
+        thread = threading.Thread(target=confirm)
+        thread.start()
+        self.assertTrue(self._wait_for(lambda: app._answer_request is not None))
+
+        initialize_text_editor(app.editor, "n")
+        app._complete_answer()
+        thread.join(timeout=1.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertFalse(result["approved"])
+        rendered = self._entry_text(app)
+        self.assertIn("auditor", rendered)
+        self.assertIn("destructive", rendered)
+        self.assertIn("denied", rendered)
+
+    def test_confirm_safety_request_cancel_raises_turn_cancelled(self):
+        app, _test_console, _output = self._app()
+        app._foreground_input_active = True
+        request = ConfirmRequest(body=Text("$ rm -rf /"))
+        result = {}
+
+        def confirm():
+            try:
+                app._confirm_safety_request(request)
+            except TurnCancelled:
+                result["cancelled"] = True
+
+        thread = threading.Thread(target=confirm)
+        thread.start()
+        self.assertTrue(self._wait_for(lambda: app._answer_request is not None))
+
+        app._cancel_answer()
+        thread.join(timeout=1.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertTrue(result.get("cancelled"))
+        self.assertIn("cancelled", self._entry_text(app))
+
+    def test_app_lifecycle_registers_confirm_handler(self):
+        app, _test_console, _output = self._app()
+        with patch("jarv.headsup.enable_mouse_wheel_reporting"), patch(
+            "jarv.headsup.disable_mouse_capture"
+        ):
+            app.on_start()
+            try:
+                self.assertTrue(confirm_handler_active())
+            finally:
+                app.on_stop()
+        self.assertFalse(confirm_handler_active())
 
     def test_status_indicators_match_oneshot_glyphs(self):
         app, _test_console, _output = self._app()

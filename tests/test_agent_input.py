@@ -17,7 +17,6 @@ from jarv.agent import (
     _dispatch_ask_user,
     _dispatch_run_command_with_ui,
     _interaction_marker_text,
-    _parse_terminal_control,
     _print_tool_card,
     _run_command_waiting_prompt,
     _TurnRenderer,
@@ -1205,6 +1204,8 @@ class AgentInputTests(unittest.TestCase):
         self.assertIn("choice=3 name=Ada", rendered)
 
     def test_terminal_controls_include_raw_keys_and_ctrl_d_alias(self):
+        from jarv.interactive_command import _parse_terminal_actions
+
         cases = [
             ("<CTRL_D>", "eof", None, "<EOF>"),
             ("<ESC>", "stdin_raw", "\x1b", "<ESC>"),
@@ -1217,7 +1218,7 @@ class AgentInputTests(unittest.TestCase):
 
         for text, expected_action, expected_payload, expected_display in cases:
             with self.subTest(text=text):
-                action, payload = _parse_terminal_control(text)
+                action, payload = _parse_terminal_actions(text)[0][0]
                 self.assertEqual(action, expected_action)
                 self.assertEqual(payload, expected_payload)
                 self.assertEqual(
@@ -1225,11 +1226,13 @@ class AgentInputTests(unittest.TestCase):
                     expected_display,
                 )
 
-    def test_terminal_control_parser_uses_only_first_action(self):
-        action, payload = _parse_terminal_control("<TAB><ENTER>")
+    def test_terminal_action_parser_returns_chained_controls_in_order(self):
+        from jarv.interactive_command import _parse_terminal_actions
 
-        self.assertEqual(action, "stdin_raw")
-        self.assertEqual(payload, "\t")
+        actions, _note = _parse_terminal_actions("<TAB><ENTER>")
+
+        self.assertEqual(actions[0], ("stdin_raw", "\t"))
+        self.assertEqual(actions[1], ("stdin", "\n"))
 
     def test_interactive_check_in_prompt_reports_elapsed_time(self):
         snapshot = InteractiveCommandSnapshot(

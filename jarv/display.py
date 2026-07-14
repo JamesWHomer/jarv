@@ -44,7 +44,11 @@ def _make_console() -> Console:
 
 console = _make_console()
 
-_live_display_depth = threading.local()
+# Process-wide (not per-thread): a Rich Live owned by one thread must be
+# visible to workers on other threads deciding whether they can start their
+# own Live on the shared console (Rich allows only one per console).
+_live_display_depth = 0
+_live_display_depth_lock = threading.Lock()
 _first_paint_marks: set[str] = set()
 
 PANEL_BORDER_STYLE = "cyan"
@@ -58,6 +62,7 @@ TOOL_CARD_STYLES = {
     "edit": ("\u00b1", "Edit", "bright_yellow"),
     "spawn": ("\u21b3", "Subagent", "magenta"),
     "ask_user": ("?", "Ask user", "blue"),
+    "safety": ("\u26a0", "Safety", "yellow"),
 }
 
 
@@ -180,19 +185,22 @@ def section_rule(label: str, step: int | None = None, total: int | None = None) 
 
 
 def live_display_depth() -> int:
-    """Return how many nested Rich Live displays are active on this thread."""
-    return int(getattr(_live_display_depth, "depth", 0) or 0)
+    """Return how many tracked Rich Live displays are active process-wide."""
+    with _live_display_depth_lock:
+        return _live_display_depth
 
 
 @contextmanager
 def track_live_display():
-    """Increment live-display depth for the current thread."""
-    depth = live_display_depth()
-    _live_display_depth.depth = depth + 1
+    """Increment the process-wide live-display depth while the block runs."""
+    global _live_display_depth
+    with _live_display_depth_lock:
+        _live_display_depth += 1
     try:
         yield
     finally:
-        _live_display_depth.depth = depth
+        with _live_display_depth_lock:
+            _live_display_depth -= 1
 
 
 def rendered_text_lines(renderable: RenderableType, width: int) -> list[Text]:

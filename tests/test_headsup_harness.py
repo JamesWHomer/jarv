@@ -63,3 +63,38 @@ def test_harness_frame_carries_stale_edge_erase():
 
 def test_strip_ansi_removes_escape_sequences():
     assert strip_ansi("\x1b[31mred\x1b[0m\x1b[0K") == "red"
+
+
+def test_harness_safety_confirmation_end_to_end():
+    """A risky command inside a real heads-up turn prompts via the app.
+
+    The gate runs on the agent worker thread while the loop owns the alt
+    screen — exactly the topology that used to crash (nested Live) or hang
+    (console.input racing the loop's key reader).
+    """
+    from conftest import wait_for
+    from jarv.safety import check_command
+
+    results = {}
+
+    def risky_agent(query, config, client, *, ui=None, **kwargs):
+        results["gate"] = check_command(
+            "taskkill /f /im notepad.exe", "risky", audit=False
+        )
+        if ui is not None and hasattr(ui, "finish_assistant_message"):
+            ui.finish_assistant_message("done")
+        return SimpleNamespace(cancelled=False, error=None)
+
+    with HeadsupHarness(width=90, height=24, run_agent=risky_agent) as h:
+        h.feed_text("kill notepad")
+        h.feed_key("enter")
+        assert wait_for(lambda: h.answer_prompt is not None, timeout=3.0)
+        assert "Allow this command?" in h.answer_prompt
+        assert "taskkill" in h.transcript
+
+        h.feed_text("y")
+        h.feed_key("enter")
+        assert h.wait_idle(timeout=3.0)
+
+    assert results["gate"] == (True, "")
+    assert "approved" in h.transcript

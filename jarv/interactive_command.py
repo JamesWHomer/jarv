@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import time
+from contextlib import contextmanager
 
 from rich.text import Text
 
@@ -239,11 +240,6 @@ def _parse_terminal_actions(
     return actions, note
 
 
-def _parse_terminal_control(text: str) -> tuple[str, str | float | None]:
-    """First action of the reply — kept for callers that predate sequences."""
-    return _parse_terminal_actions(text)[0][0]
-
-
 def _terminal_action_display(action: str, payload: str | float | None) -> str:
     if action == "stdin":
         text = str(payload or "").rstrip("\n")
@@ -386,6 +382,36 @@ def _cancellable_sleep(seconds: float, cancellation_token=None) -> None:
         time.sleep(0.05)
 
 
+@contextmanager
+def _suspended_card_live(pending):
+    """Pause the held-open inline card ``Live`` around a console prompt.
+
+    The card's auto-refresh thread would repaint over the y/N prompt and Rich
+    hides the cursor while a Live is active, so the user would type blind.
+    No-op when a confirm handler owns the display (heads-up: the prompt never
+    touches the console) or in heads-up's inline-card-less mode
+    (``pending.live is None``). stop()/start(refresh=True) reuse is the same
+    pattern as ``AltScreenApp.suspended``.
+    """
+    from .safety import confirm_handler_active
+
+    live = getattr(pending, "live", None)
+    if live is None or confirm_handler_active():
+        yield
+        return
+    try:
+        live.stop()
+    except Exception:
+        pass
+    try:
+        yield
+    finally:
+        try:
+            live.start(refresh=True)
+        except Exception:
+            pass
+
+
 def _screen_stdin_text(pending, actions, config: dict) -> str | None:
     """Local safety gate for typed stdin lines.
 
@@ -393,10 +419,14 @@ def _screen_stdin_text(pending, actions, config: dict) -> str | None:
     a shell/REPL afterwards used to bypass it entirely. Classify each typed
     line with the same risky patterns and confirm locally (no LLM auditor —
     stdin lines are cheap to deny and may be prompt answers, not commands).
+    Under ``command_safety="all"`` every non-empty typed line needs approval,
+    or an approved bare shell/REPL would be an ungated escape hatch; controls,
+    raw keys, and plain Enter never prompt.
     """
-    if config.get("command_safety", "risky") == "none":
+    level = config.get("command_safety", "risky")
+    if level == "none":
         return None
-    from .safety import classify_command, prompt_confirmation
+    from .safety import approval_lock, classify_command, prompt_confirmation
 
     for action, payload in actions:
         if action != "stdin":
@@ -405,9 +435,20 @@ def _screen_stdin_text(pending, actions, config: dict) -> str | None:
         if not text:
             continue
         is_risky, reason = classify_command(text)
-        if is_risky and not prompt_confirmation(
-            f"stdin to `{pending.prepared.cmd}`: {text}", reason
-        ):
+        if not is_risky:
+            if level != "all":
+                continue
+            reason = "all commands require approval"
+        with approval_lock(), _suspended_card_live(pending):
+            approved = prompt_confirmation(
+                f"stdin to `{pending.prepared.cmd}`: {text}",
+                reason,
+                kind="stdin",
+                question="Allow this input?",
+            )
+        if not approved:
+            if not is_risky:
+                return "[stdin blocked by user — safety level is set to 'all']"
             return f"[stdin blocked by user — detected as risky: {reason}]"
     return None
 
