@@ -139,11 +139,105 @@ class StdinSafetyScreenTests(unittest.TestCase):
 
     def test_benign_stdin_line_never_prompts(self):
         config = {**DEFAULT_CONFIG, "command_safety": "risky"}
-        def boom(*_args):  # pragma: no cover - must not be called
+        def boom(*_args, **_kwargs):  # pragma: no cover - must not be called
             raise AssertionError("prompt_confirmation should not run")
         with patch("jarv.safety.prompt_confirmation", side_effect=boom):
             denial = _screen_stdin_text(self._pending(), [("stdin", "y\n")], config)
         self.assertIsNone(denial)
+
+    def test_all_level_gates_benign_stdin_line(self):
+        # An approved bare shell must not be an ungated escape hatch when the
+        # user asked for every command to be confirmed.
+        config = {**DEFAULT_CONFIG, "command_safety": "all"}
+        prompts = []
+
+        def record(command, reason, **_kwargs):
+            prompts.append((command, reason))
+            return False
+
+        with patch("jarv.safety.prompt_confirmation", side_effect=record):
+            denial = _screen_stdin_text(
+                self._pending(), [("stdin", "echo hello\n")], config
+            )
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("echo hello", prompts[0][0])
+        self.assertIn("all commands require approval", prompts[0][1])
+        self.assertEqual(
+            denial, "[stdin blocked by user — safety level is set to 'all']"
+        )
+
+    def test_all_level_approved_benign_line_passes(self):
+        config = {**DEFAULT_CONFIG, "command_safety": "all"}
+        with patch("jarv.safety.prompt_confirmation", return_value=True):
+            denial = _screen_stdin_text(
+                self._pending(), [("stdin", "echo hello\n")], config
+            )
+        self.assertIsNone(denial)
+
+    def test_all_level_risky_line_keeps_risky_denial_message(self):
+        config = {**DEFAULT_CONFIG, "command_safety": "all"}
+        with patch("jarv.safety.prompt_confirmation", return_value=False):
+            denial = _screen_stdin_text(
+                self._pending(), [("stdin", "rm -rf /\n")], config
+            )
+        self.assertIn("detected as risky", denial)
+
+    def test_all_level_never_prompts_for_controls_or_plain_enter(self):
+        config = {**DEFAULT_CONFIG, "command_safety": "all"}
+        def boom(*_args, **_kwargs):  # pragma: no cover - must not be called
+            raise AssertionError("prompt_confirmation should not run")
+        actions = [
+            ("stdin", "\n"),          # plain <ENTER>
+            ("stdin_raw", "\x1b[B"),  # arrow key
+            ("wait", None),
+            ("ctrl_c", None),
+            ("eof", None),
+        ]
+        with patch("jarv.safety.prompt_confirmation", side_effect=boom):
+            denial = _screen_stdin_text(self._pending(), actions, config)
+        self.assertIsNone(denial)
+
+    def test_prompt_suspends_inline_card_live_around_confirmation(self):
+        # The held-open card Live hides the cursor and repaints over the
+        # prompt; it must stop before the question and resume after.
+        events = []
+        live = SimpleNamespace(
+            stop=lambda: events.append("stop"),
+            start=lambda refresh=False: events.append(f"start(refresh={refresh})"),
+        )
+        pending = SimpleNamespace(
+            prepared=SimpleNamespace(cmd="bash"), live=live
+        )
+        config = {**DEFAULT_CONFIG, "command_safety": "risky"}
+
+        def prompt(*_args, **_kwargs):
+            events.append("prompt")
+            return True
+
+        with patch("jarv.safety.prompt_confirmation", side_effect=prompt):
+            _screen_stdin_text(pending, [("stdin", "rm -rf /\n")], config)
+        self.assertEqual(events, ["stop", "prompt", "start(refresh=True)"])
+
+    def test_prompt_leaves_live_alone_when_confirm_handler_registered(self):
+        # Heads-up mode: the handler owns the display; the (absent) inline
+        # Live must not be touched.
+        from jarv.safety import clear_confirm_handler, set_confirm_handler
+
+        events = []
+        live = SimpleNamespace(
+            stop=lambda: events.append("stop"),
+            start=lambda refresh=False: events.append("start"),
+        )
+        pending = SimpleNamespace(
+            prepared=SimpleNamespace(cmd="bash"), live=live
+        )
+        config = {**DEFAULT_CONFIG, "command_safety": "risky"}
+        set_confirm_handler(lambda request: True)
+        self.addCleanup(clear_confirm_handler)
+
+        denial = _screen_stdin_text(pending, [("stdin", "rm -rf /\n")], config)
+        self.assertIsNone(denial)
+        self.assertEqual(events, [])
 
 
 class InteractiveRoundCapTests(unittest.TestCase):

@@ -216,7 +216,6 @@ from .interactive_command import (
     _interactive_check_in_seconds,
     _interactive_max_rounds,
     _interactive_tool_call_reminder,
-    _parse_terminal_control,
     _record_interactive_input,
     _run_command_final_prompt,
     _run_command_waiting_prompt,
@@ -321,6 +320,8 @@ def _dispatch_run_command_with_ui(
     )
     live = None
     live_depth_cm = None
+    process = None
+    unregister_cancel = None
 
     try:
         if ui is not None:
@@ -352,9 +353,19 @@ def _dispatch_run_command_with_ui(
         elif live is not None:
             live.refresh()
     except (KeyboardInterrupt, TurnCancelled):
+        # The cancel path kills via the token-registered kill_tree callback.
         _stop_interactive_card_live(live, live_depth_cm)
         raise
     except Exception as e:
+        # Nothing else owns the process yet: kill it here or it (and its
+        # reader threads) outlive the turn.
+        if process is not None:
+            try:
+                process.kill_tree()
+            except Exception:
+                pass
+        if callable(unregister_cancel):
+            unregister_cancel()
         _stop_interactive_card_live(live, live_depth_cm)
         return f"[error: {e}]"
 

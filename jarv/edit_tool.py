@@ -300,6 +300,8 @@ def _check_edit(resolved: Path, diff_text: str, config: dict) -> tuple[bool, str
             body,
             subtitle="confirm to edit",
             question="Allow this edit?",
+            kind="edit",
+            reason=reason,
         ):
             return True, ""
     return False, f"[edit denied by user — {reason}]"

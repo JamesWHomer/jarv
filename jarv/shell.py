@@ -429,12 +429,15 @@ class InteractiveCommandProcess:
             if consume:
                 self._stdout_consumed = len(stdout)
                 self._stderr_consumed = len(stderr)
+        # Poll once: the process can exit between two calls, which would yield
+        # the contradictory ``exited=True, exit_code=None``.
+        exit_code = self.proc.poll()
         return InteractiveCommandSnapshot(
             self.command,
             stdout,
             stderr,
-            self.proc.poll(),
-            exited=self.proc.poll() is not None,
+            exit_code,
+            exited=exit_code is not None,
             stdin_closed=self._stdin_closed,
             stdout_start=stdout_start,
             stderr_start=stderr_start,
