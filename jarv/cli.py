@@ -267,7 +267,12 @@ def main() -> None:
         sys.stderr.reconfigure(encoding="utf-8")
 
     parser = _build_parser()
-    args = parser.parse_args()
+    args, unknown = parser.parse_known_args()
+    if unknown:
+        if args.query and args.query[0].lower() in {"/uninstall", "uninstall"}:
+            args.query.extend(unknown)
+        else:
+            parser.error(f"unrecognized arguments: {' '.join(unknown)}")
     query_parts: list[str] = args.query
     console = _console()
 
@@ -280,10 +285,15 @@ def main() -> None:
     # Slash commands — flags are silently ignored for these
     if query_parts and query_parts[0].startswith("/"):
         command = query_parts[0].lower()
-        if command == "/update":
-            from .commands import cmd_update
+        if command in {"/update", "/uninstall"}:
+            if command == "/update":
+                from .commands import cmd_update
 
-            status = cmd_update()
+                status = cmd_update()
+            else:
+                from .uninstall import cmd_uninstall
+
+                status = cmd_uninstall(query_parts[1:])
             if status:
                 raise SystemExit(status)
             return

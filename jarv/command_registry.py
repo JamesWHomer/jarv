@@ -95,6 +95,7 @@ COMMANDS: dict[str, CommandMeta] = {
     "help": CommandMeta(False, summary="Show help menu"),
     "about": CommandMeta(False, summary="Show detailed reference information"),
     "update": CommandMeta(False, needs_nudge=True, summary="Update jarv"),
+    "uninstall": CommandMeta(True, summary="Uninstall jarv", arg_hint="[--purge]"),
 }
 
 CONFIG_MUTATING_COMMANDS = frozenset(
@@ -106,6 +107,7 @@ HANDLER_SPECS: dict[str, tuple[str, str]] = {
     "help": ("jarv.commands", "print_help"),
     "about": ("jarv.commands", "print_about"),
     "update": ("jarv.commands", "cmd_update"),
+    "uninstall": ("jarv.uninstall", "cmd_uninstall"),
     "new": ("jarv.commands", "cmd_new"),
     "archive": ("jarv.session_commands", "cmd_archive"),
     "session": ("jarv.session_browser", "cmd_sessions"),

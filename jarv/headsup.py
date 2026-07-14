@@ -96,6 +96,7 @@ _FULLSCREEN_SLASH_COMMANDS = frozenset({
     "/history",
     "/settings",
     "/setup",
+    "/uninstall",
     "/usage",
 })
 
