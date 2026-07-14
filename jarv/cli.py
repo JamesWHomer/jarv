@@ -39,6 +39,21 @@ def _print_previous_update_result() -> None:
     console.print("[dim]Run [bold]jarv /update[/bold] to retry.[/dim]")
 
 
+def _print_previous_uninstall_result() -> None:
+    from rich.text import Text
+
+    from .paths import UNINSTALL_RESULT_FILE
+    from .standalone import consume_windows_update_result
+
+    result = consume_windows_update_result(UNINSTALL_RESULT_FILE)
+    if result is None or result["status"] != "failed":
+        return
+    console = _console()
+    message = result["message"] or "The previous uninstall did not complete."
+    console.print(Text.assemble(("✗ ", "bold red"), (message, "red")))
+    console.print("[dim]Run [bold]jarv /uninstall[/bold] to retry.[/dim]")
+
+
 def _start_agent_import() -> tuple[dict, threading.Event]:
     state: dict = {}
     ready = threading.Event()
@@ -294,6 +309,7 @@ def main() -> None:
     query_parts: list[str] = args.query
     console = _console()
     _print_previous_update_result()
+    _print_previous_uninstall_result()
 
     # "jarv help" permanent alias (only when help is the sole argument)
     if len(query_parts) == 1 and query_parts[0].lower() == "help":

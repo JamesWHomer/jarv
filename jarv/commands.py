@@ -245,7 +245,7 @@ def _about_body() -> Markdown:
 - `jarv /sessions` / `jarv /session` - List sessions by recency. In an interactive terminal you can scroll through all of them; when stdout is not a TTY (e.g. piped), only the 5 most recent are listed.
 - `jarv /sessions <id>` - Bind this terminal to a specific session id (prefix match).
 - `jarv /update` - Update Jarv through the active install channel. Standalone builds update from GitHub Releases; Python installs update through pip, pipx, or uv.
-- `jarv /uninstall [--purge]` - Uninstall Jarv or show the command for its package manager. User data is kept unless `--purge` is supplied.
+- `jarv /uninstall [--purge] [--yes]` - Uninstall Jarv or show the command for its package manager. User data is kept unless `--purge` is supplied; `--yes` skips the confirmation prompt (required when stdin is not a terminal).
 
 ## Heads-up mode
 

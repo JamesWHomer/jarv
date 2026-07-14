@@ -98,7 +98,6 @@ _FULLSCREEN_SLASH_COMMANDS = frozenset({
     "/history",
     "/settings",
     "/setup",
-    "/uninstall",
     "/usage",
 })
 
@@ -1476,23 +1475,20 @@ class HeadsupApp(AltScreenApp):
             command = parts[0].lower()
             if command in {"/exit", "/quit"}:
                 return "exit"
-            self._run_slash(command, parts[1:])
-            return None
+            return self._run_slash(command, parts[1:])
 
         alias = self._command_alias(parts[0], parts[1:])
         if alias is not None:
             command, rest = alias
             if self._confirm_command_alias(command, rest, query):
-                self._run_slash(command, rest)
-                return None
+                return self._run_slash(command, rest)
             self._run_agent_query(query)
             return None
 
         result = self.maybe_command(parts[0], parts[1:])
         if result is not None:
             _, command, rest = result
-            self._run_slash(command, rest)
-            return None
+            return self._run_slash(command, rest)
 
         self._run_agent_query(query)
         return None
@@ -1518,24 +1514,27 @@ class HeadsupApp(AltScreenApp):
         answer = self.read_answer("choice> ").strip().lower()
         return answer in _COMMAND_CONFIRM_YES
 
-    def _run_slash(self, command: str, rest: list[str]) -> None:
+    def _run_slash(self, command: str, rest: list[str]) -> str | None:
+        """Run one slash command; returns "exit" when heads-up must stop."""
         if command == "/tree":
             self._run_tree()
-            return
+            return None
         if command == "/btw":
             self._run_btw(rest)
-            return
+            return None
         if command == "/update":
             # Blocks on the network and the installer for up to minutes, so it
             # runs like an agent turn — worker thread plus a live status entry —
             # instead of freezing the loop in the captured-output path below.
             self._start_update()
-            return
+            return None
+        if command == "/uninstall":
+            return self._run_uninstall(rest)
         if command in _FULLSCREEN_SLASH_COMMANDS or (
             command in {"/session", "/sessions"} and not rest
         ):
             self._run_interactive_slash(command, rest)
-            return
+            return None
         with self._captured_console_output() as capture:
             self.config, self.client = self.handle_slash(
                 command,
@@ -1550,6 +1549,22 @@ class HeadsupApp(AltScreenApp):
         if not self._sync_after_slash(command, notice):
             if notice:
                 self.add_notice(notice)
+        return None
+
+    def _run_uninstall(self, rest: list[str]) -> str | None:
+        """Run /uninstall suspended; exit heads-up after a destructive run.
+
+        Staying alive after a purge would re-persist the data just deleted, and
+        on Windows the staged uninstaller waits for this process to exit.
+        """
+        from .uninstall import run_uninstall
+
+        with self.suspended():
+            outcome = run_uninstall(rest)
+        if outcome.destructive:
+            return "exit"
+        self._sync_after_slash("/uninstall", None)
+        return None
 
     def _run_interactive_slash(self, command: str, rest: list[str]) -> None:
         with self.suspended():

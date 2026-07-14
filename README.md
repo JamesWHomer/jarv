@@ -65,7 +65,11 @@ curl -fsSL https://github.com/JamesWHomer/jarv/releases/latest/download/uninstal
 
 Package-manager commands are `winget uninstall JamesWHomer.Jarv`, `brew uninstall jarv`, `scoop uninstall jarv`, `uv tool uninstall jarv`, `pipx uninstall jarv`, or `python -m pip uninstall jarv`.
 
-Your data stays in `~/.jarv`; add `--purge` (or `-Purge` for `uninstall.ps1`) to remove it and cached clipboard images too.
+Your data stays in `~/.jarv`; add `--purge` to remove it and cached clipboard images too, and `--yes` to skip the confirmation prompt (required in non-interactive shells). For `uninstall.ps1`, parameters can't pass through `| iex` — use:
+
+```powershell
+& ([ScriptBlock]::Create((irm https://github.com/JamesWHomer/jarv/releases/latest/download/uninstall.ps1))) -Purge
+```
 
 ## Usage
 
@@ -222,7 +226,7 @@ The terminal shows a live progress panel as children run, with a green checkmark
 | `/usage` | Interactive usage screen — spend, tokens, requests, context headroom, a daily-spend trend, and by-model bars. `←/→` (or `1-5` / `s t w m a`) switches scope live |
 | `/usage <session\|day\|week\|month\|all>` | Open straight to a scope (`day`/`today` = rolling 24h; `all` = full system-wide history) |
 | `/update` | Update Jarv to the latest version for the active install channel |
-| `/uninstall [--purge]` | Uninstall Jarv or show its package-manager uninstall command |
+| `/uninstall [--purge] [--yes]` | Uninstall Jarv or show its package-manager uninstall command |
 
 All commands work both as `jarv /command` (one-shot) and inside heads-up mode. Read-only commands (`/help`, `/about`, `/usage`, and `/config`) use a temporary display by default in interactive terminals; change `read_only_command_display` in `/settings` to print them permanently instead.
 
