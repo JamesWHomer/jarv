@@ -21,6 +21,24 @@ def _console():
     return console
 
 
+def _print_previous_update_result() -> None:
+    from rich.text import Text
+
+    from .standalone import consume_windows_update_result
+
+    result = consume_windows_update_result()
+    if result is None:
+        return
+    console = _console()
+    if result["status"] == "updated":
+        message = result["message"] or "Updated successfully."
+        console.print(Text.assemble(("✓ ", "bold green"), (message, "green")))
+        return
+    message = result["message"] or "The previous update failed."
+    console.print(Text.assemble(("✗ ", "bold red"), (message, "red")))
+    console.print("[dim]Run [bold]jarv /update[/bold] to retry.[/dim]")
+
+
 def _start_agent_import() -> tuple[dict, threading.Event]:
     state: dict = {}
     ready = threading.Event()
@@ -275,6 +293,7 @@ def main() -> None:
             parser.error(f"unrecognized arguments: {' '.join(unknown)}")
     query_parts: list[str] = args.query
     console = _console()
+    _print_previous_update_result()
 
     # "jarv help" permanent alias (only when help is the sole argument)
     if len(query_parts) == 1 and query_parts[0].lower() == "help":

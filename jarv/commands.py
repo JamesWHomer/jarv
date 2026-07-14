@@ -604,7 +604,7 @@ _UPDATE_OUTCOME_STYLES = {
 
 _UPDATE_RESTART_HINTS = {
     "updated": "Run jarv again to use the new version.",
-    "staged": "Close this process, then run jarv again to use the new version.",
+    "staged": "Exit Jarv, then run it again to finish the update.",
 }
 
 
