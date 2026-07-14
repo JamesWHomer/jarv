@@ -45,6 +45,28 @@ jarv /update
 
 ![jarv update demo](https://github.com/JamesWHomer/jarv/releases/download/readme-assets/update.webp)
 
+### Uninstall
+
+Jarv can detect how it was installed and either uninstall the standalone binary or show the exact package-manager command to run:
+
+```bash
+jarv /uninstall
+```
+
+The standalone uninstall scripts also work when the binary is unavailable:
+
+```powershell
+irm https://github.com/JamesWHomer/jarv/releases/latest/download/uninstall.ps1 | iex
+```
+
+```bash
+curl -fsSL https://github.com/JamesWHomer/jarv/releases/latest/download/uninstall.sh | sh
+```
+
+Package-manager commands are `winget uninstall JamesWHomer.Jarv`, `brew uninstall jarv`, `scoop uninstall jarv`, `uv tool uninstall jarv`, `pipx uninstall jarv`, or `python -m pip uninstall jarv`.
+
+Your data stays in `~/.jarv`; add `--purge` (or `-Purge` for `uninstall.ps1`) to remove it and cached clipboard images too.
+
 ## Usage
 
 ### One-shot mode
@@ -200,6 +222,7 @@ The terminal shows a live progress panel as children run, with a green checkmark
 | `/usage` | Interactive usage screen — spend, tokens, requests, context headroom, a daily-spend trend, and by-model bars. `←/→` (or `1-5` / `s t w m a`) switches scope live |
 | `/usage <session\|day\|week\|month\|all>` | Open straight to a scope (`day`/`today` = rolling 24h; `all` = full system-wide history) |
 | `/update` | Update Jarv to the latest version for the active install channel |
+| `/uninstall [--purge]` | Uninstall Jarv or show its package-manager uninstall command |
 
 All commands work both as `jarv /command` (one-shot) and inside heads-up mode. Read-only commands (`/help`, `/about`, `/usage`, and `/config`) use a temporary display by default in interactive terminals; change `read_only_command_display` in `/settings` to print them permanently instead.
 
