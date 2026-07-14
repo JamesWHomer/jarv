@@ -739,6 +739,80 @@ class OrchestratorTests(unittest.TestCase):
 
         self.assertLess(time.perf_counter() - started, 0.25)
 
+    def test_spawn_batch_times_out_one_stalled_child(self):
+        parent = AgentNode(
+            label="root",
+            depth=0,
+            parent_label=None,
+            task="root",
+            sterile=False,
+        )
+
+        def blocked_worker(*_args, cancellation_token=None, **_kwargs):
+            while not cancellation_token.cancelled:
+                time.sleep(0.005)
+            cancellation_token.throw_if_cancelled()
+
+        started = time.perf_counter()
+        with patch("jarv.orchestrator.run_subagent_loop", side_effect=blocked_worker):
+            results = spawn_batch(
+                parent,
+                [{"label": "child", "task": "work"}],
+                ArtifactStore(),
+                client=None,
+                config={**DEFAULT_CONFIG, "subagent_timeout": 0.05},
+            )
+
+        self.assertLess(time.perf_counter() - started, 0.25)
+        self.assertEqual(
+            results,
+            [{
+                "label": "child",
+                "status": "failed",
+                "reason": "spawn batch timed out after 0.05 seconds",
+            }],
+        )
+
+    def test_spawn_batch_timeout_preserves_completed_siblings(self):
+        parent = AgentNode(
+            label="root",
+            depth=0,
+            parent_label=None,
+            task="root",
+            sterile=False,
+        )
+
+        def mixed_workers(node, *_args, cancellation_token=None, **_kwargs):
+            if node.label == "fast":
+                return "full result", "done"
+            while not cancellation_token.cancelled:
+                time.sleep(0.005)
+            cancellation_token.throw_if_cancelled()
+
+        with patch("jarv.orchestrator.run_subagent_loop", side_effect=mixed_workers):
+            results = spawn_batch(
+                parent,
+                [
+                    {"label": "fast", "task": "quick work"},
+                    {"label": "stalled", "task": "slow work"},
+                ],
+                ArtifactStore(),
+                client=None,
+                config={**DEFAULT_CONFIG, "subagent_timeout": 0.05},
+            )
+
+        self.assertEqual(
+            results,
+            [
+                {"label": "fast", "status": "done", "tldr": "done"},
+                {
+                    "label": "stalled",
+                    "status": "failed",
+                    "reason": "spawn batch timed out after 0.05 seconds",
+                },
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

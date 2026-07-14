@@ -379,7 +379,12 @@ class HeadsupAgentUI:
             self._animated_live_tool_keys.add(live_kind)
             return
         if live_kind == "SpawnPanel":
-            self.app.upsert_live_tool(live_kind, renderable)
+            if getattr(renderable, "finished", False):
+                self.app.replace_live_tool(live_kind, renderable)
+                self._animated_live_tool_keys.discard(live_kind)
+            else:
+                self.app.upsert_live_tool(live_kind, renderable)
+                self._animated_live_tool_keys.add(live_kind)
             return
         if self._tool_live_kind is not None:
             self.app.replace_live_tool(self._tool_live_kind, renderable)

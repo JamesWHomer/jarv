@@ -211,6 +211,7 @@ def test_help_omits_reference_config_and_path_sections():
         "system_prompt",
         "max_subagent_depth",
         "subagent_thread_pool_max_workers",
+        "subagent_timeout",
         "check_updates",
         "read_only_command_display",
         "print_usage_after_agent",

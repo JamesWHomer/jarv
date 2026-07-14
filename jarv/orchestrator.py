@@ -8,6 +8,7 @@ tool; only the artifact persists, transcripts are discarded.
 
 import concurrent.futures
 import json
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -1086,33 +1087,69 @@ def spawn_batch(
     if observer is not None:
         observer.on_spawn_start(parent.label, [n.label for n in nodes])
 
-    pool_size = max(1, int(config.get("subagent_thread_pool_max_workers", 8)))
+    pool_size = max(1, int(get_setting(config, "subagent_thread_pool_max_workers")))
+    timeout_seconds = float(get_setting(config, "subagent_timeout"))
     raw_results: dict[str, dict] = {}
     ex = concurrent.futures.ThreadPoolExecutor(max_workers=pool_size)
     future_to_node = {}
+    future_to_token: dict[concurrent.futures.Future, CancellationToken] = {}
+    parent_unregisters: list[Callable[[], None]] = []
+    timed_out_futures: set[concurrent.futures.Future] = set()
+    deadline = time.monotonic() + timeout_seconds
+
     try:
-        future_to_node = {
-            ex.submit(
+        for node in nodes:
+            child_token = CancellationToken()
+            if cancellation_token is not None:
+                parent_unregisters.append(
+                    cancellation_token.register(child_token.cancel)
+                )
+            future = ex.submit(
                 run_subagent_loop,
-                n,
+                node,
                 store,
                 client,
                 config,
                 spawn_observer=observer,
-                cancellation_token=cancellation_token,
+                cancellation_token=child_token,
                 retained_store=retained_store,
-            ): n
-            for n in nodes
-        }
+            )
+            future_to_node[future] = node
+            future_to_token[future] = child_token
         pending = set(future_to_node)
         while pending:
             if cancellation_token is not None:
                 cancellation_token.throw_if_cancelled()
-            done, pending = concurrent.futures.wait(
-                pending,
-                timeout=0.05,
-                return_when=concurrent.futures.FIRST_COMPLETED,
-            )
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # Preserve workers that completed at the boundary; only the
+                # genuinely unfinished futures are failed and cancelled.
+                done = {future for future in pending if future.done()}
+                pending.difference_update(done)
+                for future in tuple(pending):
+                    pending.remove(future)
+                    timed_out_futures.add(future)
+                    future_to_token[future].cancel()
+                    future.cancel()
+                    node = future_to_node[future]
+                    result = {
+                        "label": node.label,
+                        "status": "failed",
+                        "reason": (
+                            "spawn batch timed out after "
+                            f"{timeout_seconds:g} seconds"
+                        ),
+                    }
+                    raw_results[node.label] = result
+                    if observer is not None:
+                        observer.on_child_done(parent.label, node.label, result)
+            else:
+                done, pending = concurrent.futures.wait(
+                    pending,
+                    timeout=min(0.05, remaining),
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
             for fut in done:
                 n = future_to_node[fut]
                 try:
@@ -1136,9 +1173,18 @@ def spawn_batch(
             cancellation_token.cancel()
         raise
     finally:
-        if cancellation_token is not None and cancellation_token.cancelled:
+        for unregister in parent_unregisters:
+            unregister()
+        if (
+            (cancellation_token is not None and cancellation_token.cancelled)
+            or timed_out_futures
+        ):
             for future in future_to_node:
-                future.cancel()
+                if (
+                    cancellation_token is not None
+                    and cancellation_token.cancelled
+                ) or future in timed_out_futures:
+                    future.cancel()
             ex.shutdown(wait=False, cancel_futures=True)
         else:
             ex.shutdown(wait=True)
