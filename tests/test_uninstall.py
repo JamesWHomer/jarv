@@ -1,4 +1,6 @@
 import io
+import json
+import os
 import sys
 from pathlib import Path
 
@@ -135,7 +137,9 @@ def test_windows_standalone_stages_deferred_uninstall(monkeypatch, tmp_path, cap
         lambda path, **kwargs: calls.append((path, kwargs)),
     )
 
-    assert uninstall.cmd_uninstall(["--yes", "--purge"]) == 0
+    outcome = uninstall.run_uninstall(["--yes", "--purge"])
+
+    assert outcome == uninstall.UninstallOutcome(0, destructive=True)
     assert calls == [(executable, {"remove_path_entry": True, "purge": True})]
     assert executable.exists()
 
@@ -152,7 +156,9 @@ def test_staged_windows_script_has_handoff_path_filter_and_optional_purge(
     executable.write_text("binary", encoding="utf-8")
     staging_root = tmp_path / "staging"
     staging_root.mkdir()
+    result_file = tmp_path / "config" / "uninstall-result.json"
     staged_processes = []
+    monkeypatch.setattr(uninstall, "UNINSTALL_RESULT_FILE", result_file)
     monkeypatch.setattr(uninstall.tempfile, "mkdtemp", lambda **_kwargs: str(staging_root))
     monkeypatch.setattr(uninstall.shutil, "which", lambda _name: "powershell")
     monkeypatch.setattr(
@@ -175,7 +181,89 @@ def test_staged_windows_script_has_handoff_path_filter_and_optional_purge(
     assert script.parent != install_dir
     assert (str(uninstall.CONFIG_DIR) in text) is purge
     assert (str(uninstall.clipboard_image_dir()) in text) is purge
-    assert staged_processes[0][1]["stdin"] == uninstall.subprocess.DEVNULL
+    # PATH cleanup and purge only run once the executable is gone; otherwise a
+    # failure breadcrumb is written for the next launch to report.
+    assert str(result_file) in text
+    assert '"status":"failed"' in text
+    assert "} else {" in text
+    assert text.index('"status":"failed"') < text.index("SetEnvironmentVariable")
+    args, kwargs = staged_processes[0]
+    assert "-NonInteractive" in args
+    assert kwargs["stdin"] == uninstall.subprocess.DEVNULL
+    assert kwargs["creationflags"] == standalone._windows_updater_creation_flags()
+
+
+def test_staged_windows_uninstaller_clears_stale_breadcrumb(monkeypatch, tmp_path):
+    executable = tmp_path / "Jarv" / "jarv.exe"
+    executable.parent.mkdir()
+    executable.write_text("binary", encoding="utf-8")
+    staging_root = tmp_path / "staging"
+    staging_root.mkdir()
+    result_file = tmp_path / "uninstall-result.json"
+    result_file.write_text("stale", encoding="utf-8")
+    monkeypatch.setattr(uninstall, "UNINSTALL_RESULT_FILE", result_file)
+    monkeypatch.setattr(uninstall.tempfile, "mkdtemp", lambda **_kwargs: str(staging_root))
+    monkeypatch.setattr(uninstall.shutil, "which", lambda _name: "powershell")
+    monkeypatch.setattr(uninstall.subprocess, "Popen", lambda args, **kwargs: object())
+
+    uninstall._stage_windows_uninstaller(executable, remove_path_entry=False, purge=False)
+
+    assert not result_file.exists()
+
+
+def test_staged_windows_uninstaller_retries_without_breakaway_when_job_rejects_it(
+    monkeypatch,
+    tmp_path,
+):
+    executable = tmp_path / "Jarv" / "jarv.exe"
+    executable.parent.mkdir()
+    executable.write_text("binary", encoding="utf-8")
+    staging_root = tmp_path / "staging"
+    staging_root.mkdir()
+    creation_flags = []
+    process = object()
+    monkeypatch.setattr(uninstall, "UNINSTALL_RESULT_FILE", tmp_path / "uninstall-result.json")
+    monkeypatch.setattr(uninstall.tempfile, "mkdtemp", lambda **_kwargs: str(staging_root))
+    monkeypatch.setattr(uninstall.shutil, "which", lambda _name: "powershell")
+
+    def popen(_args, **kwargs):
+        creation_flags.append(kwargs["creationflags"])
+        if len(creation_flags) == 1:
+            error = OSError("access denied")
+            error.winerror = 5
+            raise error
+        return process
+
+    monkeypatch.setattr(uninstall.subprocess, "Popen", popen)
+
+    staged = uninstall._stage_windows_uninstaller(
+        executable,
+        remove_path_entry=False,
+        purge=False,
+    )
+
+    assert staged is process
+    assert creation_flags == [
+        standalone._windows_updater_creation_flags(),
+        standalone._windows_updater_creation_flags(allow_breakaway=False),
+    ]
+
+
+def test_path_value_contains_expands_registry_style_entries(monkeypatch, tmp_path):
+    directory = tmp_path / "Jarv"
+    monkeypatch.setenv("JARV_TEST_ROOT", str(tmp_path))
+    raw = ";".join(
+        [
+            str(tmp_path / "other"),
+            f"%JARV_TEST_ROOT%{os.sep}Jarv{os.sep}",
+        ]
+    )
+
+    assert uninstall._path_value_contains(raw, directory)
+    assert uninstall._path_value_contains(str(directory), directory)
+    assert not uninstall._path_value_contains(str(tmp_path / "other"), directory)
+    assert not uninstall._path_value_contains("", directory)
+    assert not uninstall._path_value_contains(None, directory)
 
 
 @pytest.mark.parametrize(
@@ -215,11 +303,13 @@ def test_manager_purge_removes_data_but_default_keeps_it(monkeypatch, tmp_path, 
         lambda: uninstall.InstallChannel("pipx", Path("python"), "pipx uninstall jarv"),
     )
 
-    assert uninstall.cmd_uninstall([]) == 0
+    outcome = uninstall.run_uninstall([])
+    assert outcome == uninstall.UninstallOutcome(0, destructive=False)
     assert config_dir.exists()
     assert clipboard_dir.exists()
 
-    assert uninstall.cmd_uninstall(["--purge", "--yes"]) == 0
+    outcome = uninstall.run_uninstall(["--purge", "--yes"])
+    assert outcome == uninstall.UninstallOutcome(0, destructive=True)
     assert not config_dir.exists()
     assert not clipboard_dir.exists()
 
@@ -233,6 +323,31 @@ def test_unknown_argument_is_usage_error(monkeypatch, captured_console):
 
     assert uninstall.cmd_uninstall(["--nope"]) == 2
     assert "Usage:" in captured_console[1].getvalue()
+
+
+def test_previous_failed_uninstall_is_reported_and_consumed(monkeypatch, tmp_path):
+    from jarv import paths
+
+    output = io.StringIO()
+    test_console = Console(file=output, force_terminal=False, color_system=None)
+    result_file = tmp_path / "uninstall-result.json"
+    result_file.write_text(
+        json.dumps({"status": "failed", "message": "could not remove jarv.exe"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli, "_console", lambda: test_console)
+    monkeypatch.setattr(paths, "UNINSTALL_RESULT_FILE", result_file)
+
+    cli._print_previous_uninstall_result()
+
+    text = output.getvalue()
+    assert "could not remove jarv.exe" in text
+    assert "jarv /uninstall" in text
+    assert not result_file.exists()
+
+    cli._print_previous_uninstall_result()
+
+    assert output.getvalue() == text
 
 
 def test_cli_forwards_uninstall_flags_and_propagates_status(monkeypatch):
