@@ -2042,6 +2042,21 @@ class HeadsupTests(unittest.TestCase):
         # the window is resized desyncs ConPTY's size tracking on Windows).
         self.assertEqual(alt_screen_calls, [])
 
+    def test_uninstall_slash_exits_headsup_only_when_destructive(self):
+        from jarv.uninstall import UninstallOutcome
+
+        for destructive in (True, False):
+            with self.subTest(destructive=destructive):
+                app, _test_console, _output = self._app()
+                app.live = self._FakeLive()
+                with patch(
+                    "jarv.uninstall.run_uninstall",
+                    return_value=UninstallOutcome(0, destructive=destructive),
+                ) as run:
+                    result = app._run_slash("/uninstall", ["--purge"])
+                run.assert_called_once_with(["--purge"])
+                self.assertEqual(result, "exit" if destructive else None)
+
     def test_all_supported_slash_commands_route_cleanly_in_headsup(self):
         cases = [
             ("/setup", ["provider"], True),
