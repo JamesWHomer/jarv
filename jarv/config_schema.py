@@ -118,6 +118,17 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
         settings_choices=tuple((value, value) for value in TOOL_CALL_DISPLAY_CHOICES),
         about="How agent tool calls are rendered.",
     ),
+    ConfigField(
+        "tool_output_display_lines",
+        "auto",
+        validator="display_lines",
+        label="Tool output lines",
+        section="display",
+        desc="output lines shown per tool card; 'auto' scales with terminal",
+        ui_kind="text",
+        empty="auto",
+        about="Maximum output lines shown per tool card (display only — `max_tool_output_chars` separately caps what the model sees). `auto` scales with terminal height (a third inline, half in heads-up); an integer (minimum 3) pins both.",
+    ),
     ConfigField("print_usage_after_agent", False, validator="bool", label="Print usage", section="display", desc="print token totals after completed agent runs", ui_kind="bool", about="When `true`, print a compact token usage line after each completed agent run."),
 )
 
@@ -246,6 +257,23 @@ def validate_config_fields(
                     ok = False
                 elif len(set(disabled_tools)) != len(disabled_tools):
                     config[key] = list(dict.fromkeys(disabled_tools))
+        elif field.validator == "display_lines":
+            value = config.get(key, field.default)
+            if value in ("auto", "", None):
+                config[key] = "auto"
+            else:
+                try:
+                    if isinstance(value, bool):
+                        raise ValueError
+                    number = int(value)
+                    if number < 3:
+                        raise ValueError
+                    config[key] = number
+                except (TypeError, ValueError):
+                    report(
+                        f"[red]Config '{key}' must be 'auto' or an integer of at least 3.[/red]"
+                    )
+                    ok = False
         elif field.validator == "service_tiers":
             service_tiers = config.get(key, field.default)
             if not isinstance(service_tiers, dict):

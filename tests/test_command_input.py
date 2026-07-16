@@ -914,6 +914,31 @@ def test_read_key_maps_posix_ctrl_v_and_alt_v(monkeypatch):
     assert stdin.remaining == ""
 
 
+def test_read_key_maps_posix_ctrl_o(monkeypatch):
+    stdin = _install_posix_input(monkeypatch, "\x0f")
+    assert command_input._read_key(text_mode=True) == "CTRL_O"
+    assert stdin.remaining == ""
+
+
+def test_read_key_maps_windows_ctrl_o(monkeypatch):
+    chars = deque("\x0f")
+    fake_msvcrt = SimpleNamespace(
+        getwch=chars.popleft,
+        kbhit=lambda: bool(chars),
+    )
+    command_input._PENDING_KEYS.clear()
+    monkeypatch.setattr(command_input.sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    command_input._WINDOWS_MOUSE_CAPTURE_DEPTH = 0
+    try:
+        assert command_input._read_key(text_mode=True) == "CTRL_O"
+        assert not chars
+        assert not command_input._PENDING_KEYS
+    finally:
+        command_input._WINDOWS_MOUSE_CAPTURE_DEPTH = 0
+        command_input._PENDING_KEYS.clear()
+
+
 def test_read_key_maps_windows_ctrl_v_and_alt_v(monkeypatch):
     # Ctrl+V arrives as a raw \x16 when the terminal doesn't own the paste
     # binding; Alt+V arrives ESC-prefixed under VT input and is the fallback

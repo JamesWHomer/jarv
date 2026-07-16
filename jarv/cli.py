@@ -362,6 +362,10 @@ def main() -> None:
     if not validate_config(config):
         sys.exit(1)
 
+    from .display import configure_output_display_lines
+
+    configure_output_display_lines(config.get("tool_output_display_lines", "auto"))
+
     from .provider import resolve_api_key, LOCAL_PROVIDERS
 
     provider_name = config.get("provider", "openai")

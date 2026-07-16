@@ -167,6 +167,76 @@ def test_clip_tail_keeps_newest_lines():
     assert clip_tail(lines, 10) == (lines, 0)
 
 
+def _render_plain(renderable, width: int = 120) -> str:
+    stream = io.StringIO()
+    Console(file=stream, force_terminal=False, color_system=None, width=width).print(
+        renderable
+    )
+    return stream.getvalue()
+
+
+def test_configured_display_lines_override_terminal_budget(monkeypatch):
+    monkeypatch.setattr(display, "terminal_size", lambda **_kwargs: (120, 60))
+    try:
+        display.configure_output_display_lines(12)
+        assert output_display_line_limit(console=FakeConsole()) == 12
+        assert (
+            output_display_line_limit(console=FakeConsole(), display_mode="fullscreen")
+            == 12
+        )
+        display.configure_output_display_lines(1)
+        assert output_display_line_limit(console=FakeConsole()) == 3
+    finally:
+        display.configure_output_display_lines("auto")
+    assert output_display_line_limit(console=FakeConsole()) == 20
+    assert (
+        output_display_line_limit(console=FakeConsole(), display_mode="fullscreen")
+        == 30
+    )
+
+
+def test_output_renderable_expanded_keeps_every_line(monkeypatch):
+    monkeypatch.setattr(display, "terminal_size", lambda **_kwargs: (120, 24))
+    output = "\n".join(f"Line {number}" for number in range(1, 41))
+
+    rendered = _render_plain(display.output_renderable(output, expanded=True))
+
+    assert rendered.count("Line ") == 40
+    assert "lines hidden" not in rendered
+
+
+def test_command_line_renderable_clips_long_scripts():
+    command = "\n".join(f"line {number}" for number in range(1, 11))
+
+    rendered = _render_plain(display.command_line_renderable(command))
+
+    assert "> line 1" in rendered
+    assert "line 3" in rendered
+    assert "line 4" not in rendered
+    assert "… 7 more lines" in rendered
+
+
+def test_command_line_renderable_expanded_and_short_commands_untouched():
+    command = "\n".join(f"line {number}" for number in range(1, 11))
+
+    rendered = _render_plain(display.command_line_renderable(command, expanded=True))
+    assert rendered.count("line ") == 10
+    assert "more lines" not in rendered
+
+    short = _render_plain(display.command_line_renderable("echo hi"))
+    assert "> echo hi" in short
+    assert "more lines" not in short
+
+
+def test_command_line_renderable_caps_single_monster_line():
+    command = "python -c " + "x" * 1000
+
+    rendered = _render_plain(display.command_line_renderable(command), width=2000)
+
+    assert "… +" in rendered and "chars" in rendered
+    assert "x" * 1000 not in rendered
+
+
 def test_tool_card_uses_shared_neutral_shell_and_tool_accent():
     stream = io.StringIO()
     test_console = Console(

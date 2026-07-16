@@ -667,6 +667,8 @@ def _windows_key_from_virtual_key(
         return "ESC"
     if char == "\x06":
         return "CTRL_F"
+    if char == "\x0f":
+        return "CTRL_O"
     if char == "\x13":
         return "CTRL_S"
     if char == "\x16":
@@ -1171,7 +1173,7 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
     """Read a single keypress and return a normalised token.
 
     Returns one of: UP, DOWN, LEFT, RIGHT, HOME, END, PAGEUP, PAGEDOWN,
-    ENTER, ESC, TAB, CTRL_F, CTRL_N, CTRL_S, CTRL_V, ALT_V, BACKSPACE, DELETE,
+    ENTER, ESC, TAB, CTRL_F, CTRL_N, CTRL_O, CTRL_S, CTRL_V, ALT_V, BACKSPACE, DELETE,
     the modified arrows CTRL_LEFT/CTRL_RIGHT (word-wise) and SHIFT_LEFT/
     SHIFT_RIGHT/CTRL_SHIFT_LEFT/CTRL_SHIFT_RIGHT (selection), or the raw
     character. Raises KeyboardInterrupt on Ctrl-C.  When ``text_mode`` is True, the convenience q/Q → ESC mapping is
@@ -1273,6 +1275,8 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
             return "ESC"
         if ch == "\x06":
             return "CTRL_F"
+        if ch == "\x0f":
+            return "CTRL_O"
         if ch == "\x13":
             return "CTRL_S"
         if ch == "\x16":
@@ -1343,6 +1347,8 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
                 return "ESC"
             if ch == "\x06":
                 return "CTRL_F"
+            if ch == "\x0f":
+                return "CTRL_O"
             if ch == "\x13":
                 return "CTRL_S"
             if ch == "\x16":

@@ -1036,6 +1036,140 @@ class HeadsupTests(unittest.TestCase):
         self.assertEqual(len(app.entries), slot_count)
         self.assertFalse(ui.has_active_animation())
 
+    def test_ctrl_o_toggles_every_tool_card_expansion(self):
+        from jarv.display import configure_output_display_lines
+        from jarv.session_render import tool_call_card_from_args
+
+        app, _test_console, _output = self._app()
+        ui = HeadsupAgentUI(app)
+        first_output = "\n".join(f"first line {number}" for number in range(40))
+        second_output = "\n".join(f"second line {number}" for number in range(40))
+        ui.show_tool_card(
+            tool_call_card_from_args(
+                "run_command", {"command": "python one.py"}, output=first_output
+            )
+        )
+        ui.show_tool_card(
+            tool_call_card_from_args(
+                "run_command", {"command": "python two.py"}, output=second_output
+            )
+        )
+        try:
+            configure_output_display_lines(6)
+            collapsed = self._entry_text(app)
+            self.assertIn("lines hidden", collapsed)
+            self.assertNotIn("first line 20", collapsed)
+            self.assertNotIn("second line 20", collapsed)
+
+            app.on_key("CTRL_O", 1)
+            expanded = self._entry_text(app)
+            self.assertIn("first line 20", expanded)
+            self.assertIn("second line 20", expanded)
+            self.assertNotIn("lines hidden", expanded)
+            self.assertIn("Ctrl+O to collapse", app._prompt_notice.plain)
+
+            app.on_key("CTRL_O", 1)
+            recollapsed = self._entry_text(app)
+            self.assertIn("lines hidden", recollapsed)
+            self.assertNotIn("first line 20", recollapsed)
+            self.assertNotIn("second line 20", recollapsed)
+            self.assertIn("Collapsed", app._prompt_notice.plain)
+        finally:
+            configure_output_display_lines("auto")
+
+    def test_new_tool_cards_join_the_active_expansion_mode(self):
+        from jarv.session_render import tool_call_card_from_args
+
+        app, _test_console, _output = self._app()
+        ui = HeadsupAgentUI(app)
+        first = tool_call_card_from_args("run_command", {"command": "echo one"})
+        ui.show_tool_card(first)
+
+        app.on_key("CTRL_O", 1)
+        self.assertTrue(app.tool_cards_expanded)
+        self.assertTrue(first.expanded)
+
+        # A card arriving while the mode is on renders expanded immediately.
+        second = tool_call_card_from_args("run_command", {"command": "echo two"})
+        ui.show_tool_card(second)
+        self.assertTrue(second.expanded)
+
+        app.on_key("CTRL_O", 1)
+        self.assertFalse(first.expanded)
+        self.assertFalse(second.expanded)
+
+    def test_ctrl_o_keeps_viewport_anchored_while_scrolled(self):
+        from jarv.display import configure_output_display_lines
+        from jarv.session_render import tool_call_card_from_args
+        from jarv.tui_frame import compute_layout
+
+        app, _test_console, _output = self._app()
+        ui = HeadsupAgentUI(app)
+        output = "\n".join(f"output line {number}" for number in range(40))
+        ui.show_tool_card(
+            tool_call_card_from_args(
+                "run_command", {"command": "python gen.py"}, output=output
+            )
+        )
+        app.add_user_message("\n".join(f"user line {number}" for number in range(8)))
+        try:
+            configure_output_display_lines(6)
+            width = compute_layout(80, 24).inner_width
+            with patch("jarv.headsup.terminal_size", return_value=(80, 24)):
+                before = app._transcript_lines(width)
+                app.scroll_offset = 4
+                anchor_before = before[len(before) - app.scroll_offset - 1].plain
+
+                app.on_key("CTRL_O", 1)
+                after = app._transcript_lines(width)
+                self.assertGreater(len(after), len(before))
+                anchor_after = after[len(after) - app.scroll_offset - 1].plain
+                self.assertEqual(anchor_after, anchor_before)
+
+                app.on_key("CTRL_O", 1)
+                collapsed = app._transcript_lines(width)
+                self.assertEqual(len(collapsed), len(before))
+                anchor_collapsed = collapsed[
+                    len(collapsed) - app.scroll_offset - 1
+                ].plain
+                self.assertEqual(anchor_collapsed, anchor_before)
+        finally:
+            configure_output_display_lines("auto")
+
+    def test_ctrl_o_without_tool_cards_shows_notice(self):
+        app, _test_console, _output = self._app()
+
+        app.on_key("CTRL_O", 1)
+
+        self.assertIn("No tool output to expand", app._prompt_notice.plain)
+
+    def test_transcript_synced_from_history_is_expandable(self):
+        from jarv.session_render import ToolCallCard
+
+        app, _test_console, _output = self._app()
+        history = [
+            {
+                "type": "function_call",
+                "name": "run_command",
+                "call_id": "call-1",
+                "arguments": '{"command": "echo hi"}',
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call-1",
+                "output": "hi",
+            },
+        ]
+        with patch("jarv.headsup.load_history", return_value=history):
+            app._sync_transcript_from_history()
+
+        tool_entries = [entry for entry in app.entries if entry.kind == "tool"]
+        self.assertEqual(len(tool_entries), 1)
+        self.assertIsInstance(tool_entries[0].renderable, ToolCallCard)
+
+        app.on_key("CTRL_O", 1)
+        self.assertTrue(tool_entries[0].renderable.expanded)
+
     def test_thinking_card_footer_ticks_on_refresh_without_reupsert(self):
         # Regression: the "deciding next input… 0s" footer used to freeze because
         # the per-entry render cache replayed its first frame; the tick path must

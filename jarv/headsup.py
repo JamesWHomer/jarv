@@ -41,6 +41,7 @@ from .agent_ui import (
 )
 from .config import get_setting
 from .display import (
+    configure_output_display_lines,
     console,
     flatten_headings,
     rendered_text_lines,
@@ -55,7 +56,7 @@ from .session_render import (
     _history_content_to_str,
     _status_renderable,
     _tool_call_output,
-    _tool_call_renderable,
+    tool_call_card,
 )
 from .text_editor import (
     apply_text_editor_key,
@@ -681,12 +682,18 @@ class HeadsupApp(AltScreenApp):
             key_available_fn=self._headsup_key_available,
         )
         self.config = dict(config)
+        configure_output_display_lines(
+            get_setting(self.config, "tool_output_display_lines")
+        )
         self.client = client
         self.args = args
         self.agent_import, self.agent_ready = agent_loader
         self.handle_slash = handle_slash
         self.maybe_command = maybe_command
         self.entries: list[TranscriptEntry] = [self._initial_notice_entry()]
+        # Ctrl+O view mode: when True, every expandable tool card (including
+        # ones added later in the session) renders its full command and output.
+        self.tool_cards_expanded = False
         self.editor: dict = {}
         initialize_text_editor(self.editor, "")
         self._pastes = PasteRegistry()
@@ -859,6 +866,9 @@ class HeadsupApp(AltScreenApp):
             return
         if key in ("CTRL_V", "ALT_V"):
             self._paste_from_system_clipboard()
+            return
+        if key == "CTRL_O":
+            self._toggle_tool_expansion()
             return
         scroll_delta = scroll_key_delta(key, repeat)
         if scroll_delta is not None:
@@ -1549,6 +1559,9 @@ class HeadsupApp(AltScreenApp):
                 self.args,
                 True,
             )
+        configure_output_display_lines(
+            get_setting(self.config, "tool_output_display_lines")
+        )
         output = capture.get().strip()
         notice = Text.from_ansi(output) if output else None
         if not self._sync_after_slash(command, notice):
@@ -1581,6 +1594,9 @@ class HeadsupApp(AltScreenApp):
                 self.args,
                 True,
             )
+        configure_output_display_lines(
+            get_setting(self.config, "tool_output_display_lines")
+        )
         self._sync_after_slash(command, None)
 
     def _run_tree(self) -> None:
@@ -1926,17 +1942,19 @@ class HeadsupApp(AltScreenApp):
                     )
                 continue
             if item.get("type") == "function_call":
+                card = tool_call_card(
+                    item,
+                    _tool_call_output(
+                        history,
+                        item_index,
+                        item.get("call_id"),
+                    ),
+                )
+                card.expanded = self.tool_cards_expanded
                 entries.append(
                     TranscriptEntry(
                         "tool",
-                        _tool_call_renderable(
-                            item,
-                            _tool_call_output(
-                                history,
-                                item_index,
-                                item.get("call_id"),
-                            ),
-                        ),
+                        card,
                         spacer_before=len(entries) > 1,
                     )
                 )
@@ -2288,10 +2306,100 @@ class HeadsupApp(AltScreenApp):
     def _scroll_transcript(self, delta: int) -> None:
         self.scroll_offset = max(0, self.scroll_offset + delta)
 
+    def _entry_line_counts(self, width: int) -> list[int]:
+        """Per-entry visual line counts, mirroring ``_transcript_lines`` exactly
+        (spacer row included, empty renders still occupy one line)."""
+        counts: list[int] = []
+        for entry in self.entries:
+            count = max(1, len(entry.rendered_lines(width)))
+            if entry.spacer_before:
+                count += 1
+            counts.append(count)
+        return counts
+
+    def _toggle_tool_expansion(self) -> None:
+        """Ctrl+O: toggle every expandable tool card between compact and full.
+
+        The per-entry line caches make this cheap: untouched entries are cache
+        hits, and each toggled card re-renders once (the next paint reuses it).
+        While scrolled up, the viewport is re-anchored so the line being read
+        stays put as cards elsewhere in the history grow or shrink; pinned to
+        the bottom it simply stays pinned.
+        """
+        term_w, term_h = terminal_size(console=self.console)
+        width = compute_layout(term_w, term_h).inner_width
+        with self.lock:
+            target = not self.tool_cards_expanded
+            expandable_entries = [
+                entry
+                for entry in self.entries
+                if entry.kind == "tool"
+                and getattr(entry.renderable, "expandable", False)
+            ]
+            if not expandable_entries:
+                notice = Text("No tool output to expand.", style="dim")
+            else:
+                before_counts = (
+                    self._entry_line_counts(width) if self.scroll_offset else None
+                )
+                for entry in expandable_entries:
+                    entry.renderable.expanded = target
+                    entry.invalidate()
+                self.tool_cards_expanded = target
+                if before_counts is not None:
+                    self._reanchor_scroll(width, before_counts)
+                notice = Text(
+                    "Expanded all tool output — Ctrl+O to collapse."
+                    if target
+                    else "Collapsed tool output.",
+                    style="dim",
+                )
+        self.set_prompt_notice(notice)
+        self.refresh()
+
+    def _reanchor_scroll(self, width: int, before_counts: list[int]) -> None:
+        """Keep the viewport's bottom line on the same content after entries
+        change height. The anchor is located by (entry, line-within-entry);
+        within a resized entry it is rescaled proportionally, so an anchor in
+        a card's tail stays near that tail."""
+        total_before = sum(before_counts)
+        anchor = total_before - self.scroll_offset - 1
+        if anchor < 0:
+            return
+        seen = 0
+        entry_index = None
+        for index, count in enumerate(before_counts):
+            if anchor < seen + count:
+                entry_index = index
+                break
+            seen += count
+        if entry_index is None:
+            return
+        offset_in_entry = anchor - seen
+        after_counts = self._entry_line_counts(width)
+        old_count = before_counts[entry_index]
+        new_count = after_counts[entry_index]
+        if old_count != new_count:
+            if old_count <= 1 or new_count <= 1:
+                offset_in_entry = 0
+            else:
+                offset_in_entry = round(
+                    offset_in_entry * (new_count - 1) / (old_count - 1)
+                )
+        offset_in_entry = min(offset_in_entry, new_count - 1)
+        new_anchor = sum(after_counts[:entry_index]) + offset_in_entry
+        self.scroll_offset = max(0, sum(after_counts) - new_anchor - 1)
+
+    def _apply_expansion_mode(self, kind: str, renderable: RenderableType) -> None:
+        """New tool cards join the transcript in the current Ctrl+O view mode."""
+        if kind == "tool" and getattr(renderable, "expandable", False):
+            renderable.expanded = self.tool_cards_expanded
+
     def _append(self, kind: str, renderable: RenderableType, *, spacer_before: bool = False) -> None:
         if kind != "notice":
             self._dismiss_intro()
         with self.lock:
+            self._apply_expansion_mode(kind, renderable)
             self.entries.append(TranscriptEntry(kind, renderable, spacer_before=spacer_before))
             # Follow the newest line only while pinned to the bottom. When the user
             # has scrolled up (scroll_offset > 0) to read history, preserve their
@@ -2303,6 +2411,7 @@ class HeadsupApp(AltScreenApp):
         if kind != "notice":
             self._dismiss_intro()
         with self.lock:
+            self._apply_expansion_mode(kind, renderable)
             if index is not None and 0 <= index < len(self.entries):
                 self.entries[index] = TranscriptEntry(kind, renderable)
                 result = index
@@ -2449,7 +2558,7 @@ class HeadsupApp(AltScreenApp):
         elif cancelling:
             value = "Enter send   Ctrl+N newline   Esc/Ctrl+C cancel turn   Wheel/PgUp/PgDn scroll"
         else:
-            value = "Enter send   Ctrl+N newline   Esc/Ctrl+C clear/exit/cancel   Wheel/PgUp/PgDn scroll   /exit quit"
+            value = "Enter send   Ctrl+N newline   Ctrl+O expand output   Esc/Ctrl+C clear/exit/cancel   Wheel/PgUp/PgDn scroll   /exit quit"
         return Text(
             clip_text(value, width),
             style="dim italic",
