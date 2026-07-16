@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jarv"
-version = "0.48.0"
+version = "0.49.0"
 description = "Scriptable, multi-provider AI agent for the terminal — pipe into it, script it, run it on any model, cloud or local"
 readme = "README.md"
 requires-python = ">=3.10"
