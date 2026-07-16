@@ -8,7 +8,9 @@ from jarv.config import DEFAULT_CONFIG
 from jarv.orchestrator import (
     RUN_COMMAND_TOOL,
     AgentNode,
+    ToolExecutionHooks,
     dispatch_tool,
+    execute_tool_calls,
     run_subagent_loop,
     spawn_batch,
 )
@@ -20,6 +22,48 @@ from jarv.provider import (
 )
 from jarv.cancellation import CancellationToken, TurnCancelled
 from jarv.shell import CommandResult, ShellState
+
+
+class ToolArgumentSalvageTests(unittest.TestCase):
+    def _execute_with_arguments(self, arguments):
+        received = {}
+
+        def run_command(args):
+            received["args"] = args
+            return "ran"
+
+        results = []
+        execute_tool_calls(
+            [
+                ToolCallDone(
+                    id="fc_1",
+                    call_id="call_1",
+                    name="run_command",
+                    arguments=arguments,
+                ),
+            ],
+            node=None,
+            store=None,
+            client=None,
+            config=dict(DEFAULT_CONFIG),
+            append_tool_result=lambda _item, output: results.append(output),
+            hooks=ToolExecutionHooks(run_command=run_command),
+        )
+        return received.get("args"), results
+
+    def test_fenced_arguments_are_salvaged_and_dispatched(self):
+        # Local models often wrap tool arguments in a markdown fence; the
+        # call must still dispatch instead of erroring.
+        args, results = self._execute_with_arguments(
+            'Running it now:\n```json\n{"command": "echo hi"}\n```'
+        )
+        self.assertEqual(args, {"command": "echo hi"})
+        self.assertEqual(results, ["ran"])
+
+    def test_hopelessly_malformed_arguments_still_error(self):
+        args, results = self._execute_with_arguments('{"command": ')
+        self.assertIsNone(args)
+        self.assertIn("tool argument error", results[0])
 
 
 class OrchestratorTests(unittest.TestCase):

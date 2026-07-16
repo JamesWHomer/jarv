@@ -18,6 +18,7 @@ from .cancellation import CancellationToken, TurnCancelled
 from .config import DEFAULT_CONFIG, TOOL_NAMES, get_setting
 from .context_budget import trim_turn_input
 from .edit_tool import EDIT_TOOL, dispatch_edit_tool
+from .jsonutil import salvage_json_object
 from .safety import check_command
 from .anthropic_http import DEFAULT_SUBAGENT_MAX_TOKENS
 from .provider import (
@@ -268,6 +269,10 @@ class PendingRunCommand:
     transcript_segments: list = field(default_factory=list)
     # Model interaction rounds so far, checked against interactive_max_rounds.
     rounds: int = 0
+    # Consecutive unparseable replies; bounded separately from rounds so a
+    # confused model can be re-prompted a few times without eating the
+    # interaction budget, but cannot loop forever.
+    invalid_streak: int = 0
     # The growing transcript card and (inline only) the persistent Rich ``Live``
     # kept open for the whole interactive session, plus the live-display depth
     # context manager that wraps it. Heads-up mode leaves ``live``/``live_depth_cm``
@@ -488,6 +493,12 @@ def _parse_tool_args(arguments: str | None) -> tuple[dict | None, str | None]:
     try:
         args = json.loads(arguments or "{}")
     except json.JSONDecodeError as e:
+        # Local/chat-completions models often fence or narrate around the
+        # JSON; recover the object when it is unambiguous instead of failing
+        # the whole tool call.
+        salvaged = salvage_json_object(arguments or "")
+        if salvaged is not None:
+            return salvaged, None
         return None, f"[tool argument error: invalid JSON: {e}]"
     if not isinstance(args, dict):
         return None, "[tool argument error: arguments must be an object]"
@@ -760,13 +771,11 @@ def execute_tool_calls(
             item_index += 1
             continue
 
-        try:
-            args = json.loads(item.arguments or "{}")
-        except json.JSONDecodeError as e:
-            output = f"[tool argument error: invalid JSON: {e}]"
+        args, args_error = _parse_tool_args(item.arguments)
+        if args_error is not None:
             if hooks.on_tool_error is not None:
-                hooks.on_tool_error(output)
-            append_tool_result(item, output)
+                hooks.on_tool_error(args_error)
+            append_tool_result(item, args_error)
             item_index += 1
             continue
 
@@ -949,9 +958,10 @@ def run_subagent_loop(
         for item in tool_calls:
             if item.name != "finish":
                 continue
-            try:
-                json.loads(item.arguments or "{}")
-            except json.JSONDecodeError:
+            # Same parse (salvage included) as execution will attempt, so the
+            # truncation nudge fires only for args that are truly unusable.
+            _finish_args, finish_error = _parse_tool_args(item.arguments)
+            if finish_error is not None:
                 if stop_reason == "max_tokens" and not finish_truncation_nudge_sent:
                     finish_truncation_nudge_sent = True
                     truncated_finish = True

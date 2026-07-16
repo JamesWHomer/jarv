@@ -7,7 +7,6 @@ runs automatically with a printed reason) or defers to the user (showing why
 it recommends caution).
 """
 
-import json
 import re
 import threading
 from pathlib import Path
@@ -15,6 +14,7 @@ from typing import Any
 
 from .cancellation import CancellationToken, TurnCancelled
 from .display import console
+from .jsonutil import iter_json_objects
 from .provider import resolve_api_key, PROVIDERS, LOCAL_PROVIDERS
 from .provider_catalog import configured_service_tier
 from .usage import estimate_context_breakdown, record_response_usage
@@ -543,13 +543,7 @@ def _parse_response(text: str) -> tuple[bool, str]:
 
 def _parse_json_verdict(text: str) -> tuple[bool, str] | None:
     """Return the first valid JSON verdict object found in arbitrary text."""
-    decoder = json.JSONDecoder()
-    for match in re.finditer(r"{", text):
-        try:
-            data, _ = decoder.raw_decode(text[match.start():])
-        except json.JSONDecodeError:
-            continue
-
+    for data in iter_json_objects(text):
         parsed = _coerce_json_verdict(data)
         if parsed:
             return parsed
