@@ -2,6 +2,7 @@ import json
 import platform
 import shlex
 import sys
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -9,11 +10,14 @@ from unittest.mock import patch
 from jarv.agent import _advance_interactive_continuation
 from jarv.config import DEFAULT_CONFIG
 from jarv.interactive_command import (
+    _MAX_CONSECUTIVE_INVALID,
     _finalize_interactive_record,
+    _invalid_reply_message,
     _parse_terminal_actions,
     _record_interactive_input,
     _run_command_waiting_prompt,
     _screen_stdin_text,
+    _terminal_action_display,
 )
 from jarv.orchestrator import (
     PendingRunCommand,
@@ -52,17 +56,99 @@ class TerminalReplyParsingTests(unittest.TestCase):
         self.assertIsNone(note)
 
     def test_malformed_wait_is_invalid_not_typed_into_stdin(self):
-        actions, _note = _parse_terminal_actions("<WAIT 2m>")
+        actions, _note = _parse_terminal_actions("<WAIT soon>")
         self.assertEqual(actions[0][0], "invalid")
 
     def test_unknown_token_only_line_is_invalid(self):
-        actions, _note = _parse_terminal_actions("<CTRL_Z>")
+        actions, _note = _parse_terminal_actions("<FROB>")
         self.assertEqual(actions[0][0], "invalid")
 
     def test_plain_text_with_unknown_token_stays_literal_stdin(self):
         actions, note = _parse_terminal_actions("echo <hello>")
         self.assertEqual(actions, [("stdin", "echo <hello>\n")])
         self.assertIsNone(note)
+
+    def test_wait_accepts_minute_and_second_units(self):
+        self.assertEqual(_parse_terminal_actions("<WAIT 2m>")[0], [("wait", 120.0)])
+        self.assertEqual(_parse_terminal_actions("<WAIT 1min>")[0], [("wait", 60.0)])
+        self.assertEqual(_parse_terminal_actions("<WAIT 90>")[0], [("wait", 90.0)])
+        self.assertEqual(_parse_terminal_actions("<WAIT 5sec>")[0], [("wait", 5.0)])
+        self.assertEqual(_parse_terminal_actions("<WAIT 500ms>")[0], [("wait", 0.5)])
+
+    def test_new_key_tokens_send_raw_sequences(self):
+        cases = {
+            "<SPACE>": " ",
+            "<BACKSPACE>": "\x08",
+            "<DELETE>": "\x1b[3~",
+            "<HOME>": "\x1b[H",
+            "<END>": "\x1b[F",
+            "<PAGE_UP>": "\x1b[5~",
+            "<PAGE_DOWN>": "\x1b[6~",
+        }
+        for token, sequence in cases.items():
+            actions, note = _parse_terminal_actions(token)
+            self.assertEqual(actions, [("stdin_raw", sequence)], token)
+            self.assertIsNone(note)
+
+    def test_generic_ctrl_letter_sends_control_byte(self):
+        actions, _note = _parse_terminal_actions("<CTRL_Z>")
+        self.assertEqual(actions, [("stdin_raw", "\x1a")])
+
+    def test_ctrl_c_and_ctrl_d_keep_signal_semantics(self):
+        # The generic CTRL_x rule must not shadow interrupt/EOF handling.
+        self.assertEqual(_parse_terminal_actions("<CTRL_C>")[0], [("ctrl_c", None)])
+        self.assertEqual(_parse_terminal_actions("<CTRL_D>")[0], [("eof", None)])
+
+    def test_dash_and_space_token_spellings_normalize(self):
+        self.assertEqual(_parse_terminal_actions("<Ctrl-C>")[0], [("ctrl_c", None)])
+        self.assertEqual(
+            _parse_terminal_actions("<PAGE DOWN>")[0], [("stdin_raw", "\x1b[6~")]
+        )
+
+    def test_prose_line_then_control_line_executes_the_control(self):
+        # The worst old failure: narration on line one was typed into the
+        # live process and the real control dropped.
+        actions, note = _parse_terminal_actions("Let me wait for it.\n<WAIT 30s>")
+        self.assertEqual(actions, [("wait", 30.0)])
+        self.assertIn("not typed into stdin", note)
+
+    def test_prose_line_then_control_chain_executes_in_order(self):
+        actions, _note = _parse_terminal_actions(
+            "I'll pick the second entry.\n<DOWN> <ENTER>"
+        )
+        self.assertEqual(actions, [("stdin_raw", "\x1b[B"), ("stdin", "\n")])
+
+    def test_single_word_first_line_is_never_redirected(self):
+        actions, note = _parse_terminal_actions("y\n<ENTER>")
+        self.assertEqual(actions, [("stdin", "y\n")])
+        self.assertIsNone(note)
+
+    def test_multiword_stdin_without_control_line_stays_stdin(self):
+        actions, note = _parse_terminal_actions(
+            "fix parser bug\nSecond thoughts about naming."
+        )
+        self.assertEqual(actions, [("stdin", "fix parser bug\n")])
+        self.assertIsNone(note)
+
+    def test_prose_then_malformed_control_line_is_invalid(self):
+        # The model clearly meant a control; re-prompt instead of typing the
+        # prose into stdin.
+        actions, _note = _parse_terminal_actions("Waiting a bit.\n<WAIT soon>")
+        self.assertEqual(actions[0][0], "invalid")
+
+    def test_invalid_message_names_token_and_suggests_close_match(self):
+        message = _invalid_reply_message("<ENTR>")
+        self.assertIn("<ENTR>", message)
+        self.assertIn("<ENTER>", message)
+
+    def test_invalid_message_explains_wait_forms_and_single_letters(self):
+        self.assertIn("<WAIT 2m>", _invalid_reply_message("<WAIT soon>"))
+        self.assertIn("literal text y", _invalid_reply_message("<Y>"))
+
+    def test_display_round_trips_new_keys_and_ctrl_letters(self):
+        self.assertEqual(_terminal_action_display("stdin_raw", " "), "<SPACE>")
+        self.assertEqual(_terminal_action_display("stdin_raw", "\x1a"), "<CTRL_Z>")
+        self.assertEqual(_terminal_action_display("stdin_raw", "\x1b[6~"), "<PAGE_DOWN>")
 
 
 class WaitingPromptTests(unittest.TestCase):
@@ -272,6 +358,97 @@ class InteractiveRoundCapTests(unittest.TestCase):
         self.assertIn("aborted", items[-1]["content"])
         self.assertIn("output so far", pending.output_item["output"])
         self.assertIn("aborted", pending.output_item["output"])
+
+
+class InvalidReplyStreakTests(unittest.TestCase):
+    def _pending(self, rounds=5, streak=0):
+        return SimpleNamespace(
+            rounds=rounds,
+            invalid_streak=streak,
+            card=None,
+            live=None,
+            live_depth_cm=None,
+            process=SimpleNamespace(kill_tree=lambda: None),
+            unregister_cancel=None,
+            input_markers=[],
+            transcript_segments=["Choose:"],
+            output_item={"output": "Choose:"},
+            prepared=SimpleNamespace(cmd="menu", head_chars=None, tail_chars=None),
+        )
+
+    def _advance(self, pending, reply):
+        renderer = SimpleNamespace(
+            tool_calls=[],
+            thought_started=time.perf_counter(),
+            reply_text=reply,
+        )
+        return _advance_interactive_continuation(
+            pending,
+            renderer,
+            [],
+            config=dict(DEFAULT_CONFIG),
+            cancellation_token=None,
+            retained_store=None,
+            ui=None,
+            interactive_help={"sent": True},
+        )
+
+    def test_invalid_reply_refunds_round_and_records_rejection(self):
+        pending = self._pending(rounds=5)
+        items, still_pending = self._advance(pending, "<FROB>")
+        self.assertIs(still_pending, pending)
+        # The round was incremented then refunded — nothing touched the process.
+        self.assertEqual(pending.rounds, 5)
+        self.assertEqual(pending.invalid_streak, 1)
+        self.assertIn("[reply rejected:", pending.output_item["output"])
+        self.assertIn("[terminal reply not applied]", items[-1]["content"])
+
+    def test_consecutive_invalid_replies_abort_the_interaction(self):
+        killed = {}
+        pending = self._pending(streak=_MAX_CONSECUTIVE_INVALID - 1)
+        pending.process = SimpleNamespace(
+            kill_tree=lambda: killed.setdefault("yes", True)
+        )
+        items, still_pending = self._advance(pending, "<FROB>")
+        self.assertIsNone(still_pending)
+        self.assertTrue(killed)
+        self.assertIn("unparseable", items[-1]["content"])
+        self.assertIn("aborted", pending.output_item["output"])
+
+    def test_applied_reply_resets_invalid_streak(self):
+        pending = self._pending(streak=2)
+        delta = SimpleNamespace(
+            to_model_output=lambda head_chars=None, tail_chars=None: "out",
+            full_model_output=lambda: "out",
+        )
+        snapshot = SimpleNamespace(
+            exited=False,
+            command="menu",
+            check_in=False,
+            stdin_closed=False,
+            to_delta_command_result=lambda: delta,
+        )
+        pending.process = SimpleNamespace(
+            wait_until_idle=lambda **_kwargs: snapshot,
+        )
+        steps = []
+        pending.card = SimpleNamespace(
+            add_step=lambda *args, **kwargs: steps.append(args)
+        )
+        _items, still_pending = self._advance(pending, "<WAIT 1s>")
+        self.assertIs(still_pending, pending)
+        self.assertEqual(pending.invalid_streak, 0)
+        self.assertTrue(steps)
+
+    def test_blocked_reply_resets_streak_and_is_recorded(self):
+        pending = self._pending(streak=3)
+        with patch("jarv.safety.prompt_confirmation", return_value=False):
+            _items, still_pending = self._advance(pending, "rm -rf /")
+        self.assertIs(still_pending, pending)
+        self.assertEqual(pending.invalid_streak, 0)
+        # Blocked replies still consume a round; only unparseable ones refund.
+        self.assertEqual(pending.rounds, 6)
+        self.assertIn("blocked", pending.output_item["output"])
 
 
 class SkippedTrailingToolCallTests(unittest.TestCase):

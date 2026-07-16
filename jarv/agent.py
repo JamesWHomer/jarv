@@ -206,6 +206,7 @@ def _agent_check_run_command(prepared, config: dict, **kwargs):
 
 
 from .interactive_command import (
+    _MAX_CONSECUTIVE_INVALID,
     _TERMINAL_REPLY_INSTRUCTIONS,
     _attach_interactive_output_item,
     _continue_interactive_command,
@@ -217,6 +218,7 @@ from .interactive_command import (
     _interactive_max_rounds,
     _interactive_tool_call_reminder,
     _record_interactive_input,
+    _record_rejected_reply,
     _run_command_final_prompt,
     _run_command_waiting_prompt,
     _terminal_action_display,
@@ -875,6 +877,29 @@ class TurnCheckpointer:
         self.persistence.save_turn()
 
 
+def _abort_interactive_command(pending, note: str, ui, input_items: list) -> list:
+    """Kill a held-open interactive command and close out its record/card.
+
+    Shared by the round cap and the consecutive-invalid-reply cap; returns the
+    input items with the abort note appended for the model.
+    """
+    if pending.card is not None:
+        pending.card.add_step(
+            Text(note, style="dim red"), "", None, exited=True,
+        )
+        _refresh_interactive_card(ui, pending)
+    _close_interactive_card_live(pending)
+    try:
+        pending.process.kill_tree()
+    except Exception:
+        pass
+    _finalize_interactive_record(pending, note)
+    if callable(pending.unregister_cancel):
+        pending.unregister_cancel()
+        pending.unregister_cancel = None
+    return input_items + [{"role": "user", "content": note}]
+
+
 def _advance_interactive_continuation(
     pending: PendingRunCommand,
     renderer: _TurnRenderer,
@@ -901,21 +926,7 @@ def _advance_interactive_continuation(
             f"[interactive command aborted: {max_rounds} interaction rounds "
             "reached (interactive_max_rounds); the process was killed]"
         )
-        if pending.card is not None:
-            pending.card.add_step(
-                Text(note, style="dim red"), "", None, exited=True,
-            )
-            _refresh_interactive_card(ui, pending)
-        _close_interactive_card_live(pending)
-        try:
-            pending.process.kill_tree()
-        except Exception:
-            pass
-        _finalize_interactive_record(pending, note)
-        if callable(pending.unregister_cancel):
-            pending.unregister_cancel()
-            pending.unregister_cancel = None
-        return input_items + [{"role": "user", "content": note}], None
+        return _abort_interactive_command(pending, note, ui, input_items), None
     if renderer.tool_calls:
         # A stray mid-interaction tool call: remind and re-prompt without
         # touching the process.
@@ -944,7 +955,30 @@ def _advance_interactive_continuation(
     )
     if snapshot is None:
         # Malformed reply or a blocked stdin line: nothing touched the
-        # process; tell the model why and re-prompt.
+        # process; tell the model why and re-prompt. Either way the reason
+        # goes into the collapsed record so the session sidecar shows why the
+        # interaction stalled.
+        if terminal_kind == "invalid":
+            # Refund the round — nothing touched the process — but bound the
+            # streak so a model stuck on the same bad token cannot loop
+            # forever on free retries.
+            pending.rounds -= 1
+            pending.invalid_streak += 1
+            _record_rejected_reply(pending, f"[reply rejected: {terminal_action}]")
+            if pending.invalid_streak >= _MAX_CONSECUTIVE_INVALID:
+                note = (
+                    f"[interactive command aborted: {_MAX_CONSECUTIVE_INVALID} "
+                    "consecutive unparseable terminal replies; the process "
+                    "was killed]"
+                )
+                return (
+                    _abort_interactive_command(pending, note, ui, input_items),
+                    None,
+                )
+        else:
+            # A blocked stdin line parsed fine — the user denied it.
+            pending.invalid_streak = 0
+            _record_rejected_reply(pending, terminal_action)
         return (
             input_items + [{
                 "role": "user",
@@ -955,6 +989,7 @@ def _advance_interactive_continuation(
             }],
             pending,
         )
+    pending.invalid_streak = 0
     delta_text = "" if snapshot.exited else (
         snapshot.to_delta_command_result().to_model_output(
             head_chars=pending.prepared.head_chars,

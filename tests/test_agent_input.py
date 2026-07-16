@@ -1183,20 +1183,20 @@ class AgentInputTests(unittest.TestCase):
         self.assertIn("Name:", waiting_prompts[0])
         self.assertNotIn("1. One", waiting_prompts[0])
         # Help is sent once (on the first prompt); later prompts carry only state.
-        self.assertNotIn("Only the first line is used", waiting_prompts[0])
+        self.assertNotIn("a line containing only controls", waiting_prompts[0])
         self.assertIn("[interactive command exited]", final_prompt["value"])
         self.assertIn("choice=3 name=Ada", final_prompt["value"])
         self.assertNotIn("1. One", final_prompt["value"])
         # The whole exchange collapses into one run_command record; the repeated
         # waiting prompts and "[terminal input sent]" chat messages are gone.
         self.assertNotIn("[terminal input sent]", saved_text)
-        self.assertNotIn("Only the first line is used", saved_text)
+        self.assertNotIn("a line containing only controls", saved_text)
         self.assertEqual(len(command_outputs), 1)
         collapsed = command_outputs[0]
         self.assertIn("stdin> 3", collapsed)
         self.assertIn("stdin> Ada", collapsed)
         self.assertIn("choice=3 name=Ada", collapsed)
-        self.assertNotIn("Only the first line is used", collapsed)
+        self.assertNotIn("a line containing only controls", collapsed)
         rendered = console_output.getvalue()
         self.assertIn("stdin> 3", rendered)
         self.assertNotIn("3<WAIT>", rendered)
@@ -1269,9 +1269,9 @@ class AgentInputTests(unittest.TestCase):
         # State is present either way; the control vocabulary only when asked.
         self.assertIn("Choose:", with_help)
         self.assertIn("Choose:", without_help)
-        self.assertIn("Only the first line is used", with_help)
+        self.assertIn("a line containing only controls", with_help)
         self.assertIn("<CTRL_C>", with_help)
-        self.assertNotIn("Only the first line is used", without_help)
+        self.assertNotIn("a line containing only controls", without_help)
         self.assertNotIn("<CTRL_C>", without_help)
 
     def _render_card(self, card, *, height: int | None = None) -> str:
