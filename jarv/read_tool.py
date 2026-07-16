@@ -18,6 +18,8 @@ from .web import (
     MAX_RESPONSE_BYTES,
     WebToolError,
     fetch_web_bytes,
+    fragment_note,
+    url_fragment,
     web_content_from_bytes,
 )
 
@@ -332,6 +334,7 @@ def _resolve_source(
                 web_bytes.final_url,
                 web_bytes.content_type,
                 web_bytes.body,
+                fragment=url_fragment(value),
             )
         except WebToolError as exc:
             return f"[read error: {exc}]"
@@ -342,6 +345,9 @@ def _resolve_source(
         ]
         if web.title:
             metadata.append(f"Title: {web.title}")
+        note = fragment_note(web)
+        if note:
+            metadata.append(note)
         return ReadSource(
             "web",
             web.final_url,
