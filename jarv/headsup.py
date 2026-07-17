@@ -151,6 +151,11 @@ _SGR_MOUSE_TEXT_LOOKBACK = 64
 _OUTRO_DURATION = 0.4
 _USAGE_STATUS_CACHE_TTL = 0.5
 
+# How long a self-expiring prompt notice stays visible. Most notices persist
+# until the next edit/Enter clears them; pure view toggles (Ctrl+O) opt into
+# this TTL instead, since the user never types after pressing them.
+_PROMPT_NOTICE_TTL = 4.0
+
 # Aqua used to light up a recognised slash command (the "/name" token) as it is
 # typed in the input box, matching the cyan the autocomplete menu paints its
 # commands with.
@@ -738,6 +743,7 @@ class HeadsupApp(AltScreenApp):
         # changes the buffer and so re-enables it (no reset bookkeeping needed).
         self._slash_menu_dismissed_for: str | None = None
         self._prompt_notice: RenderableType | None = None
+        self._prompt_notice_expires_at: float | None = None
         self._usage_status_cache: tuple[float, int, object, str | None, Text] | None = None
 
     # ------------------------------------------------------------------ #
@@ -917,6 +923,12 @@ class HeadsupApp(AltScreenApp):
     def on_tick(self) -> None:
         now = time.perf_counter()
         repaint = False
+        expires_at = self._prompt_notice_expires_at
+        if expires_at is not None and now >= expires_at:
+            with self.lock:
+                self._prompt_notice = None
+                self._prompt_notice_expires_at = None
+            repaint = True
         if self._idle_animation_active() or (
             self._outro_started_at and now - self._outro_started_at < _OUTRO_DURATION
         ):
@@ -1162,14 +1174,25 @@ class HeadsupApp(AltScreenApp):
     def add_notice(self, renderable: RenderableType) -> None:
         self._append("notice", renderable)
 
-    def set_prompt_notice(self, renderable: RenderableType | None) -> None:
+    def set_prompt_notice(
+        self,
+        renderable: RenderableType | None,
+        *,
+        expires_after: float | None = None,
+    ) -> None:
         with self.lock:
             self._prompt_notice = renderable
+            self._prompt_notice_expires_at = (
+                time.perf_counter() + expires_after
+                if renderable is not None and expires_after is not None
+                else None
+            )
         self.refresh()
 
     def _clear_prompt_notice(self) -> None:
         with self.lock:
             self._prompt_notice = None
+            self._prompt_notice_expires_at = None
         self.refresh()
 
     def read_answer(self, label: str, *, echo_answer: bool = True) -> str:
@@ -2351,10 +2374,10 @@ class HeadsupApp(AltScreenApp):
                 notice = Text(
                     "Expanded all tool output — Ctrl+O to collapse."
                     if target
-                    else "Collapsed tool output.",
+                    else "Collapsed tool output — Ctrl+O to expand.",
                     style="dim",
                 )
-        self.set_prompt_notice(notice)
+        self.set_prompt_notice(notice, expires_after=_PROMPT_NOTICE_TTL)
         self.refresh()
 
     def _reanchor_scroll(self, width: int, before_counts: list[int]) -> None:

@@ -1073,7 +1073,7 @@ class HeadsupTests(unittest.TestCase):
             self.assertIn("lines hidden", recollapsed)
             self.assertNotIn("first line 20", recollapsed)
             self.assertNotIn("second line 20", recollapsed)
-            self.assertIn("Collapsed", app._prompt_notice.plain)
+            self.assertIn("Collapsed tool output — Ctrl+O to expand", app._prompt_notice.plain)
         finally:
             configure_output_display_lines("auto")
 
@@ -1142,6 +1142,37 @@ class HeadsupTests(unittest.TestCase):
         app.on_key("CTRL_O", 1)
 
         self.assertIn("No tool output to expand", app._prompt_notice.plain)
+
+    def test_ctrl_o_notice_expires_after_ttl(self):
+        from jarv.session_render import tool_call_card_from_args
+
+        app, _test_console, _output = self._app()
+        ui = HeadsupAgentUI(app)
+        ui.show_tool_card(
+            tool_call_card_from_args("run_command", {"command": "echo hi"})
+        )
+
+        app.on_key("CTRL_O", 1)
+        self.assertIsNotNone(app._prompt_notice)
+        self.assertGreater(app._prompt_notice_expires_at, time.perf_counter())
+
+        # Not yet due: the notice survives the tick.
+        app.on_tick()
+        self.assertIsNotNone(app._prompt_notice)
+
+        app._prompt_notice_expires_at = time.perf_counter() - 1
+        app.on_tick()
+        self.assertIsNone(app._prompt_notice)
+        self.assertIsNone(app._prompt_notice_expires_at)
+
+    def test_key_cleared_notices_do_not_expire(self):
+        app, _test_console, _output = self._app()
+
+        app.set_prompt_notice(Text("Draft cleared.", style="dim"))
+        self.assertIsNone(app._prompt_notice_expires_at)
+
+        app.on_tick()
+        self.assertEqual(app._prompt_notice.plain, "Draft cleared.")
 
     def test_transcript_synced_from_history_is_expandable(self):
         from jarv.session_render import ToolCallCard
