@@ -8,8 +8,10 @@ during an interactive `run_command`.
 
 from __future__ import annotations
 
+import difflib
 import re
 import time
+from contextlib import contextmanager
 
 from rich.text import Text
 
@@ -46,8 +48,10 @@ def _interactive_max_rounds(config: dict) -> int:
 # Single source of truth for the terminal control vocabulary shown to the model,
 # reused by the waiting prompt's help line and the tool-call reminder below.
 _TERMINAL_CONTROLS = (
-    "<ENTER>, <WAIT>, <WAIT Ns> (e.g. <WAIT 30s>), <CTRL_C>, <EOF>, "
-    "<CTRL_D>, <ESC>, <TAB>, <UP>, <DOWN>, <LEFT>, <RIGHT>"
+    "<ENTER>, <WAIT>, <WAIT Ns|Nm> (e.g. <WAIT 30s>, <WAIT 2m>), <CTRL_C>, "
+    "<EOF>, <CTRL_D>, <CTRL_x> (any letter), <ESC>, <TAB>, <SPACE>, "
+    "<BACKSPACE>, <DELETE>, <HOME>, <END>, <PAGE_UP>, <PAGE_DOWN>, "
+    "<UP>, <DOWN>, <LEFT>, <RIGHT>"
 )
 
 # Sent once per session; later waiting prompts omit it and carry only state.
@@ -55,7 +59,9 @@ _TERMINAL_REPLY_INSTRUCTIONS = (
     "Reply with one line — stdin text (sent with Enter) or controls: "
     f"{_TERMINAL_CONTROLS}. Controls may be chained in order (e.g. "
     "<DOWN> <DOWN> <ENTER>); an empty reply just waits. Do not mix prose with "
-    "controls — text around controls is not sent. Only the first line is used."
+    "controls — text around controls is not sent. In a multi-line reply, a "
+    "line containing only controls is executed and surrounding prose is "
+    "ignored."
 )
 
 
@@ -130,54 +136,122 @@ _MAX_ACTIONS_PER_REPLY = 8
 
 _TOKEN_RE = re.compile(r"<[A-Za-z_][^<>]*>")
 
+# Raw VT byte sequences written to the process's stdin. That stdin is an
+# anonymous pipe (see shell.py), not a ConPTY: line-oriented readers will not
+# see these as keys, but raw-mode readers (menus, pagers, REPLs) will — the
+# same delivery the arrow keys have always used.
 _SPECIAL_KEYS = {
     "<ESC>": "\x1b",
     "<TAB>": "\t",
+    "<SPACE>": " ",
+    "<BACKSPACE>": "\x08",
+    "<DELETE>": "\x1b[3~",
+    "<HOME>": "\x1b[H",
+    "<END>": "\x1b[F",
+    "<PAGE_UP>": "\x1b[5~",
+    "<PAGE_DOWN>": "\x1b[6~",
     "<UP>": "\x1b[A",
     "<DOWN>": "\x1b[B",
     "<RIGHT>": "\x1b[C",
     "<LEFT>": "\x1b[D",
 }
 
+_SPECIAL_KEY_NAMES = {sequence: name for name, sequence in _SPECIAL_KEYS.items()}
+
+# Accepted <WAIT ...> unit suffixes, longest first so "ms" wins over "s" and
+# "min" over "m"; a bare number means seconds.
+_WAIT_UNITS = (("ms", 0.001), ("sec", 1.0), ("min", 60.0), ("s", 1.0), ("m", 60.0))
+
+_CTRL_LETTER_RE = re.compile(r"<CTRL_([A-Z])>")
+
+
+def _normalize_token_name(token: str) -> str:
+    """Canonicalize a ``<...>`` token: uppercase, ``-``/spaces to ``_``.
+
+    Models spell controls as ``<Ctrl-C>`` or ``<PAGE DOWN>`` about as often as
+    the advertised forms; rejecting those spellings only burns a re-prompt.
+    """
+    inner = token[1:-1] if token.startswith("<") and token.endswith(">") else token
+    return "<" + re.sub(r"[\s-]+", "_", inner.strip()).upper() + ">"
+
 
 def _control_token_action(token: str) -> tuple[str, str | float | None] | None:
     """Parse one ``<...>`` token into an action, or None when it isn't a control."""
     upper = token.upper()
-    if upper == "<ENTER>":
-        return "stdin", "\n"
+    # WAIT is matched before separator normalization because its payload
+    # legitimately contains a space.
     if upper == "<WAIT>":
         return "wait", None
     if upper.startswith("<WAIT") and upper.endswith(">"):
         raw = token[5:-1].strip().lower()
         multiplier = 1.0
-        if raw.endswith("ms"):
-            multiplier = 0.001
-            raw = raw[:-2].strip()
-        elif raw.endswith("s"):
-            raw = raw[:-1].strip()
+        for suffix, factor in _WAIT_UNITS:
+            if raw.endswith(suffix):
+                multiplier = factor
+                raw = raw[: -len(suffix)].strip()
+                break
         try:
             return "wait", max(0.0, float(raw) * multiplier)
         except ValueError:
             # Malformed wait: surfaced as a re-prompt, never typed into stdin.
             return "invalid", token
-    if upper == "<CTRL_C>":
+    name = _normalize_token_name(token)
+    if name == "<ENTER>":
+        return "stdin", "\n"
+    if name == "<CTRL_C>":
         return "ctrl_c", None
-    if upper in {"<EOF>", "<CTRL_D>"}:
+    if name in {"<EOF>", "<CTRL_D>"}:
         return "eof", None
-    if upper in _SPECIAL_KEYS:
-        return "stdin_raw", _SPECIAL_KEYS[upper]
+    if name in _SPECIAL_KEYS:
+        return "stdin_raw", _SPECIAL_KEYS[name]
+    ctrl = _CTRL_LETTER_RE.fullmatch(name)
+    if ctrl:
+        # Down a pipe these are plain bytes with no signal semantics — which
+        # is why C (interrupt) and D (EOF) keep their special cases above.
+        return "stdin_raw", chr(ord(ctrl.group(1)) - 64)
     return None
 
 
-def _first_reply_line(text: str) -> str:
+def _candidate_lines(text: str) -> list[str]:
+    lines = []
     for raw_line in text.strip().splitlines():
         line = raw_line.strip()
         if not line or line.startswith("```"):
             continue
         if line.lower().startswith("stdin>"):
             line = line[6:].strip()
-        return line
-    return ""
+        lines.append(line)
+    return lines
+
+
+def _control_line_redirect(
+    later_lines: list[str],
+) -> tuple[list[tuple[str, str | float | None]], str | None] | None:
+    """Find the first later line that is nothing but valid control tokens.
+
+    Reasoning models often narrate on line one and put the actual control on
+    the next line; typing that narration into a live process is the worst
+    possible reading of the reply. Only pure-control lines redirect — a later
+    line mixing prose and controls is no clearer than line one, and a
+    malformed control (``<WAIT soon>``) invalidates the reply outright: the
+    model clearly meant a control, so re-prompt rather than type prose.
+    """
+    for line in later_lines:
+        matches = list(_TOKEN_RE.finditer(line))
+        if not matches or _TOKEN_RE.sub("", line).strip():
+            continue
+        parsed = [_control_token_action(match.group()) for match in matches]
+        for action in parsed:
+            if action is not None and action[0] == "invalid":
+                return [action], None
+        if any(action is None for action in parsed):
+            continue
+        return (
+            parsed[:_MAX_ACTIONS_PER_REPLY],
+            "your reply had multiple lines; the control line was executed "
+            "and the surrounding prose was not typed into stdin",
+        )
+    return None
 
 
 def _parse_terminal_actions(
@@ -185,20 +259,25 @@ def _parse_terminal_actions(
 ) -> tuple[list[tuple[str, str | float | None]], str | None]:
     """Parse a model reply into an ordered action sequence plus an advisory note.
 
-    Rules (first non-fence line only):
+    Rules (first non-fence line, with one multi-line exception below):
     - an empty reply is a wait, never Enter (Enter can confirm destructive prompts);
     - no control tokens -> the line is stdin text (Enter implied), except a line
       that is nothing but unknown ``<...>`` tokens, which is invalid (re-prompt);
+    - multi-line exception: a multi-word first line with no valid control is
+      treated as narration when a later line is pure controls — that control
+      line is executed instead of typing the narration into stdin. A one-word
+      first line ("y", "3") is a real answer and never redirected;
     - a single word followed by controls (``3<WAIT>``) -> the word is the stdin
       answer and the trailing controls are dropped;
     - otherwise controls win: the run of controls starting at the first one is
       executed in order and surrounding prose is dropped, with a note so the
       model learns what was ignored;
-    - a malformed control (``<WAIT 2m>``) invalidates the reply (re-prompt).
+    - a malformed control (``<WAIT soon>``) invalidates the reply (re-prompt).
     """
-    line = _first_reply_line(text)
-    if not line:
+    lines = _candidate_lines(text)
+    if not lines:
         return [("wait", None)], None
+    line = lines[0]
 
     matches = [
         (match, _control_token_action(match.group()))
@@ -208,6 +287,10 @@ def _parse_terminal_actions(
     if not controls:
         if matches and not _TOKEN_RE.sub("", line).strip():
             return [("invalid", line)], None
+        if any(ch.isspace() for ch in line):
+            redirect = _control_line_redirect(lines[1:])
+            if redirect is not None:
+                return redirect
         return [("stdin", line.rstrip("\n") + "\n")], None
 
     first_match = controls[0][0]
@@ -239,9 +322,50 @@ def _parse_terminal_actions(
     return actions, note
 
 
-def _parse_terminal_control(text: str) -> tuple[str, str | float | None]:
-    """First action of the reply — kept for callers that predate sequences."""
-    return _parse_terminal_actions(text)[0][0]
+# Known non-WAIT controls, for close-match suggestions in rejection messages.
+_CONTROL_VOCABULARY = (
+    "<ENTER>", "<CTRL_C>", "<EOF>", "<CTRL_D>", *_SPECIAL_KEYS,
+)
+
+
+def _invalid_reply_message(payload: str) -> str:
+    """Explain a rejected reply, naming the exact offending token.
+
+    The old generic ``could not parse '...'`` left models re-sending the same
+    bad token round after round; naming the token and the closest valid
+    control (or the literal-text fallback for single letters) converges the
+    retry loop instead.
+    """
+    hints = []
+    for token in _TOKEN_RE.findall(payload):
+        action = _control_token_action(token)
+        if action is not None and action[0] != "invalid":
+            continue
+        if token.upper().startswith("<WAIT"):
+            hints.append(
+                f"{token} is not a valid wait — use <WAIT Ns> or <WAIT Nm>, "
+                "e.g. <WAIT 30s> or <WAIT 2m>"
+            )
+            continue
+        inner = token[1:-1].strip()
+        if len(inner) == 1 and inner.isalpha():
+            hints.append(
+                f"{token} is not a control — to type '{inner.lower()}', "
+                f"reply with the literal text {inner.lower()}"
+            )
+            continue
+        close = difflib.get_close_matches(
+            _normalize_token_name(token), _CONTROL_VOCABULARY, n=1
+        )
+        if close:
+            hints.append(
+                f"{token} is not a supported control — did you mean {close[0]}?"
+            )
+        else:
+            hints.append(f"{token} is not a supported control")
+    if not hints:
+        return f"could not parse {payload!r}"
+    return f"could not parse {payload!r}: " + "; ".join(hints)
 
 
 def _terminal_action_display(action: str, payload: str | float | None) -> str:
@@ -257,15 +381,13 @@ def _terminal_action_display(action: str, payload: str | float | None) -> str:
     if action == "eof":
         return "<EOF>"
     if action == "stdin_raw":
-        controls = {
-            "\x1b": "<ESC>",
-            "\t": "<TAB>",
-            "\x1b[A": "<UP>",
-            "\x1b[B": "<DOWN>",
-            "\x1b[C": "<RIGHT>",
-            "\x1b[D": "<LEFT>",
-        }
-        return controls.get(str(payload or ""), "<KEY>")
+        sequence = str(payload or "")
+        name = _SPECIAL_KEY_NAMES.get(sequence)
+        if name:
+            return name
+        if len(sequence) == 1 and 1 <= ord(sequence) <= 26:
+            return f"<CTRL_{chr(ord(sequence) + 64)}>"
+        return "<KEY>"
     return ""
 
 
@@ -348,6 +470,24 @@ def _record_interactive_input(
         output_item["output"] = "\n".join(pending.transcript_segments)
 
 
+# Consecutive unparseable replies before the interaction is aborted; bounded
+# separately from interactive_max_rounds (see PendingRunCommand.invalid_streak).
+_MAX_CONSECUTIVE_INVALID = 5
+
+
+def _record_rejected_reply(pending, marker: str) -> None:
+    """Append a rejected/blocked-reply marker line to the collapsed record.
+
+    Rejected replies used to live only in the un-persisted live conversation,
+    so a stalled interaction left no trace in the session sidecar; the marker
+    makes the failure diagnosable after the fact.
+    """
+    pending.transcript_segments.append(marker)
+    output_item = getattr(pending, "output_item", None)
+    if isinstance(output_item, dict):
+        output_item["output"] = "\n".join(pending.transcript_segments)
+
+
 def _finalize_interactive_record(pending, final_output: str) -> None:
     """Close the record: the interleaved transcript followed by the final output."""
     output_item = getattr(pending, "output_item", None)
@@ -386,6 +526,36 @@ def _cancellable_sleep(seconds: float, cancellation_token=None) -> None:
         time.sleep(0.05)
 
 
+@contextmanager
+def _suspended_card_live(pending):
+    """Pause the held-open inline card ``Live`` around a console prompt.
+
+    The card's auto-refresh thread would repaint over the y/N prompt and Rich
+    hides the cursor while a Live is active, so the user would type blind.
+    No-op when a confirm handler owns the display (heads-up: the prompt never
+    touches the console) or in heads-up's inline-card-less mode
+    (``pending.live is None``). stop()/start(refresh=True) reuse is the same
+    pattern as ``AltScreenApp.suspended``.
+    """
+    from .safety import confirm_handler_active
+
+    live = getattr(pending, "live", None)
+    if live is None or confirm_handler_active():
+        yield
+        return
+    try:
+        live.stop()
+    except Exception:
+        pass
+    try:
+        yield
+    finally:
+        try:
+            live.start(refresh=True)
+        except Exception:
+            pass
+
+
 def _screen_stdin_text(pending, actions, config: dict) -> str | None:
     """Local safety gate for typed stdin lines.
 
@@ -393,10 +563,14 @@ def _screen_stdin_text(pending, actions, config: dict) -> str | None:
     a shell/REPL afterwards used to bypass it entirely. Classify each typed
     line with the same risky patterns and confirm locally (no LLM auditor —
     stdin lines are cheap to deny and may be prompt answers, not commands).
+    Under ``command_safety="all"`` every non-empty typed line needs approval,
+    or an approved bare shell/REPL would be an ungated escape hatch; controls,
+    raw keys, and plain Enter never prompt.
     """
-    if config.get("command_safety", "risky") == "none":
+    level = config.get("command_safety", "risky")
+    if level == "none":
         return None
-    from .safety import classify_command, prompt_confirmation
+    from .safety import approval_lock, classify_command, prompt_confirmation
 
     for action, payload in actions:
         if action != "stdin":
@@ -405,9 +579,20 @@ def _screen_stdin_text(pending, actions, config: dict) -> str | None:
         if not text:
             continue
         is_risky, reason = classify_command(text)
-        if is_risky and not prompt_confirmation(
-            f"stdin to `{pending.prepared.cmd}`: {text}", reason
-        ):
+        if not is_risky:
+            if level != "all":
+                continue
+            reason = "all commands require approval"
+        with approval_lock(), _suspended_card_live(pending):
+            approved = prompt_confirmation(
+                f"stdin to `{pending.prepared.cmd}`: {text}",
+                reason,
+                kind="stdin",
+                question="Allow this input?",
+            )
+        if not approved:
+            if not is_risky:
+                return "[stdin blocked by user — safety level is set to 'all']"
             return f"[stdin blocked by user — detected as risky: {reason}]"
     return None
 
@@ -427,7 +612,7 @@ def _continue_interactive_command(
     """
     actions, note = _parse_terminal_actions(terminal_reply)
     if actions[0][0] == "invalid":
-        return None, f"could not parse {actions[0][1]!r}", "invalid", note
+        return None, _invalid_reply_message(str(actions[0][1])), "invalid", note
     denial = _screen_stdin_text(pending, actions, config)
     if denial is not None:
         return None, denial, "blocked", note

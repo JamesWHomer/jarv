@@ -27,6 +27,25 @@ def _state_temp_files() -> set:
     return set(Path(tempfile.gettempdir()).glob("jarv-shell-state-*"))
 
 
+class InteractiveSnapshotConsistencyTests(unittest.TestCase):
+    def test_snapshot_polls_once_for_consistent_exit_state(self):
+        # The process can exit between two poll() calls; a snapshot must never
+        # report exited=True with exit_code=None.
+        from types import SimpleNamespace
+
+        polls = iter([None, 0])
+        proc = SimpleNamespace(
+            stdout=None,
+            stderr=None,
+            poll=lambda: next(polls, 0),
+        )
+        process = InteractiveCommandProcess("cmd", proc)
+
+        snapshot = process.snapshot()
+
+        self.assertEqual(snapshot.exited, snapshot.exit_code is not None)
+
+
 class ShellOutputLimitTests(unittest.TestCase):
     def test_compact_command_output_collapses_single_row_table(self):
         output = "\nPath\n----\nC:\\Users\\ubers\n\n"

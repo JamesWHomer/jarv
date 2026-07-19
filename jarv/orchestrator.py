@@ -8,6 +8,7 @@ tool; only the artifact persists, transcripts are discarded.
 
 import concurrent.futures
 import json
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -17,6 +18,7 @@ from .cancellation import CancellationToken, TurnCancelled
 from .config import DEFAULT_CONFIG, TOOL_NAMES, get_setting
 from .context_budget import trim_turn_input
 from .edit_tool import EDIT_TOOL, dispatch_edit_tool
+from .jsonutil import salvage_json_object
 from .safety import check_command
 from .anthropic_http import DEFAULT_SUBAGENT_MAX_TOKENS
 from .provider import (
@@ -41,7 +43,7 @@ from .shell import (
     resolve_command_output_window,
     truncate_model_output,
 )
-from .tool_outputs import ToolOutput
+from .tool_outputs import ToolOutput, summarize_tool_output
 from .turn_loop import collect_stream_response, run_tool_execution_round
 from .turn_records import (
     append_reasoning_input_items,
@@ -235,8 +237,8 @@ class ToolBatchResult:
 class ToolExecutionHooks:
     """Optional root-agent UI hooks; subagents leave these unset and use dispatch_tool."""
 
-    on_parallel_read: Callable[[object, dict], None] | None = None
-    on_parallel_web_search: Callable[[object, dict], None] | None = None
+    on_parallel_read: Callable[[object, dict, str], None] | None = None
+    on_parallel_web_search: Callable[[object, dict, str], None] | None = None
     run_command: Callable[[dict], str] | None = None
     run_edit: Callable[[dict], str] | None = None
     run_spawn: Callable[[dict], str] | None = None
@@ -267,6 +269,10 @@ class PendingRunCommand:
     transcript_segments: list = field(default_factory=list)
     # Model interaction rounds so far, checked against interactive_max_rounds.
     rounds: int = 0
+    # Consecutive unparseable replies; bounded separately from rounds so a
+    # confused model can be re-prompted a few times without eating the
+    # interaction budget, but cannot loop forever.
+    invalid_streak: int = 0
     # The growing transcript card and (inline only) the persistent Rich ``Live``
     # kept open for the whole interactive session, plus the live-display depth
     # context manager that wraps it. Heads-up mode leaves ``live``/``live_depth_cm``
@@ -487,6 +493,12 @@ def _parse_tool_args(arguments: str | None) -> tuple[dict | None, str | None]:
     try:
         args = json.loads(arguments or "{}")
     except json.JSONDecodeError as e:
+        # Local/chat-completions models often fence or narrate around the
+        # JSON; recover the object when it is unambiguous instead of failing
+        # the whole tool call.
+        salvaged = salvage_json_object(arguments or "")
+        if salvaged is not None:
+            return salvaged, None
         return None, f"[tool argument error: invalid JSON: {e}]"
     if not isinstance(args, dict):
         return None, "[tool argument error: arguments must be an object]"
@@ -730,12 +742,22 @@ def execute_tool_calls(
             )
             for safe_item, batch_result in zip(group, batch_results):
                 output = batch_result.output
+                # Hooks get the pre-nudge output: the web_search read nudge
+                # appended below is model-facing and must not reach the card.
                 if safe_item.name == "read" and batch_result.args is not None:
                     if hooks.on_parallel_read is not None:
-                        hooks.on_parallel_read(safe_item, batch_result.args)
+                        hooks.on_parallel_read(
+                            safe_item,
+                            batch_result.args,
+                            summarize_tool_output(output),
+                        )
                 elif safe_item.name == "web_search" and batch_result.args is not None:
                     if hooks.on_parallel_web_search is not None:
-                        hooks.on_parallel_web_search(safe_item, batch_result.args)
+                        hooks.on_parallel_web_search(
+                            safe_item,
+                            batch_result.args,
+                            summarize_tool_output(output),
+                        )
                     if not result.web_search_read_nudge_sent:
                         output = append_web_search_read_nudge(output)
                         result.web_search_read_nudge_sent = True
@@ -749,13 +771,11 @@ def execute_tool_calls(
             item_index += 1
             continue
 
-        try:
-            args = json.loads(item.arguments or "{}")
-        except json.JSONDecodeError as e:
-            output = f"[tool argument error: invalid JSON: {e}]"
+        args, args_error = _parse_tool_args(item.arguments)
+        if args_error is not None:
             if hooks.on_tool_error is not None:
-                hooks.on_tool_error(output)
-            append_tool_result(item, output)
+                hooks.on_tool_error(args_error)
+            append_tool_result(item, args_error)
             item_index += 1
             continue
 
@@ -938,9 +958,10 @@ def run_subagent_loop(
         for item in tool_calls:
             if item.name != "finish":
                 continue
-            try:
-                json.loads(item.arguments or "{}")
-            except json.JSONDecodeError:
+            # Same parse (salvage included) as execution will attempt, so the
+            # truncation nudge fires only for args that are truly unusable.
+            _finish_args, finish_error = _parse_tool_args(item.arguments)
+            if finish_error is not None:
                 if stop_reason == "max_tokens" and not finish_truncation_nudge_sent:
                     finish_truncation_nudge_sent = True
                     truncated_finish = True
@@ -1086,33 +1107,69 @@ def spawn_batch(
     if observer is not None:
         observer.on_spawn_start(parent.label, [n.label for n in nodes])
 
-    pool_size = max(1, int(config.get("subagent_thread_pool_max_workers", 8)))
+    pool_size = max(1, int(get_setting(config, "subagent_thread_pool_max_workers")))
+    timeout_seconds = float(get_setting(config, "subagent_timeout"))
     raw_results: dict[str, dict] = {}
     ex = concurrent.futures.ThreadPoolExecutor(max_workers=pool_size)
     future_to_node = {}
+    future_to_token: dict[concurrent.futures.Future, CancellationToken] = {}
+    parent_unregisters: list[Callable[[], None]] = []
+    timed_out_futures: set[concurrent.futures.Future] = set()
+    deadline = time.monotonic() + timeout_seconds
+
     try:
-        future_to_node = {
-            ex.submit(
+        for node in nodes:
+            child_token = CancellationToken()
+            if cancellation_token is not None:
+                parent_unregisters.append(
+                    cancellation_token.register(child_token.cancel)
+                )
+            future = ex.submit(
                 run_subagent_loop,
-                n,
+                node,
                 store,
                 client,
                 config,
                 spawn_observer=observer,
-                cancellation_token=cancellation_token,
+                cancellation_token=child_token,
                 retained_store=retained_store,
-            ): n
-            for n in nodes
-        }
+            )
+            future_to_node[future] = node
+            future_to_token[future] = child_token
         pending = set(future_to_node)
         while pending:
             if cancellation_token is not None:
                 cancellation_token.throw_if_cancelled()
-            done, pending = concurrent.futures.wait(
-                pending,
-                timeout=0.05,
-                return_when=concurrent.futures.FIRST_COMPLETED,
-            )
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # Preserve workers that completed at the boundary; only the
+                # genuinely unfinished futures are failed and cancelled.
+                done = {future for future in pending if future.done()}
+                pending.difference_update(done)
+                for future in tuple(pending):
+                    pending.remove(future)
+                    timed_out_futures.add(future)
+                    future_to_token[future].cancel()
+                    future.cancel()
+                    node = future_to_node[future]
+                    result = {
+                        "label": node.label,
+                        "status": "failed",
+                        "reason": (
+                            "spawn batch timed out after "
+                            f"{timeout_seconds:g} seconds"
+                        ),
+                    }
+                    raw_results[node.label] = result
+                    if observer is not None:
+                        observer.on_child_done(parent.label, node.label, result)
+            else:
+                done, pending = concurrent.futures.wait(
+                    pending,
+                    timeout=min(0.05, remaining),
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
             for fut in done:
                 n = future_to_node[fut]
                 try:
@@ -1136,9 +1193,18 @@ def spawn_batch(
             cancellation_token.cancel()
         raise
     finally:
-        if cancellation_token is not None and cancellation_token.cancelled:
+        for unregister in parent_unregisters:
+            unregister()
+        if (
+            (cancellation_token is not None and cancellation_token.cancelled)
+            or timed_out_futures
+        ):
             for future in future_to_node:
-                future.cancel()
+                if (
+                    cancellation_token is not None
+                    and cancellation_token.cancelled
+                ) or future in timed_out_futures:
+                    future.cancel()
             ex.shutdown(wait=False, cancel_futures=True)
         else:
             ex.shutdown(wait=True)

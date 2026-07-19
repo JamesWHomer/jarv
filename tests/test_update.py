@@ -7,7 +7,7 @@ from pathlib import Path
 
 from rich.console import Console
 
-from jarv import commands, standalone, update_check
+from jarv import cli, commands, standalone, update_check
 
 
 def test_fetch_latest_release_returns_exact_version_spec(monkeypatch):
@@ -358,9 +358,134 @@ def test_windows_standalone_update_stages_handoff(monkeypatch, tmp_path):
     monkeypatch.setattr(
         standalone,
         "_stage_windows_updater",
-        lambda source, handoff_target: staged.append((source, handoff_target)),
+        lambda source, handoff_target, version: staged.append(
+            (source, handoff_target, version)
+        ),
     )
 
     assert standalone.install_standalone_asset(asset, executable_path=target, windows=True) == "staged"
     assert staged
     assert staged[0][1] == target.resolve()
+    assert staged[0][2] == "0.15.1"
+
+
+def test_windows_updater_is_detached_retries_and_records_result(monkeypatch, tmp_path):
+    source = tmp_path / "update" / "extract" / "jarv.exe"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"new")
+    target = tmp_path / "install" / "jarv.exe"
+    target.parent.mkdir()
+    target.write_bytes(b"old")
+    result_file = tmp_path / "config" / "update-result.json"
+    result_file.parent.mkdir()
+    result_file.write_text("stale", encoding="utf-8")
+    calls = []
+    process = object()
+
+    monkeypatch.setattr(standalone, "WINDOWS_UPDATE_RESULT_FILE", result_file)
+    monkeypatch.setattr(
+        standalone.shutil,
+        "which",
+        lambda name: "powershell.exe" if name == "powershell" else None,
+    )
+    monkeypatch.setattr(
+        standalone.subprocess,
+        "Popen",
+        lambda command, **kwargs: calls.append((command, kwargs)) or process,
+    )
+
+    assert standalone._stage_windows_updater(source, target, "0.15.1") is process
+
+    assert not result_file.exists()
+    assert len(calls) == 1
+    command, kwargs = calls[0]
+    assert command[0] == "powershell.exe"
+    assert command[command.index("-ExpectedVersion") + 1] == "0.15.1"
+    assert command[command.index("-ResultFile") + 1] == str(result_file)
+    assert kwargs["creationflags"] == standalone._windows_updater_creation_flags()
+    assert kwargs["creationflags"] & getattr(
+        standalone.subprocess,
+        "CREATE_NO_WINDOW",
+        0x08000000,
+    )
+    assert not kwargs["creationflags"] & getattr(
+        standalone.subprocess,
+        "DETACHED_PROCESS",
+        0x00000008,
+    )
+    script = (source.parent / "jarv-update.ps1").read_text(encoding="utf-8")
+    assert "for ($attempt = 1; $attempt -le $RetryCount; $attempt++)" in script
+    assert 'if ($actualVersion -ne $expectedOutput)' in script
+    assert 'Write-UpdateResult -Status "failed"' in script
+
+
+def test_windows_updater_retries_without_breakaway_when_job_rejects_it(monkeypatch, tmp_path):
+    source = tmp_path / "extract" / "jarv.exe"
+    source.parent.mkdir()
+    source.write_bytes(b"new")
+    target = tmp_path / "jarv.exe"
+    result_file = tmp_path / "config" / "update-result.json"
+    creation_flags = []
+    process = object()
+
+    monkeypatch.setattr(standalone, "WINDOWS_UPDATE_RESULT_FILE", result_file)
+    monkeypatch.setattr(standalone.shutil, "which", lambda _name: "powershell.exe")
+
+    def popen(_command, **kwargs):
+        creation_flags.append(kwargs["creationflags"])
+        if len(creation_flags) == 1:
+            error = OSError("access denied")
+            error.winerror = 5
+            raise error
+        return process
+
+    monkeypatch.setattr(standalone.subprocess, "Popen", popen)
+
+    assert standalone._stage_windows_updater(source, target, "0.15.1") is process
+    assert creation_flags == [
+        standalone._windows_updater_creation_flags(),
+        standalone._windows_updater_creation_flags(allow_breakaway=False),
+    ]
+
+
+def test_windows_update_result_is_consumed_once(tmp_path):
+    result_file = tmp_path / "update-result.json"
+    result_file.write_text(
+        json.dumps(
+            {
+                "status": "failed",
+                "version": "0.15.1",
+                "message": "replacement was blocked",
+            }
+        ),
+        encoding="utf-8-sig",
+    )
+
+    assert standalone.consume_windows_update_result(result_file) == {
+        "status": "failed",
+        "version": "0.15.1",
+        "message": "replacement was blocked",
+    }
+    assert standalone.consume_windows_update_result(result_file) is None
+
+
+def test_previous_windows_update_failure_is_reported(monkeypatch):
+    output = io.StringIO()
+    test_console = Console(file=output, force_terminal=False, color_system=None)
+
+    monkeypatch.setattr(cli, "_console", lambda: test_console)
+    monkeypatch.setattr(
+        standalone,
+        "consume_windows_update_result",
+        lambda: {
+            "status": "failed",
+            "version": "0.15.1",
+            "message": "Update to v0.15.1 failed: replacement was blocked",
+        },
+    )
+
+    cli._print_previous_update_result()
+
+    text = output.getvalue()
+    assert "replacement was blocked" in text
+    assert "jarv /update" in text

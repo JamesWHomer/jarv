@@ -418,3 +418,29 @@ def test_prompt_confirmation_still_prompts_after_refactor(monkeypatch, answer, e
     monkeypatch.setattr(safety.console, "print", lambda *a, **k: None)
 
     assert prompt_confirmation("rm -rf build", "recursive deletion") is expected
+
+
+@pytest.mark.parametrize("approve, expected_start", [(True, "[EDIT RESULT]"), (False, "[edit denied")])
+def test_edit_confirmation_routes_through_confirm_handler(workdir, approve, expected_start):
+    from jarv.safety import clear_confirm_handler, set_confirm_handler
+
+    target = workdir / "file.txt"
+    target.write_text("alpha\n", encoding="utf-8")
+    config = {**DEFAULT_CONFIG, "command_safety": "all"}
+    seen = {}
+
+    def handler(request):
+        seen["kind"] = request.kind
+        seen["question"] = request.question
+        return approve
+
+    set_confirm_handler(handler)
+    try:
+        output = _edit(_args(target), config=config)
+    finally:
+        clear_confirm_handler()
+
+    assert output.startswith(expected_start)
+    assert seen["kind"] == "edit"
+    assert seen["question"] == "Allow this edit?"
+    assert target.read_text(encoding="utf-8") == ("beta\n" if approve else "alpha\n")

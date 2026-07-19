@@ -8,7 +8,9 @@ from jarv.config import DEFAULT_CONFIG
 from jarv.orchestrator import (
     RUN_COMMAND_TOOL,
     AgentNode,
+    ToolExecutionHooks,
     dispatch_tool,
+    execute_tool_calls,
     run_subagent_loop,
     spawn_batch,
 )
@@ -20,6 +22,48 @@ from jarv.provider import (
 )
 from jarv.cancellation import CancellationToken, TurnCancelled
 from jarv.shell import CommandResult, ShellState
+
+
+class ToolArgumentSalvageTests(unittest.TestCase):
+    def _execute_with_arguments(self, arguments):
+        received = {}
+
+        def run_command(args):
+            received["args"] = args
+            return "ran"
+
+        results = []
+        execute_tool_calls(
+            [
+                ToolCallDone(
+                    id="fc_1",
+                    call_id="call_1",
+                    name="run_command",
+                    arguments=arguments,
+                ),
+            ],
+            node=None,
+            store=None,
+            client=None,
+            config=dict(DEFAULT_CONFIG),
+            append_tool_result=lambda _item, output: results.append(output),
+            hooks=ToolExecutionHooks(run_command=run_command),
+        )
+        return received.get("args"), results
+
+    def test_fenced_arguments_are_salvaged_and_dispatched(self):
+        # Local models often wrap tool arguments in a markdown fence; the
+        # call must still dispatch instead of erroring.
+        args, results = self._execute_with_arguments(
+            'Running it now:\n```json\n{"command": "echo hi"}\n```'
+        )
+        self.assertEqual(args, {"command": "echo hi"})
+        self.assertEqual(results, ["ran"])
+
+    def test_hopelessly_malformed_arguments_still_error(self):
+        args, results = self._execute_with_arguments('{"command": ')
+        self.assertIsNone(args)
+        self.assertIn("tool argument error", results[0])
 
 
 class OrchestratorTests(unittest.TestCase):
@@ -738,6 +782,80 @@ class OrchestratorTests(unittest.TestCase):
             timer.cancel()
 
         self.assertLess(time.perf_counter() - started, 0.25)
+
+    def test_spawn_batch_times_out_one_stalled_child(self):
+        parent = AgentNode(
+            label="root",
+            depth=0,
+            parent_label=None,
+            task="root",
+            sterile=False,
+        )
+
+        def blocked_worker(*_args, cancellation_token=None, **_kwargs):
+            while not cancellation_token.cancelled:
+                time.sleep(0.005)
+            cancellation_token.throw_if_cancelled()
+
+        started = time.perf_counter()
+        with patch("jarv.orchestrator.run_subagent_loop", side_effect=blocked_worker):
+            results = spawn_batch(
+                parent,
+                [{"label": "child", "task": "work"}],
+                ArtifactStore(),
+                client=None,
+                config={**DEFAULT_CONFIG, "subagent_timeout": 0.05},
+            )
+
+        self.assertLess(time.perf_counter() - started, 0.25)
+        self.assertEqual(
+            results,
+            [{
+                "label": "child",
+                "status": "failed",
+                "reason": "spawn batch timed out after 0.05 seconds",
+            }],
+        )
+
+    def test_spawn_batch_timeout_preserves_completed_siblings(self):
+        parent = AgentNode(
+            label="root",
+            depth=0,
+            parent_label=None,
+            task="root",
+            sterile=False,
+        )
+
+        def mixed_workers(node, *_args, cancellation_token=None, **_kwargs):
+            if node.label == "fast":
+                return "full result", "done"
+            while not cancellation_token.cancelled:
+                time.sleep(0.005)
+            cancellation_token.throw_if_cancelled()
+
+        with patch("jarv.orchestrator.run_subagent_loop", side_effect=mixed_workers):
+            results = spawn_batch(
+                parent,
+                [
+                    {"label": "fast", "task": "quick work"},
+                    {"label": "stalled", "task": "slow work"},
+                ],
+                ArtifactStore(),
+                client=None,
+                config={**DEFAULT_CONFIG, "subagent_timeout": 0.05},
+            )
+
+        self.assertEqual(
+            results,
+            [
+                {"label": "fast", "status": "done", "tldr": "done"},
+                {
+                    "label": "stalled",
+                    "status": "failed",
+                    "reason": "spawn batch timed out after 0.05 seconds",
+                },
+            ],
+        )
 
 
 if __name__ == "__main__":

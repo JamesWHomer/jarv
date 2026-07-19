@@ -95,7 +95,7 @@ COMMANDS: dict[str, CommandMeta] = {
     "help": CommandMeta(False, summary="Show help menu"),
     "about": CommandMeta(False, summary="Show detailed reference information"),
     "update": CommandMeta(False, needs_nudge=True, summary="Update jarv"),
-    "uninstall": CommandMeta(True, summary="Uninstall jarv", arg_hint="[--purge]"),
+    "uninstall": CommandMeta(True, summary="Uninstall jarv", arg_hint="[--purge] [--yes]"),
 }
 
 CONFIG_MUTATING_COMMANDS = frozenset(

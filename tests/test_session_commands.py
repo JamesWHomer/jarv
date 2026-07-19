@@ -97,6 +97,135 @@ def test_history_visual_lines_render_read_like_fullscreen_tool_card():
     assert "file contents are not shown" not in rendered
 
 
+def test_history_visual_lines_show_read_result_summary_but_never_contents():
+    read_output = "\n".join([
+        "[READ RESULT]",
+        "Source: local file",
+        "Input: README.md",
+        "Offset: 0",
+        "Requested size: 4096",
+        "Returned size: 4096",
+        "Total size: 45120",
+        "EOF: false",
+        "Next offset: 4096",
+        "",
+        "SECRET FILE CONTENTS",
+    ])
+    history = [
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "read",
+            "arguments": '{"input":"README.md"}',
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": read_output,
+        },
+    ]
+
+    rendered = "\n".join(
+        line.plain for line in session_commands._history_visual_lines(history, 100)
+    )
+
+    assert "4,096 of 45,120 chars  •  more available" in rendered
+    assert "SECRET FILE CONTENTS" not in rendered
+    assert "✓ done" in rendered
+
+
+def test_history_visual_lines_mark_failed_read_with_error_line():
+    history = [
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "read",
+            "arguments": '{"input":"missing.txt"}',
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "[read error: no such file]",
+        },
+    ]
+
+    rendered = "\n".join(
+        line.plain for line in session_commands._history_visual_lines(history, 100)
+    )
+
+    assert "✗ failed" in rendered
+    assert "[read error: no such file]" in rendered
+
+
+def test_history_visual_lines_show_web_search_result_count_and_top_titles():
+    web_output = "\n".join([
+        "Query: python packaging",
+        "Offset: 0",
+        "Source pages: 1",
+        "",
+        "1. First Title",
+        "URL: https://one.example",
+        "",
+        "2. Second Title",
+        "URL: https://two.example",
+        "",
+        "3. Third Title",
+        "URL: https://three.example",
+        "",
+        "4. Fourth Title",
+        "URL: https://four.example",
+        "",
+        "5. Fifth Title",
+        "URL: https://five.example",
+    ])
+    history = [
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "web_search",
+            "arguments": '{"query":"python packaging"}',
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": web_output,
+        },
+    ]
+
+    rendered = "\n".join(
+        line.plain for line in session_commands._history_visual_lines(history, 100)
+    )
+
+    assert "5 results" in rendered
+    assert "First Title" in rendered
+    assert "Third Title" in rendered
+    assert "Fourth Title" not in rendered
+    assert "https://one.example" not in rendered
+
+
+def test_history_visual_lines_mark_failed_web_search():
+    history = [
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "web_search",
+            "arguments": '{"query":"nothing"}',
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "[web error: no search results found at offset 0]",
+        },
+    ]
+
+    rendered = "\n".join(
+        line.plain for line in session_commands._history_visual_lines(history, 100)
+    )
+
+    assert "✗ failed" in rendered
+    assert "[web error: no search results found at offset 0]" in rendered
+
+
 def test_history_visual_lines_group_multiple_tool_calls_under_one_jarv_heading():
     history = [
         {"role": "user", "content": "Use two tools"},

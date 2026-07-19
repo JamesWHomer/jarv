@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import parse_qs, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qs, unquote, urljoin, urlsplit, urlunsplit
 
 import httpx
 
@@ -17,9 +17,11 @@ from .config import DEFAULT_CONFIG, get_setting
 
 
 DUCKDUCKGO_HTML_URL = "https://html.duckduckgo.com/html/"
+SEARCH_ENGINE_LABEL = "DuckDuckGo"
 from .pdf_extract import PDF_MAGIC, is_pdf_bytes, is_pdf_media_type
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_REDIRECTS = 5
+FRAGMENT_MIN_CHARS = 200
 DEFAULT_SEARCH_RESULTS = 5
 MAX_SEARCH_RESULTS = 20
 
@@ -65,6 +67,8 @@ class FetchedWebContent:
     media_type: str
     title: str
     text: str
+    fragment: str = ""
+    fragment_applied: bool = False
 
 
 @dataclass(frozen=True)
@@ -209,6 +213,22 @@ _IGNORED_HTML_TAGS = {
     "svg",
     "canvas",
 }
+_VOID_HTML_TAGS = {
+    "area",
+    "base",
+    "br",
+    "col",
+    "embed",
+    "hr",
+    "img",
+    "input",
+    "link",
+    "meta",
+    "param",
+    "source",
+    "track",
+    "wbr",
+}
 _BLOCK_HTML_TAGS = {
     "address",
     "article",
@@ -246,16 +266,21 @@ _BLOCK_HTML_TAGS = {
 
 
 class _ReadableHTMLParser(HTMLParser):
-    def __init__(self, base_url: str = "") -> None:
+    def __init__(self, base_url: str = "", fragment: str = "") -> None:
         super().__init__(convert_charrefs=True)
         self.base_url = base_url
+        self.fragment = fragment
+        self.fragment_found = False
         self.title_parts: list[str] = []
         self.all_parts: list[str] = []
         self.preferred_parts: list[str] = []
+        self.fragment_parts: list[str] = []
+        self.fragment_tail_parts: list[str] = []
         self._ignored_depth = 0
         self._head_depth = 0
         self._title_depth = 0
         self._preferred_depth = 0
+        self._fragment_depth = 0
         self._link_url: str | None = None
         self._link_text: list[str] = []
 
@@ -265,6 +290,10 @@ class _ReadableHTMLParser(HTMLParser):
         self.all_parts.append(value)
         if self._preferred_depth:
             self.preferred_parts.append(value)
+        if self._fragment_depth:
+            self.fragment_parts.append(value)
+        if self.fragment_found:
+            self.fragment_tail_parts.append(value)
 
     def handle_starttag(
         self,
@@ -293,6 +322,20 @@ class _ReadableHTMLParser(HTMLParser):
             self._link_text = []
         if tag in {"main", "article"}:
             self._preferred_depth += 1
+        if self._fragment_depth:
+            if tag not in _VOID_HTML_TAGS:
+                self._fragment_depth += 1
+        elif (
+            self.fragment
+            and not self.fragment_found
+            and (
+                _attr(attrs, "id") == self.fragment
+                or (tag == "a" and _attr(attrs, "name") == self.fragment)
+            )
+        ):
+            self.fragment_found = True
+            if tag not in _VOID_HTML_TAGS:
+                self._fragment_depth = 1
         if tag in _BLOCK_HTML_TAGS:
             self._append("\n")
 
@@ -341,15 +384,27 @@ class _ReadableHTMLParser(HTMLParser):
             self._append("\n")
         if tag in {"main", "article"}:
             self._preferred_depth = max(0, self._preferred_depth - 1)
+        if self._fragment_depth and tag not in _VOID_HTML_TAGS:
+            self._fragment_depth -= 1
 
     def readable_text(self) -> str:
         preferred = _normalize_text("".join(self.preferred_parts))
-        if preferred:
+        full = _normalize_text("".join(self.all_parts))
+        # Some pages use <article> for sidebar widgets (link lists, teasers)
+        # while the real content lives in plain <div>s, so only trust the
+        # main/article extraction when it holds a meaningful share of the page.
+        if preferred and len(preferred) >= 0.2 * len(full):
             return preferred
-        return _normalize_text("".join(self.all_parts))
+        return full
 
     def title(self) -> str:
         return _normalize_space("".join(self.title_parts))
+
+    def fragment_text(self) -> str:
+        return _normalize_text("".join(self.fragment_parts))
+
+    def fragment_tail_text(self) -> str:
+        return _normalize_text("".join(self.fragment_tail_parts))
 
 
 def _readable_link_url(base_url: str, href: str) -> str | None:
@@ -618,6 +673,17 @@ def search_web(
     return "\n".join(lines).rstrip()
 
 
+def url_fragment(url: str) -> str:
+    """The decoded #fragment of a URL, or "" when absent or unparseable."""
+    if not isinstance(url, str):
+        return ""
+    try:
+        fragment = urlsplit(url.strip()).fragment
+    except ValueError:
+        return ""
+    return unquote(fragment)
+
+
 def fetch_web_content(
     url: str,
     *,
@@ -630,7 +696,13 @@ def fetch_web_content(
         timeout=timeout,
         cancellation_token=cancellation_token,
     )
-    return web_content_from_bytes(requested_url, final_url, content_type, body)
+    return web_content_from_bytes(
+        requested_url,
+        final_url,
+        content_type,
+        body,
+        fragment=url_fragment(url),
+    )
 
 
 def fetch_web_bytes(
@@ -661,6 +733,8 @@ def web_content_from_bytes(
     final_url: str,
     content_type: str,
     body: bytes,
+    *,
+    fragment: str = "",
 ) -> FetchedWebContent:
     media_type = _media_type(content_type)
     if not _is_textual_media_type(media_type):
@@ -669,11 +743,24 @@ def web_content_from_bytes(
 
     decoded = _decode_body(body, content_type)
     title = ""
+    fragment_applied = False
     if media_type in {"text/html", "application/xhtml+xml"}:
-        parser = _ReadableHTMLParser(final_url)
+        parser = _ReadableHTMLParser(final_url, fragment=fragment)
         parser.feed(decoded)
         text = parser.readable_text()
         title = parser.title()
+        if fragment and parser.fragment_found:
+            section = parser.fragment_text()
+            if len(section) < FRAGMENT_MIN_CHARS:
+                # Heading-style anchors (<h2 id=...>) hold only their own
+                # label; the section content follows as siblings, so take
+                # everything from the anchor onward instead.
+                tail = parser.fragment_tail_text()
+                if len(tail) > len(section):
+                    section = tail
+            if section:
+                text = section
+                fragment_applied = True
     elif media_type == "application/json" or media_type.endswith("+json"):
         try:
             text = json.dumps(json.loads(decoded), indent=2, ensure_ascii=False)
@@ -690,7 +777,18 @@ def web_content_from_bytes(
         media_type=media_type,
         title=title,
         text=text,
+        fragment=fragment,
+        fragment_applied=fragment_applied,
     )
+
+
+def fragment_note(content: FetchedWebContent) -> str | None:
+    """A user-visible line describing how the URL fragment was handled."""
+    if not content.fragment:
+        return None
+    if content.fragment_applied:
+        return f"Fragment: #{content.fragment} (section extracted)"
+    return f"Fragment: #{content.fragment} not found; returning full page"
 
 
 def fetch_web(
@@ -711,6 +809,9 @@ def fetch_web(
     ]
     if content.title:
         lines.append(f"Title: {content.title}")
+    note = fragment_note(content)
+    if note:
+        lines.append(note)
     lines.extend(["", content.text])
     return "\n".join(lines)
 

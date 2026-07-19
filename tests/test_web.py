@@ -26,7 +26,10 @@ from jarv.web import (
     _decode_search_url,
     dispatch_web_tool,
     fetch_web,
+    fragment_note,
     search_web,
+    url_fragment,
+    web_content_from_bytes,
 )
 
 
@@ -83,6 +86,96 @@ def test_readable_html_prefers_main_and_omits_scripts():
 
     assert parser.title() == "Page Title"
     assert parser.readable_text() == "Hello\n\nUseful text."
+
+
+def test_readable_html_falls_back_when_article_is_a_small_widget():
+    body_text = "Real page content outside any article element. " * 40
+    parser = _ReadableHTMLParser()
+    parser.feed(f"""
+        <html><body>
+        <div><h1>Unit outline</h1><p>{body_text}</p></div>
+        <article><ul><li>On this page</li><li>Overview</li></ul></article>
+        </body></html>
+    """)
+
+    text = parser.readable_text()
+    assert "Real page content outside any article element." in text
+    assert "On this page" in text
+
+
+def test_web_content_extracts_fragment_section():
+    section_text = "Week 01 Modular arithmetic lecture. " * 10
+    body = f"""
+        <html><body>
+        <div id="overview_panel"><p>{'Overview filler. ' * 40}</p></div>
+        <div id="weekly_schedule_panel"><h2>Weekly schedule</h2>
+        <p>{section_text}</p></div>
+        <div id="assessment_panel"><p>{'Assessment filler. ' * 40}</p></div>
+        </body></html>
+    """.encode()
+
+    content = web_content_from_bytes(
+        "https://example.test/page",
+        "https://example.test/page",
+        "text/html",
+        body,
+        fragment="weekly_schedule_panel",
+    )
+
+    assert content.fragment_applied
+    assert "Weekly schedule" in content.text
+    assert "Week 01 Modular arithmetic lecture." in content.text
+    assert "Overview filler." not in content.text
+    assert "Assessment filler." not in content.text
+    assert fragment_note(content) == (
+        "Fragment: #weekly_schedule_panel (section extracted)"
+    )
+
+
+def test_web_content_fragment_on_heading_returns_following_content():
+    body = f"""
+        <html><body>
+        <p>{'Intro filler. ' * 40}</p>
+        <h2 id="schedule">Schedule</h2>
+        <p>{'Content after the heading. ' * 20}</p>
+        </body></html>
+    """.encode()
+
+    content = web_content_from_bytes(
+        "https://example.test/page",
+        "https://example.test/page",
+        "text/html",
+        body,
+        fragment="schedule",
+    )
+
+    assert content.fragment_applied
+    assert content.text.startswith("Schedule")
+    assert "Content after the heading." in content.text
+    assert "Intro filler." not in content.text
+
+
+def test_web_content_missing_fragment_falls_back_to_full_page():
+    body = b"<html><body><main><p>Whole page text.</p></main></body></html>"
+
+    content = web_content_from_bytes(
+        "https://example.test/page",
+        "https://example.test/page",
+        "text/html",
+        body,
+        fragment="/spa/route",
+    )
+
+    assert not content.fragment_applied
+    assert content.text == "Whole page text."
+    assert fragment_note(content) == (
+        "Fragment: #/spa/route not found; returning full page"
+    )
+
+
+def test_url_fragment_decodes_and_handles_absence():
+    assert url_fragment("https://example.test/p#weekly%20schedule") == "weekly schedule"
+    assert url_fragment("https://example.test/p") == ""
 
 
 def test_readable_html_preserves_absolute_and_relative_link_urls():

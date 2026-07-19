@@ -65,7 +65,11 @@ curl -fsSL https://github.com/JamesWHomer/jarv/releases/latest/download/uninstal
 
 Package-manager commands are `winget uninstall JamesWHomer.Jarv`, `brew uninstall jarv`, `scoop uninstall jarv`, `uv tool uninstall jarv`, `pipx uninstall jarv`, or `python -m pip uninstall jarv`.
 
-Your data stays in `~/.jarv`; add `--purge` (or `-Purge` for `uninstall.ps1`) to remove it and cached clipboard images too.
+Your data stays in `~/.jarv`; add `--purge` to remove it and cached clipboard images too, and `--yes` to skip the confirmation prompt (required in non-interactive shells). For `uninstall.ps1`, parameters can't pass through `| iex` — use:
+
+```powershell
+& ([ScriptBlock]::Create((irm https://github.com/JamesWHomer/jarv/releases/latest/download/uninstall.ps1))) -Purge
+```
 
 ## Usage
 
@@ -192,6 +196,7 @@ When the model calls `spawn`, Jarv runs N child agents in parallel. Each child o
 - **Parallel by default** — all children in a `spawn` call run concurrently in a thread pool.
 - **Artifacts** — each child's output is stored as a named artifact. The parent (or siblings that declare a dependency) can fetch the full content.
 - **Recursive** — children can themselves spawn further children, up to `max_subagent_depth` levels deep (default 4). Children are sterile by default; the parent must explicitly allow further spawning.
+- **Bounded** — a `spawn` batch cancels unfinished children after `subagent_timeout` seconds (default 600) instead of waiting forever.
 - **Transcript scope** — child-agent transcripts are discarded. Root history stores the parent `spawn`/`read` tool calls and returned outputs.
 - **Session-scoped** — artifacts persist for the active session and are available on later prompts until you start a new session or archive.
 
@@ -222,7 +227,7 @@ The terminal shows a live progress panel as children run, with a green checkmark
 | `/usage` | Interactive usage screen — spend, tokens, requests, context headroom, a daily-spend trend, and by-model bars. `←/→` (or `1-5` / `s t w m a`) switches scope live |
 | `/usage <session\|day\|week\|month\|all>` | Open straight to a scope (`day`/`today` = rolling 24h; `all` = full system-wide history) |
 | `/update` | Update Jarv to the latest version for the active install channel |
-| `/uninstall [--purge]` | Uninstall Jarv or show its package-manager uninstall command |
+| `/uninstall [--purge] [--yes]` | Uninstall Jarv or show its package-manager uninstall command |
 
 All commands work both as `jarv /command` (one-shot) and inside heads-up mode. Read-only commands (`/help`, `/about`, `/usage`, and `/config`) use a temporary display by default in interactive terminals; change `read_only_command_display` in `/settings` to print them permanently instead.
 
@@ -271,6 +276,7 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 | `auditor_model` | `""` | Auditor model. Empty uses the active `model`. |
 | `max_subagent_depth` | `4` | Maximum nesting depth for spawned subagents. |
 | `subagent_thread_pool_max_workers` | `8` | Max parallel subagents per `spawn` call. |
+| `subagent_timeout` | `600` | Maximum runtime in seconds for one `spawn` batch before unfinished subagents are cancelled. |
 | `check_updates` | `true` | Background update check on startup (non-blocking, throttled to once per 24h; PyPI for Python installs, GitHub Releases for standalone installs). |
 | `read_only_command_display` | `"fullscreen"` | Display mode for `/help`, `/about`, `/usage`, and `/config`: temporary `fullscreen` view or permanent `print` output. |
 | `tool_call_display` | `"auto"` | Tool-call layout: `auto` selects `print` for one-shot runs and `fullscreen` in heads-up mode; explicit modes override it. |

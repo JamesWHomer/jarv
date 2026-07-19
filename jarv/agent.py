@@ -206,6 +206,7 @@ def _agent_check_run_command(prepared, config: dict, **kwargs):
 
 
 from .interactive_command import (
+    _MAX_CONSECUTIVE_INVALID,
     _TERMINAL_REPLY_INSTRUCTIONS,
     _attach_interactive_output_item,
     _continue_interactive_command,
@@ -216,8 +217,8 @@ from .interactive_command import (
     _interactive_check_in_seconds,
     _interactive_max_rounds,
     _interactive_tool_call_reminder,
-    _parse_terminal_control,
     _record_interactive_input,
+    _record_rejected_reply,
     _run_command_final_prompt,
     _run_command_waiting_prompt,
     _terminal_action_display,
@@ -308,19 +309,20 @@ def _dispatch_run_command_with_ui(
         return denial
 
     display_mode = get_setting(config, "tool_call_display")
-    metadata_text = f"model window {prepared.head_chars:,} / {prepared.tail_chars:,} chars"
     # One growing transcript box for the whole interactive session. Inline mode
     # holds a Rich ``Live`` open across turns so each model step appends in place
     # rather than re-printing a fresh box; heads-up re-renders the same card into
     # its live-tool slot. The card starts in its "running" state.
     card = InteractiveCommandCard(
         prepared.cmd,
-        metadata_text,
+        "",
         display_mode,
         time.perf_counter(),
     )
     live = None
     live_depth_cm = None
+    process = None
+    unregister_cancel = None
 
     try:
         if ui is not None:
@@ -352,9 +354,19 @@ def _dispatch_run_command_with_ui(
         elif live is not None:
             live.refresh()
     except (KeyboardInterrupt, TurnCancelled):
+        # The cancel path kills via the token-registered kill_tree callback.
         _stop_interactive_card_live(live, live_depth_cm)
         raise
     except Exception as e:
+        # Nothing else owns the process yet: kill it here or it (and its
+        # reader threads) outlive the turn.
+        if process is not None:
+            try:
+                process.kill_tree()
+            except Exception:
+                pass
+        if callable(unregister_cancel):
+            unregister_cancel()
         _stop_interactive_card_live(live, live_depth_cm)
         return f"[error: {e}]"
 
@@ -865,6 +877,29 @@ class TurnCheckpointer:
         self.persistence.save_turn()
 
 
+def _abort_interactive_command(pending, note: str, ui, input_items: list) -> list:
+    """Kill a held-open interactive command and close out its record/card.
+
+    Shared by the round cap and the consecutive-invalid-reply cap; returns the
+    input items with the abort note appended for the model.
+    """
+    if pending.card is not None:
+        pending.card.add_step(
+            Text(note, style="dim red"), "", None, exited=True,
+        )
+        _refresh_interactive_card(ui, pending)
+    _close_interactive_card_live(pending)
+    try:
+        pending.process.kill_tree()
+    except Exception:
+        pass
+    _finalize_interactive_record(pending, note)
+    if callable(pending.unregister_cancel):
+        pending.unregister_cancel()
+        pending.unregister_cancel = None
+    return input_items + [{"role": "user", "content": note}]
+
+
 def _advance_interactive_continuation(
     pending: PendingRunCommand,
     renderer: _TurnRenderer,
@@ -891,21 +926,7 @@ def _advance_interactive_continuation(
             f"[interactive command aborted: {max_rounds} interaction rounds "
             "reached (interactive_max_rounds); the process was killed]"
         )
-        if pending.card is not None:
-            pending.card.add_step(
-                Text(note, style="dim red"), "", None, exited=True,
-            )
-            _refresh_interactive_card(ui, pending)
-        _close_interactive_card_live(pending)
-        try:
-            pending.process.kill_tree()
-        except Exception:
-            pass
-        _finalize_interactive_record(pending, note)
-        if callable(pending.unregister_cancel):
-            pending.unregister_cancel()
-            pending.unregister_cancel = None
-        return input_items + [{"role": "user", "content": note}], None
+        return _abort_interactive_command(pending, note, ui, input_items), None
     if renderer.tool_calls:
         # A stray mid-interaction tool call: remind and re-prompt without
         # touching the process.
@@ -934,7 +955,30 @@ def _advance_interactive_continuation(
     )
     if snapshot is None:
         # Malformed reply or a blocked stdin line: nothing touched the
-        # process; tell the model why and re-prompt.
+        # process; tell the model why and re-prompt. Either way the reason
+        # goes into the collapsed record so the session sidecar shows why the
+        # interaction stalled.
+        if terminal_kind == "invalid":
+            # Refund the round — nothing touched the process — but bound the
+            # streak so a model stuck on the same bad token cannot loop
+            # forever on free retries.
+            pending.rounds -= 1
+            pending.invalid_streak += 1
+            _record_rejected_reply(pending, f"[reply rejected: {terminal_action}]")
+            if pending.invalid_streak >= _MAX_CONSECUTIVE_INVALID:
+                note = (
+                    f"[interactive command aborted: {_MAX_CONSECUTIVE_INVALID} "
+                    "consecutive unparseable terminal replies; the process "
+                    "was killed]"
+                )
+                return (
+                    _abort_interactive_command(pending, note, ui, input_items),
+                    None,
+                )
+        else:
+            # A blocked stdin line parsed fine — the user denied it.
+            pending.invalid_streak = 0
+            _record_rejected_reply(pending, terminal_action)
         return (
             input_items + [{
                 "role": "user",
@@ -945,6 +989,7 @@ def _advance_interactive_continuation(
             }],
             pending,
         )
+    pending.invalid_streak = 0
     delta_text = "" if snapshot.exited else (
         snapshot.to_delta_command_result().to_model_output(
             head_chars=pending.prepared.head_chars,
@@ -1025,22 +1070,24 @@ def _build_tool_hooks(
         else:
             console.print(f"[red]{message}[/red]")
 
-    def _on_parallel_read(_item, read_args: dict) -> None:
+    def _on_parallel_read(_item, read_args: dict, output: str) -> None:
         _print_tool_card(
             tool_call_card_from_args(
                 "read",
                 read_args,
+                output=output,
                 display_mode=get_setting(config, "tool_call_display"),
             ),
             config,
             ui=ui,
         )
 
-    def _on_parallel_web_search(_item, search_args: dict) -> None:
+    def _on_parallel_web_search(_item, search_args: dict, output: str) -> None:
         _print_tool_card(
             tool_call_card_from_args(
                 "web_search",
                 search_args,
+                output=output,
                 display_mode=get_setting(config, "tool_call_display"),
             ),
             config,

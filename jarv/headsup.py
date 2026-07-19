@@ -15,6 +15,7 @@ from rich.cells import cell_len
 from rich.console import Console, Group, RenderableType
 from rich.live import Live
 from rich.markdown import Markdown
+from rich.markup import escape
 from rich.text import Text
 
 from .cancellation import CancellationToken, TurnCancelled
@@ -49,6 +50,7 @@ from .display import (
 from .history import forget_current_session, load_history, prepare_session_context
 from .intro_animation import render_intro
 from .model_catalog import get_image_output_capability
+from .safety import ConfirmRequest, clear_confirm_handler, set_confirm_handler
 from .session_render import (
     _history_content_to_str,
     _status_renderable,
@@ -96,7 +98,6 @@ _FULLSCREEN_SLASH_COMMANDS = frozenset({
     "/history",
     "/settings",
     "/setup",
-    "/uninstall",
     "/usage",
 })
 
@@ -378,7 +379,12 @@ class HeadsupAgentUI:
             self._animated_live_tool_keys.add(live_kind)
             return
         if live_kind == "SpawnPanel":
-            self.app.upsert_live_tool(live_kind, renderable)
+            if getattr(renderable, "finished", False):
+                self.app.replace_live_tool(live_kind, renderable)
+                self._animated_live_tool_keys.discard(live_kind)
+            else:
+                self.app.upsert_live_tool(live_kind, renderable)
+                self._animated_live_tool_keys.add(live_kind)
             return
         if self._tool_live_kind is not None:
             self.app.replace_live_tool(self._tool_live_kind, renderable)
@@ -491,6 +497,66 @@ class HeadsupAgentUI:
         )
         self._stream_dirty = False
         self._last_stream_refresh_at = time.perf_counter() if now is None else now
+
+
+# Live-tool slot for the safety confirm card. One slot suffices: confirms are
+# serialized process-wide by safety's approval lock.
+_SAFETY_CONFIRM_KEY = "safety_confirm"
+
+
+class SafetyConfirmCard:
+    """Transcript card for one safety confirmation (command, stdin, or edit).
+
+    Upserted as a live tool card while the request is pending — the auditor
+    line animates off the clock, so invalidate-and-repaint ticks advance it —
+    then finalized in place with the outcome so the transcript keeps a
+    resolved record even when the turn is cancelled mid-prompt.
+    """
+
+    def __init__(self, request: ConfirmRequest):
+        self.request = request
+        self.started_at = time.perf_counter()
+        self.final: str | None = None  # "approved" | "denied" | "cancelled"
+
+    def _auditor_line(self) -> Text | None:
+        state = self.request.audit_state
+        if state is None:
+            return None
+        if state.get("done"):
+            reason = escape(str(state.get("reason", "")))
+            if state.get("allow"):
+                return Text.from_markup(
+                    f"[green]✓  auditor[/green]  [dim]{reason}[/dim]"
+                )
+            return Text.from_markup(
+                f"[yellow]⚠  auditor[/yellow]  [dim]{reason}[/dim]"
+            )
+        now = time.perf_counter()
+        elapsed = int(now - self.started_at)
+        frame = _THINKING_FRAMES[int(now * 10) % len(_THINKING_FRAMES)]
+        return Text.from_markup(
+            f"[green]{frame}  auditor[/green]  [dim]checking…  {elapsed}s[/dim]"
+        )
+
+    def __rich__(self):
+        parts: list[RenderableType] = [self.request.body]
+        auditor_line = self._auditor_line()
+        if auditor_line is not None:
+            parts.extend([Text(""), auditor_line])
+        if self.final is None:
+            status, style = "waiting", "blue"
+        elif self.final == "approved":
+            status, style = "approved", "green"
+        else:
+            status, style = self.final, "red"
+        return tool_card(
+            "safety",
+            Group(*parts),
+            metadata=self.request.subtitle,
+            status=status,
+            status_style=style,
+            display_mode="fullscreen",
+        )
 
 
 def _update_outcome_lines(outcome) -> tuple[Text, list[Text]]:
@@ -710,6 +776,11 @@ class HeadsupApp(AltScreenApp):
         self._foreground_input_active = True
         self._foreground_input_thread = threading.current_thread()
         self._begin_idle_animation()
+        # Safety prompts (risky commands, stdin lines, edits) must render in
+        # this app rather than fight its loop for the console and keyboard.
+        # Registered for the app's lifetime so subagent worker threads and
+        # queued turns reach it too.
+        set_confirm_handler(self._confirm_safety_request)
 
     def on_stop(self) -> None:
         self._idle_anim_stop.set()
@@ -719,6 +790,10 @@ class HeadsupApp(AltScreenApp):
         self._foreground_input_thread = None
         self._cancel_active_turn(clear_queue=True)
         self._wait_for_agent_idle(timeout=5.0)
+        # Cleared after the agent drains: a confirm arriving mid-teardown sees
+        # the cancelled token and raises instead of falling back to a console
+        # prompt on the dying alt screen.
+        clear_confirm_handler()
         disable_mouse_capture()
 
     def on_interrupt(self) -> None:
@@ -1139,6 +1214,53 @@ class HeadsupApp(AltScreenApp):
                 self._answer_request_completed = {}
                 self._answer_condition.notify_all()
 
+    def _confirm_safety_request(self, request: ConfirmRequest) -> bool:
+        """Registered safety confirm handler; runs on the calling worker thread.
+
+        Renders the request as a live safety card in the transcript, waits out
+        the auditor (when one is attached), and collects y/N through the same
+        answer machinery ``ask_user`` uses — so the loop thread keeps painting
+        and no code touches the console or keyboard behind its back. ESC/Ctrl+C
+        cancel the turn: ``TurnCancelled`` propagates to the safety gate.
+        """
+        card = SafetyConfirmCard(request)
+        self.upsert_live_tool(_SAFETY_CONFIRM_KEY, card)
+        self.refresh()
+        approved = False
+        try:
+            state = request.audit_state
+            if state is not None:
+                last_repaint = 0.0
+                while not state.get("done"):
+                    if request.cancellation_token is not None:
+                        request.cancellation_token.throw_if_cancelled()
+                    if state.get("cancelled"):
+                        raise TurnCancelled
+                    now = time.monotonic()
+                    if now - last_repaint >= 0.2:
+                        last_repaint = now
+                        self.invalidate_live_tool(_SAFETY_CONFIRM_KEY)
+                        self.refresh()
+                    time.sleep(0.05)
+                self.invalidate_live_tool(_SAFETY_CONFIRM_KEY)
+                self.refresh()
+                if request.auto_approve and state.get("allow"):
+                    approved = True
+                    return True
+            answer = self.read_answer(
+                f"{request.question} [y/N] > ", echo_answer=False
+            )
+            approved = answer.strip().lower() in ("y", "yes")
+            return approved
+        except (KeyboardInterrupt, TurnCancelled):
+            card.final = "cancelled"
+            raise
+        finally:
+            if card.final is None:
+                card.final = "approved" if approved else "denied"
+            self.replace_live_tool(_SAFETY_CONFIRM_KEY, card)
+            self.refresh()
+
     def _current_prompt_edit_width(self) -> int:
         term_w, _term_h = terminal_size(console=self.console)
         inner_width = max(1, _panel_width(max(20, term_w)) - 4)
@@ -1358,23 +1480,20 @@ class HeadsupApp(AltScreenApp):
             command = parts[0].lower()
             if command in {"/exit", "/quit"}:
                 return "exit"
-            self._run_slash(command, parts[1:])
-            return None
+            return self._run_slash(command, parts[1:])
 
         alias = self._command_alias(parts[0], parts[1:])
         if alias is not None:
             command, rest = alias
             if self._confirm_command_alias(command, rest, query):
-                self._run_slash(command, rest)
-                return None
+                return self._run_slash(command, rest)
             self._run_agent_query(query)
             return None
 
         result = self.maybe_command(parts[0], parts[1:])
         if result is not None:
             _, command, rest = result
-            self._run_slash(command, rest)
-            return None
+            return self._run_slash(command, rest)
 
         self._run_agent_query(query)
         return None
@@ -1400,24 +1519,27 @@ class HeadsupApp(AltScreenApp):
         answer = self.read_answer("choice> ").strip().lower()
         return answer in _COMMAND_CONFIRM_YES
 
-    def _run_slash(self, command: str, rest: list[str]) -> None:
+    def _run_slash(self, command: str, rest: list[str]) -> str | None:
+        """Run one slash command; returns "exit" when heads-up must stop."""
         if command == "/tree":
             self._run_tree()
-            return
+            return None
         if command == "/btw":
             self._run_btw(rest)
-            return
+            return None
         if command == "/update":
             # Blocks on the network and the installer for up to minutes, so it
             # runs like an agent turn — worker thread plus a live status entry —
             # instead of freezing the loop in the captured-output path below.
             self._start_update()
-            return
+            return None
+        if command == "/uninstall":
+            return self._run_uninstall(rest)
         if command in _FULLSCREEN_SLASH_COMMANDS or (
             command in {"/session", "/sessions"} and not rest
         ):
             self._run_interactive_slash(command, rest)
-            return
+            return None
         with self._captured_console_output() as capture:
             self.config, self.client = self.handle_slash(
                 command,
@@ -1432,6 +1554,22 @@ class HeadsupApp(AltScreenApp):
         if not self._sync_after_slash(command, notice):
             if notice:
                 self.add_notice(notice)
+        return None
+
+    def _run_uninstall(self, rest: list[str]) -> str | None:
+        """Run /uninstall suspended; exit heads-up after a destructive run.
+
+        Staying alive after a purge would re-persist the data just deleted, and
+        on Windows the staged uninstaller waits for this process to exit.
+        """
+        from .uninstall import run_uninstall
+
+        with self.suspended():
+            outcome = run_uninstall(rest)
+        if outcome.destructive:
+            return "exit"
+        self._sync_after_slash("/uninstall", None)
+        return None
 
     def _run_interactive_slash(self, command: str, rest: list[str]) -> None:
         with self.suspended():

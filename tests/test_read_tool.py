@@ -521,6 +521,32 @@ def test_read_web_page_includes_source_metadata(monkeypatch):
     assert output.endswith("efg")
 
 
+def test_read_web_page_extracts_url_fragment_section(monkeypatch):
+    section = "Week 01 lecture content. " * 20
+    filler = "Other panel filler. " * 40
+    monkeypatch.setattr(
+        "jarv.read_tool.fetch_web_bytes",
+        lambda *args, **kwargs: FetchedWebBytes(
+            requested_url="https://example.test/units",
+            final_url="https://example.test/units",
+            content_type="text/html",
+            media_type="text/html",
+            body=(
+                f"<html><body><div id='overview'><p>{filler}</p></div>"
+                f"<div id='schedule'><p>{section}</p></div></body></html>"
+            ).encode(),
+        ),
+    )
+
+    output = _read(
+        {"input": "https://example.test/units#schedule", "size": 10_000}
+    )
+
+    assert "Fragment: #schedule (section extracted)" in output
+    assert "Week 01 lecture content." in output
+    assert "Other panel filler." not in output
+
+
 def test_read_direct_image_url_returns_untrusted_structured_output(monkeypatch):
     def handler(_request):
         return httpx.Response(
