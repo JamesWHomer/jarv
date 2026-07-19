@@ -278,16 +278,44 @@ def tool_card(
 
 
 DISPLAY_HEIGHT_RATIO = 3
+DISPLAY_HEIGHT_RATIO_FULLSCREEN = 2
 DISPLAY_MIN_LINE_LIMIT = 3
+
+# Display-only override for the per-card output line budget. ``None`` keeps the
+# terminal-height "auto" behaviour. Pushed in from config at run start so this
+# module stays free of config imports.
+_display_lines_override: int | None = None
+
+
+def configure_output_display_lines(setting) -> None:
+    """Apply the ``tool_output_display_lines`` setting: ``"auto"`` (or empty)
+    restores terminal-based budgets, an integer pins the budget everywhere."""
+    global _display_lines_override
+    if setting in ("auto", "", None):
+        _display_lines_override = None
+        return
+    try:
+        _display_lines_override = max(DISPLAY_MIN_LINE_LIMIT, int(setting))
+    except (TypeError, ValueError):
+        _display_lines_override = None
 
 
 def flatten_headings(text: str) -> str:
     return re.sub(r"^#{1,6}\s+(.+)$", r"**\1**", text, flags=re.MULTILINE)
 
 
-def output_display_line_limit(*, console: Console = console) -> int:
+def output_display_line_limit(
+    *, console: Console = console, display_mode: str = "print"
+) -> int:
+    if _display_lines_override is not None:
+        return _display_lines_override
     _, terminal_height = terminal_size(console=console)
-    return max(DISPLAY_MIN_LINE_LIMIT, terminal_height // DISPLAY_HEIGHT_RATIO)
+    ratio = (
+        DISPLAY_HEIGHT_RATIO_FULLSCREEN
+        if display_mode == "fullscreen"
+        else DISPLAY_HEIGHT_RATIO
+    )
+    return max(DISPLAY_MIN_LINE_LIMIT, terminal_height // ratio)
 
 
 def output_display_split(line_limit: int) -> tuple[int, int]:
@@ -333,10 +361,18 @@ def clip_tail(lines: list, line_limit: int) -> tuple[list, int]:
     return lines[hidden:], hidden
 
 
-def output_renderable(output: str, *, max_lines: int | None = None) -> RenderableType:
+def output_renderable(
+    output: str,
+    *,
+    max_lines: int | None = None,
+    display_mode: str = "print",
+    expanded: bool = False,
+) -> RenderableType:
+    if expanded:
+        return Text(output, style="dim")
     lines = output.splitlines()
     line_limit = (
-        output_display_line_limit(console=console)
+        output_display_line_limit(console=console, display_mode=display_mode)
         if max_lines is None
         else max(DISPLAY_MIN_LINE_LIMIT, int(max_lines))
     )
@@ -348,6 +384,41 @@ def output_renderable(output: str, *, max_lines: int | None = None) -> Renderabl
             Text("\n".join(tail), style="dim"),
         )
     return Text(output, style="dim")
+
+
+COMMAND_DISPLAY_MAX_LINES = 3
+COMMAND_DISPLAY_MAX_LINE_CHARS = 300
+
+
+def command_line_renderable(command: str, *, expanded: bool = False) -> RenderableType:
+    """The ``> command`` header used by every command card.
+
+    Collapsed, long inline scripts are cut to the first
+    ``COMMAND_DISPLAY_MAX_LINES`` lines (each capped at
+    ``COMMAND_DISPLAY_MAX_LINE_CHARS`` characters) with a hidden-lines hint, so
+    a pasted 200-line ``python -c`` body no longer floods the card."""
+    header = Text("> ", style="bold yellow")
+    if expanded:
+        header.append(command)
+        return header
+    lines = command.splitlines() or [""]
+    hidden_chars = 0
+    shown: list[str] = []
+    for line in lines[:COMMAND_DISPLAY_MAX_LINES]:
+        if len(line) > COMMAND_DISPLAY_MAX_LINE_CHARS:
+            hidden_chars += len(line) - COMMAND_DISPLAY_MAX_LINE_CHARS
+            line = line[:COMMAND_DISPLAY_MAX_LINE_CHARS] + "…"
+        shown.append(line)
+    header.append("\n".join(shown))
+    hidden_lines = len(lines) - COMMAND_DISPLAY_MAX_LINES
+    if hidden_lines <= 0 and hidden_chars == 0:
+        return header
+    if hidden_lines > 0:
+        suffix = f"+{hidden_chars:,} chars" if hidden_chars else ""
+        hint = hidden_lines_hint(hidden_lines, where="below", suffix=suffix)
+    else:
+        hint = Text(f"… +{hidden_chars:,} chars", style="dim italic")
+    return Group(header, Text("  ").append_text(hint))
 
 
 def display_output(output: str, *, max_lines: int | None = None) -> None:

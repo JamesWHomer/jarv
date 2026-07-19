@@ -20,6 +20,7 @@ from .command_input import read_editable_line
 from .config import DEFAULT_CONFIG, get_setting
 from .display import (
     clip_middle,
+    command_line_renderable,
     console,
     flatten_headings,
     hidden_lines_hint,
@@ -176,8 +177,7 @@ class RunningCommandCard:
 
     def __rich_console__(self, console, options):
         elapsed = int(max(0.0, time.perf_counter() - self._start))
-        command_line = Text("> ", style="bold yellow")
-        command_line.append(self._command)
+        command_line = command_line_renderable(self._command)
         body = command_line
         if self._display_mode != "fullscreen":
             body = Group(
@@ -205,10 +205,13 @@ class InteractiveCommandCard:
     Rich ``Live`` (which auto-refreshes the footer) and the heads-up live-tool slot.
     """
 
+    expandable = True
+
     def __init__(self, command: str, metadata: str, display_mode: str, start_time: float):
         self.command = command
         self.metadata = metadata
         self.display_mode = display_mode
+        self.expanded = False
         self._start = start_time
         # Each segment: {"marker": Text | None, "output": str, "seconds": float | None}.
         self._segments: list[dict] = []
@@ -286,13 +289,9 @@ class InteractiveCommandCard:
         return Text(f"exit {self._exit_code}", style="bold red")
 
     def _body_parts(self):
-        command_line = Text("> ", style="bold yellow")
-        command_line.append(self.command)
-        parts = [command_line]
-        # Fullscreen heads-up renders into a scrollable transcript, so each delta
-        # is kept whole and scrolling reaches it. Inline pins the card inside a
-        # Rich ``Live`` that cannot scroll, so long deltas collapse to head/tail.
-        full = self.display_mode == "fullscreen"
+        parts = [command_line_renderable(self.command, expanded=self.expanded)]
+        # Raw segments are retained, so each delta collapses to a head/tail
+        # window at render time and Ctrl+O (heads-up) re-renders it in full.
         for segment in self._segments:
             marker = segment["marker"]
             if marker is not None:
@@ -303,7 +302,11 @@ class InteractiveCommandCard:
             output = segment["output"]
             if output:
                 parts.append(
-                    Text(output, style="dim") if full else output_renderable(output)
+                    output_renderable(
+                        output,
+                        display_mode=self.display_mode,
+                        expanded=self.expanded,
+                    )
                 )
         return parts
 

@@ -1366,10 +1366,11 @@ class AgentInputTests(unittest.TestCase):
         self.assertNotIn("Idle on stdin", done)
 
     def test_fullscreen_card_keeps_whole_scrollable_transcript(self):
-        # Heads-up renders the card into a scrollable transcript, so the whole
-        # interactive session must survive even when it overflows the terminal:
-        # every stdin marker and every full delta, never collapsed to a head/tail
-        # window the way the un-scrollable inline ``Live`` must be.
+        # Heads-up renders the card into a scrollable transcript, so short
+        # deltas (within the per-segment display budget) all survive even when
+        # the card as a whole overflows the terminal: every stdin marker and
+        # delta stays, unlike the un-scrollable inline ``Live`` which collapses
+        # the card's middle to a head/tail window.
         def build(display_mode):
             card = InteractiveCommandCard(
                 "python game.py",
@@ -1409,6 +1410,55 @@ class AgentInputTests(unittest.TestCase):
 
         # Inline cannot scroll, so it still collapses the middle to a window.
         self.assertIn("lines hidden", inline)
+
+    def test_fullscreen_card_clips_huge_deltas_and_expands_on_demand(self):
+        # A single massive delta (e.g. a command dumping a file) no longer
+        # floods the heads-up transcript: it collapses to the display budget,
+        # and flipping ``expanded`` (Ctrl+O in heads-up) restores every line.
+        from jarv.display import configure_output_display_lines
+
+        card = InteractiveCommandCard(
+            "python dump.py",
+            "model window 12,000 / 12,000 chars",
+            "fullscreen",
+            time.perf_counter(),
+        )
+        card.seed_initial(
+            InteractiveCommandSnapshot("python dump.py", "ROOM 0 line\n", "", None, exited=False)
+        )
+        big_delta = "\n".join(f"DUMP line {j}" for j in range(60)) + "\n"
+        card.add_step(
+            _interaction_marker_text("stdin", "dump"), big_delta, 0.3, exited=False
+        )
+        try:
+            configure_output_display_lines(8)
+            collapsed = self._render_card(card, height=100)
+            self.assertIn("DUMP line 0", collapsed)
+            self.assertIn("DUMP line 59", collapsed)
+            self.assertNotIn("DUMP line 30", collapsed)
+            self.assertIn("lines hidden", collapsed)
+
+            self.assertTrue(card.expandable)
+            card.expanded = True
+            expanded = self._render_card(card, height=100)
+            self.assertIn("DUMP line 30", expanded)
+            self.assertNotIn("lines hidden", expanded)
+        finally:
+            configure_output_display_lines("auto")
+
+    def test_interactive_card_clips_long_command_text(self):
+        command = "\n".join(f"script line {j}" for j in range(20))
+        card = InteractiveCommandCard(
+            command, "", "fullscreen", time.perf_counter()
+        )
+        card.seed_initial(
+            InteractiveCommandSnapshot(command, "ok\n", "", 0, exited=True)
+        )
+        rendered = self._render_card(card, height=100)
+        self.assertIn("> script line 0", rendered)
+        self.assertIn("script line 2", rendered)
+        self.assertNotIn("script line 3\n", rendered)
+        self.assertIn("… 17 more lines", rendered)
 
     def test_inline_card_fits_render_console_when_os_height_diverges(self):
         # Regression: the inline card cropped against ``os.get_terminal_size()``

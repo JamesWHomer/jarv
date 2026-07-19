@@ -8,6 +8,7 @@ from rich.markdown import Markdown
 from rich.text import Text
 
 from .display import (
+    command_line_renderable,
     flatten_headings,
     hidden_lines_hint,
     output_renderable,
@@ -82,15 +83,16 @@ def _next_visible_history_item(history: list, start_index: int) -> dict | None:
 
 
 _EDIT_SNIPPET_MAX_LINES = 3
+_ARGS_PREVIEW_MAX_CHARS = 500
 
 
-def _edit_snippet_lines(text: str, prefix: str, style: str) -> list[Text]:
+def _edit_snippet_lines(
+    text: str, prefix: str, style: str, *, expanded: bool = False
+) -> list[Text]:
     lines = text.splitlines() or [""]
-    shown = [
-        Text(prefix + line, style=style)
-        for line in lines[:_EDIT_SNIPPET_MAX_LINES]
-    ]
-    hidden = len(lines) - _EDIT_SNIPPET_MAX_LINES
+    cap = len(lines) if expanded else _EDIT_SNIPPET_MAX_LINES
+    shown = [Text(prefix + line, style=style) for line in lines[:cap]]
+    hidden = len(lines) - cap
     if hidden > 0:
         shown.append(Text("  ").append_text(hidden_lines_hint(hidden, where="below")))
     return shown
@@ -143,6 +145,18 @@ def _read_result_summary(output: str) -> str:
     if eof == "true" or total is None:
         return f"{returned:,} chars  •  EOF"
     return f"{returned:,} of {total:,} chars  •  more available"
+
+
+def _read_result_content(output: str) -> str:
+    """The content chunk of a [READ RESULT] block (after the header's blank
+    line) — shown only when a card is explicitly expanded. Image reads have no
+    displayable content, so they return empty."""
+    if not output.startswith("[READ RESULT]"):
+        return ""
+    header, separator, content = output.partition("\n\n")
+    if not separator or "Image media type: " in header:
+        return ""
+    return content.strip("\n")
 
 
 _WEB_RESULT_TITLE_RE = re.compile(r"^\d+\. (.+)$")
@@ -201,7 +215,13 @@ def _error_line(output: str) -> Text:
     return Text(first, style="dim red")
 
 
-def _tool_call_renderable(item: dict, output: str = "", *, display_mode: str = "fullscreen"):
+def _tool_call_renderable(
+    item: dict,
+    output: str = "",
+    *,
+    display_mode: str = "fullscreen",
+    expanded: bool = False,
+):
     """Render a tool call as one card: header (icon \u00b7 metadata \u00b7 status pill),
     an input summary, and an optional result preview. Every tool goes through
     the single ``tool_card`` call at the end so the card contract cannot drift
@@ -214,11 +234,17 @@ def _tool_call_renderable(item: dict, output: str = "", *, display_mode: str = "
     metadata = ""
 
     if name == "run_command" and args is not None:
-        command_line = Text("> ", style="bold yellow")
-        command_line.append(str(args.get("command", "")))
+        command_line = command_line_renderable(
+            str(args.get("command", "")), expanded=expanded
+        )
         body: object = command_line
         if output:
-            body = Group(command_line, output_renderable(output))
+            body = Group(
+                command_line,
+                output_renderable(
+                    output, display_mode=display_mode, expanded=expanded
+                ),
+            )
     elif name == "read" and args is not None:
         parts: list = [
             Text(str(args.get("input", "")), no_wrap=True, overflow="ellipsis")
@@ -229,12 +255,24 @@ def _tool_call_renderable(item: dict, output: str = "", *, display_mode: str = "
             summary = _read_result_summary(output)
             if summary:
                 parts.append(Text(summary, style="dim"))
+            if expanded:
+                content = _read_result_content(output)
+                if content:
+                    parts.append(Text(content, style="dim"))
         body = Group(*parts)
         metadata = _read_args_metadata(args)
     elif name == "edit" and args is not None:
         parts = [Text(str(args.get("path", "")), no_wrap=True, overflow="ellipsis")]
-        parts.extend(_edit_snippet_lines(str(args.get("old_text", "")), "- ", "red"))
-        parts.extend(_edit_snippet_lines(str(args.get("new_text", "")), "+ ", "green"))
+        parts.extend(
+            _edit_snippet_lines(
+                str(args.get("old_text", "")), "- ", "red", expanded=expanded
+            )
+        )
+        parts.extend(
+            _edit_snippet_lines(
+                str(args.get("new_text", "")), "+ ", "green", expanded=expanded
+            )
+        )
         if output.startswith("[EDIT RESULT]"):
             summary = _edit_result_summary(output)
             if summary:
@@ -242,13 +280,17 @@ def _tool_call_renderable(item: dict, output: str = "", *, display_mode: str = "
         elif failed and output:
             parts.append(_error_line(output))
         elif output:
-            parts.append(output_renderable(output))
+            parts.append(
+                output_renderable(output, display_mode=display_mode, expanded=expanded)
+            )
         body = Group(*parts)
         metadata = "replace all" if args.get("replace_all") else ""
     elif name == "web_search" and args is not None:
         parts = [Text(str(args.get("query", "")))]
         if failed and output:
             parts.append(_error_line(output))
+        elif expanded and output:
+            parts.append(Text(output, style="dim"))
         else:
             summary, titles = _web_search_result_summary(output)
             if summary:
@@ -294,9 +336,20 @@ def _tool_call_renderable(item: dict, output: str = "", *, display_mode: str = "
                 lines.append(line)
         body = Group(*lines) if lines else Text(raw_arguments, style="dim")
     else:
-        body = Text(raw_arguments, style="dim")
+        if not expanded and len(raw_arguments) > _ARGS_PREVIEW_MAX_CHARS:
+            args_text = Text(raw_arguments[:_ARGS_PREVIEW_MAX_CHARS], style="dim")
+            args_text.append(
+                f" … +{len(raw_arguments) - _ARGS_PREVIEW_MAX_CHARS:,} chars",
+                style="dim italic",
+            )
+        else:
+            args_text = Text(raw_arguments, style="dim")
+        body = args_text
         if output:
-            body = Group(body, output_renderable(output))
+            body = Group(
+                body,
+                output_renderable(output, display_mode=display_mode, expanded=expanded),
+            )
 
     return tool_card(
         name,
@@ -308,9 +361,32 @@ def _tool_call_renderable(item: dict, output: str = "", *, display_mode: str = "
     )
 
 
+class ToolCallCard:
+    """Lazy tool card that retains its raw call data so a transcript entry can
+    be re-rendered expanded (full command + output) on demand. Renders through
+    ``_tool_call_renderable`` on every paint, so it drops into every place a
+    pre-built card renderable was used."""
+
+    expandable = True
+
+    def __init__(self, item: dict, output: str, display_mode: str):
+        self.item = item
+        self.output = output
+        self.display_mode = display_mode
+        self.expanded = False
+
+    def __rich_console__(self, console, options):
+        yield _tool_call_renderable(
+            self.item,
+            self.output,
+            display_mode=self.display_mode,
+            expanded=self.expanded,
+        )
+
+
 def tool_call_card(item: dict, output: str = "", *, display_mode: str = "fullscreen"):
     """Render a tool call as a Rich card (shared by history and live UI)."""
-    return _tool_call_renderable(item, output, display_mode=display_mode)
+    return ToolCallCard(item, output, display_mode)
 
 
 def tool_call_card_from_args(
