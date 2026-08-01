@@ -200,7 +200,6 @@ def test_help_omits_reference_config_and_path_sections():
 
     removed_config_rows = [
         "api_key",
-        "max_history",
         "max_stdin_chars",
         "max_tool_output_chars",
         "command_timeout",

@@ -258,7 +258,6 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 | `model` | `"gpt-5.4-mini"` | Model name passed to the API. |
 | `service_tiers` | `{}` | Per-provider processing tier: `standard`, `flex`, or `priority`. Missing providers use `standard`; unsupported tiers are not offered. |
 | `reasoning_effort` | `""` | Model-supported reasoning effort. Empty uses the provider/model default; `none` explicitly disables reasoning only where supported. |
-| `max_history` | `40` | Max stored history items sent as model context (item cap before token trimming). Does not delete saved history. |
 | `context_budget_ratio` | `0.75` | Share of the context window used for input. |
 | `context_compaction_threshold` | `0.85` | Fill ratio that triggers history compaction. |
 | `context_output_reserve_ratio` | `0.15` | Context window share reserved for model output. |
@@ -305,8 +304,6 @@ All state is stored in `~/.jarv/` (on Windows, `%USERPROFILE%\.jarv\`):
 ```
 
 Project context files (`JARV.md`, `AGENTS.md`, `CLAUDE.md`) live in your repositories, not in `~/.jarv/`; jarv only reads them, never writes them.
-
-`max_history` counts stored items, not exchanges or tokens. User messages, assistant messages, reasoning items, function calls, and function call outputs each count as one item.
 
 System-wide usage tracking begins once `~/.jarv/usage.json` exists; older totals aren't backfilled into time-window reports. Cost is request-based and grouped by provider and tier: Jarv uses provider-reported cost when available, otherwise estimates from OpenRouter's public pricing catalog, and shows unknown or contract-priced requests separately.
 

@@ -105,12 +105,6 @@ def trim_items_to_budget(items: list[dict], model: str, budget: int) -> list[dic
     return _align_slice_to_user(kept)
 
 
-def _cap_items_by_count(items: list[dict], max_items: int) -> list[dict]:
-    if max_items <= 0 or len(items) <= max_items:
-        return items
-    return _align_slice_to_user(items[-max_items:])
-
-
 def _should_compact_history(
     model: str,
     config: dict,
@@ -147,11 +141,6 @@ def build_input(
             target_tokens=target_tokens,
         )
     api_items = history_to_api_items(source)
-    try:
-        max_items = int(get_setting(config, "max_history"))
-    except (TypeError, ValueError):
-        max_items = int(setting_default("max_history"))
-    api_items = _cap_items_by_count(api_items, max_items)
     budget = history_token_budget(model, config, instructions, tools)
     return trim_items_to_budget(api_items, model, budget)
 

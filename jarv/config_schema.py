@@ -61,7 +61,6 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
     ConfigField("model", "gpt-5.4-mini", label="Model", section="behaviour", desc="pick from the provider presets or enter a model", ui_kind="setup", about="Model name."),
     ConfigField("service_tiers", {}, validator="service_tiers"),
     ConfigField("reasoning_effort", "", label="Reasoning effort", section="behaviour", desc="model-supported reasoning effort", ui_kind="choice", about="Model-supported reasoning effort. Empty uses the provider/model default; `none` explicitly disables reasoning only where supported."),
-    ConfigField("max_history", 40, validator="positive_int", label="History limit", section="runtime", desc="recent stored items sent as context", ui_kind="int", about="Maximum stored history items included as model context (item cap before token trimming). It does not delete saved history."),
     ConfigField("context_budget_ratio", 0.75, validator="ratio", about="Share of the context window used for input."),
     ConfigField("context_compaction_threshold", 0.85, validator="ratio", about="Fill ratio that triggers history compaction."),
     ConfigField("context_output_reserve_ratio", 0.15, validator="ratio", about="Context window share reserved for model output."),

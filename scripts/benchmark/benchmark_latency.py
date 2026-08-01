@@ -64,7 +64,6 @@ def _isolated_home() -> Path:
         "model": "llama3.2",
         "service_tiers": {},
         "reasoning_effort": "",
-        "max_history": 40,
         "context_budget_ratio": 0.75,
         "context_compaction_threshold": 0.85,
         "context_output_reserve_ratio": 0.15,

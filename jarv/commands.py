@@ -259,7 +259,7 @@ Run `jarv` with no prompt to start an interactive session. Type a prompt and pre
 4. Sends your query, recent history, the configured system prompt, and system info to the configured provider backend (OpenAI Responses, Anthropic Messages, Gemini, or an OpenAI-compatible API).
 5. Streams the assistant response in the terminal.
 6. When the model issues tool calls, jarv runs the matching handler and feeds results back into the model. See "Tools and shell commands" below for how `run_command` output, truncation, and interactive stdin are handled.
-7. Saves the full session history. On future prompts, `max_history` limits only the recent history items sent back as model context.
+7. Saves the full session history. On future prompts, the whole session history is sent back as model context, compacted and trimmed to fit the token budget.
 
 ## Tools and shell commands
 
