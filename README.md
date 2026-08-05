@@ -140,7 +140,7 @@ Jarv uses a multi-provider tool-calling agent loop (OpenAI Responses API, Anthro
 
 | Tool | Purpose |
 | --- | --- |
-| `run_command` | Execute a shell command, including simple interactive stdin prompts |
+| `run_command` | Execute a shell command (and, with interactive commands enabled, answer its stdin prompts) |
 | `web_search` | Search the web through DuckDuckGo's public HTML endpoint |
 | `read` | Page through command output, artifacts, URLs, or local files |
 | `edit` | Make an exact string replacement in an existing text file |
@@ -153,7 +153,9 @@ On Windows, commands run through PowerShell. On other platforms, they run throug
 
 `run_command` returns a head and tail of the output, sized by its `head_chars`/`tail_chars` arguments (omitted values split `max_tool_output_chars` between the two sides). When output is truncated, Jarv retains the full result under a session-scoped `cmd_<id>` so the model can fetch the rest with `read`.
 
-If a command stays alive after its output goes idle, Jarv treats it as waiting for stdin: the model's next response is sent to the process instead of printed as chat, and the loop repeats until the command exits or is cancelled. Each step shows only the new output since the previous interaction. During this loop, `command_timeout` becomes a check-in interval rather than a kill timer — Jarv asks the model what to do next instead of terminating the process.
+Interactive commands are an experimental feature, disabled by default; turn them on with the **Interactive commands** toggle in `jarv /settings` (`interactive_commands`). While they are off, every command runs to completion or is killed at `command_timeout`, and nothing can be typed into a process that blocks on a prompt.
+
+With them on, a command that stays alive after its output goes idle is treated as waiting for stdin: the model's next response is sent to the process instead of printed as chat, and the loop repeats until the command exits or is cancelled. Each step shows only the new output since the previous interaction. During this loop, `command_timeout` becomes a check-in interval rather than a kill timer — Jarv asks the model what to do next instead of terminating the process.
 
 In the terminal, command output uses at most one-third of the screen height, and Jarv shows the resolved `head_chars` and `tail_chars` for each command.
 
@@ -267,8 +269,9 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 | `max_tool_output_chars` | `20000` | Maximum generic tool output characters returned to the model. It also supplies the default head/tail budget for `run_command`. |
 | `project_context_max_chars` | `16000` | Maximum project-context file characters injected into the system prompt (longer files are truncated head+tail). |
 | `disabled_tools` | `[]` | Tool names omitted from root agents and subagents. Configure these from the Tools section in `/settings`. |
+| `interactive_commands` | `false` | Experimental. Hold a command that is waiting on stdin open and let the model type into it. |
 | `command_timeout` | `60` | Seconds before non-interactive shell commands are killed, or before interactive commands check in again. |
-| `interactive_max_rounds` | `40` | Model interaction rounds allowed for one interactive command before Jarv kills the process. |
+| `interactive_max_rounds` | `40` | Model interaction rounds allowed for one interactive command before Jarv kills the process. Only used when `interactive_commands` is on. |
 | `web_timeout` | `15` | Seconds before a web search or URL read is killed. |
 | `command_safety` | `"risky"` | Command confirmation level: `all` (confirm every command), `risky` (confirm dangerous commands only), `none` (no confirmation). |
 | `audit` | `true` | LLM auditor for flagged commands. |

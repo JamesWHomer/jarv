@@ -146,7 +146,11 @@ class AgentInputTests(unittest.TestCase):
             color_system=None,
             width=120,
         )
-        config = {**DEFAULT_CONFIG, "tool_call_display": "fullscreen"}
+        config = {
+            **DEFAULT_CONFIG,
+            "tool_call_display": "fullscreen",
+            "interactive_commands": True,
+        }
         command = "Read-Host 'Name'"
         captured_frames: list[str] = []
 
@@ -222,6 +226,37 @@ class AgentInputTests(unittest.TestCase):
         # The card's Live stays open for a pending command; release the
         # live-display depth it entered so it doesn't leak into later tests.
         result.pending_command.live_depth_cm.__exit__(None, None, None)
+
+    def test_run_command_runs_to_completion_when_interactive_is_disabled(self):
+        # interactive_commands is off by default: run_command must not open an
+        # InteractiveCommandProcess, and it returns the finished output rather
+        # than a dispatch result the turn loop would hand back to the model.
+        stream = io.StringIO()
+        test_console = Console(
+            file=stream,
+            force_terminal=True,
+            color_system=None,
+            width=120,
+        )
+        config = {**DEFAULT_CONFIG, "tool_call_display": "fullscreen"}
+        self.assertFalse(config["interactive_commands"])
+
+        def refuse_start(*_args, **_kwargs):
+            raise AssertionError("interactive process started while disabled")
+
+        with (
+            patch("jarv.agent.console", test_console),
+            patch("jarv.agent.check_command", return_value=(True, "")),
+            patch(
+                "jarv.agent.InteractiveCommandProcess.start",
+                side_effect=refuse_start,
+            ),
+        ):
+            result = _dispatch_run_command_with_ui({"command": "echo ok"}, config)
+
+        self.assertIsInstance(result, str)
+        self.assertIn("ok", result)
+        self.assertIn("echo ok", stream.getvalue())
 
     def test_response_wait_label_is_neutral_without_reasoning(self):
         self.assertEqual(response_wait_label(has_reasoning=False), "Waiting")
@@ -1061,7 +1096,11 @@ class AgentInputTests(unittest.TestCase):
                     yield TextDelta("done")
                 yield StreamDone(response=None)
 
-            config = {**DEFAULT_CONFIG, "max_tool_output_chars": 10}
+            config = {
+                **DEFAULT_CONFIG,
+                "max_tool_output_chars": 10,
+                "interactive_commands": True,
+            }
             class FakeInteractiveProcess:
                 def kill_tree(self):
                     pass
@@ -1160,7 +1199,11 @@ class AgentInputTests(unittest.TestCase):
                 ),
                 patch("jarv.agent.sys.stdout", new=io.StringIO()),
             ):
-                result = run_agent("run menu", DEFAULT_CONFIG, client=object())
+                result = run_agent(
+                    "run menu",
+                    {**DEFAULT_CONFIG, "interactive_commands": True},
+                    client=object(),
+                )
             saved_items = load_history(history_file)
             saved_text = "\n".join(
                 str(item.get("content", ""))
