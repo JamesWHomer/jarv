@@ -243,7 +243,7 @@ def tool_card(
     title.append(label, style=f"bold {accent}")
 
     metadata_text = Text(metadata, style="dim")
-    status_text = Text(justify="right", style="dim")
+    status_text = Text(style="dim")
     if status:
         if status_style == "green":
             status_text.append("\u2713 ", style="bold green")
@@ -260,21 +260,32 @@ def tool_card(
     show_status = bool(status) and (
         display_mode == "fullscreen" or status_style != "green"
     )
-    header = ToolCardHeader(
-        title,
-        metadata_text,
-        status_text if show_status else Text(),
-    )
-    content = Group(header, body)
     if display_mode == "fullscreen":
+        header: RenderableType = ToolCardHeader(
+            title,
+            metadata_text,
+            status_text if show_status else Text(),
+        )
         return Panel(
-            content,
+            Group(header, body),
             border_style="bright_black",
             box=box.ROUNDED,
             safe_box=False,
             padding=(0, 1),
         )
-    return ToolCard(accent, content)
+    # Print mode keeps everything left-aligned: right-edge gap fill depends on
+    # the print-time width, so it rewraps into garbage once the scrollback is
+    # resized narrower.
+    header = title.copy()
+    if metadata_text:
+        header.append("  ")
+        header.append_text(metadata_text)
+    if show_status:
+        header.append("  ")
+        header.append_text(status_text)
+    header.no_wrap = True
+    header.overflow = "crop"
+    return ToolCard(accent, Group(header, body))
 
 
 DISPLAY_HEIGHT_RATIO = 3
@@ -285,6 +296,22 @@ DISPLAY_MIN_LINE_LIMIT = 3
 # terminal-height "auto" behaviour. Pushed in from config at run start so this
 # module stays free of config imports.
 _display_lines_override: int | None = None
+
+# Resolved ``tool_call_display`` mode, pushed in from ``run_agent`` so modules
+# without config access (safety confirms) can match the run's card style.
+# ``"print"`` is the safe default: it never emits width-dependent output.
+_tool_call_display_mode = "print"
+
+
+def configure_tool_call_display(mode: str) -> None:
+    """Record the resolved ``tool_call_display`` mode for this run."""
+    global _tool_call_display_mode
+    _tool_call_display_mode = "fullscreen" if mode == "fullscreen" else "print"
+
+
+def resolved_tool_call_display() -> str:
+    """Return the resolved ``tool_call_display`` mode pushed in at run start."""
+    return _tool_call_display_mode
 
 
 def configure_output_display_lines(setting) -> None:

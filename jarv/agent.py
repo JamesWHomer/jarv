@@ -19,6 +19,7 @@ from .context_budget import build_input, trim_turn_input
 from .cancellation import CancellationToken, TurnCancelled, cancel_token_on_sigint
 from .display import (
     configure_output_display_lines,
+    configure_tool_call_display,
     console,
     flatten_headings,
     track_live_display,
@@ -1171,6 +1172,7 @@ def run_agent(
         config,
         heads_up=heads_up,
     )
+    configure_tool_call_display(config["tool_call_display"])
     configure_output_display_lines(get_setting(config, "tool_output_display_lines"))
     interactive = sys.stdout.isatty() and ui is None
     history: list = []

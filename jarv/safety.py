@@ -11,7 +11,13 @@ from rich.markup import escape
 from rich.text import Text
 
 from .cancellation import CancellationToken, TurnCancelled
-from .display import console, hidden_lines_hint, jarv_panel, live_display_depth
+from .display import (
+    console,
+    hidden_lines_hint,
+    live_display_depth,
+    resolved_tool_call_display,
+    tool_card,
+)
 
 SAFETY_LEVELS = ("all", "risky", "none")
 DEFAULT_SAFETY_LEVEL = "risky"
@@ -294,12 +300,33 @@ def request_confirmation(request: ConfirmRequest) -> bool:
     )
 
 
-def _console_confirm(request: ConfirmRequest) -> bool:
-    """Inline fallback: safety panel plus y/N prompt on the shared console."""
-    console.print()
-    console.print(
-        jarv_panel(request.body, title="safety", subtitle=request.subtitle, padding=(1, 2))
+def _safety_card(
+    body,
+    *,
+    subtitle: str = "confirm to run",
+    status: str = "waiting",
+    status_style: str = "blue",
+):
+    """The inline safety confirm card, in the run's resolved card style.
+
+    Mirrors the heads-up confirm rendering: borderless left-rail card in print
+    mode (bordered panels shatter when the scrollback is resized narrower),
+    bordered card when the user pinned ``tool_call_display`` to fullscreen.
+    """
+    return tool_card(
+        "safety",
+        body,
+        metadata=subtitle,
+        status=status,
+        status_style=status_style,
+        display_mode=resolved_tool_call_display(),
     )
+
+
+def _console_confirm(request: ConfirmRequest) -> bool:
+    """Inline fallback: safety card plus y/N prompt on the shared console."""
+    console.print()
+    console.print(_safety_card(request.body, subtitle=request.subtitle))
 
     prompt = f"[bold]{request.question}[/bold] [dim]\\[y/N][/dim] [bold cyan]\u203a[/bold cyan] "
     try:
@@ -458,9 +485,7 @@ class _AuditPanel:
                     f"[green]{frame}  auditor[/green]  [dim]checking…  {elapsed}s[/dim]"
                 ))
 
-        panel = jarv_panel(
-            Group(*parts), title="safety", subtitle="confirm to run", padding=(1, 2),
-        )
+        panel = _safety_card(Group(*parts))
         buf_str = escape("".join(self.buf))
         if self.answered and buf_str:
             is_yes = buf_str.strip().lower() in ("y", "yes")
@@ -498,7 +523,7 @@ def _audit_gate(
     # heads-up app can prompt even though stdout is its alt screen.
     if not confirm_handler_active() and not sys.stdout.isatty():
         console.print()
-        console.print(jarv_panel(body, title="safety", subtitle="confirm to run", padding=(1, 2)))
+        console.print(_safety_card(body))
         allow, auditor_reason = audit_command(
             command,
             reason,
@@ -571,7 +596,7 @@ def _audit_poll_without_live(
 ) -> bool:
     """Wait for the auditor and prompt without starting a nested Rich Live."""
     console.print()
-    console.print(jarv_panel(body, title="safety", subtitle="confirm to run", padding=(1, 2)))
+    console.print(_safety_card(body))
     while not audit_state.get("done"):
         if cancellation_token is not None:
             cancellation_token.throw_if_cancelled()
