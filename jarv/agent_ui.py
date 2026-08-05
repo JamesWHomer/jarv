@@ -177,16 +177,9 @@ class RunningCommandCard:
 
     def __rich_console__(self, console, options):
         elapsed = int(max(0.0, time.perf_counter() - self._start))
-        command_line = command_line_renderable(self._command)
-        body = command_line
-        if self._display_mode != "fullscreen":
-            body = Group(
-                command_line,
-                Text(f"Running\u2026 {elapsed}s", style="dim"),
-            )
         yield tool_card(
             "run_command",
-            body,
+            command_line_renderable(self._command),
             metadata=self._metadata,
             display_mode=self._display_mode,
             status=f"running {elapsed}s",

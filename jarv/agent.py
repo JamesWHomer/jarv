@@ -19,6 +19,7 @@ from .context_budget import build_input, trim_turn_input
 from .cancellation import CancellationToken, TurnCancelled, cancel_token_on_sigint
 from .display import (
     configure_output_display_lines,
+    configure_tool_call_display,
     console,
     flatten_headings,
     track_live_display,
@@ -53,17 +54,18 @@ from .response_items import status_history_item
 from .orchestrator import (
     ASK_USER_TOOL,
     PendingRunCommand,
-    RUN_COMMAND_TOOL,
     RunCommandDispatchResult,
     SPAWN_TOOL,
     AgentNode,
     SpawnObserver,
     ToolExecutionHooks,
+    execute_run_command,
     execute_tool_calls,
     filter_enabled_tools,
     history_has_web_search_read_nudge,
     parse_spawn_children,
     prepare_run_command,
+    run_command_tool_for_config,
     spawn_tool_output,
 )
 from .edit_tool import EDIT_TOOL, dispatch_edit_tool
@@ -94,7 +96,7 @@ from .web import WEB_SEARCH_TOOL
 
 def build_agent_tools(config: dict) -> list[dict]:
     tools = [
-        RUN_COMMAND_TOOL,
+        run_command_tool_for_config(config),
         WEB_SEARCH_TOOL,
         SPAWN_TOOL,
         read_tool_for_config(config),
@@ -118,6 +120,7 @@ from .agent_ui import (
     InPlaceLive,
     InteractiveCommandCard,
     ResponseWaitIndicator,
+    RunningCommandCard,
     StreamingMarkdownPreview,
     TailMarkdown,
     ToolActivityIndicator,
@@ -274,6 +277,76 @@ def _refresh_interactive_card(ui, pending) -> None:
         pending.live.refresh()
 
 
+def _dispatch_run_command_oneshot(
+    prepared,
+    config,
+    *,
+    cancellation_token,
+    retained_store,
+    ui,
+    shell_state,
+) -> str:
+    """Run a prepared command to completion, with no held-open stdin loop.
+
+    The path taken while ``interactive_commands`` is off (the default). The
+    command still gets a live card, but ``command_timeout`` is a kill timer
+    again: a process that blocks on stdin is killed when it fires instead of
+    being handed to the model.
+    """
+    from .session_render import tool_call_card_from_args
+
+    display_mode = get_setting(config, "tool_call_display")
+    card = RunningCommandCard(prepared.cmd, "", display_mode, time.perf_counter())
+    live = None
+    live_depth_cm = None
+    if ui is not None:
+        _ui_call(ui, "show_tool_card", card)
+    else:
+        live_depth_cm = track_live_display()
+        live_depth_cm.__enter__()
+        live = Live(
+            card,
+            refresh_per_second=8,
+            console=console,
+            auto_refresh=True,
+            transient=False,
+            vertical_overflow="crop",
+        )
+        live.start()
+    try:
+        output, _result, _output_id = execute_run_command(
+            prepared,
+            config,
+            cancellation_token=cancellation_token,
+            retained_store=retained_store,
+            shell_state=shell_state,
+        )
+    except BaseException:
+        _stop_interactive_card_live(live, live_depth_cm)
+        raise
+
+    final_card = tool_call_card_from_args(
+        "run_command",
+        {"command": prepared.cmd},
+        output=output,
+        display_mode=display_mode,
+    )
+    # Inline: swap the finished card into the same Live so it replaces the
+    # running one in place. Heads-up: the card goes to its live-tool slot,
+    # which show_tool_card replaces on the next non-live renderable.
+    if live is not None:
+        try:
+            live.update(final_card)
+        except Exception:
+            pass
+    _stop_interactive_card_live(live, live_depth_cm)
+    if ui is not None:
+        _ui_call(ui, "show_tool_card", final_card)
+    else:
+        print_mode_spacer(config)
+    return output
+
+
 def _dispatch_run_command_with_ui(
     args,
     config,
@@ -308,6 +381,16 @@ def _dispatch_run_command_with_ui(
         else:
             console.print(f"[dim]{denial}[/dim]")
         return denial
+
+    if not get_setting(config, "interactive_commands"):
+        return _dispatch_run_command_oneshot(
+            prepared,
+            config,
+            cancellation_token=cancellation_token,
+            retained_store=retained_store,
+            ui=ui,
+            shell_state=shell_state,
+        )
 
     display_mode = get_setting(config, "tool_call_display")
     # One growing transcript box for the whole interactive session. Inline mode
@@ -1171,6 +1254,7 @@ def run_agent(
         config,
         heads_up=heads_up,
     )
+    configure_tool_call_display(config["tool_call_display"])
     configure_output_display_lines(get_setting(config, "tool_output_display_lines"))
     interactive = sys.stdout.isatty() and ui is None
     history: list = []

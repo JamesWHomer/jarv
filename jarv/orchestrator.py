@@ -59,15 +59,39 @@ MAX_SPAWN_DEPS = 32
 MAX_SPAWN_LABEL_CHARS = 80
 MAX_SPAWN_TASK_CHARS = 50_000
 
+def _run_command_description(interactive: bool) -> str:
+    """Describe run_command truthfully for the active `interactive_commands` setting.
+
+    With interactive commands off (the default) nothing can be typed into a
+    process that blocks on stdin, so promising the model an interactive
+    continuation only earns a command that hangs until `command_timeout`.
+    """
+    if interactive:
+        stdin_note = (
+            "If the process waits for stdin, Jarv may continue it interactively. "
+        )
+    else:
+        stdin_note = (
+            "Commands run to completion; nothing can be typed into a process that "
+            "waits for stdin, so supply input non-interactively (flags, pipes, "
+            "here-strings) and avoid commands that block on a prompt. "
+        )
+    return (
+        "Run a shell command and return its output. "
+        + stdin_note
+        + "Shell state persists between calls: the working directory (cd), "
+        "environment variables, and activated virtualenvs carry over to the "
+        "next run_command."
+    )
+
+
 RUN_COMMAND_TOOL = {
     "type": "function",
     "name": "run_command",
-    "description": (
-        "Run a shell command and return its output. If the process waits for stdin, "
-        "Jarv may continue it interactively. Shell state persists between calls: "
-        "the working directory (cd), environment variables, and activated "
-        "virtualenvs carry over to the next run_command."
-    ),
+    # Subagents never hold a command open, so the tool's baseline description is
+    # the non-interactive one; `run_command_tool_for_config` swaps it for root
+    # agents when the user has enabled interactive commands.
+    "description": _run_command_description(False),
     "parameters": {
         "type": "object",
         "properties": {
@@ -95,6 +119,14 @@ RUN_COMMAND_TOOL = {
         "additionalProperties": False,
     },
 }
+
+
+def run_command_tool_for_config(config: dict) -> dict:
+    """Return the run_command schema matching this config's interactive setting."""
+    if not get_setting(config, "interactive_commands"):
+        return RUN_COMMAND_TOOL
+    return {**RUN_COMMAND_TOOL, "description": _run_command_description(True)}
+
 
 SPAWN_TOOL = {
     "type": "function",

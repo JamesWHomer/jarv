@@ -111,6 +111,44 @@ def test_tool_builders_omit_read_image_description_for_text_only_model(monkeypat
     assert "image reads" not in child_read["description"]
 
 
+def test_interactive_commands_setting_is_an_experimental_off_by_default_toggle(monkeypatch):
+    config = dict(DEFAULT_CONFIG)
+    row = next(
+        row
+        for row in settings_command._settings_rows(config)
+        if row["key"] == "interactive_commands"
+    )
+
+    assert config["interactive_commands"] is False
+    assert row["kind"] == "bool"
+    assert row["desc"].startswith("experimental:")
+    assert settings_command._settings_value_text(row, config).plain == "off"
+
+    monkeypatch.setattr(settings_command, "save_config", lambda _config: None)
+    updated, message = settings_command._settings_apply_quick(row, config)
+
+    assert updated["interactive_commands"] is True
+    assert message == "saved Interactive commands: on"
+
+
+def test_run_command_description_promises_stdin_only_when_interactive_is_on():
+    off = _tool_by_name(build_agent_tools(DEFAULT_CONFIG), "run_command")
+    on = _tool_by_name(
+        build_agent_tools({**DEFAULT_CONFIG, "interactive_commands": True}),
+        "run_command",
+    )
+    # Subagents never hold a command open, so they always get the plain wording.
+    child = _tool_by_name(
+        build_subagent_tools(True, {**DEFAULT_CONFIG, "interactive_commands": True}),
+        "run_command",
+    )
+
+    assert "continue it interactively" not in off["description"]
+    assert "run to completion" in off["description"]
+    assert "continue it interactively" in on["description"]
+    assert "continue it interactively" not in child["description"]
+
+
 def test_subagent_finish_tool_cannot_be_disabled():
     config = {**DEFAULT_CONFIG, "disabled_tools": list(TOOL_NAMES)}
 
