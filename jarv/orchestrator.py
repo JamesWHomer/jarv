@@ -301,7 +301,8 @@ class PendingRunCommand:
     transcript_segments: list = field(default_factory=list)
     # Model interaction rounds so far, checked against interactive_max_rounds.
     rounds: int = 0
-    # Consecutive unparseable replies; bounded separately from rounds so a
+    # Consecutive replies that couldn't be applied (unparseable text, empty
+    # replies, or stray tool calls); bounded separately from rounds so a
     # confused model can be re-prompted a few times without eating the
     # interaction budget, but cannot loop forever.
     invalid_streak: int = 0

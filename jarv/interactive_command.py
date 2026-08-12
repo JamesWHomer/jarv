@@ -54,22 +54,42 @@ _TERMINAL_CONTROLS = (
     "<UP>, <DOWN>, <LEFT>, <RIGHT>"
 )
 
-# Sent once per session; later waiting prompts omit it and carry only state.
+# Sent on the first waiting prompt, then refreshed periodically (see
+# _interactive_help_refresh_due); other prompts omit it and carry only state.
 _TERMINAL_REPLY_INSTRUCTIONS = (
     "Reply with one line — stdin text (sent with Enter) or controls: "
     f"{_TERMINAL_CONTROLS}. Controls may be chained in order (e.g. "
-    "<DOWN> <DOWN> <ENTER>); an empty reply just waits. Do not mix prose with "
+    "<DOWN> <DOWN> <ENTER>); do not send an empty reply — use <WAIT> to keep "
+    "waiting. Do not mix prose with "
     "controls — text around controls is not sent. In a multi-line reply, a "
     "line containing only controls is executed and surrounding prose is "
     "ignored."
 )
 
+# Waiting-prompt rounds between refreshes of the reply instructions above.
+_HELP_REFRESH_ROUNDS = 10
+
+
+def _interactive_help_refresh_due(rounds: int) -> bool:
+    """Whether this round's waiting prompt should re-carry the instructions.
+
+    The help line used to be sent exactly once per run, inside the first
+    waiting prompt — which is the command's ``function_call_output``. In-turn
+    trimming keeps the newest user-aligned suffix of the input, so a long or
+    chatty interaction dropped that one instruction-bearing item and left a
+    tool-trained model with no protocol text in context: it fell back to
+    prose (typed into stdin) or tool calls. Refreshing every
+    ``_HELP_REFRESH_ROUNDS`` rounds keeps the vocabulary within reach.
+    """
+    return rounds > 0 and rounds % _HELP_REFRESH_ROUNDS == 0
+
 
 def _interactive_tool_call_reminder() -> str:
     """Nudge sent when the model calls a tool mid-interaction instead of replying."""
     return (
-        "A terminal command is waiting for input — reply with stdin text or "
-        f"controls ({_TERMINAL_CONTROLS}), not a tool call."
+        "A terminal command is waiting for input and your tool call was not "
+        "executed — reply with stdin text or controls "
+        f"({_TERMINAL_CONTROLS}), not a tool call."
     )
 
 
@@ -260,7 +280,10 @@ def _parse_terminal_actions(
     """Parse a model reply into an ordered action sequence plus an advisory note.
 
     Rules (first non-fence line, with one multi-line exception below):
-    - an empty reply is a wait, never Enter (Enter can confirm destructive prompts);
+    - an empty reply is invalid (re-prompt) — never Enter (Enter can confirm
+      destructive prompts), and no longer a silent wait: reasoning models emit
+      empty turns when their output fails, and mapping those to a bare <WAIT>
+      turned each one into a long check-in stall that looked like a hang;
     - no control tokens -> the line is stdin text (Enter implied), except a line
       that is nothing but unknown ``<...>`` tokens, which is invalid (re-prompt);
     - multi-line exception: a multi-word first line with no valid control is
@@ -276,7 +299,7 @@ def _parse_terminal_actions(
     """
     lines = _candidate_lines(text)
     if not lines:
-        return [("wait", None)], None
+        return [("invalid", "")], None
     line = lines[0]
 
     matches = [
@@ -336,6 +359,11 @@ def _invalid_reply_message(payload: str) -> str:
     control (or the literal-text fallback for single letters) converges the
     retry loop instead.
     """
+    if not payload.strip():
+        return (
+            "your reply was empty — nothing was typed into the terminal; "
+            "reply with stdin text, or <WAIT> to keep waiting"
+        )
     hints = []
     for token in _TOKEN_RE.findall(payload):
         action = _control_token_action(token)
@@ -470,9 +498,24 @@ def _record_interactive_input(
         output_item["output"] = "\n".join(pending.transcript_segments)
 
 
-# Consecutive unparseable replies before the interaction is aborted; bounded
+# Consecutive replies that couldn't be applied (unparseable text, empty
+# replies, or stray tool calls) before the interaction is aborted; bounded
 # separately from interactive_max_rounds (see PendingRunCommand.invalid_streak).
 _MAX_CONSECUTIVE_INVALID = 5
+
+
+def _invalid_streak_abort_note() -> str:
+    """Abort message for the shared could-not-apply streak.
+
+    One streak covers both unparseable/empty replies and stray tool calls —
+    either way the reply never touched the process — so both abort paths use
+    the same wording.
+    """
+    return (
+        f"[interactive command aborted: {_MAX_CONSECUTIVE_INVALID} "
+        "consecutive replies that were tool calls or unparseable terminal "
+        "input; the process was killed]"
+    )
 
 
 def _record_rejected_reply(pending, marker: str) -> None:

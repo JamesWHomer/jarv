@@ -219,8 +219,10 @@ from .interactive_command import (
     _format_finished_interactive_output,
     _interaction_marker_text,
     _interactive_check_in_seconds,
+    _interactive_help_refresh_due,
     _interactive_max_rounds,
     _interactive_tool_call_reminder,
+    _invalid_streak_abort_note,
     _record_interactive_input,
     _record_rejected_reply,
     _run_command_final_prompt,
@@ -1012,10 +1014,38 @@ def _advance_interactive_continuation(
         )
         return _abort_interactive_command(pending, note, ui, input_items), None
     if renderer.tool_calls:
-        # A stray mid-interaction tool call: remind and re-prompt without
-        # touching the process.
+        # A stray mid-interaction tool call: the calls are not executed. Echo
+        # the attempt back as answered function calls before the reminder —
+        # dropping the turn entirely left the model with no trace of what it
+        # had tried, and a model whose turn vanishes re-sends the same call
+        # round after round. Refund the round (nothing touched the process)
+        # but bound the streak like unparseable replies, or a tool-stuck
+        # model loops on free retries.
+        pending.rounds -= 1
+        pending.invalid_streak += 1
+        names = ", ".join(call.name for call in renderer.tool_calls)
+        _record_rejected_reply(
+            pending,
+            f"[reply rejected: tool call ({names}) instead of terminal input]",
+        )
+        if pending.invalid_streak >= _MAX_CONSECUTIVE_INVALID:
+            return (
+                _abort_interactive_command(
+                    pending, _invalid_streak_abort_note(), ui, input_items
+                ),
+                None,
+            )
+        echoed: list = []
+        append_reasoning_input_items(echoed, renderer.reasoning_items)
+        for call in renderer.tool_calls:
+            append_tool_result_input_items(
+                echoed,
+                call,
+                "[not executed: a terminal command is waiting for input; "
+                "reply to the terminal instead of calling tools]",
+            )
         return (
-            input_items + [{
+            input_items + echoed + [{
                 "role": "user",
                 "content": _interactive_tool_call_reminder(),
             }],
@@ -1050,13 +1080,10 @@ def _advance_interactive_continuation(
             pending.invalid_streak += 1
             _record_rejected_reply(pending, f"[reply rejected: {terminal_action}]")
             if pending.invalid_streak >= _MAX_CONSECUTIVE_INVALID:
-                note = (
-                    f"[interactive command aborted: {_MAX_CONSECUTIVE_INVALID} "
-                    "consecutive unparseable terminal replies; the process "
-                    "was killed]"
-                )
                 return (
-                    _abort_interactive_command(pending, note, ui, input_items),
+                    _abort_interactive_command(
+                        pending, _invalid_streak_abort_note(), ui, input_items
+                    ),
                     None,
                 )
         else:
@@ -1106,7 +1133,10 @@ def _advance_interactive_continuation(
         }]
         _finalize_interactive_record(pending, final_output)
         return input_items, None
-    include_help = not interactive_help["sent"]
+    include_help = (
+        not interactive_help["sent"]
+        or _interactive_help_refresh_due(pending.rounds)
+    )
     interactive_help["sent"] = True
     statuses = (f"Note: {parse_note}.",) if parse_note else ()
     waiting_prompt = _run_command_waiting_prompt(

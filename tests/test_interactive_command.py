@@ -10,8 +10,10 @@ from unittest.mock import patch
 from jarv.agent import _advance_interactive_continuation
 from jarv.config import DEFAULT_CONFIG
 from jarv.interactive_command import (
+    _HELP_REFRESH_ROUNDS,
     _MAX_CONSECUTIVE_INVALID,
     _finalize_interactive_record,
+    _interactive_help_refresh_due,
     _invalid_reply_message,
     _parse_terminal_actions,
     _record_interactive_input,
@@ -30,12 +32,19 @@ from jarv.shell import InteractiveCommandProcess, InteractiveCommandSnapshot
 
 
 class TerminalReplyParsingTests(unittest.TestCase):
-    def test_empty_reply_waits_instead_of_pressing_enter(self):
+    def test_empty_reply_is_rejected_not_enter_or_wait(self):
         # Enter can confirm a destructive [y/N] prompt; an empty model reply
-        # must never imply it.
+        # must never imply it. It used to mean a silent bare <WAIT>, but empty
+        # replies are usually a failed model turn, and waiting stalled the
+        # interaction for a whole check-in interval per failure.
         actions, note = _parse_terminal_actions("")
-        self.assertEqual(actions, [("wait", None)])
+        self.assertEqual(actions, [("invalid", "")])
         self.assertIsNone(note)
+
+    def test_empty_reply_rejection_message_suggests_wait(self):
+        message = _invalid_reply_message("")
+        self.assertIn("empty", message)
+        self.assertIn("<WAIT>", message)
 
     def test_narrative_before_control_executes_the_control(self):
         actions, note = _parse_terminal_actions("I'll press <ENTER>")
@@ -449,6 +458,189 @@ class InvalidReplyStreakTests(unittest.TestCase):
         # Blocked replies still consume a round; only unparseable ones refund.
         self.assertEqual(pending.rounds, 6)
         self.assertIn("blocked", pending.output_item["output"])
+
+
+class MidInteractionToolCallTests(unittest.TestCase):
+    def _pending(self, rounds=5, streak=0):
+        return SimpleNamespace(
+            rounds=rounds,
+            invalid_streak=streak,
+            card=None,
+            live=None,
+            live_depth_cm=None,
+            process=SimpleNamespace(kill_tree=lambda: None),
+            unregister_cancel=None,
+            input_markers=[],
+            transcript_segments=["Choose:"],
+            output_item={"output": "Choose:"},
+            prepared=SimpleNamespace(cmd="menu", head_chars=None, tail_chars=None),
+        )
+
+    def _advance(self, pending, tool_calls, input_items=None):
+        renderer = SimpleNamespace(
+            tool_calls=list(tool_calls),
+            reasoning_items=[],
+            thought_started=time.perf_counter(),
+            reply_text="",
+        )
+        return _advance_interactive_continuation(
+            pending,
+            renderer,
+            input_items or [],
+            config=dict(DEFAULT_CONFIG),
+            cancellation_token=None,
+            retained_store=None,
+            ui=None,
+            interactive_help={"sent": True},
+        )
+
+    def _call(self, call_id="call_1"):
+        return ToolCallDone(
+            id="fc_1",
+            call_id=call_id,
+            name="run_command",
+            arguments=json.dumps({"command": "y"}),
+        )
+
+    def test_tool_call_is_echoed_answered_and_reminded(self):
+        # The attempt must stay visible in the conversation: dropping it made
+        # the model re-send the same call round after round.
+        pending = self._pending(rounds=5)
+        items, still_pending = self._advance(pending, [self._call()])
+        self.assertIs(still_pending, pending)
+        # The round was refunded — nothing touched the process — and the
+        # shared could-not-apply streak grew.
+        self.assertEqual(pending.rounds, 5)
+        self.assertEqual(pending.invalid_streak, 1)
+        call_items = [i for i in items if i.get("type") == "function_call"]
+        output_items = [i for i in items if i.get("type") == "function_call_output"]
+        self.assertEqual(len(call_items), 1)
+        self.assertEqual(output_items[0]["call_id"], "call_1")
+        self.assertIn("[not executed:", output_items[0]["output"])
+        self.assertEqual(items[-1]["role"], "user")
+        self.assertIn("not a tool call", items[-1]["content"])
+        # The rejection is diagnosable in the collapsed session record too.
+        self.assertIn(
+            "[reply rejected: tool call (run_command)",
+            pending.output_item["output"],
+        )
+
+    def test_every_stray_call_gets_an_answer(self):
+        pending = self._pending()
+        items, _ = self._advance(pending, [self._call("call_1"), self._call("call_2")])
+        answered = {
+            i["call_id"] for i in items if i.get("type") == "function_call_output"
+        }
+        self.assertEqual(answered, {"call_1", "call_2"})
+
+    def test_consecutive_tool_call_replies_abort_the_interaction(self):
+        killed = {}
+        pending = self._pending(streak=_MAX_CONSECUTIVE_INVALID - 1)
+        pending.process = SimpleNamespace(
+            kill_tree=lambda: killed.setdefault("yes", True)
+        )
+        items, still_pending = self._advance(pending, [self._call()])
+        self.assertIsNone(still_pending)
+        self.assertTrue(killed)
+        self.assertIn("aborted", items[-1]["content"])
+        self.assertIn("tool calls", items[-1]["content"])
+        self.assertIn("aborted", pending.output_item["output"])
+
+    def test_applied_reply_resets_tool_call_streak(self):
+        # Shared streak: a valid terminal reply after stray tool calls resets it.
+        pending = self._pending(streak=3)
+        delta = SimpleNamespace(
+            to_model_output=lambda head_chars=None, tail_chars=None: "out",
+            full_model_output=lambda: "out",
+        )
+        snapshot = SimpleNamespace(
+            exited=False,
+            command="menu",
+            check_in=False,
+            stdin_closed=False,
+            to_delta_command_result=lambda: delta,
+        )
+        pending.process = SimpleNamespace(wait_until_idle=lambda **_kwargs: snapshot)
+        pending.card = SimpleNamespace(add_step=lambda *args, **kwargs: None)
+        renderer = SimpleNamespace(
+            tool_calls=[],
+            reasoning_items=[],
+            thought_started=time.perf_counter(),
+            reply_text="<WAIT 1s>",
+        )
+        _items, still_pending = _advance_interactive_continuation(
+            pending,
+            renderer,
+            [],
+            config=dict(DEFAULT_CONFIG),
+            cancellation_token=None,
+            retained_store=None,
+            ui=None,
+            interactive_help={"sent": True},
+        )
+        self.assertIs(still_pending, pending)
+        self.assertEqual(pending.invalid_streak, 0)
+
+
+class HelpRefreshTests(unittest.TestCase):
+    def test_refresh_due_every_n_rounds(self):
+        self.assertFalse(_interactive_help_refresh_due(0))
+        self.assertFalse(_interactive_help_refresh_due(_HELP_REFRESH_ROUNDS - 1))
+        self.assertTrue(_interactive_help_refresh_due(_HELP_REFRESH_ROUNDS))
+        self.assertTrue(_interactive_help_refresh_due(_HELP_REFRESH_ROUNDS * 2))
+
+    def _advance_wait(self, rounds_before):
+        delta = SimpleNamespace(
+            to_model_output=lambda head_chars=None, tail_chars=None: "out",
+            full_model_output=lambda: "out",
+        )
+        snapshot = SimpleNamespace(
+            exited=False,
+            command="menu",
+            check_in=False,
+            stdin_closed=False,
+            to_delta_command_result=lambda: delta,
+        )
+        pending = SimpleNamespace(
+            rounds=rounds_before,
+            invalid_streak=0,
+            card=SimpleNamespace(add_step=lambda *args, **kwargs: None),
+            live=None,
+            live_depth_cm=None,
+            process=SimpleNamespace(wait_until_idle=lambda **_kwargs: snapshot),
+            unregister_cancel=None,
+            input_markers=[],
+            transcript_segments=[],
+            output_item={"output": ""},
+            prepared=SimpleNamespace(cmd="menu", head_chars=None, tail_chars=None),
+        )
+        renderer = SimpleNamespace(
+            tool_calls=[],
+            reasoning_items=[],
+            thought_started=time.perf_counter(),
+            reply_text="<WAIT 1s>",
+        )
+        items, _ = _advance_interactive_continuation(
+            pending,
+            renderer,
+            [],
+            config=dict(DEFAULT_CONFIG),
+            cancellation_token=None,
+            retained_store=None,
+            ui=None,
+            interactive_help={"sent": True},
+        )
+        return items[-1]["content"]
+
+    def test_waiting_prompt_recarries_instructions_on_refresh_rounds(self):
+        # In-turn trimming can drop the first waiting prompt — the only copy
+        # of the reply vocabulary — so long interactions must re-carry it.
+        prompt = self._advance_wait(_HELP_REFRESH_ROUNDS - 1)
+        self.assertIn("Reply with one line", prompt)
+
+    def test_waiting_prompt_omits_instructions_between_refreshes(self):
+        prompt = self._advance_wait(_HELP_REFRESH_ROUNDS - 2)
+        self.assertNotIn("Reply with one line", prompt)
 
 
 class SkippedTrailingToolCallTests(unittest.TestCase):
