@@ -260,7 +260,18 @@ def usage_from_response(response: Any) -> dict | None:
     uncached_input_tokens = None
     if input_tokens is not None:
         uncached_input_tokens = max(input_tokens - cached_input_tokens, 0)
-    cache_creation_input_tokens = _int_value(usage, "cache_creation_input_tokens") or 0
+    # GPT-5.6 and later bill cache writes at 1.25x input and report them under
+    # the input details; earlier OpenAI models omit the field and charge writes
+    # at the plain input rate. Anthropic reports the same idea at the top level.
+    cache_creation_input_tokens = _first_present(
+        _int_value(usage, "cache_creation_input_tokens"),
+        _int_value(input_details, "cache_write_tokens"),
+    ) or 0
+    cache_creation_input_tokens = max(cache_creation_input_tokens, 0)
+    if uncached_input_tokens is not None:
+        cache_creation_input_tokens = min(
+            cache_creation_input_tokens, uncached_input_tokens
+        )
 
     output_tokens = _first_present(
         _int_value(usage, "output_tokens"),
@@ -687,8 +698,11 @@ def estimate_token_cost_usd(
     if cache_creation_tokens:
         cache_write_price = prices.get("cache_write")
         if cache_write_price is None:
-            # Anthropic bills cache writes at 1.25x input; assume parity elsewhere.
-            cache_write_price = prices["input"] * (1.25 if provider == "anthropic" else 1.0)
+            # Anthropic always bills cache writes at 1.25x input, and OpenAI only
+            # reports write tokens for models that surcharge them at the same
+            # rate. Assume parity for anyone else.
+            premium = 1.25 if provider in ("anthropic", "openai") else 1.0
+            cache_write_price = prices["input"] * premium
         input_cost += cache_creation_tokens * cache_write_price
     cached_cost = cached_input_tokens * (cached_input_price or 0.0)
     output_cost = output_tokens * prices["output"]

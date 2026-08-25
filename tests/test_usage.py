@@ -30,6 +30,15 @@ class UsageRecordingTests(unittest.TestCase):
                 "limit": {"context": 272_000, "output": 128_000},
                 "cost": {"input": 0.75, "cache_read": 0.075, "output": 4.5},
             },
+            "gpt-5.6": {
+                "limit": {"context": 272_000, "output": 128_000},
+                "cost": {
+                    "input": 4,
+                    "cache_read": 0.4,
+                    "cache_write": 5,
+                    "output": 20,
+                },
+            },
         },
         "anthropic": {
             "claude-sonnet-4-6": {
@@ -102,6 +111,79 @@ class UsageRecordingTests(unittest.TestCase):
             estimate_token_cost_usd(record, "gpt-5.4-mini", "openai"),
             0.8625,
         )
+
+    def test_openai_cache_writes_bill_at_the_catalog_write_rate(self):
+        record = {
+            "provider": "openai",
+            "input_tokens": 1_000_000,
+            "cached_input_tokens": 500_000,
+            "uncached_input_tokens": 500_000,
+            "cache_creation_input_tokens": 200_000,
+            "output_tokens": 100_000,
+        }
+        # 300k plain input at $4 + 200k writes at $5 + 500k reads at $0.40
+        # + 100k output at $20.
+        self.assertAlmostEqual(
+            estimate_token_cost_usd(record, "gpt-5.6", "openai"),
+            4.4,
+        )
+
+    def test_openai_cache_write_tokens_are_read_from_input_details(self):
+        with TemporaryDirectory() as tmp:
+            usage_path = Path(tmp) / "usage-test.json"
+            response = {
+                "usage": {
+                    "input_tokens": 5_000,
+                    "input_tokens_details": {
+                        "cached_tokens": 3_000,
+                        "cache_write_tokens": 1_500,
+                    },
+                    "output_tokens": 100,
+                },
+            }
+            record_response_usage(
+                usage_path,
+                "session-id",
+                "gpt-5.6",
+                response=response,
+                source="root",
+                provider="openai",
+                record_global=False,
+            )
+            last = load_usage(usage_path, "session-id")["last_request"]
+
+        self.assertEqual(last["cached_input_tokens"], 3_000)
+        self.assertEqual(last["uncached_input_tokens"], 2_000)
+        self.assertEqual(last["cache_creation_input_tokens"], 1_500)
+        # 500 plain input at $4 + 1.5k writes at $5 + 3k reads at $0.40
+        # + 100 output at $20.
+        self.assertAlmostEqual(last["estimated_cost_usd"], 0.0127)
+
+    def test_provider_cache_write_overcount_cannot_exceed_uncached_input(self):
+        with TemporaryDirectory() as tmp:
+            usage_path = Path(tmp) / "usage-test.json"
+            response = {
+                "usage": {
+                    "input_tokens": 5_000,
+                    "input_tokens_details": {
+                        "cached_tokens": 3_000,
+                        "cache_write_tokens": 4_800,
+                    },
+                    "output_tokens": 100,
+                },
+            }
+            record_response_usage(
+                usage_path,
+                "session-id",
+                "gpt-5.6",
+                response=response,
+                source="root",
+                provider="openai",
+                record_global=False,
+            )
+            last = load_usage(usage_path, "session-id")["last_request"]
+
+        self.assertEqual(last["cache_creation_input_tokens"], 2_000)
 
     def test_records_estimated_usage_when_provider_omits_usage(self):
         with TemporaryDirectory() as tmp:
