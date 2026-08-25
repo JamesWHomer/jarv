@@ -157,7 +157,7 @@ jobs:
           '@ | python -
 
       - name: Build standalone executable
-        run: pyinstaller --clean --onefile --collect-submodules jarv --name jarv packaging/pyinstaller_launcher.py
+        run: pyinstaller --clean --onefile --collect-submodules jarv --collect-data jarv --name jarv packaging/pyinstaller_launcher.py
 
       - name: Smoke test executable
         shell: bash

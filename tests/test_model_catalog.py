@@ -7,7 +7,8 @@ import httpx
 import pytest
 from rich.console import Console
 
-from jarv import model_catalog, settings_command
+from conftest import model_facts
+from jarv import model_catalog, models_dev, settings_command
 from jarv.command_input import TextInput
 from jarv.anthropic_http import list_models as list_anthropic_models
 from jarv.config import DEFAULT_CONFIG
@@ -206,21 +207,7 @@ def test_local_provider_lists_every_installed_model():
 
 def test_catalog_uses_disk_cache_when_refresh_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
-    monkeypatch.setattr(
-        model_catalog,
-        "discover_openrouter_models",
-        lambda _config: [
-            CatalogModel(
-                id="openai/gpt-5.6",
-                metadata={
-                    "pricing": {
-                        "prompt": "0.000001",
-                        "completion": "0.000005",
-                    },
-                },
-            ),
-        ],
-    )
+    monkeypatch.setattr(models_dev, "refresh", lambda _config: True)
     monkeypatch.setattr(
         model_catalog,
         "discover_models",
@@ -239,62 +226,106 @@ def test_catalog_uses_disk_cache_when_refresh_fails(tmp_path, monkeypatch):
 
     assert cached == live
     assert json.loads((tmp_path / "openai.json").read_text())["provider"] == "openai"
-    assert json.loads((tmp_path / "openrouter.json").read_text())["provider"] == "openrouter"
 
 
-def test_openrouter_pricing_resolves_models_for_all_providers(tmp_path, monkeypatch):
-    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
-    model_catalog._write_cache("openrouter", [
-        CatalogModel(id="openai/gpt-5.5"),
-        CatalogModel(id="anthropic/claude-sonnet-4.6"),
-        CatalogModel(id="google/gemini-3-flash-preview"),
-        CatalogModel(id="deepseek/deepseek-v4-flash"),
-        CatalogModel(id="openai/gpt-oss-120b"),
-        CatalogModel(id="meta-llama/llama-3.3-70b-instruct"),
-        CatalogModel(id="meta-llama/llama-3.1-8b-instruct"),
-        CatalogModel(id="meta-llama/llama-4-maverick"),
-        CatalogModel(id="moonshotai/kimi-k2.6"),
-        CatalogModel(id="minimax/minimax-m2.7"),
-        CatalogModel(id="qwen/qwen3-8b"),
-    ])
+def test_prices_come_from_the_provider_that_sells_the_model(models_dev_catalog):
+    models_dev_catalog({
+        "deepseek": {
+            "deepseek-v4-pro": model_facts(cost={"input": 0.435, "output": 0.87}),
+        },
+        "togetherai": {
+            "deepseek-ai/DeepSeek-V4-Pro": model_facts(cost={"input": 1.74, "output": 3.48}),
+        },
+    })
 
+    assert model_catalog.model_prices("deepseek", "deepseek-v4-pro")["input"] == 0.435
+    assert model_catalog.model_prices(
+        "together",
+        "deepseek-ai/DeepSeek-V4-Pro",
+    )["input"] == 1.74
+
+
+def test_another_sellers_entry_lends_capabilities_but_not_prices(models_dev_catalog):
+    models_dev_catalog({
+        "deepseek": {
+            "deepseek-v4-pro": model_facts(
+                cost={"input": 0.435, "output": 0.87},
+                limit={"context": 1_000_000, "output": 384_000},
+            ),
+        },
+    })
+
+    facts = models_dev.lookup("groq", "deepseek-v4-pro")
+
+    assert facts is not None
+    assert facts.native is False
+    assert facts.context_limit == 1_000_000
+    assert model_catalog.model_prices("groq", "deepseek-v4-pro") is None
+
+
+def test_long_context_requests_pay_the_surcharge_tier(models_dev_catalog):
+    models_dev_catalog({
+        "openai": {
+            "gpt-5.5": model_facts(
+                cost={
+                    "input": 5,
+                    "output": 30,
+                    "cache_read": 0.5,
+                    "tiers": [
+                        {
+                            "input": 10,
+                            "output": 45,
+                            "cache_read": 1,
+                            "tier": {"type": "context", "size": 272_000},
+                        },
+                    ],
+                },
+            ),
+        },
+    })
+
+    short = model_catalog.model_prices("openai", "gpt-5.5", input_tokens=50_000)
+    long = model_catalog.model_prices("openai", "gpt-5.5", input_tokens=400_000)
+
+    assert (short["input"], short["output"]) == (5, 30)
+    assert (long["input"], long["output"]) == (10, 45)
+
+
+def test_bundled_catalog_prices_each_cloud_provider_natively(bundled_catalog_only):
     cases = [
-        ("openai", "gpt-5.5", "openai/gpt-5.5"),
-        ("anthropic", "claude-sonnet-4-6", "anthropic/claude-sonnet-4.6"),
-        ("gemini", "gemini-3-flash-preview", "google/gemini-3-flash-preview"),
-        ("deepseek", "deepseek-v4-flash", "deepseek/deepseek-v4-flash"),
-        ("groq", "openai/gpt-oss-120b", "openai/gpt-oss-120b"),
-        ("groq", "llama-3.3-70b-versatile", "meta-llama/llama-3.3-70b-instruct"),
-        ("groq", "llama-3.1-8b-instant", "meta-llama/llama-3.1-8b-instruct"),
-        (
-            "together",
-            "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
-            "meta-llama/llama-4-maverick",
-        ),
-        ("fireworks", "accounts/fireworks/models/kimi-k2p6", "moonshotai/kimi-k2.6"),
-        ("fireworks", "accounts/fireworks/models/minimax-m2p7", "minimax/minimax-m2.7"),
-        ("fireworks", "accounts/fireworks/models/qwen3-8b", "qwen/qwen3-8b"),
-        ("openrouter", "openai/gpt-5.5", "openai/gpt-5.5"),
+        ("openai", "gpt-5.5"),
+        ("anthropic", "claude-opus-4-8"),
+        ("gemini", "gemini-3.1-pro-preview"),
+        ("deepseek", "deepseek-v4-pro"),
+        ("groq", "openai/gpt-oss-120b"),
+        ("together", "deepseek-ai/DeepSeek-V4-Pro"),
+        ("fireworks", "accounts/fireworks/models/kimi-k2p6"),
+        ("openrouter", "anthropic/claude-opus-4.8"),
     ]
 
-    for provider, selected_model, expected in cases:
-        resolved = model_catalog.resolve_openrouter_model(provider, selected_model)
-        assert resolved is not None
-        assert resolved.id == expected
+    for provider, model in cases:
+        facts = models_dev.lookup(provider, model)
+        assert facts is not None, f"{provider}/{model} missing from the bundled catalog"
+        assert facts.native, f"{provider}/{model} resolved to another provider"
+        assert facts.rates()["input"] > 0
 
 
-def test_image_capability_uses_openrouter_input_modalities(tmp_path, monkeypatch):
+def test_image_capability_uses_catalog_modalities(
+    tmp_path,
+    monkeypatch,
+    models_dev_catalog,
+):
     monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
-    model_catalog._write_cache("openrouter", [
-        CatalogModel(
-            id="openai/gpt-5.5",
-            metadata={"architecture": {"input_modalities": ["text", "image"]}},
-        ),
-        CatalogModel(
-            id="openai/gpt-5.4-mini",
-            metadata={"architecture": {"input_modalities": ["text"]}},
-        ),
-    ])
+    models_dev_catalog({
+        "openai": {
+            "gpt-5.5": model_facts(
+                modalities={"input": ["text", "image"], "output": ["text"]},
+            ),
+            "gpt-5.4-mini": model_facts(
+                modalities={"input": ["text"], "output": ["text"]},
+            ),
+        },
+    })
 
     supported = get_image_output_capability({
         "provider": "openai",
@@ -375,20 +406,15 @@ def test_image_capability_unknown_models_default_unsupported(tmp_path, monkeypat
     assert "does not advertise image input capability" in capability.reason
 
 
-def test_model_picker_pricing_formats_rates(tmp_path, monkeypatch):
+def test_model_picker_pricing_formats_rates(tmp_path, monkeypatch, models_dev_catalog):
     monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
-    model_catalog._write_cache("openrouter", [
-        CatalogModel(
-            id="openai/gpt-5.5",
-            metadata={
-                "pricing": {
-                    "prompt": "0.000005",
-                    "input_cache_read": "0.0000005",
-                    "completion": "0.00003",
-                },
-            },
-        ),
-    ])
+    models_dev_catalog({
+        "openai": {
+            "gpt-5.5": model_facts(
+                cost={"input": 5, "output": 30, "cache_read": 0.5},
+            ),
+        },
+    })
     assert model_catalog.model_choice_description(
         "openai",
         "gpt-5.5",
@@ -408,19 +434,15 @@ def test_model_picker_pricing_formats_rates(tmp_path, monkeypatch):
     )
 
 
-def test_settings_model_picker_shows_openrouter_pricing(tmp_path, monkeypatch):
+def test_settings_model_picker_shows_catalog_pricing(
+    tmp_path,
+    monkeypatch,
+    models_dev_catalog,
+):
     monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
-    model_catalog._write_cache("openrouter", [
-        CatalogModel(
-            id="openai/gpt-5.5",
-            metadata={
-                "pricing": {
-                    "prompt": "0.000005",
-                    "completion": "0.00003",
-                },
-            },
-        ),
-    ])
+    models_dev_catalog({
+        "openai": {"gpt-5.5": model_facts(cost={"input": 5, "output": 30})},
+    })
     edit = {
         "row": {"key": "model", "kind": "text", "label": "Model"},
         "buffer": "gpt-5.5",
@@ -567,9 +589,9 @@ def test_model_pricing_values_are_cached(monkeypatch):
     calls = []
 
     monkeypatch.setattr(
-        model_catalog,
-        "resolve_openrouter_model",
-        lambda _provider, model: calls.append(model) or None,
+        models_dev,
+        "prices",
+        lambda _provider, model, **_kwargs: calls.append(model) or None,
     )
     model_catalog.model_pricing_values.cache_clear()
 

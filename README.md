@@ -263,7 +263,7 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 | `context_budget_ratio` | `0.75` | Share of the context window used for input. |
 | `context_compaction_threshold` | `0.85` | Fill ratio that triggers history compaction. |
 | `context_output_reserve_ratio` | `0.15` | Context window share reserved for model output. |
-| `context_window_fallback` | `128000` | Context window when model metadata is unknown. |
+| `context_window_fallback` | `128000` | Context window when neither the provider nor the models.dev catalog knows the model. |
 | `max_stdin_chars` | `200000` | Maximum piped stdin characters attached to a one-shot prompt. |
 | `max_tool_output_chars` | `20000` | Maximum generic tool output characters returned to the model. It also supplies the default head/tail budget for `run_command`. |
 | `project_context_max_chars` | `16000` | Maximum project-context file characters injected into the system prompt (longer files are truncated head+tail). |
@@ -308,7 +308,23 @@ All state is stored in `~/.jarv/` (on Windows, `%USERPROFILE%\.jarv\`):
 
 Project context files (`JARV.md`, `AGENTS.md`, `CLAUDE.md`) live in your repositories, not in `~/.jarv/`; jarv only reads them, never writes them.
 
-System-wide usage tracking begins once `~/.jarv/usage.json` exists; older totals aren't backfilled into time-window reports. Cost is request-based and grouped by provider and tier: Jarv uses provider-reported cost when available, otherwise estimates from OpenRouter's public pricing catalog, and shows unknown or contract-priced requests separately.
+System-wide usage tracking begins once `~/.jarv/usage.json` exists; older totals aren't backfilled into time-window reports. Cost is request-based and grouped by provider and tier: Jarv uses provider-reported cost when available, otherwise estimates from [models.dev](https://models.dev) pricing for the provider actually serving the model — including long-context surcharges — and shows unknown or contract-priced requests separately.
+
+## Model catalog
+
+Jarv asks each provider which models it exposes, and asks [models.dev](https://models.dev) what those models *are* — prices, context and output limits, input modalities, and reasoning controls. Two sources, two jobs: the provider is authoritative about what exists today, so a model released this morning still shows up; models.dev is authoritative about its properties, so they stop drifting as labs ship.
+
+Prices are only ever read from the entry of the provider actually serving the model. The same model resold by three providers has one set of capabilities but three different prices, so capabilities carry across entries and prices never do.
+
+A pruned snapshot of the catalog ships inside the package, covering the eight cloud providers Jarv supports, so a fresh install prices correctly offline. Refreshing the model list in `/settings` also revalidates the catalog with a conditional request; when nothing upstream has changed, that transfers no data. The newer copy lands in `~/.jarv/models-dev.json` and takes precedence over the bundled one.
+
+To regenerate the bundled snapshot:
+
+```bash
+python scripts/update_models_dev.py
+```
+
+models.dev is community-maintained and MIT licensed. Local providers — Ollama, LM Studio, vLLM — serve whatever you installed, so they are read live and have no catalog entry.
 
 ## Dependencies
 
@@ -317,6 +333,8 @@ System-wide usage tracking begins once `~/.jarv/usage.json` exists; older totals
 | [httpx](https://pypi.org/project/httpx/) | Direct provider API transports |
 | [pypdf](https://pypi.org/project/pypdf/) | Lazy-loaded embedded-text extraction for PDF reads |
 | [rich](https://pypi.org/project/rich/) | Terminal styling, live rendering, markdown |
+
+Model metadata comes from [models.dev](https://models.dev) (MIT), vendored as a snapshot — no runtime package dependency.
 
 ## License
 

@@ -8,6 +8,7 @@ explicitly), so the helpers work both under pytest and in the live harness.
 from __future__ import annotations
 
 import io
+import json
 import time
 from contextlib import contextmanager
 from unittest import mock
@@ -151,9 +152,75 @@ def neutralize_tui_modes(monkeypatch):
         monkeypatch.setattr(tui_app, name, replacement)
 
 
+def model_facts(**overrides):
+    """A models.dev model entry with sensible defaults, for catalog fixtures."""
+    entry = {
+        "name": "Test model",
+        "attachment": False,
+        "reasoning": False,
+        "tool_call": True,
+        "temperature": True,
+        "release_date": "2026-01-01",
+        "last_updated": "2026-01-01",
+        "modalities": {"input": ["text"], "output": ["text"]},
+        "open_weights": False,
+        "limit": {"context": 128_000, "output": 16_000},
+        "cost": {"input": 1.0, "output": 2.0},
+    }
+    entry.update(overrides)
+    return entry
+
+
+def write_models_dev_catalog(monkeypatch, directory, providers):
+    """Point :mod:`jarv.models_dev` at a catalog built for one test.
+
+    ``providers`` maps a models.dev provider ID to ``{model_id: entry}``.
+    """
+    from jarv import model_catalog, models_dev
+
+    payload = {
+        "source": "test",
+        "providers": {
+            provider_id: {"id": provider_id, "name": provider_id, "models": models}
+            for provider_id, models in providers.items()
+        },
+    }
+    snapshot = directory / "models_dev_snapshot.json"
+    snapshot.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(models_dev, "SNAPSHOT_PATH", snapshot)
+    monkeypatch.setattr(models_dev, "CACHE_PATH", directory / "models-dev.json")
+    models_dev.clear_cache()
+    model_catalog.model_pricing_values.cache_clear()
+    return snapshot
+
+
 if pytest is not None:
 
     @pytest.fixture
     def neutral_tui_terminal():
         with neutral_terminal_modes():
             yield
+
+    @pytest.fixture
+    def bundled_catalog_only(tmp_path, monkeypatch):
+        """Read the vendored snapshot alone, ignoring any refresh on this machine."""
+        from jarv import model_catalog, models_dev
+
+        monkeypatch.setattr(models_dev, "CACHE_PATH", tmp_path / "absent.json")
+        models_dev.clear_cache()
+        model_catalog.model_pricing_values.cache_clear()
+        yield
+        models_dev.clear_cache()
+        model_catalog.model_pricing_values.cache_clear()
+
+    @pytest.fixture
+    def models_dev_catalog(tmp_path, monkeypatch):
+        """Build an isolated models.dev catalog and tear its caches down after."""
+        from jarv import model_catalog, models_dev
+
+        def build(providers):
+            return write_models_dev_catalog(monkeypatch, tmp_path, providers)
+
+        yield build
+        models_dev.clear_cache()
+        model_catalog.model_pricing_values.cache_clear()

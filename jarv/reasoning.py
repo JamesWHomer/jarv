@@ -45,145 +45,107 @@ def _supported_children(value: Any, names: tuple[str, ...]) -> tuple[str, ...]:
     )
 
 
-def _static_capabilities(provider: str, model: str) -> ReasoningCapabilities:
-    lowered = model.lower()
-    source = {"policy": "built-in model policy"}
+# OpenRouter normalizes the reasoning parameter across everything it resells,
+# so a route the catalog has not seen yet still accepts the standard ladder.
+_OPENROUTER_DEFAULTS = ReasoningCapabilities(
+    efforts=("minimal", "low", "medium", "high", "xhigh"),
+    supports_disable=True,
+    native_effort=True,
+    sources={"policy": "OpenRouter reasoning parameter"},
+)
 
-    if provider == "openrouter":
+
+def _capabilities_from_facts(facts: Any, source: str) -> ReasoningCapabilities:
+    """Translate a models.dev entry into Jarv's reasoning vocabulary."""
+    efforts: tuple[str, ...] | None = None
+    modes: list[str] = []
+    supports_disable: bool | None = None
+    native_effort: bool | None = None
+
+    for option in facts.reasoning_options:
+        kind = str(option.get("type") or "")
+        if kind == "effort":
+            values = [
+                str(value).strip().lower()
+                for value in option.get("values") or ()
+                if isinstance(value, str)
+            ]
+            # models.dev spells "reasoning off" as an effort value. Jarv models
+            # it as a separate switch, so lift it out of the ladder.
+            if "none" in values:
+                supports_disable = True
+                values = [value for value in values if value != "none"]
+            efforts = tuple(value for value in values if value in EFFORT_LEVELS)
+            native_effort = True
+        elif kind == "toggle":
+            supports_disable = True
+        elif kind == "budget_tokens":
+            modes.append("budget")
+
+    if facts.reasoning is False:
         return ReasoningCapabilities(
-            efforts=("minimal", "low", "medium", "high", "xhigh"),
-            supports_disable=True,
-            native_effort=True,
-            sources=source,
+            supported=False,
+            efforts=(),
+            supports_disable=False,
+            native_effort=False,
+            max_output_tokens=facts.output_limit,
+            sources={
+                "supported": source,
+                "efforts": source,
+                "supports_disable": source,
+                "native_effort": source,
+            },
         )
 
-    if provider == "openai":
-        if lowered.startswith("gpt-4o"):
-            return ReasoningCapabilities(
-                supported=False,
-                efforts=(),
-                supports_disable=False,
-                native_effort=False,
-                sources=source,
-            )
-        if "gpt-5" not in lowered:
-            return ReasoningCapabilities(sources=source)
-        if "pro" in lowered:
-            return ReasoningCapabilities(
-                supported=True,
-                efforts=("high",),
-                supports_disable=False,
-                native_effort=True,
-                sources=source,
-            )
-        if any(version in lowered for version in ("gpt-5.4", "gpt-5.5")):
-            return ReasoningCapabilities(
-                supported=True,
-                efforts=("low", "medium", "high", "xhigh"),
-                supports_disable=True,
-                native_effort=True,
-                sources=source,
-            )
-        return ReasoningCapabilities(
-            supported=True,
-            efforts=("minimal", "low", "medium", "high"),
-            supports_disable="gpt-5.1" in lowered or "gpt-5.2" in lowered,
-            native_effort=True,
-            sources=source,
-        )
+    if efforts is not None:
+        # A model that takes an effort but no budget is steered natively; one
+        # that takes a budget is steered by Jarv's own effort-to-budget ladder.
+        modes.append("adaptive" if "budget" not in modes else "enabled")
+    if efforts is None and facts.reasoning and "budget" in modes:
+        efforts = EFFORT_LEVELS
+        native_effort = False
+    if supports_disable is None and "budget" in modes:
+        # Thinking blocks are opt-in per request, so omitting one turns it off.
+        supports_disable = True
+    if supports_disable is None and efforts is not None:
+        supports_disable = False
 
-    if provider == "anthropic":
-        if any(name in lowered for name in ("fable-5", "opus-4-8", "opus-4.8", "opus-4-7", "opus-4.7")):
-            return ReasoningCapabilities(
-                supported=True,
-                efforts=("low", "medium", "high", "xhigh", "max"),
-                modes=("adaptive",),
-                supports_disable=False,
-                native_effort=True,
-                sources=source,
-            )
-        if any(version in lowered for version in ("-4-6", "-4.6")):
-            return ReasoningCapabilities(
-                supported=True,
-                efforts=("low", "medium", "high", "max"),
-                modes=("enabled", "adaptive"),
-                supports_disable=True,
-                native_effort=True,
-                sources=source,
-            )
-        if "opus-4-5" in lowered or "opus-4.5" in lowered:
-            return ReasoningCapabilities(
-                supported=True,
-                efforts=("low", "medium", "high"),
-                modes=("enabled",),
-                supports_disable=True,
-                native_effort=True,
-                sources=source,
-            )
-        if "claude" in lowered:
-            return ReasoningCapabilities(
-                supported=True,
-                efforts=EFFORT_LEVELS,
-                modes=("enabled",),
-                supports_disable=True,
-                native_effort=False,
-                sources=source,
-            )
+    if "budget" in modes:
+        modes = ["enabled" if mode == "budget" else mode for mode in modes]
+    ordered_modes = tuple(dict.fromkeys(modes))
 
-    if provider == "gemini":
-        if lowered.startswith("gemini-3"):
-            efforts = (
-                ("low", "medium", "high")
-                if "pro" in lowered
-                else ("minimal", "low", "medium", "high")
-            )
-            return ReasoningCapabilities(
-                supported=True,
-                efforts=efforts,
-                modes=("level",),
-                supports_disable=False,
-                native_effort=True,
-                sources=source,
-            )
-        if lowered.startswith("gemini-2.5"):
-            return ReasoningCapabilities(
-                supported=True,
-                efforts=("minimal", "low", "medium", "high"),
-                modes=("budget",),
-                supports_disable="pro" not in lowered,
-                native_effort=False,
-                sources=source,
-            )
+    values = {
+        "supported": facts.reasoning,
+        "efforts": efforts,
+        "modes": ordered_modes or None,
+        "supports_disable": supports_disable,
+        "native_effort": native_effort,
+        "max_output_tokens": facts.output_limit,
+    }
+    return ReasoningCapabilities(
+        **values,
+        sources={key: source for key, value in values.items() if value is not None},
+    )
 
-    if provider == "deepseek" and "deepseek" in lowered:
-        return ReasoningCapabilities(
-            supported=True,
-            efforts=("high", "max"),
-            modes=("enabled",),
-            supports_disable=True,
-            native_effort=True,
-            sources=source,
-        )
 
-    if provider == "groq":
-        if "gpt-oss" in lowered:
-            return ReasoningCapabilities(
-                supported=True,
-                efforts=("low", "medium", "high"),
-                supports_disable=False,
-                native_effort=True,
-                sources=source,
-            )
-        if "qwen3" in lowered:
-            return ReasoningCapabilities(
-                supported=True,
-                efforts=(),
-                supports_disable=True,
-                native_effort=False,
-                sources=source,
-            )
+def _catalog_capabilities(provider: str, model: str) -> ReasoningCapabilities:
+    """Reasoning controls for a model, as models.dev describes it."""
+    from . import models_dev
 
-    return ReasoningCapabilities(sources=source)
+    base = _OPENROUTER_DEFAULTS if provider == "openrouter" else ReasoningCapabilities()
+    if not model:
+        return base
+
+    facts = models_dev.lookup(provider, model)
+    source = "models.dev catalog"
+    if facts is None:
+        # Released after the catalog was last refreshed: its family is the best
+        # available description of how it is steered.
+        facts = models_dev.nearest_family(provider, model)
+        source = "models.dev catalog (same family)"
+    if facts is None:
+        return base
+    return _merge(base, _capabilities_from_facts(facts, source))
 
 
 def _openrouter_metadata_capabilities(metadata: dict[str, Any]) -> ReasoningCapabilities:
@@ -319,22 +281,11 @@ def get_reasoning_capabilities(
     config: dict,
     model: str | None = None,
 ) -> ReasoningCapabilities:
-    from .model_catalog import (
-        cached_openrouter_endpoints,
-        cached_provider_model,
-        resolve_openrouter_model,
-    )
+    from .model_catalog import cached_openrouter_endpoints, cached_provider_model
 
     provider = str(config.get("provider", "openai"))
     selected_model = str(model or config.get("model") or "")
-    result = _static_capabilities(provider, selected_model)
-
-    openrouter_model = resolve_openrouter_model(provider, selected_model)
-    if openrouter_model is not None:
-        result = _merge(
-            result,
-            _openrouter_metadata_capabilities(openrouter_model.metadata),
-        )
+    result = _catalog_capabilities(provider, selected_model)
 
     native_model = cached_provider_model(config, selected_model)
     if native_model is not None:

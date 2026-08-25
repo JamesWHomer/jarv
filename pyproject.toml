@@ -35,4 +35,7 @@ jarv = "jarv.cli:main"
 [tool.setuptools.packages.find]
 include = ["jarv*"]
 
+[tool.setuptools.package-data]
+jarv = ["data/*.json"]
+
 

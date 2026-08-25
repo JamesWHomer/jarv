@@ -14,6 +14,7 @@ from typing import Any, Callable
 
 import httpx
 
+from . import models_dev
 from .paths import CONFIG_DIR
 from .provider_auth import resolve_api_key
 from .provider_catalog import FALLBACK_PROVIDER_MODELS, LOCAL_PROVIDERS, PROVIDERS
@@ -228,32 +229,6 @@ def discover_models(config: dict) -> list[CatalogModel]:
         client.close()
 
 
-def discover_openrouter_models(config: dict) -> list[CatalogModel]:
-    """Fetch OpenRouter's public catalog for cross-provider pricing metadata."""
-    timeout = float(config.get("model_catalog_timeout", 10))
-    connect_timeout = float(config.get("model_catalog_connect_timeout", 5))
-    with httpx.Client(
-        timeout=httpx.Timeout(timeout, connect=connect_timeout),
-        headers={"User-Agent": "jarv"},
-    ) as client:
-        response = client.get(OPENROUTER_MODELS_URL)
-        response.raise_for_status()
-        return _normalize_openai_models(response.json())
-
-
-def refresh_openrouter_pricing(config: dict) -> list[CatalogModel]:
-    """Refresh OpenRouter pricing, falling back to its disk cache."""
-    models: list[CatalogModel] = []
-    try:
-        models = discover_openrouter_models(config)
-    except Exception:
-        models = []
-    if models:
-        _write_cache("openrouter", models)
-        return models
-    return _read_cache("openrouter")
-
-
 def discover_openrouter_endpoints(
     config: dict,
     model: str,
@@ -323,101 +298,6 @@ def refresh_openrouter_endpoints(config: dict, model: str) -> list[dict[str, Any
         _write_openrouter_endpoints(model, endpoints)
         return endpoints
     return cached_openrouter_endpoints(model)
-
-
-_OPENROUTER_PROVIDER_NAMESPACES = {
-    "openai": "openai",
-    "anthropic": "anthropic",
-    "gemini": "google",
-    "deepseek": "deepseek",
-}
-
-
-def _canonical_model_id(value: str) -> str:
-    normalized = re.sub(r"(?<=\d)p(?=\d)", "", value.lower())
-    return re.sub(r"[^a-z0-9]+", "", normalized)
-
-
-def _model_basename(value: str) -> str:
-    return value.rstrip("/").rsplit("/", 1)[-1]
-
-
-def _without_snapshot(value: str) -> str:
-    return re.sub(r"[-.]?\d{8}$", "", value)
-
-
-def _model_family_key(value: str) -> str:
-    basename = _model_basename(value).lower().split(":", 1)[0]
-    basename = re.sub(r"(?<=\d)p(?=\d)", "", basename)
-    basename = re.sub(r"\d+b[-.]?\d+e", "", basename)
-    basename = re.sub(
-        r"(?:^|[-.])(instruct|versatile|instant|fp8)(?=$|[-.])",
-        "-",
-        basename,
-    )
-    return _canonical_model_id(basename)
-
-
-def _unique_preferred_match(models: list[CatalogModel]) -> CatalogModel | None:
-    if len(models) == 1:
-        return models[0]
-    paid = [item for item in models if not item.id.endswith(":free")]
-    if len(paid) == 1:
-        return paid[0]
-    return None
-
-
-def resolve_openrouter_model(
-    provider: str | None,
-    model: str | None,
-) -> CatalogModel | None:
-    """Resolve a provider model ID to its OpenRouter catalog entry."""
-    if not model:
-        return None
-    models = _read_cache("openrouter")
-    if not models:
-        return None
-
-    model_id = str(model).strip()
-    candidates = [model_id]
-    namespace = _OPENROUTER_PROVIDER_NAMESPACES.get(str(provider or ""))
-    if namespace and "/" not in model_id:
-        candidates.append(f"{namespace}/{model_id}")
-    snapshotless = _without_snapshot(model_id)
-    if snapshotless != model_id:
-        candidates.append(snapshotless)
-        if namespace and "/" not in snapshotless:
-            candidates.append(f"{namespace}/{snapshotless}")
-
-    by_id = {item.id.lower(): item for item in models}
-    for candidate in candidates:
-        match = by_id.get(candidate.lower())
-        if match is not None:
-            return match
-
-    by_canonical: dict[str, list[CatalogModel]] = {}
-    for item in models:
-        by_canonical.setdefault(_canonical_model_id(item.id), []).append(item)
-    for candidate in candidates:
-        matches = by_canonical.get(_canonical_model_id(candidate), [])
-        if len(matches) == 1:
-            return matches[0]
-
-    basename = _canonical_model_id(_model_basename(snapshotless))
-    basename_matches = [
-        item
-        for item in models
-        if _canonical_model_id(_model_basename(item.id)) == basename
-    ]
-    match = _unique_preferred_match(basename_matches)
-    if match is not None:
-        return match
-
-    family = _model_family_key(snapshotless)
-    family_matches = [
-        item for item in models if _model_family_key(item.id) == family
-    ]
-    return _unique_preferred_match(family_matches)
 
 
 def cached_provider_model(
@@ -529,11 +409,13 @@ def get_image_output_capability(
     if provider_model is not None:
         image_input = _metadata_image_input_supported(provider_model.metadata)
 
-    openrouter_model = None
+    facts = None
     if image_input is None and provider in PROVIDERS:
-        openrouter_model = resolve_openrouter_model(provider, selected_model)
-        if openrouter_model is not None:
-            image_input = _metadata_image_input_supported(openrouter_model.metadata)
+        # Modalities describe the model, not the seller, so a catalog entry
+        # found under another provider still answers this correctly.
+        facts = models_dev.lookup(provider, selected_model)
+        if facts is not None:
+            image_input = "image" in facts.input_modalities
 
     if backend == "gemini":
         if not _is_gemini_3_model(selected_model):
@@ -547,13 +429,13 @@ def get_image_output_capability(
         if image_input is None:
             # Gemini's native model list does not currently expose modalities.
             # Gemini 3 is the documented generation for multimodal function
-            # responses, so treat the family as capable unless cache says no.
+            # responses, so treat the family as capable unless a catalog says no.
             image_input = True
 
     if image_input is not True:
         source = "cached metadata"
-        if provider_model is None and openrouter_model is None:
-            source = "provider/OpenRouter caches"
+        if provider_model is None and facts is None:
+            source = "the provider cache or the models.dev catalog"
         return ModelImageCapability(
             False,
             reason=(
@@ -565,30 +447,18 @@ def get_image_output_capability(
     return ModelImageCapability(True, output_format=output_format)
 
 
-def openrouter_prices_for_model(
+def model_prices(
     provider: str | None,
     model: str | None,
+    *,
+    input_tokens: int | None = None,
 ) -> dict[str, float] | None:
-    """Return OpenRouter catalog prices normalized to dollars per million tokens."""
-    catalog_model = resolve_openrouter_model(provider, model)
-    if catalog_model is None:
-        return None
-    pricing = catalog_model.metadata.get("pricing")
-    if not isinstance(pricing, dict):
-        return None
-    try:
-        prices = {
-            "input": float(pricing["prompt"]) * 1_000_000,
-            "output": float(pricing["completion"]) * 1_000_000,
-        }
-        cached_price = pricing.get("input_cache_read")
-        if cached_price is not None:
-            prices["cached_input"] = float(cached_price) * 1_000_000
-    except (KeyError, TypeError, ValueError):
-        return None
-    if any(price < 0 for price in prices.values()):
-        return None
-    return prices
+    """Catalog prices in dollars per million tokens, as this provider sells them.
+
+    ``input_tokens`` selects the long-context tier when a model charges more
+    past a context threshold, as GPT-5.5 and Gemini 3.1 Pro both do.
+    """
+    return models_dev.prices(provider, model, input_tokens=input_tokens)
 
 
 def _format_price_rate(value: float) -> str:
@@ -613,7 +483,7 @@ def model_pricing_values(
         model_name == "openrouter/free" or model_name.endswith(":free")
     ):
         return "$0", "$0", "$0"
-    prices = openrouter_prices_for_model(provider, model)
+    prices = model_prices(provider, model)
     if prices is None:
         return "n/a", "n/a", "n/a"
     cached = (
@@ -629,7 +499,7 @@ def model_pricing_values(
 
 
 def model_pricing_summary(provider: str | None, model: str | None) -> str:
-    """Return compact OpenRouter reference pricing for a model picker row."""
+    """Return compact catalog pricing for a model picker row."""
     return " / ".join(model_pricing_values(provider, model))
 
 
@@ -638,7 +508,7 @@ def model_choice_description(
     model: str,
     description: str,
 ) -> str:
-    """Combine a recommendation label with its OpenRouter pricing reference."""
+    """Combine a recommendation label with its catalog pricing."""
     pricing = model_pricing_summary(provider, model)
     return f"{pricing} | {description}" if description else pricing
 
@@ -948,12 +818,28 @@ def recommend_models(provider: str, models: list[CatalogModel]) -> list[tuple[st
     return _family_policy_choices(provider, models)
 
 
+def _catalog_models(provider: str) -> list[CatalogModel]:
+    """The models.dev view of a provider, shaped like a discovered catalog."""
+    return [
+        CatalogModel(
+            id=facts.id,
+            created=_timestamp(facts.release_date),
+            display_name=facts.name,
+        )
+        for facts in models_dev.models_for(provider)
+    ]
+
+
 def _merge_fallbacks(
     provider: str,
     choices: list[tuple[str, str]],
 ) -> list[tuple[str, str]]:
+    """Recommend from live data, then the vendored catalog, then the presets."""
     if choices:
         return choices
+    catalog_choices = recommend_models(provider, _catalog_models(provider))
+    if catalog_choices:
+        return catalog_choices
     return list(FALLBACK_PROVIDER_MODELS.get(provider, []))
 
 
@@ -1004,7 +890,8 @@ def refresh_model_choices(config: dict) -> list[tuple[str, str]]:
     """Refresh choices from the provider, falling back to cached data on failure."""
     provider = str(config.get("provider", "openai"))
     key = catalog_cache_key(config)
-    refresh_openrouter_pricing(config)
+    models_dev.refresh(config)
+    model_pricing_values.cache_clear()
     models: list[CatalogModel] = []
     try:
         models = discover_models(config)

@@ -82,6 +82,30 @@ PROVIDERS = {
 
 LOCAL_PROVIDERS = {"ollama", "lm_studio", "vllm"}
 
+# Catalog ids used by models.dev, the upstream source for model pricing,
+# limits, modalities, and reasoning options. Local providers serve whatever the
+# user installed, so they have no upstream entry and are looked up live instead.
+MODELS_DEV_PROVIDERS = {
+    "openai": "openai",
+    "openrouter": "openrouter",
+    "anthropic": "anthropic",
+    "gemini": "google",
+    "groq": "groq",
+    "deepseek": "deepseek",
+    "together": "togetherai",
+    "fireworks": "fireworks-ai",
+}
+
+
+def models_dev_provider(provider: str | None) -> str | None:
+    """Return the models.dev catalog id backing a Jarv provider."""
+    return MODELS_DEV_PROVIDERS.get(str(provider or ""))
+
+
+def models_dev_provider_ids() -> set[str]:
+    """Return every models.dev provider id Jarv vendors facts for."""
+    return set(MODELS_DEV_PROVIDERS.values())
+
 SERVICE_TIERS = ("standard", "flex", "priority")
 PROVIDER_SERVICE_TIERS = {
     "openai": SERVICE_TIERS,
@@ -134,15 +158,17 @@ PROVIDER_CHOICES = [
     ("gemini", "Google Gemini", "gemini-3-flash-preview"),
     ("groq", "Groq", "openai/gpt-oss-120b"),
     ("deepseek", "DeepSeek", "deepseek-v4-flash"),
-    ("together", "Together AI", "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"),
+    ("together", "Together AI", "meta-llama/Llama-3.3-70B-Instruct-Turbo"),
     ("fireworks", "Fireworks AI", "accounts/fireworks/models/kimi-k2p6"),
     ("ollama", "Ollama", "llama3.3"),
     ("lm_studio", "LM Studio", "local-model"),
     ("vllm", "vLLM", "local-model"),
 ]
 
-# These are deliberately small offline fallbacks. The interactive selectors use
-# live provider catalogs through model_catalog.get_model_choices().
+# Last-resort offline presets, reached only when both the live provider catalog
+# and the bundled models.dev snapshot come up empty. The selectors normally
+# recommend from live data through model_catalog.get_model_choices(), and fall
+# back to the snapshot before these.
 FALLBACK_PROVIDER_MODELS = {
     "openai": [
         ("gpt-5.5", "Flagship — largest, smartest"),
@@ -192,7 +218,7 @@ FALLBACK_PROVIDER_MODELS = {
     ],
     "together": [
         ("deepseek-ai/DeepSeek-V4-Pro", "Flagship — DeepSeek V4 Pro"),
-        ("meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8", "Balanced — Llama 4 Maverick, 1M context"),
+        ("meta-llama/Llama-3.3-70B-Instruct-Turbo", "Balanced — Llama 3.3 70B"),
         ("Qwen/Qwen3.5-9B", "Budget — Qwen 3.5 9B"),
     ],
     "fireworks": [

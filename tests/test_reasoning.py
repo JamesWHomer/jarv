@@ -1,7 +1,9 @@
+from conftest import model_facts
 from jarv import model_catalog, settings_command
 from jarv.config import DEFAULT_CONFIG, validate_config
 from jarv.model_catalog import CatalogModel
 from jarv.reasoning import (
+    EFFORT_LEVELS,
     get_reasoning_capabilities,
     reasoning_effort_choices,
     reasoning_effort_description,
@@ -373,3 +375,170 @@ def test_settings_startup_persists_reconciled_effort(monkeypatch):
     assert config["reasoning_effort"] == ""
     assert saved[-1]["reasoning_effort"] == ""
     assert rendered[-1]["reasoning_effort"] == ""
+
+
+def test_catalog_effort_values_lift_none_out_into_the_disable_switch(
+    tmp_path,
+    monkeypatch,
+    models_dev_catalog,
+):
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    models_dev_catalog({
+        "openai": {
+            "gpt-5.6": model_facts(
+                reasoning=True,
+                reasoning_options=[
+                    {"type": "effort", "values": ["none", "low", "medium", "high", "xhigh", "max"]},
+                ],
+                limit={"context": 1_050_000, "output": 128_000},
+            ),
+        },
+    })
+
+    config = {"provider": "openai", "model": "gpt-5.6"}
+    capabilities = get_reasoning_capabilities(config)
+
+    assert capabilities.efforts == ("low", "medium", "high", "xhigh", "max")
+    assert capabilities.supports_disable is True
+    assert capabilities.native_effort is True
+    assert capabilities.max_output_tokens == 128_000
+    assert reasoning_effort_error(config, "max") is None
+    assert reasoning_effort_error(config, "none") is None
+
+
+def test_effort_only_models_cannot_disable_reasoning(
+    tmp_path,
+    monkeypatch,
+    models_dev_catalog,
+):
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    models_dev_catalog({
+        "anthropic": {
+            "claude-opus-5": model_facts(
+                reasoning=True,
+                reasoning_options=[
+                    {"type": "effort", "values": ["low", "medium", "high", "xhigh", "max"]},
+                ],
+            ),
+        },
+    })
+
+    config = {"provider": "anthropic", "model": "claude-opus-5"}
+    capabilities = get_reasoning_capabilities(config)
+
+    assert capabilities.supports_disable is False
+    assert capabilities.native_effort is True
+    assert capabilities.modes == ("adaptive",)
+    assert reasoning_effort_error(config, "none") == (
+        "claude-opus-5 does not support disabling reasoning"
+    )
+
+
+def test_budget_only_models_keep_jarvs_own_effort_ladder(
+    tmp_path,
+    monkeypatch,
+    models_dev_catalog,
+):
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    models_dev_catalog({
+        "anthropic": {
+            "claude-sonnet-4-5": model_facts(
+                reasoning=True,
+                reasoning_options=[{"type": "budget_tokens", "min": 1024}],
+            ),
+        },
+    })
+
+    capabilities = get_reasoning_capabilities({
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-5",
+    })
+
+    assert capabilities.efforts == EFFORT_LEVELS
+    assert capabilities.native_effort is False
+    assert capabilities.modes == ("enabled",)
+    assert capabilities.supports_disable is True
+
+
+def test_non_reasoning_models_expose_no_controls(tmp_path, monkeypatch, models_dev_catalog):
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    models_dev_catalog({"openai": {"gpt-4o": model_facts(reasoning=False)}})
+
+    config = {"provider": "openai", "model": "gpt-4o"}
+    capabilities = get_reasoning_capabilities(config)
+
+    assert capabilities.supported is False
+    assert capabilities.efforts == ()
+    assert reasoning_effort_choices(config) == (("", "default"),)
+    assert reasoning_effort_description(config) == (
+        "selected model does not expose reasoning controls"
+    )
+
+
+def test_models_newer_than_the_catalog_inherit_their_family(
+    tmp_path,
+    monkeypatch,
+    models_dev_catalog,
+):
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    models_dev_catalog({
+        "openai": {
+            "gpt-5.4-mini": model_facts(
+                family="gpt-mini",
+                reasoning=True,
+                release_date="2026-03-05",
+                reasoning_options=[
+                    {"type": "effort", "values": ["none", "low", "medium", "high"]},
+                ],
+            ),
+        },
+    })
+
+    capabilities = get_reasoning_capabilities({
+        "provider": "openai",
+        "model": "gpt-5.9-mini",
+    })
+
+    assert capabilities.efforts == ("low", "medium", "high")
+    assert capabilities.supports_disable is True
+    assert capabilities.sources["efforts"] == "models.dev catalog (same family)"
+
+
+def test_openrouter_routes_outside_the_catalog_keep_the_standard_ladder(
+    tmp_path,
+    monkeypatch,
+    models_dev_catalog,
+):
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    models_dev_catalog({"openrouter": {"openai/gpt-5.5": model_facts()}})
+
+    capabilities = get_reasoning_capabilities({
+        "provider": "openrouter",
+        "model": "some-lab/brand-new-route",
+    })
+
+    assert capabilities.efforts == ("minimal", "low", "medium", "high", "xhigh")
+    assert capabilities.supports_disable is True
+
+
+def test_bundled_catalog_fixes_the_drift_the_name_patterns_had(
+    tmp_path,
+    monkeypatch,
+    bundled_catalog_only,
+):
+    """Regressions the hand-written model policy carried before models.dev."""
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+
+    gpt56 = get_reasoning_capabilities({"provider": "openai", "model": "gpt-5.6"})
+    assert "xhigh" in gpt56.efforts
+    assert "max" in gpt56.efforts
+    assert "minimal" not in gpt56.efforts
+    assert gpt56.supports_disable is True
+
+    gpt55_pro = get_reasoning_capabilities({"provider": "openai", "model": "gpt-5.5-pro"})
+    assert gpt55_pro.efforts == ("medium", "high", "xhigh")
+
+    opus5 = get_reasoning_capabilities({"provider": "anthropic", "model": "claude-opus-5"})
+    assert opus5.native_effort is True
+    assert opus5.supports_disable is False
+    assert "minimal" not in opus5.efforts

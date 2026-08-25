@@ -1,3 +1,4 @@
+import json
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -5,7 +6,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from jarv import model_catalog
+from jarv import model_catalog, models_dev
 from jarv.model_catalog import CatalogModel
 from jarv.usage import (
     append_global_usage_record,
@@ -21,66 +22,76 @@ from jarv.usage import (
 
 
 class UsageRecordingTests(unittest.TestCase):
+    """Cost and context maths against a catalog this class fully controls."""
+
+    CATALOG = {
+        "openai": {
+            "gpt-5.4-mini": {
+                "limit": {"context": 272_000, "output": 128_000},
+                "cost": {"input": 0.75, "cache_read": 0.075, "output": 4.5},
+            },
+        },
+        "anthropic": {
+            "claude-sonnet-4-6": {
+                "limit": {"context": 1_000_000, "output": 64_000},
+                "cost": {"input": 3, "cache_read": 0.3, "output": 15},
+            },
+        },
+        "google": {
+            "gemini-3-flash-preview": {
+                "limit": {"context": 1_048_576, "output": 65_536},
+                "cost": {"input": 0.5, "cache_read": 0.05, "output": 3},
+            },
+        },
+        "openrouter": {
+            "openai/gpt-5.4-mini": {
+                "limit": {"context": 272_000, "output": 128_000},
+                "cost": {"input": 0.75, "cache_read": 0.075, "output": 4.5},
+            },
+            "anthropic/claude-sonnet-4.6": {
+                "limit": {"context": 1_000_000, "output": 64_000},
+                "cost": {"input": 3, "cache_read": 0.3, "output": 15},
+            },
+            "openrouter/free": {
+                "limit": {"context": 128_000, "output": 16_000},
+                "cost": {"input": 0, "cache_read": 0, "output": 0},
+            },
+        },
+    }
+
     def setUp(self):
         self.catalog_dir = TemporaryDirectory()
-        self.cache_patch = patch.object(
-            model_catalog,
-            "CACHE_DIR",
-            Path(self.catalog_dir.name),
+        root = Path(self.catalog_dir.name)
+        snapshot = root / "models_dev.json"
+        snapshot.write_text(
+            json.dumps({
+                "source": "test",
+                "providers": {
+                    provider_id: {"id": provider_id, "models": models}
+                    for provider_id, models in self.CATALOG.items()
+                },
+            }),
+            encoding="utf-8",
         )
-        self.cache_patch.start()
-        model_catalog._write_cache("openrouter", [
-            CatalogModel(
-                id="openai/gpt-5.4-mini",
-                metadata={
-                    "context_length": 272_000,
-                    "pricing": {
-                        "prompt": "0.00000075",
-                        "input_cache_read": "0.000000075",
-                        "completion": "0.0000045",
-                    },
-                },
-            ),
-            CatalogModel(
-                id="anthropic/claude-sonnet-4.6",
-                metadata={
-                    "context_length": 1_000_000,
-                    "pricing": {
-                        "prompt": "0.000003",
-                        "input_cache_read": "0.0000003",
-                        "completion": "0.000015",
-                    },
-                },
-            ),
-            CatalogModel(
-                id="google/gemini-3-flash-preview",
-                metadata={
-                    "context_length": 1_048_576,
-                    "pricing": {
-                        "prompt": "0.0000005",
-                        "input_cache_read": "0.00000005",
-                        "completion": "0.000003",
-                    },
-                },
-            ),
-            CatalogModel(
-                id="openrouter/free",
-                metadata={
-                    "context_length": 128_000,
-                    "pricing": {
-                        "prompt": "0",
-                        "input_cache_read": "0",
-                        "completion": "0",
-                    },
-                },
-            ),
-        ])
+
+        self.patches = [
+            patch.object(model_catalog, "CACHE_DIR", root),
+            patch.object(models_dev, "SNAPSHOT_PATH", snapshot),
+            patch.object(models_dev, "CACHE_PATH", root / "models-dev.json"),
+        ]
+        for active in self.patches:
+            active.start()
+        models_dev.clear_cache()
+        model_catalog.model_pricing_values.cache_clear()
 
     def tearDown(self):
-        self.cache_patch.stop()
+        for active in reversed(self.patches):
+            active.stop()
         self.catalog_dir.cleanup()
+        models_dev.clear_cache()
+        model_catalog.model_pricing_values.cache_clear()
 
-    def test_openrouter_metadata_prices_cached_input_separately(self):
+    def test_catalog_metadata_prices_cached_input_separately(self):
         record = {
             "input_tokens": 1_000_000,
             "cached_input_tokens": 500_000,
@@ -88,7 +99,7 @@ class UsageRecordingTests(unittest.TestCase):
         }
         self.assertEqual(known_context_window("gpt-5.4-mini"), 272_000)
         self.assertAlmostEqual(
-            estimate_token_cost_usd(record, "gpt-5.4-mini"),
+            estimate_token_cost_usd(record, "gpt-5.4-mini", "openai"),
             0.8625,
         )
 

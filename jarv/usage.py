@@ -546,7 +546,8 @@ def aggregate_usage_records(records: list[dict]) -> dict:
 
 
 def _context_window_from_catalog(model: str, config: dict) -> int | None:
-    from .model_catalog import _read_cache, resolve_openrouter_model
+    """Context window as the provider itself advertised it, when it did."""
+    from .model_catalog import _read_cache
 
     provider = str(config.get("provider", "openai"))
     suffix = model.split("/", 1)[-1] if model else ""
@@ -555,31 +556,27 @@ def _context_window_from_catalog(model: str, config: dict) -> int | None:
         if model_id != model and model_id != suffix and not model_id.endswith(f"/{suffix}"):
             continue
         metadata = catalog_model.metadata if isinstance(catalog_model.metadata, dict) else {}
-        for key in ("context_length", "inputTokenLimit"):
+        for key in ("context_length", "inputTokenLimit", "max_input_tokens"):
             value = metadata.get(key)
             if isinstance(value, (int, float)) and value > 0:
                 return int(value)
-    openrouter_model = resolve_openrouter_model(provider, model)
-    if openrouter_model is not None:
-        value = openrouter_model.metadata.get("context_length")
-        if isinstance(value, (int, float)) and value > 0:
-            return int(value)
     return None
 
 
 def known_context_window(model: str | None, config: dict | None = None) -> int | None:
-    if model and config:
+    if not model:
+        return None
+    if config:
         catalog_window = _context_window_from_catalog(model, config)
         if catalog_window is not None:
             return catalog_window
-    if model:
-        from .model_catalog import resolve_openrouter_model
 
-        openrouter_model = resolve_openrouter_model(None, model)
-        if openrouter_model is not None:
-            window = _int_value(openrouter_model.metadata, "context_length")
-            if window is not None and window > 0:
-                return window
+    from . import models_dev
+
+    provider = str((config or {}).get("provider") or "") or None
+    facts = models_dev.lookup(provider, model)
+    if facts is not None and facts.context_limit:
+        return facts.context_limit
     return None
 
 
@@ -602,10 +599,12 @@ def resolve_context_window(model: str | None, config: dict | None = None) -> int
 def token_prices_for_model(
     model: str | None,
     provider: str | None = None,
+    *,
+    input_tokens: int | None = None,
 ) -> dict[str, float] | None:
-    from .model_catalog import openrouter_prices_for_model
+    from .model_catalog import model_prices
 
-    return openrouter_prices_for_model(provider, model)
+    return model_prices(provider, model, input_tokens=input_tokens)
 
 
 def _normalized_tier(value: Any) -> str | None:
@@ -663,11 +662,11 @@ def estimate_token_cost_usd(
         if tier != "standard":
             return None
         multiplier = 1.0
-    prices = token_prices_for_model(model, provider)
+    input_tokens = int(record.get("input_tokens") or 0)
+    prices = token_prices_for_model(model, provider, input_tokens=input_tokens)
     if prices is None:
         return None
 
-    input_tokens = int(record.get("input_tokens") or 0)
     cached_input_tokens = int(record.get("cached_input_tokens") or 0)
     cached_input_tokens = min(max(cached_input_tokens, 0), max(input_tokens, 0))
     cached_input_price = prices.get("cached_input")
@@ -686,8 +685,11 @@ def estimate_token_cost_usd(
     base_uncached_tokens = max(uncached_input_tokens - cache_creation_tokens, 0)
     input_cost = base_uncached_tokens * prices["input"]
     if cache_creation_tokens:
-        cache_creation_multiplier = 1.25 if provider == "anthropic" else 1.0
-        input_cost += cache_creation_tokens * prices["input"] * cache_creation_multiplier
+        cache_write_price = prices.get("cache_write")
+        if cache_write_price is None:
+            # Anthropic bills cache writes at 1.25x input; assume parity elsewhere.
+            cache_write_price = prices["input"] * (1.25 if provider == "anthropic" else 1.0)
+        input_cost += cache_creation_tokens * cache_write_price
     cached_cost = cached_input_tokens * (cached_input_price or 0.0)
     output_cost = output_tokens * prices["output"]
 
