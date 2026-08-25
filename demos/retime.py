@@ -9,8 +9,8 @@
 #
 # Always scales from the pristine capture in output/.orig/ so repeated runs
 # don't compound. Usage:
-#   uv run python demos/retime.py 1.4            # all tapes, 1.4x slower
-#   uv run python demos/retime.py 1.4 hero usage # just these
+#   python demos/retime.py 1.2            # all tapes, 1.2x slower
+#   python demos/retime.py 1.2 hero usage # just these
 import struct
 import sys
 from pathlib import Path

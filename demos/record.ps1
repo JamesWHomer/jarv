@@ -1,5 +1,5 @@
 # Record one or more demo tapes individually, sequentially — the full pipeline
-# per tape (lossless capture, per-tape reasoning effort, retime). For the fast
+# per tape (lossless capture, recording reasoning effort, retime). For the fast
 # parallel path over everything at once, use record-all.ps1 instead.
 #
 # Usage:
@@ -11,20 +11,21 @@ param([Parameter(Mandatory, ValueFromRemainingArguments = $true)][string[]]$Name
 . "$PSScriptRoot\_record-common.ps1"
 Initialize-RecordEnv
 
+$tapes = Get-Tapes $Names
 $prevEffort = Get-CurrentEffort
 $recorded = @()
 $failed = @()
 try {
-    foreach ($name in $Names) {
-        $tape = "$DemosDir\tapes\$name.tape"
-        if (-not (Test-Path $tape)) { throw "No tape named '$name' in tapes\" }
-        $effort = Get-TapeEffort $name
-        Set-Effort $effort
-        Write-Host "==> Recording $name (reasoning_effort $effort)..." -ForegroundColor Cyan
+    foreach ($tape in $tapes) {
+        $name = $tape.BaseName
+        # Re-asserted per tape: commands.tape cycles reasoning_effort on camera,
+        # so an earlier take in this run may have left it somewhere else.
+        Set-Effort $RecordEffort
+        Write-Host "==> Recording $name (reasoning_effort $RecordEffort)..." -ForegroundColor Cyan
         # Fresh terminal identity per take: jarv keys session history on
         # WT_SESSION, so this isolates the recording from ours.
         $env:WT_SESSION = [guid]::NewGuid().ToString()
-        vhs $tape
+        vhs $tape.FullName
         if ($LASTEXITCODE -ne 0) {
             Write-Host "    $name failed" -ForegroundColor Yellow
             $failed += $name

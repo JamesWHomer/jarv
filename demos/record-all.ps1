@@ -6,27 +6,21 @@
 # in tapes\ (e.g. tapes\hero.ps1). Shared setup lives in _record-common.ps1;
 # see demos/README.md for requirements.
 #
-# Tapes record grouped into waves by reasoning effort (the effort lives in the
-# shared config.json, so it can only vary between waves, not within one). Total
-# wall time is roughly the longest tape per wave.
+# Every tape records at once, so total wall time is roughly the longest tape.
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Names)
 
 . "$PSScriptRoot\_record-common.ps1"
 Initialize-RecordEnv
 
-$tapes = Get-ChildItem "$DemosDir\tapes\*.tape"
-if ($Names) {
-    $tapes = $tapes | Where-Object { $Names -contains $_.BaseName }
-    if (-not $tapes) { throw "No tapes matched: $Names" }
-}
-
+$tapes = Get-Tapes $Names
 $prevEffort = Get-CurrentEffort
 
 $recordJob = {
-    param($tapePath, $repoRoot, $pathEnv, $shimReal, $shimLog)
+    param($tapePath, $repoRoot, $pathEnv, $ffmpegReal, $ffmpegLog, $ttydReal)
     $env:Path = $pathEnv
-    $env:FFMPEG_SHIM_REAL = $shimReal
-    $env:FFMPEG_SHIM_LOG = $shimLog
+    $env:FFMPEG_SHIM_REAL = $ffmpegReal
+    $env:FFMPEG_SHIM_LOG = $ffmpegLog
+    $env:TTYD_SHIM_REAL = $ttydReal
     # Fresh terminal identity per take: jarv keys sessions on WT_SESSION, so this
     # keeps each recording's history isolated from ours and from other takes.
     $env:WT_SESSION = [guid]::NewGuid().ToString()
@@ -37,44 +31,39 @@ $recordJob = {
 
 $failed = @()
 try {
-    # commands.tape cycles reasoning_effort on camera mid-wave; concurrent takes
-    # read config at launch (before the cycling lands), and retries re-assert the
-    # wave's effort first.
-    $waves = $tapes | Group-Object { Get-TapeEffort $_.BaseName }
-    foreach ($wave in $waves) {
-        Set-Effort $wave.Name
-        Write-Host "==> Recording in parallel (reasoning_effort $($wave.Name)): $(($wave.Group | ForEach-Object BaseName) -join ', ')" -ForegroundColor Cyan
-        $jobs = @{}
-        foreach ($tape in $wave.Group) {
-            $jobs[$tape.BaseName] = Start-Job -ScriptBlock $recordJob -ArgumentList `
-                $tape.FullName, $RepoRoot, $env:Path, $env:FFMPEG_SHIM_REAL, $env:FFMPEG_SHIM_LOG
+    # commands.tape cycles reasoning_effort on camera; concurrent takes read the
+    # config at launch, before that lands, and each retry re-asserts it first.
+    Set-Effort $RecordEffort
+    Write-Host "==> Recording in parallel (reasoning_effort $RecordEffort): $(($tapes | ForEach-Object BaseName) -join ', ')" -ForegroundColor Cyan
+    $jobs = @{}
+    foreach ($tape in $tapes) {
+        $jobs[$tape.BaseName] = Start-Job -ScriptBlock $recordJob -ArgumentList `
+            $tape.FullName, $RepoRoot, $env:Path, $env:FFMPEG_SHIM_REAL, $env:FFMPEG_SHIM_LOG, $env:TTYD_SHIM_REAL
+    }
+    # Tapes bound their own waits (240s max) — 10 minutes means a hang.
+    Wait-Job -Job @($jobs.Values) -Timeout 600 | Out-Null
+    foreach ($name in $jobs.Keys) {
+        $job = $jobs[$name]
+        if ($job.State -ne 'Completed') { Stop-Job $job }
+        $exit = @(Receive-Job $job -ErrorAction SilentlyContinue)[-1]
+        Remove-Job $job -Force
+        if ($exit -ne 0) {
+            Write-Host "    $name failed (exit $exit)" -ForegroundColor Yellow
+            $failed += $name
         }
-        # Tapes bound their own waits (240s max) — 10 minutes means a hang.
-        Wait-Job -Job @($jobs.Values) -Timeout 600 | Out-Null
-        foreach ($name in $jobs.Keys) {
-            $job = $jobs[$name]
-            if ($job.State -ne 'Completed') { Stop-Job $job }
-            $exit = @(Receive-Job $job -ErrorAction SilentlyContinue)[-1]
-            Remove-Job $job -Force
-            if ($exit -ne 0) {
-                Write-Host "    $name failed (exit $exit)" -ForegroundColor Yellow
-                $failed += $name
-            }
-            else {
-                Write-Host "    $name done" -ForegroundColor Green
-            }
+        else {
+            Write-Host "    $name done" -ForegroundColor Green
         }
     }
 
     # One sequential retry per failed tape: the first heads-up launch after an
     # idle stretch sometimes comes up with dead keyboard input (the tapes' Wait
     # patterns turn that into a loud timeout), and ttyd itself occasionally
-    # flakes. Effort is re-asserted per retry because commands.tape may have
-    # cycled it during its wave.
+    # flakes. Effort is re-asserted because commands.tape may have cycled it.
     $stillFailed = @()
     foreach ($name in $failed) {
-        Set-Effort (Get-TapeEffort $name)
-        Write-Host "==> Retrying $name (reasoning_effort $(Get-TapeEffort $name))..." -ForegroundColor Cyan
+        Set-Effort $RecordEffort
+        Write-Host "==> Retrying $name..." -ForegroundColor Cyan
         $env:WT_SESSION = [guid]::NewGuid().ToString()
         vhs "$DemosDir\tapes\$name.tape"
         if ($LASTEXITCODE -ne 0) { $stillFailed += $name }
@@ -90,8 +79,7 @@ if ($failed) {
     throw "Failed tapes: $($failed -join ', ')"
 }
 
-$recorded = if ($Names) { $Names } else { (Get-ChildItem "$OutputDir\*.webp").BaseName }
-Complete-Retime $recorded
+Complete-Retime @($tapes | ForEach-Object BaseName)
 
 Write-Host ""
 Get-ChildItem "$OutputDir\*.webp" | Format-Table Name, @{L = 'Size'; E = { '{0:N0} KB' -f ($_.Length / 1KB) } }, LastWriteTime
