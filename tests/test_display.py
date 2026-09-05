@@ -2,6 +2,7 @@ import io
 from types import SimpleNamespace
 
 from rich.console import Console
+from rich.text import Text
 
 from jarv import display
 from jarv.display import (
@@ -334,3 +335,74 @@ def test_print_tool_cards_can_be_separated_by_one_blank_line():
 
     rendered = stream.getvalue()
     assert "DuckDuckGo homepage\n\n\u258e \u2261 Read" in rendered
+
+
+def test_configure_monochrome_toggles_the_shared_console():
+    assert display.console.no_color is False
+
+    display.configure_monochrome(True)
+    assert display.console.no_color is True
+    assert display.monochrome_enabled() is True
+
+    display.configure_monochrome(False)
+    assert display.console.no_color is False
+    assert display.monochrome_enabled() is False
+
+
+def test_monochrome_never_re_enables_colour_for_a_no_color_environment(monkeypatch):
+    # NO_COLOR was set when the console was built, so turning the setting off
+    # must leave the console colourless rather than overriding the environment.
+    monkeypatch.setattr(display, "_ENV_NO_COLOR", True)
+
+    display.configure_monochrome(False)
+    assert display.console.no_color is True
+    assert display.monochrome_enabled() is True
+
+    display.configure_monochrome(True)
+    assert display.console.no_color is True
+
+
+def test_monochrome_strips_colour_but_keeps_emphasis():
+    stream = io.StringIO()
+    test_console = Console(
+        file=stream,
+        force_terminal=True,
+        color_system="truecolor",
+        width=80,
+    )
+    text = Text("jarv", style="bold red")
+
+    test_console.print(text)
+    coloured = stream.getvalue()
+
+    stream.seek(0)
+    stream.truncate()
+    test_console.no_color = True
+    test_console.print(text)
+    monochrome = stream.getvalue()
+
+    # Rich reads ``no_color`` per render, so the same console flips mid-run.
+    assert "\x1b[1;31m" in coloured
+    assert "31m" not in monochrome
+    assert "\x1b[1m" in monochrome
+    assert "jarv" in monochrome
+
+
+def test_ask_user_prompt_drops_ansi_colour_when_monochrome():
+    from jarv.agent_ui import _ask_user_prompt
+
+    display.configure_monochrome(False)
+    assert _ask_user_prompt("print") == (
+        "\x1b[34m\u258e\x1b[0m \x1b[1;36m>\x1b[0m ",
+        "\x1b[97m",
+    )
+
+    display.configure_monochrome(True)
+    prompt, text_style = _ask_user_prompt("print")
+    assert prompt == "\u258e > "
+    assert text_style == ""
+    assert "\x1b" not in prompt
+
+    fullscreen_prompt, fullscreen_style = _ask_user_prompt("fullscreen")
+    assert fullscreen_prompt == "> "
+    assert fullscreen_style == ""

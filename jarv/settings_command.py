@@ -16,7 +16,7 @@ from .config import (
     save_config,
     validate_config,
 )
-from .display import console, jarv_panel, section_rule
+from .display import configure_monochrome, console, jarv_panel, section_rule
 from .settings_schema import (
     settings_rows,
     settings_service_tier_choices,
@@ -69,6 +69,10 @@ def _settings_save_validated(config: dict) -> bool:
     config.clear()
     config.update(trial)
     save_config(config)
+    # The single save funnel for quick toggles, the field editors, and reset, so
+    # hooking it here means the settings screen repaints in the newly chosen
+    # mode on its very next frame -- it renders on this same shared console.
+    configure_monochrome(config.get("monochrome", False))
     return True
 
 

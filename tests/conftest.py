@@ -196,6 +196,20 @@ def write_models_dev_catalog(monkeypatch, directory, providers):
 
 if pytest is not None:
 
+    @pytest.fixture(autouse=True)
+    def _reset_monochrome():
+        """Undo any ``monochrome`` toggling a test leaves on the shared console.
+
+        ``load_config`` and the settings save funnel both push the setting into
+        ``jarv.display.console``, which is a process-wide singleton -- without
+        this, one test writing ``monochrome: true`` would silently strip colour
+        from every test that ran after it.
+        """
+        from jarv import display
+
+        yield
+        display.configure_monochrome(False)
+
     @pytest.fixture
     def neutral_tui_terminal():
         with neutral_terminal_modes():

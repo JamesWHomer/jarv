@@ -86,6 +86,13 @@ def load_config() -> dict:
     if changed:
         save_config(config)
 
+    # Every entry point funnels through here -- including the slash commands
+    # dispatched before cli.main() loads the run config -- so this is the one
+    # place that reaches /help, /settings, and the heads-up TUI alike.
+    from .display import configure_monochrome
+
+    configure_monochrome(config.get("monochrome", False))
+
     return config
 
 

@@ -235,6 +235,8 @@ All commands work both as `jarv /command` (one-shot) and inside heads-up mode. R
 
 Agent tool calls have a separate `tool_call_display` setting. `auto` uses `print` for one-shot runs and `fullscreen` in heads-up mode. `print` is resize-safe and left-aligned; `fullscreen` uses bordered cards with right-aligned status.
 
+Toggle **Black and white** in `/settings` (or set `monochrome`) to render everything without colour — bold, dim, and underline are kept, so the layout still reads. Setting `NO_COLOR` in the environment does the same thing without changing your config.
+
 ## Sessions
 
 Each terminal is automatically bound to its own session. Jarv identifies terminals using environment variables (`WT_SESSION`, `TERM_SESSION_ID`, `TMUX`, `STY`) with a parent-process fallback, so history persists across runs in the same terminal.
@@ -283,6 +285,7 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 | `read_only_command_display` | `"fullscreen"` | Display mode for `/help`, `/about`, `/usage`, and `/config`: temporary `fullscreen` view or permanent `print` output. |
 | `tool_call_display` | `"auto"` | Tool-call layout: `auto` selects `print` for one-shot runs and `fullscreen` in heads-up mode; explicit modes override it. |
 | `print_usage_after_agent` | `false` | Print a compact token usage line after each completed agent run. |
+| `monochrome` | `false` | Render without colour, keeping bold, dim, and underline. Also enabled when the `NO_COLOR` environment variable is set. |
 | `system_prompt` | `"You are Jarv..."` | System instructions sent with each request. |
 | `project_context` | `true` | Read `JARV.md`/`AGENTS.md`/`CLAUDE.md` and git branch, status, and recent commits into the system prompt. |
 

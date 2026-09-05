@@ -24,6 +24,7 @@ from .display import (
     console,
     flatten_headings,
     hidden_lines_hint,
+    monochrome_enabled,
     output_renderable,
     rendered_text_lines,
     terminal_size,
@@ -694,6 +695,20 @@ def _ask_user_terminal_input():
         tty.close()
 
 
+def _ask_user_prompt(display_mode: str) -> tuple[str, str]:
+    """Return the ``(prompt, text_style)`` pair for the ask_user input line.
+
+    This prompt is written straight to the terminal by the line editor rather
+    than rendered through Rich, so it is the one place colour has to be dropped
+    by hand when the ``monochrome`` setting (or NO_COLOR) is on.
+    """
+    rail = "\u258e " if display_mode == "print" else ""
+    if monochrome_enabled():
+        return f"{rail}> ", ""
+    coloured_rail = "\x1b[34m\u258e\x1b[0m " if rail else ""
+    return f"{coloured_rail}\x1b[1;36m>\x1b[0m ", "\x1b[97m"
+
+
 def _dispatch_ask_user(args: dict, config: dict | None = None, ui=None) -> str:
     question = args.get("question")
     if not isinstance(question, str) or not question.strip():
@@ -739,12 +754,8 @@ def _dispatch_ask_user(args: dict, config: dict | None = None, ui=None) -> str:
                 waiting_card
             )
         try:
-            prompt = (
-                "\x1b[34m\u258e\x1b[0m \x1b[1;36m>\x1b[0m "
-                if display_mode == "print"
-                else "\x1b[1;36m>\x1b[0m "
-            )
-            answer = read_editable_line(prompt, text_style="\x1b[97m").strip()
+            prompt, prompt_text_style = _ask_user_prompt(display_mode)
+            answer = read_editable_line(prompt, text_style=prompt_text_style).strip()
         except KeyboardInterrupt:
             raise
         except EOFError:

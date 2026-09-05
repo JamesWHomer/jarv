@@ -41,6 +41,7 @@ from .agent_ui import (
 )
 from .config import get_setting
 from .display import (
+    configure_monochrome,
     configure_output_display_lines,
     console,
     flatten_headings,
@@ -690,6 +691,7 @@ class HeadsupApp(AltScreenApp):
         configure_output_display_lines(
             get_setting(self.config, "tool_output_display_lines")
         )
+        configure_monochrome(get_setting(self.config, "monochrome"))
         self.client = client
         self.args = args
         self.agent_import, self.agent_ready = agent_loader
@@ -1585,6 +1587,7 @@ class HeadsupApp(AltScreenApp):
         configure_output_display_lines(
             get_setting(self.config, "tool_output_display_lines")
         )
+        configure_monochrome(get_setting(self.config, "monochrome"))
         output = capture.get().strip()
         notice = Text.from_ansi(output) if output else None
         if not self._sync_after_slash(command, notice):
@@ -1620,6 +1623,7 @@ class HeadsupApp(AltScreenApp):
         configure_output_display_lines(
             get_setting(self.config, "tool_output_display_lines")
         )
+        configure_monochrome(get_setting(self.config, "monochrome"))
         self._sync_after_slash(command, None)
 
     def _run_tree(self) -> None:

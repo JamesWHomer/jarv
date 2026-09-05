@@ -18,6 +18,7 @@ from .config import DEFAULT_CONFIG, get_setting
 from .context_budget import build_input, trim_turn_input
 from .cancellation import CancellationToken, TurnCancelled, cancel_token_on_sigint
 from .display import (
+    configure_monochrome,
     configure_output_display_lines,
     configure_tool_call_display,
     console,
@@ -1286,6 +1287,7 @@ def run_agent(
     )
     configure_tool_call_display(config["tool_call_display"])
     configure_output_display_lines(get_setting(config, "tool_output_display_lines"))
+    configure_monochrome(get_setting(config, "monochrome"))
     interactive = sys.stdout.isatty() and ui is None
     history: list = []
     metadata: dict = {}

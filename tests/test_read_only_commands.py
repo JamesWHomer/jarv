@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from rich.console import Console
 
-from jarv import commands, config as config_module, history, settings_command, usage, usage_command, usage_view
+from jarv import commands, config as config_module, display, history, settings_command, usage, usage_command, usage_view
 from jarv.config import DEFAULT_CONFIG, READ_ONLY_COMMAND_DISPLAY_CHOICES, validate_config
 
 
@@ -28,6 +28,7 @@ def test_read_only_command_display_default_is_fullscreen():
     assert READ_ONLY_COMMAND_DISPLAY_CHOICES == ("fullscreen", "print")
     assert DEFAULT_CONFIG["read_only_command_display"] == "fullscreen"
     assert DEFAULT_CONFIG["print_usage_after_agent"] is False
+    assert DEFAULT_CONFIG["monochrome"] is False
     assert validate_config(dict(DEFAULT_CONFIG))
 
 
@@ -78,6 +79,23 @@ def test_settings_exposes_print_usage_after_agent(monkeypatch):
 
     assert updated["print_usage_after_agent"] is True
     assert message == "saved Print usage: on"
+
+
+def test_settings_exposes_monochrome(monkeypatch):
+    config = dict(DEFAULT_CONFIG)
+    row = next(row for row in settings_command._settings_rows(config) if row["key"] == "monochrome")
+
+    assert row["section"] == "display"
+    assert row["label"] == "Black and white"
+    assert settings_command._settings_value_text(row, config).plain == "off"
+
+    monkeypatch.setattr(settings_command, "save_config", lambda _config: None)
+    updated, message = settings_command._settings_apply_quick(row, config)
+
+    assert updated["monochrome"] is True
+    assert message == "saved Black and white: on"
+    # Toggling in /settings takes effect on the screen you toggled it from.
+    assert display.console.no_color is True
 
 
 def test_settings_groups_account_and_behaviour_rows_in_requested_order():
