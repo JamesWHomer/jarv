@@ -31,6 +31,7 @@ from .tui_frame import panel_width
 from .tui_layout import append_bottom_footer, clip_text
 from .tui_overlay import (
     SELECTION_KEYS,
+    SHIFT_SELECTION_KEYS,
     apply_scroll_keys,
     apply_selection_keys,
     body_content_rows,
@@ -256,20 +257,26 @@ class SessionBrowserScreen(AltScreenApp):
         self.current_session_id = current_session_id
 
         self.view_mode = "active"  # "active" | "all" | "archived"
-        self.arm_delete_sid: str | None = None
+        # Sids armed for deletion; the second ``d`` only fires if the target set
+        # is still the same one that armed it.
+        self.arm_delete_sids: frozenset[str] | None = None
         self.flash: tuple[str, str] | None = None  # (message, style) shown above the footer
         self.search_query = ""
         self.search_active = False  # input bar focused for typing
         self.search_text_cache: dict[str, str] = {}  # sid -> lowercased transcript text
         self.last_action: dict | None = None  # most recent undoable action (5s window)
         self.undo_lock = threading.Lock()
-        # When a row is archived/unarchived from a filtered view, keep it visible
-        # in place (with its new aesthetic) until the cursor moves.
-        self.ghost_sid: str | None = None
+        # When rows are archived/unarchived from a filtered view, keep them
+        # visible in place (with their new aesthetic) until the cursor moves.
+        self.ghost_sids: set[str] = set()
         self.selected_sid: str | None = next(
             (r["sid"] for r in rows if r["is_current"] and not r["archived"]),
             next((r["sid"] for r in rows if not r["archived"]), rows[0]["sid"] if rows else None),
         )
+        # Contiguous Shift+arrow range selection. ``anchor_sid`` is where the
+        # range started; an empty ``marked_sids`` means "act on the cursor row".
+        self.anchor_sid: str | None = None
+        self.marked_sids: set[str] = set()
         self.offset = 0
         self.preview_sid: str | None = None
         self.preview_offset = 0
@@ -295,6 +302,8 @@ class SessionBrowserScreen(AltScreenApp):
                 "DOWN",
                 "LEFT",
                 "RIGHT",
+                "SHIFT_UP",
+                "SHIFT_DOWN",
                 "PAGEUP",
                 "PAGEDOWN",
                 "MOUSE_WHEEL_UP",
@@ -452,7 +461,7 @@ class SessionBrowserScreen(AltScreenApp):
         q = self.search_query.lower().strip()
 
         def keep(r: dict) -> bool:
-            if r["sid"] == self.ghost_sid:
+            if r["sid"] in self.ghost_sids:
                 return True
             if self.view_mode == "active" and r["archived"]:
                 return False
@@ -473,14 +482,62 @@ class SessionBrowserScreen(AltScreenApp):
                 return i
         return 0
 
+    def _clear_selection(self) -> None:
+        """Drop the Shift+arrow range back to a lone cursor."""
+        self.anchor_sid = None
+        self.marked_sids = set()
+
+    def _target_rows(self, visible: list[dict]) -> list[dict]:
+        """Rows an action applies to: the marked span, else the cursor row.
+
+        Every row action goes through this, so ``a``/``d`` behave identically
+        whether or not a range is active.
+        """
+        if self.marked_sids:
+            marked = [r for r in visible if r["sid"] in self.marked_sids]
+            if marked:
+                return marked
+        if not visible:
+            return []
+        return [visible[self._selected_pos(visible)]]
+
+    def _extend_selection(self, key: str, repeat_count: int, visible: list[dict]) -> None:
+        """Grow or shrink the Shift+arrow range, carrying the cursor with it."""
+        if not visible:
+            return
+        sel = self._selected_pos(visible)
+        if self.anchor_sid is None or not any(r["sid"] == self.anchor_sid for r in visible):
+            self.anchor_sid = visible[sel]["sid"]
+        nav = apply_selection_keys(
+            SHIFT_SELECTION_KEYS[key],
+            repeat_count,
+            selected=sel,
+            total=len(visible),
+            page=self._max_vis(),
+        )
+        if nav is None:
+            return
+        self.selected_sid = visible[nav]["sid"]
+        anchor_pos = next(
+            (i for i, r in enumerate(visible) if r["sid"] == self.anchor_sid), nav
+        )
+        lo, hi = (anchor_pos, nav) if anchor_pos <= nav else (nav, anchor_pos)
+        self.marked_sids = {r["sid"] for r in visible[lo:hi + 1]}
+        self.ghost_sids = set()
+
     def _subtitle(self) -> str:
         n_active = sum(1 for r in self.rows if not r["archived"])
         n_archived = len(self.rows) - n_active
         if self.view_mode == "active":
-            return f"[dim]{n_active} active[/dim]"
-        if self.view_mode == "archived":
-            return f"[dim]{n_archived} archived[/dim]"
-        return f"[dim]{n_active} active · {n_archived} archived[/dim]"
+            counts = f"[dim]{n_active} active[/dim]"
+        elif self.view_mode == "archived":
+            counts = f"[dim]{n_archived} archived[/dim]"
+        else:
+            counts = f"[dim]{n_active} active · {n_archived} archived[/dim]"
+        n_marked = len(self.marked_sids)
+        if n_marked > 1:
+            return f"{counts} [bold cyan]· {n_marked} selected[/bold cyan]"
+        return counts
 
     def _footer_text(self) -> str:
         if self.search_active:
@@ -488,9 +545,16 @@ class SessionBrowserScreen(AltScreenApp):
         cur_visible = self._visible_rows_list()
         cur = cur_visible[self._selected_pos(cur_visible)] if cur_visible else None
         a_hint = "a unarchive" if (cur and cur["archived"]) else "a archive"
+        d_hint = "d delete"
+        n_targets = len(self._target_rows(cur_visible))
+        if n_targets > 1:
+            a_hint = f"{a_hint} {n_targets}"
+            d_hint = f"{d_hint} {n_targets}"
         find_hint = "^F edit search" if self.search_query else "^F find"
         parts = [
-            "←→/↑↓ navigate", "Enter load", "p preview", "d delete",
+            # "navigate" trimmed to "nav" to pay for most of the select hint --
+            # this line already overflows a narrow terminal and gets clipped.
+            "←→/↑↓ nav", "⇧↑↓ select", "Enter load", "p preview", d_hint,
             a_hint, f"Tab view: {self.view_mode}", find_hint,
         ]
         action = self.last_action
@@ -613,10 +677,20 @@ class SessionBrowserScreen(AltScreenApp):
         sel = self._selected_pos(visible)
 
         status: Text | None = None
-        cur = visible[sel] if visible else None
-        if self.arm_delete_sid and cur and cur["sid"] == self.arm_delete_sid:
+        armed = self.arm_delete_sids
+        # Only prompt while the armed set is still what ``d`` would act on, so a
+        # selection change between the two presses can't leave a stale prompt.
+        if armed and armed == {r["sid"] for r in self._target_rows(visible)}:
+            what = (
+                f"{len(armed)} sessions"
+                if len(armed) > 1
+                else next(
+                    (r["short_id"] for r in visible if r["sid"] in armed),
+                    _short_session_id(next(iter(armed))),
+                )
+            )
             prompt = (
-                f"Delete {cur['short_id']} permanently? "
+                f"Delete {what} permanently? "
                 "Press d again to confirm · any other key cancels"
             )
             status = Text(self._truncate(prompt, inner_width), style="bold red", no_wrap=True, overflow="crop")
@@ -686,7 +760,11 @@ class SessionBrowserScreen(AltScreenApp):
             r = visible[i]
             self._ensure_row_metadata(r)
             is_sel = (i == sel) and not self.search_active
-            is_armed = is_sel and self.arm_delete_sid == r["sid"]
+            is_marked = r["sid"] in self.marked_sids and not self.search_active
+            # Marked rows paint like the cursor row -- the "›" prefix is what
+            # still distinguishes the cursor within the span.
+            highlight = is_sel or is_marked
+            is_armed = self.arm_delete_sids is not None and r["sid"] in self.arm_delete_sids
             t = Text(no_wrap=True, overflow="ellipsis")
             prefix = " › " if is_sel else "   "
             if r["is_current"]:
@@ -721,7 +799,7 @@ class SessionBrowserScreen(AltScreenApp):
                 short_id = self._truncate(r["short_id"], id_width)
                 if is_armed:
                     id_style = "bold red"
-                elif is_sel:
+                elif highlight:
                     id_style = "bold cyan"
                 elif r["archived"]:
                     id_style = "dim cyan"
@@ -734,7 +812,7 @@ class SessionBrowserScreen(AltScreenApp):
                 time_str = self._truncate(r["time_str"], time_width)
                 if is_armed:
                     time_style = "bold red"
-                elif is_sel:
+                elif highlight:
                     time_style = "bold"
                 else:
                     time_style = "dim"
@@ -745,7 +823,7 @@ class SessionBrowserScreen(AltScreenApp):
             if snippet_width:
                 if is_armed:
                     snip_style = "bold red"
-                elif is_sel:
+                elif highlight:
                     snip_style = "bold" if not r["archived"] else "dim strike"
                 elif r["archived"]:
                     snip_style = "dim strike"
@@ -788,9 +866,10 @@ class SessionBrowserScreen(AltScreenApp):
     def _finalize_action(self, action: dict) -> None:
         """Apply the irreversible part of an action that's leaving its window."""
         if action["kind"] == "did_delete":
-            hp_str = action.get("history_path")
-            if hp_str:
-                delete_session_files(Path(hp_str))
+            for entry in action["entries"]:
+                hp_str = entry.get("history_path")
+                if hp_str:
+                    delete_session_files(Path(hp_str))
 
     def _expire_action(self, action: dict) -> None:
         with self.undo_lock:
@@ -837,64 +916,46 @@ class SessionBrowserScreen(AltScreenApp):
             t.cancel()
         return action
 
-    def _do_undo(self) -> tuple[tuple[str, str], str | None] | None:
-        """Returns ((flash_msg, flash_style), restored_sid) or None."""
+    def _do_undo(self) -> tuple[tuple[str, str], list[str]] | None:
+        """Returns ((flash_msg, flash_style), restored_sids) or None."""
         action = self._take_last_action()
         if action is None:
             return None
         kind = action["kind"]
-        if kind == "did_archive":
-            sid = action["sid"]
-            row = next((r for r in self.rows if r["sid"] == sid), None)
-            if row is None:
-                return (("○ session no longer exists", "dim"), None)
-            meta = self.sessions.get(sid, {})
-            hp_str = meta.get("history_file")
-            hp = Path(hp_str) if hp_str else None
-            restored = unarchive_session_files(hp, sid) if hp else None
-            if restored is not None:
-                meta["history_file"] = str(restored)
-            meta.pop("archived", None)
-            meta.pop("archived_at", None)
-            row["archived"] = False
+        if kind in ("did_archive", "did_unarchive"):
+            restored: list[str] = []
+            for sid in action["sids"]:
+                row = next((r for r in self.rows if r["sid"] == sid), None)
+                if row is None:
+                    continue
+                if kind == "did_archive":
+                    self._unarchive_row(row)
+                    restored.append(sid)
+                elif self._archive_row(row):
+                    restored.append(sid)
+            if not restored:
+                return (("○ nothing left to undo", "dim"), [])
             save_sessions(self.data)
-            return ((f"↺ restored {row['short_id']}", "green"), sid)
-        if kind == "did_unarchive":
-            sid = action["sid"]
-            row = next((r for r in self.rows if r["sid"] == sid), None)
-            if row is None:
-                return (("○ session no longer exists", "dim"), None)
-            meta = self.sessions.get(sid, {})
-            hp_str = meta.get("history_file")
-            hp = Path(hp_str) if hp_str else None
-            archived_path = archive_session_files(hp) if hp else None
-            if archived_path is None:
-                return (("○ couldn't re-archive", "dim"), None)
-            meta["history_file"] = str(archived_path)
-            meta["archived"] = True
-            meta["archived_at"] = isoformat_utc(utc_now())
-            for term_id, mapped_sid in list(self.terminals.items()):
-                if mapped_sid == sid:
-                    self.terminals.pop(term_id)
-            row["archived"] = True
-            row["is_current"] = False
-            save_sessions(self.data)
-            return ((f"↺ archived {row['short_id']}", "cyan"), sid)
+            label = self._batch_label(restored)
+            if kind == "did_archive":
+                return ((f"↺ restored {label}", "green"), restored)
+            return ((f"↺ archived {label}", "cyan"), restored)
         if kind == "did_delete":
-            sid = action["sid"]
-            snapshot_row = action["row"]
-            snapshot_meta = action["meta"]
-            row_index = action.get("row_index", len(self.rows))
-            removed_terminals = action.get("removed_terminals", [])
-            self.sessions[sid] = snapshot_meta
-            for term_id in removed_terminals:
-                self.terminals[term_id] = sid
-            if 0 <= row_index <= len(self.rows):
-                self.rows.insert(row_index, snapshot_row)
-            else:
-                self.rows.append(snapshot_row)
+            # Ascending row_index so each insert lands where the row used to be.
+            entries = sorted(action["entries"], key=lambda e: e["row_index"])
+            for entry in entries:
+                sid = entry["sid"]
+                self.sessions[sid] = entry["meta"]
+                for term_id in entry["removed_terminals"]:
+                    self.terminals[term_id] = sid
+                row_index = entry["row_index"]
+                if 0 <= row_index <= len(self.rows):
+                    self.rows.insert(row_index, entry["row"])
+                else:
+                    self.rows.append(entry["row"])
             save_sessions(self.data)
-            return ((f"↺ restored {snapshot_row['short_id']}", "green"), sid)
+            sids = [e["sid"] for e in entries]
+            return ((f"↺ restored {self._batch_label(sids)}", "green"), sids)
         return None
 
     # ------------------------------------------------------------------ #
@@ -917,86 +978,140 @@ class SessionBrowserScreen(AltScreenApp):
         self.loaded_row = row
         self.stop()
 
-    def _toggle_archive(self, cur: dict | None) -> None:
-        if cur is None:
-            return
-        sid = cur["sid"]
-        meta = self.sessions.get(sid, {})
-        hp_str = meta.get("history_file")
-        hp = Path(hp_str) if hp_str else None
-        if cur["archived"]:
-            restored = unarchive_session_files(hp, sid) if hp else None
-            if restored is not None:
-                meta["history_file"] = str(restored)
-                meta.pop("archived", None)
-                meta.pop("archived_at", None)
-                cur["archived"] = False
-                save_sessions(self.data)
-                self.flash = (f"✓ restored {cur['short_id']}", "green")
-                self.ghost_sid = sid if self.view_mode == "archived" else None
-                self._start_undo({"kind": "did_unarchive", "sid": sid})
-            else:
-                meta.pop("archived", None)
-                meta.pop("archived_at", None)
-                cur["archived"] = False
-                save_sessions(self.data)
-                self.flash = (f"○ archive missing for {cur['short_id']} — marked active", "dim")
-                self.ghost_sid = sid if self.view_mode == "archived" else None
-        else:
-            archived_path = archive_session_files(hp) if hp else None
-            if archived_path is not None:
-                meta["history_file"] = str(archived_path)
-                meta["archived"] = True
-                meta["archived_at"] = isoformat_utc(utc_now())
-                for term_id, mapped_sid in list(self.terminals.items()):
-                    if mapped_sid == sid:
-                        self.terminals.pop(term_id)
-                cur["archived"] = True
-                cur["is_current"] = False
-                save_sessions(self.data)
-                self.flash = (f"✓ archived {cur['short_id']}", "cyan")
-                self.ghost_sid = sid if self.view_mode == "active" else None
-                self._start_undo({"kind": "did_archive", "sid": sid})
-            else:
-                self.flash = (f"○ nothing to archive for {cur['short_id']}", "dim")
+    def _batch_label(self, sids) -> str:
+        """Flash/prompt wording: a short id for one row, a count for a batch."""
+        sids = list(sids)
+        if len(sids) == 1:
+            return _short_session_id(sids[0])
+        return f"{len(sids)} sessions"
 
-    def _handle_delete_key(self, cur: dict | None, sel: int) -> None:
-        if cur is None:
-            return
-        sid = cur["sid"]
-        if self.arm_delete_sid != sid:
-            self.arm_delete_sid = sid
-            return
+    def _archive_row(self, row: dict) -> bool:
+        """Move one session into the archive. False when there was nothing to move."""
+        sid = row["sid"]
         meta = self.sessions.get(sid, {})
         hp_str = meta.get("history_file")
-        snapshot_meta = dict(meta)
-        snapshot_row = dict(cur)
-        row_index = next((i for i, r in enumerate(self.rows) if r["sid"] == sid), len(self.rows))
-        removed_terminals: list[str] = []
+        archived_path = archive_session_files(Path(hp_str)) if hp_str else None
+        if archived_path is None:
+            return False
+        meta["history_file"] = str(archived_path)
+        meta["archived"] = True
+        meta["archived_at"] = isoformat_utc(utc_now())
         for term_id, mapped_sid in list(self.terminals.items()):
             if mapped_sid == sid:
-                removed_terminals.append(term_id)
                 self.terminals.pop(term_id)
-        self.sessions.pop(sid, None)
-        self.rows[:] = [r for r in self.rows if r["sid"] != sid]
+        row["archived"] = True
+        row["is_current"] = False
+        return True
+
+    def _unarchive_row(self, row: dict) -> bool:
+        """Mark one session active again, moving its files back if they're there.
+
+        The row flips to active either way -- metadata claiming an archive that
+        no longer exists shouldn't strand the session in the archived view --
+        but False says nothing moved, so the caller can skip the undo entry.
+        """
+        sid = row["sid"]
+        meta = self.sessions.get(sid, {})
+        hp_str = meta.get("history_file")
+        restored = unarchive_session_files(Path(hp_str), sid) if hp_str else None
+        if restored is not None:
+            meta["history_file"] = str(restored)
+        meta.pop("archived", None)
+        meta.pop("archived_at", None)
+        row["archived"] = False
+        return restored is not None
+
+    def _archive_selection(self, rows: list[dict], cur: dict | None) -> None:
+        """Archive or unarchive every targeted row as one undoable action.
+
+        The cursor row picks the direction and rows already in that state are
+        skipped, so a span mixing active and archived sessions can't half-flip.
+        """
+        if cur is None or not rows:
+            return
+        unarchiving = cur["archived"]
+        changed: list[str] = []
+        moved: list[str] = []
+        for row in rows:
+            if row["archived"] != unarchiving:
+                continue
+            if unarchiving:
+                changed.append(row["sid"])
+                if self._unarchive_row(row):
+                    moved.append(row["sid"])
+            elif self._archive_row(row):
+                changed.append(row["sid"])
+                moved.append(row["sid"])
+
+        if not changed:
+            label = self._batch_label([r["sid"] for r in rows])
+            self.flash = (f"○ nothing to archive for {label}", "dim")
+            return
+
         save_sessions(self.data)
+        # Rows that just left this view stay painted in place until the cursor
+        # moves, so a batch doesn't vanish out from under the user.
+        ghost_view = "archived" if unarchiving else "active"
+        self.ghost_sids = set(changed) if self.view_mode == ghost_view else set()
+        label = self._batch_label(changed)
+        if not moved:
+            self.flash = (f"○ archive missing for {label} — marked active", "dim")
+            return
+        if unarchiving:
+            self.flash = (f"✓ restored {label}", "green")
+            self._start_undo({"kind": "did_unarchive", "sids": moved})
+        else:
+            self.flash = (f"✓ archived {label}", "cyan")
+            self._start_undo({"kind": "did_archive", "sids": moved})
+
+    def _handle_delete_key(self, rows: list[dict], visible: list[dict]) -> None:
+        if not rows:
+            return
+        target_sids = frozenset(r["sid"] for r in rows)
+        if self.arm_delete_sids != target_sids:
+            # First press, or the target set moved since the last one: (re)arm
+            # rather than deleting something the prompt never named.
+            self.arm_delete_sids = target_sids
+            return
+
+        entries: list[dict] = []
+        for row in rows:
+            sid = row["sid"]
+            meta = self.sessions.get(sid, {})
+            removed_terminals: list[str] = []
+            for term_id, mapped_sid in list(self.terminals.items()):
+                if mapped_sid == sid:
+                    removed_terminals.append(term_id)
+                    self.terminals.pop(term_id)
+            entries.append({
+                "sid": sid,
+                "row": dict(row),
+                "meta": dict(meta),
+                "row_index": next(
+                    (i for i, r in enumerate(self.rows) if r["sid"] == sid), len(self.rows)
+                ),
+                "removed_terminals": removed_terminals,
+                "history_path": meta.get("history_file"),
+            })
+            self.sessions.pop(sid, None)
+
+        # Land the cursor where the top of the deleted span used to be.
+        first_pos = min(
+            (i for i, r in enumerate(visible) if r["sid"] in target_sids),
+            default=0,
+        )
+        self.rows[:] = [r for r in self.rows if r["sid"] not in target_sids]
+        save_sessions(self.data)
+        self._clear_selection()
+        self.ghost_sids = set()
         new_visible = self._visible_rows_list()
         if new_visible:
-            new_sel = min(sel, len(new_visible) - 1)
-            self.selected_sid = new_visible[new_sel]["sid"]
+            self.selected_sid = new_visible[min(first_pos, len(new_visible) - 1)]["sid"]
         else:
             self.selected_sid = None
-        self.flash = (f"✓ deleted {cur['short_id']}", "red")
-        self.arm_delete_sid = None
-        self._start_undo({
-            "kind": "did_delete",
-            "sid": sid,
-            "row": snapshot_row,
-            "meta": snapshot_meta,
-            "row_index": row_index,
-            "removed_terminals": removed_terminals,
-            "history_path": hp_str,
-        })
+        self.flash = (f"✓ deleted {self._batch_label(target_sids)}", "red")
+        self.arm_delete_sids = None
+        self._start_undo({"kind": "did_delete", "entries": entries})
 
     # ------------------------------------------------------------------ #
     # Key handling
@@ -1014,19 +1129,23 @@ class SessionBrowserScreen(AltScreenApp):
             self._on_key_preview(key, repeat_count)
             return
 
-        if key == "ESC" and self.arm_delete_sid is not None:
-            self.arm_delete_sid = None
+        if key == "ESC" and self.arm_delete_sids is not None:
+            self.arm_delete_sids = None
             self.flash = None
             return
 
         if key != "d":
-            self.arm_delete_sid = None
+            self.arm_delete_sids = None
         self.flash = None
 
         visible = self._visible_rows_list()
         n_vis = len(visible)
         sel = self._selected_pos(visible) if visible else 0
         cur = visible[sel] if visible else None
+
+        if key in SHIFT_SELECTION_KEYS:
+            self._extend_selection(key, repeat_count, visible)
+            return
 
         nav_key = {
             "LEFT": "UP",
@@ -1042,40 +1161,57 @@ class SessionBrowserScreen(AltScreenApp):
             )
             if nav is not None:
                 self.selected_sid = visible[nav]["sid"]
-            self.ghost_sid = None
+            self.ghost_sids = set()
+            # An unmodified move ends the range -- Shift is what holds it open.
+            self._clear_selection()
         elif key == "ENTER":
             if cur is not None:
+                # Loading is inherently single-session, so the span goes away.
+                self._clear_selection()
                 self._activate_row(cur)
         elif key == "ESC":
-            self.stop()
+            if self.marked_sids:
+                self._clear_selection()
+            else:
+                self.stop()
         elif key == "CTRL_F":
             self._start_prefetch()
             self.search_active = True
         elif key == "TAB":
             self.view_mode = {"active": "all", "all": "archived", "archived": "active"}[self.view_mode]
             self.offset = 0
-            self.ghost_sid = None
+            self.ghost_sids = set()
+            # The span was built against the old view's rows; don't carry a
+            # selection over rows the user can no longer see.
+            self._clear_selection()
         elif key == "p":
             if cur is not None:
                 self.preview_sid = cur["sid"]
                 self.preview_offset = 0
         elif key == "a":
-            self._toggle_archive(cur)
+            self._archive_selection(self._target_rows(visible), cur)
         elif key == "d":
-            self._handle_delete_key(cur, sel)
+            self._handle_delete_key(self._target_rows(visible), visible)
         elif key == "u":
             result = self._do_undo()
             if result is not None:
-                self.flash, restored_sid = result
-                if restored_sid is not None:
-                    self.selected_sid = restored_sid
-                    self.ghost_sid = restored_sid
+                self.flash, restored_sids = result
+                if restored_sids:
+                    self.selected_sid = restored_sids[0]
+                    self.ghost_sids = set(restored_sids)
+                    # Re-mark a restored batch so a follow-up action can retarget it.
+                    if len(restored_sids) > 1:
+                        self.anchor_sid = restored_sids[0]
+                        self.marked_sids = set(restored_sids)
+                    else:
+                        self._clear_selection()
 
     def _on_key_search(self, key: str) -> None:
         if key == "ESC":
             self.search_active = False
             self.search_query = ""
             self.offset = 0
+            self._clear_selection()
         elif key in ("ENTER", "DOWN"):
             # Exit search mode, drop focus into the filtered list.
             self.search_active = False
@@ -1087,12 +1223,16 @@ class SessionBrowserScreen(AltScreenApp):
             if self.search_query:
                 self.search_query = self.search_query[:-1]
                 self.offset = 0
+                self._clear_selection()
         elif key == "CTRL_F":
             self._start_prefetch()
             self.search_active = False
         elif isinstance(key, str) and len(key) == 1 and key.isprintable():
             self.search_query += key
             self.offset = 0
+            # Re-filtering changes which rows exist; a stale span could target
+            # sessions that are no longer on screen.
+            self._clear_selection()
             visible_now = self._visible_rows_list()
             if visible_now and not any(r["sid"] == self.selected_sid for r in visible_now):
                 self.selected_sid = visible_now[0]["sid"]
@@ -1115,6 +1255,8 @@ class SessionBrowserScreen(AltScreenApp):
                 self.preview_sid = visible_now[pos]["sid"]
                 self.selected_sid = self.preview_sid
                 self.preview_offset = 0
+                # Same rule as the list: an unmodified move ends the range.
+                self._clear_selection()
         elif key in (
             "UP",
             "DOWN",

@@ -437,6 +437,7 @@ def _make_console_records_kernel32(records):
             target.KeyEvent.wRepeatCount = rec.get("repeat", 1)
             target.KeyEvent.wVirtualKeyCode = rec.get("vk", 0)
             target.KeyEvent.UnicodeChar = rec.get("char", "\x00")
+            target.KeyEvent.dwControlKeyState = rec.get("ctrl_state", 0)
         elif rec["type"] == 0x0002:
             target.MouseEvent.dwEventFlags = rec.get("flags", 0)
             target.MouseEvent.dwButtonState = rec.get("button", 0)
@@ -520,6 +521,42 @@ def test_windows_read_returns_sentinel_when_only_non_key_events(monkeypatch):
             )
             == command_input._NO_ACTIONABLE_KEY
         )
+    finally:
+        command_input._WINDOWS_MOUSE_CAPTURE_DEPTH = 0
+        command_input._PENDING_KEYS.clear()
+
+
+def test_windows_console_records_decode_shift_arrows(monkeypatch):
+    # The console-record reader is the primary Windows path and the only place
+    # dwControlKeyState is available, so Shift+Up/Down has to be resolved from
+    # that bit rather than from an escape sequence.
+    import ctypes
+
+    shift = 0x0010
+    records = [
+        {"type": 0x0001, "vk": 0x26, "ctrl_state": shift},
+        {"type": 0x0001, "vk": 0x28, "ctrl_state": shift},
+        {"type": 0x0001, "vk": 0x26},
+        {"type": 0x0001, "vk": 0x28},
+        # Shift on a key with no range meaning keeps its plain token.
+        {"type": 0x0001, "vk": 0x24, "ctrl_state": shift},
+    ]
+    kernel32, pending = _make_console_records_kernel32(records)
+    monkeypatch.setattr(command_input.sys, "platform", "win32")
+    monkeypatch.setattr(ctypes, "windll", SimpleNamespace(kernel32=kernel32), raising=False)
+    command_input._PENDING_KEYS.clear()
+    command_input._WINDOWS_MOUSE_CAPTURE_DEPTH = 1
+
+    try:
+        read = [
+            command_input._read_windows_console_input_key(
+                text_mode=True,
+                translate_mouse_wheel=False,
+            )
+            for _ in records
+        ]
+        assert read == ["SHIFT_UP", "SHIFT_DOWN", "UP", "DOWN", "HOME"]
+        assert not pending
     finally:
         command_input._WINDOWS_MOUSE_CAPTURE_DEPTH = 0
         command_input._PENDING_KEYS.clear()
@@ -852,8 +889,21 @@ def test_read_key_maps_posix_modified_arrows(monkeypatch):
         "\x1b[1;2C": "SHIFT_RIGHT",
         "\x1b[1;6D": "CTRL_SHIFT_LEFT",
         "\x1b[1;6C": "CTRL_SHIFT_RIGHT",
+        # Vertical arrows fold Shift only -- the /sessions range-select chord.
+        "\x1b[1;2A": "SHIFT_UP",
+        "\x1b[1;2B": "SHIFT_DOWN",
+        "\x1b[1;6A": "SHIFT_UP",
     }
     for sequence, expected in cases.items():
+        stdin = _install_posix_input(monkeypatch, sequence)
+        assert command_input._read_key(text_mode=True) == expected
+        assert stdin.remaining == ""
+
+
+def test_read_key_keeps_ctrl_vertical_arrows_unmodified(monkeypatch):
+    # Ctrl (without Shift) on Up/Down must stay plain UP/DOWN: minting CTRL_UP
+    # here would make every alt-screen view stop scrolling on Ctrl+Up.
+    for sequence, expected in {"\x1b[1;5A": "UP", "\x1b[1;5B": "DOWN"}.items():
         stdin = _install_posix_input(monkeypatch, sequence)
         assert command_input._read_key(text_mode=True) == expected
         assert stdin.remaining == ""
@@ -971,6 +1021,9 @@ def test_read_key_maps_windows_modified_arrows(monkeypatch):
         "\x1b[1;5C": "CTRL_RIGHT",
         "\x1b[1;2D": "SHIFT_LEFT",
         "\x1b[1;6C": "CTRL_SHIFT_RIGHT",
+        "\x1b[1;2A": "SHIFT_UP",
+        "\x1b[1;2B": "SHIFT_DOWN",
+        "\x1b[1;5A": "UP",
     }
     for sequence, expected in cases.items():
         chars = deque(sequence)

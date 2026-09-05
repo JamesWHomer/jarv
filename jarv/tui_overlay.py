@@ -89,6 +89,12 @@ def apply_scroll_keys(
 
 SELECTION_KEYS = frozenset({"UP", "DOWN", "HOME", "END", "PAGEUP", "PAGEDOWN"})
 
+# Shift+arrow tokens that extend a contiguous range instead of moving a lone
+# cursor, mapped to the plain key whose movement they borrow. Views that want
+# range selection translate through this and then reuse apply_selection_keys;
+# views that don't simply never see these tokens.
+SHIFT_SELECTION_KEYS = {"SHIFT_UP": "UP", "SHIFT_DOWN": "DOWN"}
+
 
 def apply_selection_keys(
     key: str,

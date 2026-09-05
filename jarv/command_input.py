@@ -67,6 +67,8 @@ _WINDOWS_ENABLE_QUICK_EDIT_MODE = 0x0040
 _WINDOWS_ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
 _WINDOWS_ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200
 _WINDOWS_KEY_EVENT = 0x0001
+# KEY_EVENT_RECORD.dwControlKeyState shift bit (SHIFT_PRESSED).
+_WINDOWS_SHIFT_PRESSED = 0x0010
 _WINDOWS_MOUSE_EVENT = 0x0002
 _WINDOWS_MOUSE_WHEELED = 0x0004
 # Returned by the input readers when only non-key console events were pending
@@ -654,6 +656,7 @@ def _windows_key_from_virtual_key(
     char: str,
     *,
     text_mode: bool,
+    control_key_state: int = 0,
 ) -> str | None:
     if char == "\r":
         return "ENTER"
@@ -677,6 +680,14 @@ def _windows_key_from_virtual_key(
         return "BACKSPACE"
     if char == "\x03":
         raise KeyboardInterrupt
+
+    if control_key_state & _WINDOWS_SHIFT_PRESSED:
+        # Shift+Up/Down is the /sessions range-select chord. Only these two keys
+        # care about the modifier; everything else keeps its plain token so no
+        # other view sees a token it doesn't handle.
+        shifted = {0x26: "SHIFT_UP", 0x28: "SHIFT_DOWN"}.get(virtual_key)
+        if shifted is not None:
+            return shifted
 
     mapped = {
         0x26: "UP",
@@ -856,6 +867,7 @@ def _read_windows_console_input_key(
                 int(key.wVirtualKeyCode),
                 key.UnicodeChar,
                 text_mode=text_mode,
+                control_key_state=int(key.dwControlKeyState),
             )
             if token is None:
                 continue
@@ -931,8 +943,10 @@ def _csi_token(params: str, final: str) -> str:
     variants). The modifier lives in the second parameter and encodes
     ``Shift``/``Alt``/``Ctrl`` as ``(mod - 1)`` bit flags. For Left/Right we fold
     Ctrl and Shift into ``CTRL_``/``SHIFT_`` prefixes so the editable input can
-    map them to word-wise motion and text selection; every other key ignores the
-    modifier and returns its plain token (so e.g. Ctrl+Home is still HOME).
+    map them to word-wise motion and text selection. Up/Down fold Shift alone
+    into ``SHIFT_UP``/``SHIFT_DOWN`` (the /sessions range-select chord); every
+    other key ignores the modifier and returns its plain token (so e.g.
+    Ctrl+Home is still HOME).
     """
     parts = params.split(";")
     code = parts[0]
@@ -948,6 +962,12 @@ def _csi_token(params: str, final: str) -> str:
         prefix = ("CTRL_" if bits & 4 else "") + ("SHIFT_" if bits & 1 else "")
         if prefix:
             return prefix + base
+    if base in ("UP", "DOWN") and modifier >= 2 and (modifier - 1) & 1:
+        # Shift only, deliberately. Folding Ctrl here too would mint CTRL_UP/
+        # CTRL_DOWN tokens that every alt-screen view would silently stop
+        # treating as plain UP/DOWN, so Ctrl+Up stays UP and Ctrl+Shift+Up
+        # reads as SHIFT_UP.
+        return "SHIFT_" + base
     return base
 
 
@@ -1174,10 +1194,11 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
 
     Returns one of: UP, DOWN, LEFT, RIGHT, HOME, END, PAGEUP, PAGEDOWN,
     ENTER, ESC, TAB, CTRL_F, CTRL_N, CTRL_O, CTRL_S, CTRL_V, ALT_V, BACKSPACE, DELETE,
-    the modified arrows CTRL_LEFT/CTRL_RIGHT (word-wise) and SHIFT_LEFT/
-    SHIFT_RIGHT/CTRL_SHIFT_LEFT/CTRL_SHIFT_RIGHT (selection), or the raw
-    character. Raises KeyboardInterrupt on Ctrl-C.  When ``text_mode`` is True, the convenience q/Q → ESC mapping is
-    disabled so a search query can include those letters. When
+    the modified arrows CTRL_LEFT/CTRL_RIGHT (word-wise), SHIFT_LEFT/
+    SHIFT_RIGHT/CTRL_SHIFT_LEFT/CTRL_SHIFT_RIGHT (text selection) and
+    SHIFT_UP/SHIFT_DOWN (list range selection), or the raw character. Raises
+    KeyboardInterrupt on Ctrl-C. When ``text_mode`` is True, the convenience
+    q/Q → ESC mapping is disabled so a search query can include those letters. When
     ``translate_mouse_wheel`` is False, SGR wheel input returns MOUSE_WHEEL_*
     tokens instead of arrow/page navigation tokens.
     """
@@ -1195,6 +1216,10 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
         import msvcrt
         ch = msvcrt.getwch()
         if ch in ("\x00", "\xe0"):
+            # Legacy scan codes carry no modifier state, so Shift+Up/Down
+            # degrades to plain UP/DOWN here. The console-record reader above
+            # and the VT branch below both resolve the chord properly; this is
+            # only reached on a console offering neither.
             second = msvcrt.getwch()
             return {
                 "H": "UP", "P": "DOWN", "K": "LEFT", "M": "RIGHT",

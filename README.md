@@ -240,7 +240,7 @@ Agent tool calls have a separate `tool_call_display` setting. `auto` uses `print
 Each terminal is automatically bound to its own session. Jarv identifies terminals using environment variables (`WT_SESSION`, `TERM_SESSION_ID`, `TMUX`, `STY`) with a parent-process fallback, so history persists across runs in the same terminal.
 
 - `/new` starts a fresh session on the next prompt without archiving the current session.
-- `/sessions` opens an interactive browser (arrow keys to navigate, Enter to load, `a` to archive, `d` to delete, `p` to preview, `Tab` to switch views, Ctrl+F to search).
+- `/sessions` opens an interactive browser (arrow keys to navigate, Enter to load, `a` to archive, `d` to delete, `p` to preview, `Tab` to switch views, Ctrl+F to search). Hold `Shift` with `↑`/`↓` to select a range of sessions, then `a` or `d` to archive or delete them together — `u` undoes the whole batch.
 - `/history` opens an interactive transcript where Up/Down scroll and Left/Right jump to the previous or next chat/reply.
 - `/tree` opens the session as a navigable tree — fork, edit, or resume from any earlier prompt.
 - `/undo` and `/redo` let you step through recent exchanges.
