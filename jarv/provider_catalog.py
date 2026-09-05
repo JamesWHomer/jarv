@@ -152,9 +152,9 @@ KEY_PATTERNS: dict[str, str] = {
 
 
 PROVIDER_CHOICES = [
-    ("openai", "OpenAI", "gpt-5.4-mini"),
+    ("openai", "OpenAI", "gpt-5.6-terra"),
     ("openrouter", "OpenRouter (200+ models)", "tencent/hy3-preview"),
-    ("anthropic", "Anthropic", "claude-sonnet-4-6"),
+    ("anthropic", "Anthropic", "claude-sonnet-5"),
     ("gemini", "Google Gemini", "gemini-3-flash-preview"),
     ("groq", "Groq", "openai/gpt-oss-120b"),
     ("deepseek", "DeepSeek", "deepseek-v4-flash"),
@@ -171,13 +171,13 @@ PROVIDER_CHOICES = [
 # back to the snapshot before these.
 FALLBACK_PROVIDER_MODELS = {
     "openai": [
-        ("gpt-5.5", "Flagship — largest, smartest"),
-        ("gpt-5.4-mini", "Balanced — faster, cheaper"),
-        ("gpt-5.4-nano", "Budget — smallest, fastest"),
+        ("gpt-6-astra", "Flagship — largest, smartest"),
+        ("gpt-5.6-terra", "Balanced — faster, cheaper"),
+        ("gpt-5.6-luna", "Budget — smallest, fastest"),
     ],
     "anthropic": [
-        ("claude-opus-4-7", "Flagship — most capable"),
-        ("claude-sonnet-4-6", "Balanced — fast and capable"),
+        ("claude-opus-5", "Flagship — most capable"),
+        ("claude-sonnet-5", "Balanced — fast and capable"),
         ("claude-haiku-4-5", "Budget — fastest, cheapest"),
     ],
     "openrouter": [
@@ -205,7 +205,7 @@ FALLBACK_PROVIDER_MODELS = {
     "gemini": [
         ("gemini-3.1-pro-preview", "Flagship — Gemini 3.1 Pro, 2M context"),
         ("gemini-3-flash-preview", "Balanced — Gemini 3 Flash"),
-        ("gemini-3.1-flash-lite", "Budget — fastest, cheapest"),
+        ("gemini-3.5-flash-lite", "Budget — fastest, cheapest"),
     ],
     "groq": [
         ("openai/gpt-oss-120b", "Flagship — GPT OSS 120B"),

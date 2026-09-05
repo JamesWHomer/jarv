@@ -60,6 +60,61 @@ def test_openai_recommendations_prefer_gpt_56_named_tiers():
     ]
 
 
+def test_openai_recommendations_promote_codenames_jarv_has_never_seen():
+    """A release ships into the flagship slot without a Jarv release first."""
+    choices = recommend_models("openai", _models(
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-6-astra",
+    ))
+
+    assert choices[0] == ("gpt-6-astra", "Flagship - latest GPT")
+    assert [model for model, _description in choices] == [
+        "gpt-6-astra",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+    ]
+
+
+def test_openai_recommendations_read_the_last_word_as_the_tier():
+    choices = recommend_models("openai", _models(
+        "gpt-5.6-sol",
+        "gpt-7-vega",
+        "gpt-7-vega-mini",
+        "gpt-7-vega-nano",
+    ))
+
+    assert [model for model, _description in choices] == [
+        "gpt-7-vega",
+        "gpt-7-vega-mini",
+        "gpt-7-vega-nano",
+    ]
+
+
+def test_openai_recommendations_skip_parallel_lineages():
+    """Only the general-purpose line is recommended, however new the rest are."""
+    choices = recommend_models("openai", _models(
+        "gpt-5.6-sol",
+        "gpt-6-astra-pro",
+        "gpt-6-astra-codex",
+        "gpt-6-astra-codex-max",
+        "gpt-6-chat-latest",
+        "gpt-6-astra-2026-09-05",
+        "gpt-audio-2",
+        "gpt-image-3",
+        "gpt-4o",
+    ))
+
+    assert [model for model, _description in choices] == ["gpt-5.6-sol"]
+
+
+def test_openai_recommendations_prefer_the_codename_over_the_bare_alias():
+    choices = recommend_models("openai", _models("gpt-5.6", "gpt-5.6-sol"))
+
+    assert [model for model, _description in choices] == ["gpt-5.6-sol"]
+
+
 def test_default_model_uses_the_providers_preferred_live_tier():
     assert get_default_model(
         {"provider": "openai"},
@@ -96,6 +151,21 @@ def test_anthropic_recommendations_include_fable_and_snapshot_fallback():
     ]
 
 
+def test_anthropic_recommendations_list_tiers_jarv_has_never_seen():
+    choices = recommend_models("anthropic", _models(
+        "claude-opus-5",
+        "claude-sonnet-5",
+        "claude-lyric-1",
+        "claude-lyric-2",
+    ))
+
+    assert choices == [
+        ("claude-opus-5", "Flagship - latest Claude Opus"),
+        ("claude-sonnet-5", "Balanced - latest Claude Sonnet"),
+        ("claude-lyric-2", "New - latest Claude Lyric"),
+    ]
+
+
 def test_gemini_recommendations_choose_latest_generation_per_tier():
     choices = recommend_models("gemini", _models(
         "gemini-2.5-pro",
@@ -103,6 +173,24 @@ def test_gemini_recommendations_choose_latest_generation_per_tier():
         "gemini-3-flash-preview",
         "gemini-3.1-flash-lite",
         "gemini-embedding-001",
+    ))
+
+    assert [model for model, _description in choices] == [
+        "gemini-3.1-pro-preview",
+        "gemini-3-flash-preview",
+        "gemini-3.1-flash-lite",
+    ]
+
+
+def test_gemini_recommendations_ignore_other_modalities():
+    """Gemini stays a closed list: an unknown word is a modality, not a tier."""
+    choices = recommend_models("gemini", _models(
+        "gemini-3.1-pro-preview",
+        "gemini-3-flash-preview",
+        "gemini-3.1-flash-lite",
+        "gemini-4-flash-image",
+        "gemini-4-transcribe",
+        "gemini-4-ultra",
     ))
 
     assert [model for model, _description in choices] == [
@@ -123,6 +211,21 @@ def test_deepseek_recommendations_ignore_unrelated_models():
     assert [model for model, _description in choices] == [
         "deepseek-v4-pro",
         "deepseek-v4-flash",
+    ]
+
+
+def test_deepseek_recommendations_list_tiers_jarv_has_never_seen():
+    choices = recommend_models("deepseek", _models(
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+        "deepseek-v5-reasoner",
+        "deepseek-v4-flash-vision-exp",
+    ))
+
+    assert choices == [
+        ("deepseek-v4-pro", "Flagship - latest DeepSeek Pro"),
+        ("deepseek-v4-flash", "Budget - latest DeepSeek Flash"),
+        ("deepseek-v5-reasoner", "New - latest DeepSeek Reasoner"),
     ]
 
 

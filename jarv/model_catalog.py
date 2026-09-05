@@ -525,7 +525,14 @@ def _choose_versions(
     family_group: str = "family",
     version_groups: tuple[str, ...] = ("major", "minor"),
     snapshot_group: str | None = None,
+    unknown_description: str | None = None,
 ) -> list[tuple[str, str]]:
+    """Reduce a provider catalog to the newest model in each known tier.
+
+    A tier Jarv has never heard of is listed after the known ones when
+    ``unknown_description`` is set, rather than dropped: a surprising label
+    beats a model the picker silently cannot offer.
+    """
     candidates: dict[str, list[tuple[tuple[int, ...], bool, CatalogModel]]] = {}
     for model in models:
         match = pattern.fullmatch(model.id)
@@ -536,80 +543,87 @@ def _choose_versions(
         stable = not snapshot_group or not match.group(snapshot_group)
         candidates.setdefault(family, []).append((version, stable, model))
 
+    def newest(family: str) -> CatalogModel:
+        return max(
+            candidates[family],
+            key=lambda item: (item[0], item[1], item[2].created),
+        )[2]
+
     choices = []
     for family, description in tiers:
-        family_models = candidates.get(family, [])
-        if not family_models:
-            continue
-        _version, _stable, selected = max(
-            family_models,
-            key=lambda item: (item[0], item[1], item[2].created),
-        )
-        choices.append((selected.id, description))
+        if candidates.get(family):
+            choices.append((newest(family).id, description))
+    if unknown_description:
+        known = {family for family, _description in tiers}
+        for family in sorted(set(candidates) - known):
+            choices.append((
+                newest(family).id,
+                unknown_description.format(family=family.title()),
+            ))
     return choices
 
 
 _OPENAI_PATTERN = re.compile(
-    r"^gpt-(?P<major>\d+)\.(?P<minor>\d+)(?:-(?P<family>mini|nano))?$"
+    r"^gpt-(?P<major>\d+)(?:\.(?P<minor>\d+))?(?P<variant>(?:-[a-z]+)*)$"
 )
-_OPENAI_NAMED_PATTERN = re.compile(
-    r"^gpt-(?P<major>\d+)\.(?P<minor>\d+)-(?P<family>sol|terra|luna)$"
-)
+# Trailing words that mark a smaller, cheaper cut of a release. Any other word
+# is read as a codename for the general-purpose model itself (gpt-5.6-sol,
+# gpt-6-astra), so a release reaches the flagship slot the day it lands instead
+# of waiting for Jarv to learn its name.
+_OPENAI_TIERS = {"mini": "mini", "terra": "mini", "nano": "nano", "luna": "nano"}
+# Lineages that run alongside the general-purpose model rather than replace it.
+_OPENAI_SPECIALIZED = frozenset({
+    "audio",
+    "chat",
+    "codex",
+    "pro",
+    "realtime",
+    "search",
+    "turbo",
+})
 _ANTHROPIC_PATTERN = re.compile(
-    r"^claude-(?P<family>fable|opus|sonnet|haiku)-"
+    r"^claude-(?P<family>[a-z]+)-"
     r"(?P<major>\d+)(?:-(?P<minor>\d{1,2}))?(?:-(?P<snapshot>\d{8}))?$"
 )
+# Deliberately closed, unlike the OpenAI and Anthropic shapes above: Google
+# reuses gemini-<version>-<word> for image, tts, transcribe and robotics models,
+# so an unrecognized word here is likelier to be another modality than a new
+# tier, and guessing "flagship" would offer an image model for coding work.
 _GEMINI_PATTERN = re.compile(
     r"^gemini-(?P<major>\d+)(?:\.(?P<minor>\d+))?-"
     r"(?P<family>flash-lite|pro|flash)"
     r"(?P<snapshot>(?:-preview)?(?:-\d{2}-\d{2})?)$"
 )
 _DEEPSEEK_PATTERN = re.compile(
-    r"^deepseek-v(?P<major>\d+)(?:\.(?P<minor>\d+))?-(?P<family>pro|flash)$",
+    r"^deepseek-v(?P<major>\d+)(?:\.(?P<minor>\d+))?-(?P<family>[a-z]+)$",
     re.IGNORECASE,
 )
 
 
 def _openai_choices(models: list[CatalogModel]) -> list[tuple[str, str]]:
-    normalized = []
+    candidates: dict[str, list[tuple[tuple[int, int], bool, float, CatalogModel]]] = {}
     for model in models:
         match = _OPENAI_PATTERN.fullmatch(model.id)
-        named_match = _OPENAI_NAMED_PATTERN.fullmatch(model.id)
-        if not match and not named_match:
+        if not match:
             continue
-        family = (match or named_match).group("family") or "flagship"
-        family = {
-            "sol": "flagship",
-            "terra": "mini",
-            "luna": "nano",
-        }.get(family, family)
-        normalized.append(CatalogModel(
-            id=model.id,
-            created=model.created,
-            display_name=model.display_name,
-            metadata={**model.metadata, "family": family},
-        ))
-
-    candidates: dict[str, list[tuple[tuple[int, int], bool, float, CatalogModel]]] = {}
-    for model in normalized:
-        match = _OPENAI_PATTERN.fullmatch(model.id)
-        named_match = _OPENAI_NAMED_PATTERN.fullmatch(model.id)
-        if match or named_match:
-            match = match or named_match
-            family = str(model.metadata["family"])
-            version = (int(match.group("major")), int(match.group("minor")))
-            candidates.setdefault(family, []).append(
-                (version, named_match is not None, model.created, model)
-            )
+        words = match.group("variant").split("-")[1:]
+        if _OPENAI_SPECIALIZED.intersection(words):
+            continue
+        tier = _OPENAI_TIERS.get(words[-1] if words else "", "flagship")
+        version = (int(match.group("major")), int(match.group("minor") or 0))
+        # At equal versions a codenamed release outranks the bare alias.
+        candidates.setdefault(tier, []).append(
+            (version, bool(words), model.created, model)
+        )
 
     result = []
-    for family, description in (
+    for tier, description in (
         ("flagship", "Flagship - latest GPT"),
         ("mini", "Balanced - latest GPT mini"),
         ("nano", "Budget - latest GPT nano"),
     ):
-        if candidates.get(family):
-            selected = max(candidates[family], key=lambda item: item[:3])[3]
+        if candidates.get(tier):
+            selected = max(candidates[tier], key=lambda item: item[:3])[3]
             result.append((selected.id, description))
     return result
 
@@ -625,6 +639,7 @@ def _anthropic_choices(models: list[CatalogModel]) -> list[tuple[str, str]]:
             ("haiku", "Budget - latest Claude Haiku"),
         ],
         snapshot_group="snapshot",
+        unknown_description="New - latest Claude {family}",
     )
 
 
@@ -649,6 +664,7 @@ def _deepseek_choices(models: list[CatalogModel]) -> list[tuple[str, str]]:
             ("pro", "Flagship - latest DeepSeek Pro"),
             ("flash", "Budget - latest DeepSeek Flash"),
         ],
+        unknown_description="New - latest DeepSeek {family}",
     )
 
 
