@@ -32,6 +32,7 @@ from .settings_refresher import _ModelCatalogRefresher
 from .tui_app import AltScreenApp
 from .tui_frame import panel_width, wrap_frame
 from .tui_layout import append_bottom_footer
+from .tui_panel import MenuPanel, configure_menu_border, menu_border_enabled, menu_frame_rows, menu_inner_width
 from .settings_command import (
     _clip_text,
     _settings_apply_quick,
@@ -67,6 +68,7 @@ class SettingsApp(AltScreenApp):
     def __init__(self, config: dict, *, render_console=console):
         super().__init__(console=render_console)
         self.config = config
+        configure_menu_border(menu_border_enabled(config))
         self.lock = threading.RLock()
 
         self.rows = _settings_rows(config)
@@ -161,7 +163,7 @@ class SettingsApp(AltScreenApp):
             key,
             repeat,
             catalog=self.catalog,
-            inner_width=max(1, term_w - 4),
+            inner_width=menu_inner_width(term_w, self.config),
         )
         if outcome.kind == "committed":
             self.rows = _settings_rows(self.config)
@@ -278,10 +280,10 @@ class SettingsApp(AltScreenApp):
     def _render_settings_panel(self, height: int) -> Panel:
         term_w, _ = terminal_size(console=self.console)
         width = panel_width(term_w)
-        inner_width = max(1, width - 4)
+        inner_width = menu_inner_width(width, self.config)
         height = max(3, height)
         show_footer = self.edit is None and height >= 8
-        content_rows = max(1, height - 2)
+        content_rows = max(1, height - menu_frame_rows(self.config))
         reserved = 1
         if self.flash is not None:
             reserved += 2
@@ -343,9 +345,9 @@ class SettingsApp(AltScreenApp):
                     no_wrap=True,
                     overflow="crop",
                 )
-            append_bottom_footer(parts, height, footer, crop=True)
+            append_bottom_footer(parts, height, footer, border_rows=menu_frame_rows(self.config), crop=True)
 
-        return Panel(
+        return MenuPanel(
             Group(*parts),
             title="[bold bright_white]jarv ▸ settings[/bold bright_white]",
             title_align="left",
@@ -356,6 +358,7 @@ class SettingsApp(AltScreenApp):
             padding=(0, 1),
             width=width,
             height=height,
+            border=menu_border_enabled(self.config),
         )
 
     def _render(self) -> RenderableType:
@@ -365,7 +368,7 @@ class SettingsApp(AltScreenApp):
             return self._render_settings_panel(term_h)
 
         width = panel_width(term_w)
-        inner_width = max(1, width - 4)
+        inner_width = menu_inner_width(width, self.config)
         desired_editor_height = _settings_desired_editor_height(
             self.edit,
             self.config,

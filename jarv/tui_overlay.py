@@ -13,6 +13,7 @@ from rich.text import Text
 from .display import console, jarv_panel, terminal_size
 from .tui_app import AltScreenApp
 from .tui_frame import wrap_frame
+from .tui_panel import menu_frame_rows, menu_inner_width
 from .tui_layout import append_bottom_footer
 
 
@@ -28,7 +29,7 @@ class ScrollOverlayState:
 def body_content_rows(term_h: int, *, footer_rows: int = 2) -> tuple[int, bool]:
     """Return scrollable body row count and whether a footer is shown."""
     show_footer = term_h >= 6
-    rows = max(1, term_h - 2 - (footer_rows if show_footer else 0))
+    rows = max(1, term_h - menu_frame_rows() - (footer_rows if show_footer else 0))
     return rows, show_footer
 
 
@@ -265,13 +266,14 @@ def scroll_overlay(
 
     def _is_compact(term_w: int, term_h: int) -> bool:
         panel_width = min(term_w, max_width) if max_width else term_w
-        inner_width = max(1, panel_width - 4)
-        return len(_lines(inner_width)) + compact_chrome_rows <= term_h
+        inner_width = menu_inner_width(panel_width)
+        chrome_rows = compact_chrome_rows - (2 - menu_frame_rows())
+        return len(_lines(inner_width)) + chrome_rows <= term_h
 
     def _render() -> Panel:
         term_w, term_h = terminal_size_fn(console=console_ref)
         panel_width = max(1, min(term_w, max_width) if max_width else term_w)
-        inner_width = max(1, panel_width - 4)
+        inner_width = menu_inner_width(panel_width)
         lines = _lines(inner_width)
         total = len(lines)
 
@@ -322,7 +324,7 @@ def scroll_overlay(
         if not fill_screen and _is_compact(term_w, term_h):
             return False
         panel_width = min(term_w, max_width) if max_width else term_w
-        total = len(_lines(max(1, panel_width - 4)))
+        total = len(_lines(menu_inner_width(panel_width)))
         body_rows, _ = body_content_rows(term_h)
         scroll_state.offset = apply_scroll_keys(
             key,

@@ -197,6 +197,13 @@ def write_models_dev_catalog(monkeypatch, directory, providers):
 if pytest is not None:
 
     @pytest.fixture(autouse=True)
+    def _reset_menu_border():
+        from jarv.tui_panel import configure_menu_border
+
+        yield
+        configure_menu_border(True)
+
+    @pytest.fixture(autouse=True)
     def _reset_monochrome():
         """Undo any ``monochrome`` toggling a test leaves on the shared console.
 

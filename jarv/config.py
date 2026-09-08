@@ -90,8 +90,10 @@ def load_config() -> dict:
     # dispatched before cli.main() loads the run config -- so this is the one
     # place that reaches /help, /settings, and the heads-up TUI alike.
     from .display import configure_monochrome
+    from .tui_panel import configure_menu_border
 
     configure_monochrome(config.get("monochrome", False))
+    configure_menu_border(get_setting(config, "headsup_border"))
 
     return config
 

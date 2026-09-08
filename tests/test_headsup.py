@@ -116,6 +116,44 @@ class HeadsupTests(unittest.TestCase):
         self.assertIn("\u256d", rendered)
         self.assertIn("\u256f", rendered)
 
+    def test_borderless_frame_preserves_status_prompt_and_terminal_size(self):
+        for width, height in ((20, 8), (42, 12), (80, 24), (96, 30)):
+            for draft in ("", "a long draft " * 12, "/settings"):
+                with self.subTest(width=width, height=height, draft=draft):
+                    app, test_console, output = self._app(width=width)
+                    app.config["headsup_border"] = False
+                    initialize_text_editor(app.editor, draft)
+                    rendered = self._rendered_text(
+                        app, test_console, output, width=width, height=height,
+                    )
+                    lines = rendered.splitlines()
+                    self.assertEqual(len(lines), height)
+                    self.assertTrue(all(cell_len(line) == width for line in lines))
+                    self.assertTrue(lines[0].startswith("jarv"))
+                    self.assertIn("jarv ▸ heads-up", lines[0])
+                    self.assertNotIn("─", lines[0])
+                    self.assertNotIn("─", lines[-1])
+                    self.assertIn("% full", lines[-1])
+                    self.assertTrue(lines[-2].startswith("╰"))
+                    self.assertTrue(lines[-2].endswith("╯"))
+                    with patch("jarv.headsup.terminal_size", return_value=(width, height)):
+                        self.assertEqual(app._current_prompt_edit_width(), width - 4)
+                    if width >= 80:
+                        self.assertIn("openai / test-model", lines[0])
+
+    def test_border_toggle_reflows_existing_content_and_can_be_restored(self):
+        app, test_console, output = self._app(width=42)
+        app.upsert_assistant_message(None, "x" * 39)
+        bordered = self._rendered_text(app, test_console, output, width=42)
+        self.assertNotIn("x" * 39, bordered)
+        app.config["headsup_border"] = False
+        borderless = self._rendered_text(app, test_console, output, width=42)
+        self.assertIn("x" * 39, borderless)
+        self.assertFalse(borderless.startswith("╭"))
+        app.config["headsup_border"] = True
+        restored = self._rendered_text(app, test_console, output, width=42)
+        self.assertEqual(restored, bordered)
+
     def test_render_erases_stale_right_edge_in_terminal_frames(self):
         ready = threading.Event()
         ready.set()

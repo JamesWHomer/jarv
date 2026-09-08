@@ -129,6 +129,7 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
         empty="auto",
         about="Maximum output lines shown per tool card (display only — `max_tool_output_chars` separately caps what the model sees). `auto` scales with terminal height (a third inline, half in heads-up); an integer (minimum 3) pins both.",
     ),
+    ConfigField("headsup_border", True, validator="bool", label="Menu borders", section="display", desc="outer frames in heads-up and menus; off removes side padding too", ui_kind="bool", about="Show outer borders in heads-up mode and all menus, including settings, setup, sessions, tree, usage, and read-only screens. When `false`, remove outer borders and horizontal frame padding while keeping headers, footers, and the heads-up input box."),
     ConfigField("print_usage_after_agent", False, validator="bool", label="Print usage", section="display", desc="print token totals after completed agent runs", ui_kind="bool", about="When `true`, print a compact token usage line after each completed agent run."),
     ConfigField("monochrome", False, validator="bool", label="Black and white", section="display", desc="render without colour", ui_kind="bool", about="When `true`, jarv strips all colour from its output while keeping bold, dim, and underline. Also enabled automatically when the `NO_COLOR` environment variable is set."),
 )

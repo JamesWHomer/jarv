@@ -26,6 +26,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from .text_editor import apply_text_editor_key
+from .tui_panel import MenuPanel, menu_border_enabled, menu_frame_rows, menu_inner_width
 from .settings_command import (
     _settings_commit_edit,
     _settings_edit_is_dirty,
@@ -81,13 +82,9 @@ def render_editor_panel(
     setup passes ``setup · Step N/M · {label}``). *controls* overrides the
     default subtitle help in the normal (non-warning, non-discard) case.
     """
-    inner_width = max(1, panel_width - 4)
+    inner_width = menu_inner_width(panel_width, config)
     height = max(3, height)
-    content_rows = max(1, height - 2)
     row = edit["row"] if edit is not None else {"label": "setting"}
-    editor_parts = _settings_editor_lines(edit, config, inner_width, max_lines=content_rows)
-    if not editor_parts:
-        editor_parts = [Text("")]
 
     if edit is not None and edit.get("model_validation_warning"):
         footer = "←→ select   Enter confirm   Esc keep editing"
@@ -98,7 +95,12 @@ def render_editor_panel(
     else:
         footer = "" if row.get("multiline") else "Enter save   Esc back"
 
-    return Panel(
+    content_rows = max(1, height - menu_frame_rows(config, footer=bool(footer)))
+    editor_parts = _settings_editor_lines(edit, config, inner_width, max_lines=content_rows)
+    if not editor_parts:
+        editor_parts = [Text("")]
+
+    return MenuPanel(
         Group(*editor_parts),
         title=f"[bold bright_white]jarv ▸ {title}[/bold bright_white]",
         title_align="left",
@@ -109,6 +111,8 @@ def render_editor_panel(
         padding=(0, 1),
         width=panel_width,
         height=height,
+        border=menu_border_enabled(config),
+        footer=bool(footer),
     )
 
 

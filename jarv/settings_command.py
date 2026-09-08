@@ -23,6 +23,7 @@ from .settings_schema import (
     settings_service_tier_description,
 )
 from .tui_layout import clip_text
+from .tui_panel import configure_menu_border, menu_border_enabled, menu_frame_rows
 from .text_editor import (
     apply_text_editor_key,
     initialize_text_editor,
@@ -73,6 +74,7 @@ def _settings_save_validated(config: dict) -> bool:
     # hooking it here means the settings screen repaints in the newly chosen
     # mode on its very next frame -- it renders on this same shared console.
     configure_monochrome(config.get("monochrome", False))
+    configure_menu_border(menu_border_enabled(config))
     return True
 
 
@@ -733,8 +735,10 @@ def _settings_desired_editor_height(
     inner_width: int,
     terminal_height: int,
 ) -> int:
-    max_content_lines = max(1, terminal_height - 2)
     row = edit["row"]
+    footer = not row.get("multiline") or bool(edit.get("discard_armed") or edit.get("model_validation_warning"))
+    frame_rows = menu_frame_rows(config, footer=footer)
+    max_content_lines = max(1, terminal_height - frame_rows)
     max_lines = None if row.get("multiline") else max_content_lines
     content_height = len(
         _settings_editor_lines(
@@ -746,7 +750,7 @@ def _settings_desired_editor_height(
         )
     )
     minimum = 7 if row.get("multiline") else 3
-    return min(terminal_height, max(minimum, content_height + 2))
+    return min(terminal_height, max(minimum, content_height + frame_rows))
 
 
 def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, bool]:

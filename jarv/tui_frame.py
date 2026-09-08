@@ -18,13 +18,13 @@ from rich import box
 from rich.cells import cell_len
 from rich.console import Console, Group, RenderableType
 from rich.control import Control, ControlType
-from rich.panel import Panel
 from rich.segment import Segment
 from rich.text import Text
 
 from .display import TITLE_STYLE
 from .tui_capabilities import supports_erase_eol
 from .tui_layout import clip_text
+from .tui_panel import MenuPanel
 
 _ERASE_TO_END_OF_LINE = Control((ControlType.ERASE_IN_LINE, 0)).segment
 
@@ -96,7 +96,7 @@ class FrameLayout:
     max_prompt_rows: int
 
 
-def compute_layout(term_w: int, term_h: int) -> FrameLayout:
+def compute_layout(term_w: int, term_h: int, *, border: bool = True) -> FrameLayout:
     """Derive all per-frame dimensions from the terminal size.
 
     Mirrors the historical inline math in HeadsupApp.render so behaviour is
@@ -105,7 +105,8 @@ def compute_layout(term_w: int, term_h: int) -> FrameLayout:
     term_w = max(20, term_w)
     term_h = max(8, term_h)
     pw = panel_width(term_w)
-    inner_width = max(1, pw - 4)
+    inner_width = max(1, pw - (4 if border else 0))
+    # The header and footer retain their rows even without an outer border.
     body_height = max(3, term_h - 2)
     max_prompt_rows = min(8, max(1, body_height - 2), max(3, term_h // 3))
     return FrameLayout(
@@ -145,9 +146,10 @@ def compose_title(
     panel_width: int,
     *,
     left_label: str = HEADSUP_TITLE_LABEL,
+    border: bool = True,
 ) -> Text:
     """Build the panel title: left label, a rule, then the model status."""
-    title_width = max(1, panel_width - _TITLE_CELL_BUDGET)
+    title_width = max(1, panel_width - (_TITLE_CELL_BUDGET if border else 0))
     title = Text(no_wrap=True, overflow="crop")
     left = clip_text(left_label, title_width)
     title.append(left, style=TITLE_STYLE)
@@ -158,7 +160,7 @@ def compose_title(
     separator_width = title_width - cell_len(left) - cell_len(status) - 2
     if separator_width > 0:
         title.append(" ")
-        title.append("─" * separator_width, style="cyan")
+        title.append(("─" if border else " ") * separator_width, style="cyan")
         title.append(" ")
     else:
         title.append(" ")
@@ -197,6 +199,7 @@ def compose_subtitle(
     panel_width: int,
     *,
     left_style: str = "dim",
+    border: bool = True,
 ) -> Text:
     """Build the panel's bottom bar: a left label, a rule, then a right status.
 
@@ -207,7 +210,7 @@ def compose_subtitle(
     panel narrows. The middle is filled with the same cyan rule as the title so
     the border reads as continuous.
     """
-    bar_width = max(1, panel_width - _TITLE_CELL_BUDGET)
+    bar_width = max(1, panel_width - (_TITLE_CELL_BUDGET if border else 0))
     bar = Text(no_wrap=True, overflow="crop")
 
     right = right.copy()
@@ -219,7 +222,7 @@ def compose_subtitle(
     if not left_label or left_budget < 1:
         fill = bar_width - right_cells - 1
         if fill > 0:
-            bar.append("─" * fill, style="cyan")
+            bar.append(("─" if border else " ") * fill, style="cyan")
             bar.append(" ")
         bar.append_text(right)
         return bar
@@ -229,7 +232,7 @@ def compose_subtitle(
     separator_width = bar_width - cell_len(left) - right_cells - 2
     bar.append(" ")
     if separator_width > 0:
-        bar.append("─" * separator_width, style="cyan")
+        bar.append(("─" if border else " ") * separator_width, style="cyan")
     bar.append(" ")
     bar.append_text(right)
     return bar
@@ -429,9 +432,10 @@ def build_frame(
     subtitle: Text,
     panel_width: int,
     term_h: int,
+    border: bool = True,
 ) -> RenderableType:
-    """Wrap the composed body in the bordered panel and erase trailing columns."""
-    panel = Panel(
+    """Frame the body with an optional border and erase trailing columns."""
+    panel = MenuPanel(
         Group(*parts),
         title=title,
         title_align="left",
@@ -442,6 +446,8 @@ def build_frame(
         padding=(0, 1),
         width=panel_width,
         height=term_h,
+        border=border,
+        footer=True,
     )
     return wrap_frame(panel)
 

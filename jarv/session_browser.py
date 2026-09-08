@@ -28,6 +28,7 @@ from .history import (
 from .session_render import _history_visual_lines, _session_row_widths
 from .session_store import archive_session_files, delete_session_files, unarchive_session_files
 from .tui_frame import panel_width
+from .tui_panel import MenuPanel, menu_frame_rows, menu_inner_width
 from .tui_layout import append_bottom_footer, clip_text
 from .tui_overlay import (
     SELECTION_KEYS,
@@ -357,7 +358,7 @@ class SessionBrowserScreen(AltScreenApp):
 
     def _content_rows(self, term_h: int, has_status: bool, show_footer: bool, has_search: bool = False) -> int:
         # Panel border = 2 rows. Header consumes 1 row. Footer = 2 rows (blank + controls).
-        content = max(1, term_h - 2 - 1)
+        content = max(1, term_h - menu_frame_rows() - 1)
         if show_footer:
             content -= 2
         if has_status:
@@ -593,7 +594,7 @@ class SessionBrowserScreen(AltScreenApp):
     def _render_preview(self) -> Panel:
         term_w, term_h = terminal_size(console=console)
         width = panel_width(term_w)
-        inner_width = max(1, width - 4)
+        inner_width = menu_inner_width(width)
         body_rows, show_footer = body_content_rows(term_h)
         body_rows = max(1, body_rows - 1)
 
@@ -669,7 +670,7 @@ class SessionBrowserScreen(AltScreenApp):
             return self._render_preview()
         term_w, term_h = terminal_size(console=console)
         width = panel_width(term_w)
-        inner_width = max(1, width - 4)
+        inner_width = menu_inner_width(width)
         show_footer = term_h >= 6
 
         visible = self._visible_rows_list()
@@ -732,7 +733,7 @@ class SessionBrowserScreen(AltScreenApp):
                         overflow="crop",
                     ),
                 )
-            return Panel(
+            return MenuPanel(
                 Group(*parts),
                 title="[bold bright_white]jarv ▸ sessions[/bold bright_white]",
                 title_align="left",
@@ -847,7 +848,7 @@ class SessionBrowserScreen(AltScreenApp):
                 ),
             )
 
-        return Panel(
+        return MenuPanel(
             Group(*parts),
             title="[bold bright_white]jarv ▸ sessions[/bold bright_white]",
             title_align="left",
@@ -1270,7 +1271,7 @@ class SessionBrowserScreen(AltScreenApp):
             "MOUSE_WHEEL_PAGEDOWN",
         ):
             term_w, term_h = terminal_size(console=console)
-            inner_width = max(1, term_w - 4)
+            inner_width = menu_inner_width(term_w)
             total = len(self._preview_lines(self.preview_sid, inner_width))
             body_rows, _ = body_content_rows(term_h)
             body_rows = max(1, body_rows - 1)

@@ -237,6 +237,8 @@ Agent tool calls have a separate `tool_call_display` setting. `auto` uses `print
 
 Toggle **Black and white** in `/settings` (or set `monochrome`) to render everything without colour — bold, dim, and underline are kept, so the layout still reads. Setting `NO_COLOR` in the environment does the same thing without changing your config.
 
+Turn off **Menu borders** in the Display section of `/settings`, or run `/set headsup_border false`, to remove outer frames in heads-up mode and all menus (settings and editors, setup, sessions and previews, tree, usage, and read-only screens). Borderless frames have no side padding, so content uses the full width. Menu metadata shares the header, freeing the bottom row for content and keeping usage hints at the bottom. Editor controls, heads-up status, and the heads-up input box remain visible. The settings screen updates immediately; `/set headsup_border true` restores the borders and padding.
+
 ## Sessions
 
 Each terminal is automatically bound to its own session. Jarv identifies terminals using environment variables (`WT_SESSION`, `TERM_SESSION_ID`, `TMUX`, `STY`) with a parent-process fallback, so history persists across runs in the same terminal.
@@ -285,6 +287,7 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 | `read_only_command_display` | `"fullscreen"` | Display mode for `/help`, `/about`, `/usage`, and `/config`: temporary `fullscreen` view or permanent `print` output. |
 | `tool_call_display` | `"auto"` | Tool-call layout: `auto` selects `print` for one-shot runs and `fullscreen` in heads-up mode; explicit modes override it. |
 | `print_usage_after_agent` | `false` | Print a compact token usage line after each completed agent run. |
+| `headsup_border` | `true` | Show outer frames in heads-up mode and all menus. Turn off to remove borders and side padding while keeping headers, footers, and the heads-up input box. |
 | `monochrome` | `false` | Render without colour, keeping bold, dim, and underline. Also enabled when the `NO_COLOR` environment variable is set. |
 | `system_prompt` | `"You are Jarv..."` | System instructions sent with each request. |
 | `project_context` | `true` | Read `JARV.md`/`AGENTS.md`/`CLAUDE.md` and git branch, status, and recent commits into the system prompt. |

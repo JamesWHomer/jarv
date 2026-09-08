@@ -13,6 +13,8 @@ from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
 
+from .tui_panel import MenuPanel
+
 def _truecolor_color_system() -> str | None:
     """Return ``"truecolor"`` when the terminal renders 24-bit colour, else ``None``.
 
@@ -178,7 +180,7 @@ def jarv_panel(
     height: int | None = None,
 ) -> Panel:
     """Return a Panel using the shared jarv aesthetic."""
-    return Panel(
+    return MenuPanel(
         body,
         title=f"[{TITLE_STYLE}]jarv \u25b8 {title}[/{TITLE_STYLE}]",
         title_align="left",

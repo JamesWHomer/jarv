@@ -112,6 +112,30 @@ def test_panel_width_spans_full_terminal_width():
     assert tui_frame.panel_width(120) == 120
 
 
+def test_switching_to_borderless_clears_previous_frame_edges():
+    width, height = 40, 12
+    buffer = io.StringIO()
+    console = Console(
+        file=buffer, width=width, height=height,
+        force_terminal=True, color_system=None, legacy_windows=False,
+    )
+    for border in (True, False):
+        buffer.write("\x1b[H")
+        console.print(tui_frame.build_frame(
+            [Text("")] * (height - 2),
+            title=tui_frame.compose_title("openai / test", width, border=border),
+            subtitle=tui_frame.compose_subtitle("~/jarv", Text("$0.00"), width, border=border),
+            panel_width=width, term_h=height, border=border,
+        ))
+    rows = _emulate_terminal(buffer.getvalue(), width, height)
+    assert rows[0].startswith("jarv")
+    assert all(not row.strip() for row in rows[1:-1])
+    assert rows[-1].endswith("$0.00")
+    assert not any(char in "".join(rows) for char in "╭╮╰╯│─")
+    assert "jarv" in rows[0]
+    assert "$0.00" in rows[-1]
+
+
 def test_panel_width_never_below_one():
     assert tui_frame.panel_width(1) == 1
     assert tui_frame.panel_width(0) == 1

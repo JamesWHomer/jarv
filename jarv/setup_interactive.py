@@ -37,6 +37,7 @@ from .settings_editor import apply_catalog_refresh, apply_editor_key, render_edi
 from .settings_refresher import _ModelCatalogRefresher
 from .tui_app import AltScreenApp
 from .tui_frame import panel_width
+from .tui_panel import MenuPanel, configure_menu_border, menu_border_enabled, menu_frame_rows, menu_inner_width
 from .tui_layout import clip_text
 
 
@@ -198,6 +199,7 @@ class SetupApp(AltScreenApp):
     def __init__(self, config: dict, *, step: str | None = None, render_console=console):
         super().__init__(console=render_console, repeatable_keys=_REPEATABLE_KEYS)
         self.config = config
+        configure_menu_border(menu_border_enabled(config))
         self.single_step = step is not None
         self._step_name = step
         self.lock = threading.RLock()
@@ -320,7 +322,7 @@ class SetupApp(AltScreenApp):
                 key,
                 repeat,
                 catalog=self.catalog,
-                inner_width=max(1, term_w - 4),
+                inner_width=menu_inner_width(term_w, self.config),
             )
         if outcome.kind == "committed":
             self._advance_step()
@@ -441,8 +443,8 @@ class SetupApp(AltScreenApp):
         return f"{forward}   {back}"
 
     def _render_welcome(self, width: int, term_h: int) -> Panel:
-        inner_width = max(1, width - 4)
-        inner_height = max(1, term_h - 2)
+        inner_width = menu_inner_width(width, self.config)
+        inner_height = max(1, term_h - menu_frame_rows(self.config))
         elapsed = time.perf_counter() - self._brand_started_at
         rows = render_intro(
             inner_width, inner_height, elapsed, hint=self._welcome_hint(inner_width)
@@ -465,8 +467,8 @@ class SetupApp(AltScreenApp):
         return "enter begin"
 
     def _render_ready(self, width: int, term_h: int) -> Panel:
-        inner_width = max(1, width - 4)
-        inner_height = max(1, term_h - 2)
+        inner_width = menu_inner_width(width, self.config)
+        inner_height = max(1, term_h - menu_frame_rows(self.config))
 
         summary = self._center_block(self._ready_summary_lines(), inner_width)
         footer = self._center(
@@ -615,17 +617,18 @@ class SetupApp(AltScreenApp):
         width: int,
         term_h: int,
     ) -> Panel:
-        return Panel(
+        return MenuPanel(
             Group(*rows),
             title=f"[bold bright_white]jarv ▸ {title}[/bold bright_white]",
             title_align="left",
-            subtitle=f"[dim]{clip_text(subtitle, max(1, width - 6))}[/dim]" if subtitle else None,
+            subtitle=f"[dim]{clip_text(subtitle, max(1, width - (6 if menu_border_enabled(self.config) else 0)))}[/dim]" if subtitle else None,
             subtitle_align="right",
             border_style="cyan",
             box=box.ROUNDED,
             padding=(0, 1),
             width=width,
             height=term_h,
+            border=menu_border_enabled(self.config),
         )
 
 

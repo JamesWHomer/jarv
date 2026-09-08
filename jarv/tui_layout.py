@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .tui_panel import menu_frame_rows
+
 
 def clip_text(value: str, width: int, *, ellipsis: str = "...") -> str:
     if width <= 0:
@@ -20,10 +22,12 @@ def append_bottom_footer(
     height: int,
     footer: Any,
     *,
-    border_rows: int = 2,
+    border_rows: int | None = None,
     footer_rows: int = 2,
     crop: bool = False,
 ) -> None:
+    if border_rows is None:
+        border_rows = menu_frame_rows()
     target_rows_before_footer = max(0, height - border_rows - footer_rows)
     if crop and len(parts) > target_rows_before_footer:
         del parts[target_rows_before_footer:]

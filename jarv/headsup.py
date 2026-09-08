@@ -78,11 +78,11 @@ from .tui_frame import (
     compose_title,
     compute_layout,
     overlay_menu,
-    panel_width as _panel_width,
     transcript_rows as _transcript_rows_for,
     window_transcript,
 )
 from .tui_layout import clip_text
+from .tui_panel import configure_menu_border
 from .tui_overlay import scroll_key_delta
 from .usage import format_cost, known_context_window, load_usage, usage_cost_summary, usage_file_for
 
@@ -692,6 +692,7 @@ class HeadsupApp(AltScreenApp):
             get_setting(self.config, "tool_output_display_lines")
         )
         configure_monochrome(get_setting(self.config, "monochrome"))
+        configure_menu_border(get_setting(self.config, "headsup_border"))
         self.client = client
         self.args = args
         self.agent_import, self.agent_ready = agent_loader
@@ -959,10 +960,11 @@ class HeadsupApp(AltScreenApp):
 
     def render(self) -> RenderableType:
         term_w, term_h = terminal_size(console=self.console)
-        layout = compute_layout(term_w, term_h)
+        border = get_setting(self.config, "headsup_border")
+        layout = compute_layout(term_w, term_h, border=border)
         inner_width = layout.inner_width
         model_status = _model_status(self.config)
-        title = compose_title(model_status, layout.panel_width)
+        title = compose_title(model_status, layout.panel_width, border=border)
 
         with self.lock:
             # The slash-command popup and the input box are drawn as one seamless
@@ -1042,13 +1044,17 @@ class HeadsupApp(AltScreenApp):
             subtitle=subtitle,
             panel_width=layout.panel_width,
             term_h=layout.term_h,
+            border=border,
         )
 
     def _panel_subtitle(self, panel_width: int) -> Text:
         # Working directory on the bottom-left, usage status on the bottom-right.
         # compose_subtitle keeps the usage intact and truncates the dir first.
         usage = self._usage_status(max(1, panel_width))
-        return compose_subtitle(self._cwd_label(), usage, panel_width)
+        return compose_subtitle(
+            self._cwd_label(), usage, panel_width,
+            border=get_setting(self.config, "headsup_border"),
+        )
 
     def _cwd_label(self) -> str:
         """The working directory for the bottom bar.
@@ -1297,8 +1303,10 @@ class HeadsupApp(AltScreenApp):
             self.refresh()
 
     def _current_prompt_edit_width(self) -> int:
-        term_w, _term_h = terminal_size(console=self.console)
-        inner_width = max(1, _panel_width(max(20, term_w)) - 4)
+        term_w, term_h = terminal_size(console=self.console)
+        inner_width = compute_layout(
+            term_w, term_h, border=get_setting(self.config, "headsup_border")
+        ).inner_width
         return self._prompt_edit_width(inner_width)
 
     def _editor_selection_span(self) -> tuple[int, int] | None:
@@ -1588,6 +1596,7 @@ class HeadsupApp(AltScreenApp):
             get_setting(self.config, "tool_output_display_lines")
         )
         configure_monochrome(get_setting(self.config, "monochrome"))
+        configure_menu_border(get_setting(self.config, "headsup_border"))
         output = capture.get().strip()
         notice = Text.from_ansi(output) if output else None
         if not self._sync_after_slash(command, notice):
@@ -1624,6 +1633,7 @@ class HeadsupApp(AltScreenApp):
             get_setting(self.config, "tool_output_display_lines")
         )
         configure_monochrome(get_setting(self.config, "monochrome"))
+        configure_menu_border(get_setting(self.config, "headsup_border"))
         self._sync_after_slash(command, None)
 
     def _run_tree(self) -> None:
@@ -2354,7 +2364,9 @@ class HeadsupApp(AltScreenApp):
         the bottom it simply stays pinned.
         """
         term_w, term_h = terminal_size(console=self.console)
-        width = compute_layout(term_w, term_h).inner_width
+        width = compute_layout(
+            term_w, term_h, border=get_setting(self.config, "headsup_border")
+        ).inner_width
         with self.lock:
             target = not self.tool_cards_expanded
             expandable_entries = [

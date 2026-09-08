@@ -26,6 +26,7 @@ from .display import (
 from .read_only_display import interactive_terminal, read_only_display_mode
 from .tui_app import AltScreenApp
 from .tui_frame import panel_width, wrap_frame
+from .tui_panel import menu_inner_width
 from .tui_layout import append_bottom_footer
 from .tui_overlay import (
     apply_scroll_keys,
@@ -621,7 +622,7 @@ def build_usage_body(view: UsageView, width: int | None = None) -> Group:
     read-only print path adapts too; callers (and tests) may pin it explicitly.
     """
     if width is None:
-        width = max(1, terminal_size(console=console)[0] - 4)
+        width = menu_inner_width(terminal_size(console=console)[0])
     return Group(_scope_tabs(view.scope_key), Text(""), *_usage_body_sections(view, width))
 
 
@@ -716,7 +717,7 @@ class UsageScreen(AltScreenApp):
     def _geometry(self) -> tuple[int, int, int, int, bool]:
         _term_w, term_h = terminal_size(console=console)
         width = panel_width(_term_w)
-        inner_width = max(1, width - 4)
+        inner_width = menu_inner_width(width)
         body_rows, show_footer = body_content_rows(term_h)
         body_rows = max(1, body_rows - 2)  # reserve the fixed tab row + spacer
         return term_h, width, inner_width, body_rows, show_footer

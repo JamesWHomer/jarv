@@ -22,6 +22,7 @@ from .history import branches_file_for, load_branches, load_history
 from .session_tree import build_tree, delete_subtree, leaf_of, parent_id_of
 from .tui_app import AltScreenApp
 from .tui_frame import panel_width, wrap_frame
+from .tui_panel import MenuPanel, menu_inner_width
 from .tui_layout import append_bottom_footer, clip_text
 from .tui_overlay import apply_selection_keys, body_content_rows, clamp_selection_scroll
 
@@ -87,7 +88,7 @@ class TreeBrowserScreen(AltScreenApp):
     def render(self) -> Panel:
         term_w, term_h = terminal_size(console=console)
         width = panel_width(term_w)
-        inner = max(1, width - 4)
+        inner = menu_inner_width(width)
         body_rows, show_footer = body_content_rows(term_h, footer_rows=3)
 
         if not self.nodes:
@@ -96,6 +97,8 @@ class TreeBrowserScreen(AltScreenApp):
                 Text(
                     "  No prompts yet — start a conversation, then /tree to branch it.",
                     style="dim",
+                    no_wrap=True,
+                    overflow="ellipsis",
                 ),
             ]
             if show_footer:
@@ -170,7 +173,7 @@ class TreeBrowserScreen(AltScreenApp):
         # wrap_frame clears a previous, wider frame's stale right border on
         # WSL/ConPTY -- the same fix heads-up uses, applied here too.
         return wrap_frame(
-            Panel(
+            MenuPanel(
                 Group(*parts),
                 title="[bold bright_white]jarv ▸ tree[/bold bright_white]",
                 title_align="left",

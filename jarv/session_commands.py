@@ -6,6 +6,7 @@ import importlib
 import sys
 
 from .display import console
+from .tui_panel import menu_inner_width
 from .history import (
     forget_current_session,
     load_history,
@@ -152,7 +153,7 @@ def cmd_history() -> None:
 
     def _jump_to_message(delta: int) -> None:
         term_w, term_h = terminal_size(console=console)
-        width = max(1, term_w - 4)
+        width = menu_inner_width(term_w)
         anchors = _anchors(width)
         if not anchors:
             return
@@ -169,7 +170,7 @@ def cmd_history() -> None:
         term_w, term_h = terminal_size(console=console)
         panel_width = max(1, term_w)
         body_rows, show_footer = body_content_rows(term_h)
-        inner_width = max(1, panel_width - 4)
+        inner_width = menu_inner_width(panel_width)
         lines = _lines(inner_width)
         total = len(lines)
         state.offset = clamp_scroll_offset(state.offset, total, body_rows)
@@ -214,7 +215,7 @@ def cmd_history() -> None:
                 _jump_to_message(1)
             return False
         term_w, term_h = terminal_size(console=console)
-        width = max(1, term_w - 4)
+        width = menu_inner_width(term_w)
         total = len(_lines(width))
         body_rows, _ = body_content_rows(term_h)
         scroll_state.offset = apply_scroll_keys(

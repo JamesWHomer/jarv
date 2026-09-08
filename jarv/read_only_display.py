@@ -18,6 +18,7 @@ from .config import (
     is_setup_complete,
 )
 from .display import console, jarv_panel, rendered_text_lines, terminal_size
+from .tui_panel import configure_menu_border, menu_border_enabled
 from .tui_overlay import scroll_overlay
 
 
@@ -86,6 +87,8 @@ def show_read_only_command(
     fill_screen: bool = False,
 ) -> None:
     """Display read-only command output permanently or in a temporary view."""
+    if config is not None:
+        configure_menu_border(menu_border_enabled(config))
     body = _with_optional_setup_nudge(body, include_setup_nudge=include_setup_nudge)
     selected_mode = mode if mode in READ_ONLY_COMMAND_DISPLAY_CHOICES else _config_display_mode(config)
 
