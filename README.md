@@ -288,6 +288,8 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 | `tool_call_display` | `"auto"` | Tool-call layout: `auto` selects `print` for one-shot runs and `fullscreen` in heads-up mode; explicit modes override it. |
 | `print_usage_after_agent` | `false` | Print a compact token usage line after each completed agent run. |
 | `headsup_border` | `true` | Show outer frames in heads-up mode and all menus. Turn off to remove borders and side padding while keeping headers, footers, and the heads-up input box. |
+| `headsup_intro_logo` | `true` | Show the rainbow JARV logo, wave, and welcome hint in new heads-up sessions. Toggle **Rainbow JARV** in Display settings. |
+| `headsup_intro_stars` | `true` | Show twinkling stars in new heads-up sessions. Toggle **Welcome stars** in Display settings. Turn both welcome settings off for a blank area. |
 | `colour` | `true` | Render in colour. Set to `false` to keep only bold, dim, and underline. The `NO_COLOR` environment variable also disables colour. |
 | `system_prompt` | `"You are Jarv..."` | System instructions sent with each request. |
 | `project_context` | `true` | Read `JARV.md`/`AGENTS.md`/`CLAUDE.md` and git branch, status, and recent commits into the system prompt. |

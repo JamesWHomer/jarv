@@ -1008,6 +1008,8 @@ class HeadsupApp(AltScreenApp):
                 inner_width,
                 rows,
                 time.perf_counter() - self._idle_anim_started_at,
+                show_logo=get_setting(self.config, "headsup_intro_logo"),
+                show_stars=get_setting(self.config, "headsup_intro_stars"),
             )
         elif outro_started_at:
             exit_progress = (time.perf_counter() - outro_started_at) / _OUTRO_DURATION
@@ -1017,6 +1019,8 @@ class HeadsupApp(AltScreenApp):
                     rows,
                     time.perf_counter() - self._idle_anim_started_at,
                     exit=exit_progress,
+                    show_logo=get_setting(self.config, "headsup_intro_logo"),
+                    show_stars=get_setting(self.config, "headsup_intro_stars"),
                 )
         if intro is not None:
             visible = intro + [Text("")] * max(0, rows - len(intro))
@@ -1083,6 +1087,8 @@ class HeadsupApp(AltScreenApp):
         self._usage_status_cache = None
 
     def _idle_animation_active(self) -> bool:
+        if not (get_setting(self.config, "headsup_intro_logo") or get_setting(self.config, "headsup_intro_stars")):
+            return False
         if self._idle_anim_stop.is_set():
             return False
         if self.scroll_offset:

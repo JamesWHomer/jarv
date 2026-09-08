@@ -381,6 +381,8 @@ def render_intro(
     exit: float = 0.0,
     *,
     hint=_DEFAULT_HINT,
+    show_logo: bool = True,
+    show_stars: bool = True,
 ) -> list[Text] | None:
     """Render the idle intro animation as ``height`` Rich ``Text`` rows.
 
@@ -393,6 +395,9 @@ def render_intro(
     ``hint`` overrides the single hint line beneath the wordmark so the same
     brand mark can front other screens (the /setup welcome). The default keeps
     the heads-up "type a message to begin" hint; pass ``""`` to draw no hint.
+
+    ``show_logo`` toggles the wordmark, wave, and hint together, while
+    ``show_stars`` independently toggles the background starfield.
     """
     if width < 18 or height < 5:
         return None
@@ -405,7 +410,13 @@ def render_intro(
 
     # Stars fill the whole canvas; the wordmark and hint are drawn on top, with
     # only their tight bounding boxes cleared so stars remain at the sides.
-    _draw_starfield(chars, colors, t, height, width, _ease_out(_stage(t, _STARS_IN)))
+    if show_stars:
+        _draw_starfield(chars, colors, t, height, width, _ease_out(_stage(t, _STARS_IN)))
+
+    if not show_logo:
+        if exit > 0.0:
+            _apply_exit(chars, colors, exit, width, height)
+        return _rows_to_text(chars, colors, width, height)
 
     big = width >= _LOGO_W + 2 and height >= 11
     if hint is _DEFAULT_HINT:

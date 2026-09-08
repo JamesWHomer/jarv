@@ -361,6 +361,25 @@ class HeadsupTests(unittest.TestCase):
         self.assertIn("first message", rendered_after)
         self.assertIn("Heads-up mode. Type /help for commands.", rendered_after)
 
+    def test_intro_display_toggles_apply_live_in_large_and_small_terminals(self):
+        for width, height, logo_glyph in [(80, 24, "█"), (40, 14, "J A R V")]:
+            app, test_console, output = self._app(width=width)
+            for logo, stars in [(True, True), (False, True), (True, False), (False, False)]:
+                with self.subTest(width=width, logo=logo, stars=stars):
+                    app.config.update(headsup_intro_logo=logo, headsup_intro_stars=stars)
+                    app._idle_anim_started_at = time.perf_counter() - 5
+                    rendered = self._rendered_text(app, test_console, output, width=width, height=height)
+                    self.assertEqual(logo_glyph in rendered, logo)
+                    # Bright star glyphs do not overlap the welcome hint separator.
+                    self.assertEqual(any(ch in rendered for ch in "*✦"), stars)
+                    self.assertEqual(app._idle_animation_active(), logo or stars)
+
+            app._foreground_input_active = True
+            app.add_user_message("first message without effects")
+            self.assertEqual(app._outro_started_at, 0.0)
+            rendered = self._rendered_text(app, test_console, output, width=width, height=height)
+            self.assertIn("first message without effects", rendered)
+
     def test_live_construction_does_not_capture_completed_intro_frame(self):
         app, test_console, output = self._app(width=80)
         captured = []
