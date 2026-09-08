@@ -235,7 +235,7 @@ All commands work both as `jarv /command` (one-shot) and inside heads-up mode. R
 
 Agent tool calls have a separate `tool_call_display` setting. `auto` uses `print` for one-shot runs and `fullscreen` in heads-up mode. `print` is resize-safe and left-aligned; `fullscreen` uses bordered cards with right-aligned status.
 
-Toggle **Black and white** in `/settings` (or set `monochrome`) to render everything without colour — bold, dim, and underline are kept, so the layout still reads. Setting `NO_COLOR` in the environment does the same thing without changing your config.
+**Colour** in `/settings` defaults to **on**. Set it to **off** (or set `colour` to `false`) to render everything without colour — bold, dim, and underline are kept, so the layout still reads. Setting `NO_COLOR` in the environment does the same thing without changing your config. Existing `monochrome` preferences are migrated automatically.
 
 Turn off **Menu borders** in the Display section of `/settings`, or run `/set headsup_border false`, to remove outer frames in heads-up mode and all menus (settings and editors, setup, sessions and previews, tree, usage, and read-only screens). Borderless frames have no side padding, so content uses the full width. Menu metadata shares the header, freeing the bottom row for content and keeping usage hints at the bottom. Editor controls, heads-up status, and the heads-up input box remain visible. The settings screen updates immediately; `/set headsup_border true` restores the borders and padding.
 
@@ -288,7 +288,7 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 | `tool_call_display` | `"auto"` | Tool-call layout: `auto` selects `print` for one-shot runs and `fullscreen` in heads-up mode; explicit modes override it. |
 | `print_usage_after_agent` | `false` | Print a compact token usage line after each completed agent run. |
 | `headsup_border` | `true` | Show outer frames in heads-up mode and all menus. Turn off to remove borders and side padding while keeping headers, footers, and the heads-up input box. |
-| `monochrome` | `false` | Render without colour, keeping bold, dim, and underline. Also enabled when the `NO_COLOR` environment variable is set. |
+| `colour` | `true` | Render in colour. Set to `false` to keep only bold, dim, and underline. The `NO_COLOR` environment variable also disables colour. |
 | `system_prompt` | `"You are Jarv..."` | System instructions sent with each request. |
 | `project_context` | `true` | Read `JARV.md`/`AGENTS.md`/`CLAUDE.md` and git branch, status, and recent commits into the system prompt. |
 

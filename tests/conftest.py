@@ -205,11 +205,11 @@ if pytest is not None:
 
     @pytest.fixture(autouse=True)
     def _reset_monochrome():
-        """Undo any ``monochrome`` toggling a test leaves on the shared console.
+        """Undo any colour toggling a test leaves on the shared console.
 
         ``load_config`` and the settings save funnel both push the setting into
         ``jarv.display.console``, which is a process-wide singleton -- without
-        this, one test writing ``monochrome: true`` would silently strip colour
+        this, one test writing ``colour: false`` would silently strip colour
         from every test that ran after it.
         """
         from jarv import display

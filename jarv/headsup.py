@@ -691,7 +691,7 @@ class HeadsupApp(AltScreenApp):
         configure_output_display_lines(
             get_setting(self.config, "tool_output_display_lines")
         )
-        configure_monochrome(get_setting(self.config, "monochrome"))
+        configure_monochrome(not get_setting(self.config, "colour"))
         configure_menu_border(get_setting(self.config, "headsup_border"))
         self.client = client
         self.args = args
@@ -1595,7 +1595,7 @@ class HeadsupApp(AltScreenApp):
         configure_output_display_lines(
             get_setting(self.config, "tool_output_display_lines")
         )
-        configure_monochrome(get_setting(self.config, "monochrome"))
+        configure_monochrome(not get_setting(self.config, "colour"))
         configure_menu_border(get_setting(self.config, "headsup_border"))
         output = capture.get().strip()
         notice = Text.from_ansi(output) if output else None
@@ -1632,7 +1632,7 @@ class HeadsupApp(AltScreenApp):
         configure_output_display_lines(
             get_setting(self.config, "tool_output_display_lines")
         )
-        configure_monochrome(get_setting(self.config, "monochrome"))
+        configure_monochrome(not get_setting(self.config, "colour"))
         configure_menu_border(get_setting(self.config, "headsup_border"))
         self._sync_after_slash(command, None)
 

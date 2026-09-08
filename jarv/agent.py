@@ -1287,7 +1287,7 @@ def run_agent(
     )
     configure_tool_call_display(config["tool_call_display"])
     configure_output_display_lines(get_setting(config, "tool_output_display_lines"))
-    configure_monochrome(get_setting(config, "monochrome"))
+    configure_monochrome(not get_setting(config, "colour"))
     interactive = sys.stdout.isatty() and ui is None
     history: list = []
     metadata: dict = {}

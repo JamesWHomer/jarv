@@ -700,7 +700,7 @@ def _ask_user_prompt(display_mode: str) -> tuple[str, str]:
 
     This prompt is written straight to the terminal by the line editor rather
     than rendered through Rich, so it is the one place colour has to be dropped
-    by hand when the ``monochrome`` setting (or NO_COLOR) is on.
+    by hand when the ``colour`` setting is off (or NO_COLOR is set).
     """
     rail = "\u258e " if display_mode == "print" else ""
     if monochrome_enabled():

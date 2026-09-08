@@ -47,14 +47,14 @@ def _make_console() -> Console:
 console = _make_console()
 
 # Rich resolves ``no_color`` from the NO_COLOR environment variable at
-# construction. Latch that answer so toggling the ``monochrome`` setting off
+# construction. Latch that answer so toggling the ``colour`` setting on
 # never overrides a user who asked for colourless output via the environment.
 _ENV_NO_COLOR = console.no_color
 _monochrome = False
 
 
 def configure_monochrome(enabled) -> None:
-    """Apply the ``monochrome`` setting to the shared console.
+    """Apply monochrome mode (the inverse of ``colour``) to the shared console.
 
     Rich reads ``console.no_color`` when it renders a buffer, not when the
     console is built, so this takes effect on the next paint -- including

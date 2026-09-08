@@ -73,7 +73,7 @@ def _settings_save_validated(config: dict) -> bool:
     # The single save funnel for quick toggles, the field editors, and reset, so
     # hooking it here means the settings screen repaints in the newly chosen
     # mode on its very next frame -- it renders on this same shared console.
-    configure_monochrome(config.get("monochrome", False))
+    configure_monochrome(not config.get("colour", True))
     configure_menu_border(menu_border_enabled(config))
     return True
 
@@ -193,7 +193,7 @@ def _settings_apply_quick(row: dict, config: dict) -> tuple[dict, str] | None:
         config[key] = not bool(config.get(key, DEFAULT_CONFIG.get(key, False)))
         if not _settings_save_validated(config):
             return config, "config validation failed"
-        state = "on" if config[key] else "off"
+        state = _settings_value_text(row, config).plain
         return config, f"saved {row['label']}: {state}"
 
     if kind == "tool_bool":

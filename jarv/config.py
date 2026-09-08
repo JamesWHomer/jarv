@@ -67,6 +67,10 @@ def load_config() -> dict:
         _console().print(f"[red]Config must be a JSON object:[/red] {CONFIG_FILE}")
         sys.exit(1)
     changed = False
+    if "monochrome" in config:
+        config.setdefault("colour", not config.pop("monochrome"))
+        changed = True
+
     for k, v in DEFAULT_CONFIG.items():
         if k not in config:
             config[k] = v
@@ -92,7 +96,7 @@ def load_config() -> dict:
     from .display import configure_monochrome
     from .tui_panel import configure_menu_border
 
-    configure_monochrome(config.get("monochrome", False))
+    configure_monochrome(not get_setting(config, "colour"))
     configure_menu_border(get_setting(config, "headsup_border"))
 
     return config

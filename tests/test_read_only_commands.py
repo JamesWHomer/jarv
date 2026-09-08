@@ -1,4 +1,5 @@
 import io
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,7 +29,7 @@ def test_read_only_command_display_default_is_fullscreen():
     assert READ_ONLY_COMMAND_DISPLAY_CHOICES == ("fullscreen", "print")
     assert DEFAULT_CONFIG["read_only_command_display"] == "fullscreen"
     assert DEFAULT_CONFIG["print_usage_after_agent"] is False
-    assert DEFAULT_CONFIG["monochrome"] is False
+    assert DEFAULT_CONFIG["colour"] is True
     assert validate_config(dict(DEFAULT_CONFIG))
 
 
@@ -81,21 +82,47 @@ def test_settings_exposes_print_usage_after_agent(monkeypatch):
     assert message == "saved Print usage: on"
 
 
-def test_settings_exposes_monochrome(monkeypatch):
+def test_settings_exposes_colour(monkeypatch):
     config = dict(DEFAULT_CONFIG)
-    row = next(row for row in settings_command._settings_rows(config) if row["key"] == "monochrome")
+    row = next(row for row in settings_command._settings_rows(config) if row["key"] == "colour")
 
     assert row["section"] == "display"
-    assert row["label"] == "Black and white"
-    assert settings_command._settings_value_text(row, config).plain == "off"
+    assert row["label"] == "Colour"
+    assert settings_command._settings_value_text(row, config).plain == "on"
 
     monkeypatch.setattr(settings_command, "save_config", lambda _config: None)
     updated, message = settings_command._settings_apply_quick(row, config)
 
-    assert updated["monochrome"] is True
-    assert message == "saved Black and white: on"
+    assert updated["colour"] is False
+    assert message == "saved Colour: off"
     # Toggling in /settings takes effect on the screen you toggled it from.
     assert display.console.no_color is True
+
+    updated, message = settings_command._settings_apply_quick(row, config)
+    assert updated["colour"] is True
+    assert message == "saved Colour: on"
+    assert display.console.no_color == display._ENV_NO_COLOR
+
+
+@pytest.mark.parametrize("saved, expected", [
+    ({"monochrome": True}, False),
+    ({"monochrome": False}, True),
+    ({"monochrome": True, "colour": True}, True),
+    ({"monochrome": False, "colour": False}, False),
+])
+def test_load_config_migrates_monochrome(monkeypatch, tmp_path, saved, expected):
+    config_file = tmp_path / "config.json"
+    config_file.write_text(json.dumps(saved), encoding="utf-8")
+    monkeypatch.setattr(config_module, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_module, "CONFIG_FILE", config_file)
+    monkeypatch.setattr(history, "migrate_flat_session_files", lambda: None)
+
+    loaded = config_module.load_config()
+
+    assert loaded["colour"] is expected
+    assert "monochrome" not in loaded
+    assert json.loads(config_file.read_text(encoding="utf-8")) == loaded
+    assert display.console.no_color == (not expected or display._ENV_NO_COLOR)
 
 
 def test_settings_groups_account_and_behaviour_rows_in_requested_order():

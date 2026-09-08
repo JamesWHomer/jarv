@@ -365,7 +365,7 @@ def main() -> None:
     from .display import configure_monochrome, configure_output_display_lines
 
     configure_output_display_lines(config.get("tool_output_display_lines", "auto"))
-    configure_monochrome(config.get("monochrome", False))
+    configure_monochrome(not config.get("colour", True))
 
     from .provider import resolve_api_key, LOCAL_PROVIDERS
 

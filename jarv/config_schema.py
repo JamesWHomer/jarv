@@ -131,7 +131,7 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
     ),
     ConfigField("headsup_border", True, validator="bool", label="Menu borders", section="display", desc="outer frames in heads-up and menus; off removes side padding too", ui_kind="bool", about="Show outer borders in heads-up mode and all menus, including settings, setup, sessions, tree, usage, and read-only screens. When `false`, remove outer borders and horizontal frame padding while keeping headers, footers, and the heads-up input box."),
     ConfigField("print_usage_after_agent", False, validator="bool", label="Print usage", section="display", desc="print token totals after completed agent runs", ui_kind="bool", about="When `true`, print a compact token usage line after each completed agent run."),
-    ConfigField("monochrome", False, validator="bool", label="Black and white", section="display", desc="render without colour", ui_kind="bool", about="When `true`, jarv strips all colour from its output while keeping bold, dim, and underline. Also enabled automatically when the `NO_COLOR` environment variable is set."),
+    ConfigField("colour", True, validator="bool", label="Colour", section="display", desc="render output in colour", ui_kind="bool", about="When `true` (the default), jarv renders output in colour. When `false`, colour is stripped while keeping bold, dim, and underline. The `NO_COLOR` environment variable disables colour regardless of this setting."),
 )
 
 CONFIG_FIELD_BY_KEY = {field.key: field for field in CONFIG_FIELDS}
