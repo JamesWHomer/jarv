@@ -318,7 +318,7 @@ def _hero_band(view: UsageView, width: int = 0) -> Table:
 def _daily_chart(view: UsageView, width: int = 0) -> Group | None:
     """A vertical sparkline of daily spend, shown for windows with >=2 days of data.
 
-    A wide terminal shows more history (up to the 90-day retention window); a
+    A wide terminal shows more history (up to 90 daily bars); a
     narrow one keeps today's 30-bar cap so the line never overruns the panel.
     """
     days = view.daily

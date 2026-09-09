@@ -660,6 +660,25 @@ class UsageRecordingTests(unittest.TestCase):
         self.assertEqual(aggregate["sources"]["root"]["request_count"], 1)
         self.assertEqual(aggregate["sources"]["subagent"]["request_count"], 1)
 
+    def test_global_usage_append_preserves_old_history_without_reading_or_rewriting(self):
+        with TemporaryDirectory() as tmp:
+            global_path = Path(tmp) / "usage.json"
+            jsonl_path = global_path.with_suffix(".jsonl")
+            old_record = {"created_at": "2000-01-01T00:00:00Z", "session_id": "old"}
+            original = (json.dumps(old_record, indent=None) + "\n").encode("utf-8")
+            jsonl_path.write_bytes(original)
+            new_record = {"created_at": "2026-09-08T00:00:00Z", "session_id": "new"}
+
+            with (
+                patch.object(Path, "read_text", side_effect=AssertionError("append must not scan history")),
+                patch.object(Path, "write_text", side_effect=AssertionError("append must not rewrite history")),
+            ):
+                append_global_usage_record(new_record, global_path)
+
+            self.assertTrue(jsonl_path.read_bytes().startswith(original))
+            records = load_global_usage_records(global_path)
+            self.assertEqual([record["session_id"] for record in records], ["old", "new"])
+
     def test_global_usage_records_combine_legacy_json_and_jsonl(self):
         with TemporaryDirectory() as tmp:
             global_path = Path(tmp) / "usage.json"

@@ -310,13 +310,13 @@ All state is stored in `~/.jarv/` (on Windows, `%USERPROFILE%\.jarv\`):
 │   ├── reads-<hash>.json            # retained command outputs
 │   ├── usage-<hash>.json            # session token usage totals
 │   └── redo-<hash>.json             # undo/redo stack
-├── usage.json                       # future system-wide token usage ledger
+├── usage.jsonl                      # append-only system-wide usage ledger
 └── archive/                         # archived sessions
 ```
 
 Project context files (`JARV.md`, `AGENTS.md`, `CLAUDE.md`) live in your repositories, not in `~/.jarv/`; jarv only reads them, never writes them.
 
-System-wide usage tracking begins once `~/.jarv/usage.json` exists; older totals aren't backfilled into time-window reports. Cost is request-based and grouped by provider and tier: Jarv uses provider-reported cost when available, otherwise estimates from [models.dev](https://models.dev) pricing for the provider actually serving the model — including long-context surcharges — and shows unknown or contract-priced requests separately.
+System-wide usage records are appended to `~/.jarv/usage.jsonl` and retained without automatic expiry. Time-window reports filter this history without deleting records; `all` includes all available history. Legacy `usage.json` records are also read, but older session totals aren't backfilled into time-window reports. Cost is request-based and grouped by provider and tier: Jarv uses provider-reported cost when available, otherwise estimates from [models.dev](https://models.dev) pricing for the provider actually serving the model — including long-context surcharges — and shows unknown or contract-priced requests separately.
 
 ## Model catalog
 
