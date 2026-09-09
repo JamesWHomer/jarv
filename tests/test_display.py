@@ -1,6 +1,7 @@
 import io
 from types import SimpleNamespace
 
+import pytest
 from rich.console import Console
 from rich.text import Text
 
@@ -15,6 +16,35 @@ from jarv.display import (
     terminal_size,
     tool_card,
 )
+
+
+def test_benchmark_stop_requires_first_paint_opt_in(monkeypatch):
+    monkeypatch.delenv("JARV_BENCH_FIRST_PAINT", raising=False)
+    monkeypatch.setenv("JARV_BENCH_STOP_AFTER_PAINT", "1")
+    monkeypatch.setattr(display, "_first_paint_marks", set())
+    monkeypatch.setattr(display.os, "_exit", lambda code: pytest.fail("unexpected exit"))
+    display.mark_first_paint("test")
+    assert not display._first_paint_marks
+
+
+def test_benchmark_stop_bypasses_live_stderr_redirection(monkeypatch):
+    monkeypatch.setenv("JARV_BENCH_FIRST_PAINT", "1")
+    monkeypatch.setenv("JARV_BENCH_STOP_AFTER_PAINT", "1")
+    monkeypatch.setattr(display, "_first_paint_marks", set())
+    raw, redirected = io.StringIO(), io.StringIO()
+    monkeypatch.setattr(display.sys, "__stderr__", raw)
+    monkeypatch.setattr(display.sys, "stderr", redirected)
+
+    def stop(code):
+        raise SystemExit(code)
+
+    monkeypatch.setattr(display.os, "_exit", stop)
+    with pytest.raises(SystemExit) as result:
+        display.mark_first_paint("test")
+    assert result.value.code == 0
+    assert raw.getvalue().splitlines()[0].startswith("JARV_FIRST_PAINT test ")
+    assert raw.getvalue().splitlines()[1].startswith("BENCH_READY ")
+    assert redirected.getvalue() == ""
 
 
 def test_truecolor_detected_from_colorterm(monkeypatch):

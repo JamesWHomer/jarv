@@ -167,6 +167,12 @@ def mark_first_paint(label: str) -> None:
     if label in _first_paint_marks:
         return
     _first_paint_marks.add(label)
+    if os.environ.get("JARV_BENCH_STOP_AFTER_PAINT") == "1":
+        # Bypass Rich's live stderr redirection so a benchmark can stop at the
+        # completed refresh without waiting for input or including teardown.
+        print(f"JARV_FIRST_PAINT {label} {time.time_ns()}", file=sys.__stderr__, flush=True)
+        print(f"BENCH_READY {time.perf_counter_ns()}", file=sys.__stderr__, flush=True)
+        os._exit(0)
     print(f"JARV_FIRST_PAINT {label} {time.time_ns()}", file=sys.stderr, flush=True)
 
 
