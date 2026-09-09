@@ -83,15 +83,26 @@ def read_context_file(path: Path, max_chars: int) -> str:
 
 
 def build_git_block(cwd: Path) -> str:
+    from concurrent.futures import ThreadPoolExecutor
+
+    # These independent read-only queries spend most of their time waiting for
+    # Git processes. Keep the same commands, timeouts and output order, but
+    # overlap their waits rather than paying three process launches in series.
+    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="jarv-git-context") as pool:
+        branch_query = pool.submit(_run_git, ["branch", "--show-current"], cwd)
+        status_query = pool.submit(_run_git, ["status", "--porcelain"], cwd)
+        log_query = pool.submit(_run_git, ["log", "--oneline", "-5", "--no-decorate"], cwd)
+        branch = branch_query.result()
+        sha = _run_git(["rev-parse", "--short", "HEAD"], cwd) if branch == "" else None
+        status = status_query.result()
+        log = log_query.result()
+
     lines = []
-    branch = _run_git(["branch", "--show-current"], cwd)
     if branch:
         lines.append(f"branch: {branch}")
     elif branch is not None:
-        sha = _run_git(["rev-parse", "--short", "HEAD"], cwd)
         if sha:
             lines.append(f"branch: detached HEAD at {sha}")
-    status = _run_git(["status", "--porcelain"], cwd)
     if status is not None:
         changed = sum(1 for line in status.splitlines() if line.strip())
         if changed == 0:
@@ -99,7 +110,6 @@ def build_git_block(cwd: Path) -> str:
         else:
             noun = "file" if changed == 1 else "files"
             lines.append(f"status: dirty ({changed} {noun} changed)")
-    log = _run_git(["log", "--oneline", "-5", "--no-decorate"], cwd)
     if log:
         lines.append("recent commits:")
         lines.extend(f"  {line}" for line in log.splitlines())

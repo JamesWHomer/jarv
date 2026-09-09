@@ -1,4 +1,6 @@
+import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -219,6 +221,66 @@ def test_git_failures_omit_lines(monkeypatch, tmp_path):
     assert build_git_block(tmp_path) == "status: clean"
     _fake_git(monkeypatch, {})
     assert build_git_block(tmp_path) == ""
+
+
+def test_git_queries_overlap_without_reordering_output(monkeypatch, tmp_path):
+    started = threading.Barrier(3, timeout=5)
+    responses = _repo_responses(tmp_path)
+
+    def query(args, cwd):
+        # All three must start before any can finish; no wall-clock threshold.
+        started.wait()
+        return responses[tuple(args)]
+
+    monkeypatch.setattr(project_context, "_run_git", query)
+    assert build_git_block(tmp_path) == (
+        "branch: main\nstatus: dirty (3 files changed)\nrecent commits:\n"
+        "  abc1 one\n  abc2 two\n  abc3 three\n  abc4 four\n  abc5 five"
+    )
+
+
+def test_git_status_timeout_preserves_other_context(monkeypatch, tmp_path):
+    def run(command, **kwargs):
+        if command[1] == "status":
+            raise subprocess.TimeoutExpired(command, timeout=1.5)
+        output = "main" if command[1] == "branch" else "abc123 initial"
+        return subprocess.CompletedProcess(command, 0, stdout=output)
+
+    monkeypatch.setattr(project_context.subprocess, "run", run)
+    assert build_git_block(tmp_path) == "branch: main\nrecent commits:\n  abc123 initial"
+
+
+@pytest.mark.parametrize("state", ["unborn", "clean", "dirty", "detached"])
+def test_git_context_real_repository(tmp_path, state):
+    if not shutil.which("git"):
+        pytest.skip("git is not installed")
+
+    def git(*args):
+        result = subprocess.run(
+            ["git", "-c", "user.name=Benchmark Test", "-c", "user.email=test@example.invalid",
+             "-c", "commit.gpgsign=false", *args], cwd=tmp_path,
+            capture_output=True, text=True, check=True,
+        )
+        return result.stdout.strip()
+
+    git("init", "-b", "main")
+    if state == "unborn":
+        assert build_git_block(tmp_path) == "branch: main\nstatus: clean"
+        return
+    (tmp_path / "tracked.txt").write_text("original\n", encoding="utf-8")
+    git("add", "tracked.txt")
+    git("commit", "-m", "initial")
+    commit = git("log", "--oneline", "-1", "--no-decorate")
+    branch = "main"
+    status = "clean"
+    if state == "dirty":
+        (tmp_path / "tracked.txt").write_text("modified\n", encoding="utf-8")
+        (tmp_path / "untracked.txt").write_text("new\n", encoding="utf-8")
+        status = "dirty (2 files changed)"
+    elif state == "detached":
+        git("checkout", "--detach")
+        branch = f"detached HEAD at {git('rev-parse', '--short', 'HEAD')}"
+    assert build_git_block(tmp_path) == f"branch: {branch}\nstatus: {status}\nrecent commits:\n  {commit}"
 
 
 def test_missing_git_sets_memo_and_stops_spawning(tmp_path, monkeypatch):
