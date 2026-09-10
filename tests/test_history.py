@@ -1,3 +1,5 @@
+import pytest
+from jarv.storage import StorageError
 import json
 import unittest
 from pathlib import Path
@@ -128,28 +130,31 @@ def test_load_sessions_missing_file_returns_default_shape(tmp_path, monkeypatch)
     assert history.load_sessions() == {"terminals": {}, "sessions": {}}
 
 
-def test_load_sessions_malformed_json_returns_default_shape(tmp_path, monkeypatch):
+def test_load_sessions_malformed_json_raises(tmp_path, monkeypatch):
     sessions_file = tmp_path / "sessions.json"
     sessions_file.write_text("{not json", encoding="utf-8")
     monkeypatch.setattr(history, "SESSIONS_FILE", sessions_file)
 
-    assert history.load_sessions() == {"terminals": {}, "sessions": {}}
+    with pytest.raises(StorageError):
+        history.load_sessions()
 
 
-def test_load_sessions_non_dict_payload_returns_default_shape(tmp_path, monkeypatch):
+def test_load_sessions_non_dict_payload_raises(tmp_path, monkeypatch):
     sessions_file = tmp_path / "sessions.json"
     sessions_file.write_text("[1, 2, 3]", encoding="utf-8")
     monkeypatch.setattr(history, "SESSIONS_FILE", sessions_file)
 
-    assert history.load_sessions() == {"terminals": {}, "sessions": {}}
+    with pytest.raises(StorageError):
+        history.load_sessions()
 
 
-def test_load_sessions_wrong_typed_keys_return_default_shape(tmp_path, monkeypatch):
+def test_load_sessions_wrong_typed_keys_raise(tmp_path, monkeypatch):
     sessions_file = tmp_path / "sessions.json"
     sessions_file.write_text(json.dumps({"terminals": [], "sessions": {}}), encoding="utf-8")
     monkeypatch.setattr(history, "SESSIONS_FILE", sessions_file)
 
-    assert history.load_sessions() == {"terminals": {}, "sessions": {}}
+    with pytest.raises(StorageError):
+        history.load_sessions()
 
 
 def test_save_then_load_sessions_round_trips(tmp_path, monkeypatch):

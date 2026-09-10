@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .storage import transaction, delete_json
 from .history import (
     branches_file_for,
     load_branches,
@@ -266,53 +267,48 @@ def checkout(history_file: Path, *, leaf_id: str) -> bool:
     ``leaf_id == ROOT`` empties the active history (used when editing a root
     prompt). Returns ``True`` if anything changed on disk.
     """
-    history = load_history(history_file)
-    branches_path = branches_file_for(history_file)
-    model = build_tree(history, load_branches(branches_path))
+    with transaction(history_file):
+        history = load_history(history_file)
+        branches_path = branches_file_for(history_file)
+        model = build_tree(history, load_branches(branches_path))
 
-    if leaf_id == ROOT:
-        target: TreeNode | None = None
-        spine: list[TreeNode] = []
-    else:
-        target = model.find(leaf_id)
-        if target is None:
-            return False
-        # No-op: already sitting on this exact leaf.
-        if target.is_active_leaf:
-            return False
-        spine = ancestors_and_self(target)
+        if leaf_id == ROOT:
+            target: TreeNode | None = None
+            spine: list[TreeNode] = []
+        else:
+            target = model.find(leaf_id)
+            if target is None:
+                return False
+            # No-op: already sitting on this exact leaf.
+            if target.is_active_leaf:
+                return False
+            spine = ancestors_and_self(target)
 
-    spine_set = {id(n) for n in spine}
-    off_spine = [n for n in model.nodes if id(n) not in spine_set]
+        spine_set = {id(n) for n in spine}
+        off_spine = [n for n in model.nodes if id(n) not in spine_set]
 
-    # Assign real ids before computing parent pointers so every reference is stable.
-    for node in spine:
-        node.frame_id = _set_frame_id(node.items)
-    for node in off_spine:
-        node.frame_id = _set_frame_id(node.items)
+        # Assign real ids before computing parent pointers so every reference is stable.
+        for node in spine:
+            node.frame_id = _set_frame_id(node.items)
+        for node in off_spine:
+            node.frame_id = _set_frame_id(node.items)
 
-    new_history: list = []
-    for node in spine:
-        new_history.extend(node.items)
+        new_history: list = []
+        for node in spine:
+            new_history.extend(node.items)
 
-    new_frames = [
-        {
-            "parent_frame_id": node.parent.frame_id if node.parent is not None else ROOT,
-            "items": node.items,
-        }
-        for node in off_spine
-    ]
+        new_frames = [
+            {
+                "parent_frame_id": node.parent.frame_id if node.parent is not None else ROOT,
+                "items": node.items,
+            }
+            for node in off_spine
+        ]
 
-    save_history(new_history, history_file)
-    save_branches(new_frames, branches_path)
-    # The linear redo stack no longer describes this path; drop it.
-    redo_path = redo_file_for(history_file)
-    if redo_path.exists():
-        try:
-            redo_path.unlink()
-        except OSError:
-            pass
-    return True
+        save_history(new_history, history_file)
+        save_branches(new_frames, branches_path)
+        delete_json(redo_file_for(history_file))
+        return True
 
 
 def delete_subtree(history_file: Path, *, node_id: str) -> bool:
@@ -323,41 +319,42 @@ def delete_subtree(history_file: Path, *, node_id: str) -> bool:
     ids so surviving branches keep valid parent references. Returns ``True`` if a
     subtree was removed.
     """
-    history = load_history(history_file)
-    branches_path = branches_file_for(history_file)
-    model = build_tree(history, load_branches(branches_path))
+    with transaction(history_file):
+        history = load_history(history_file)
+        branches_path = branches_file_for(history_file)
+        model = build_tree(history, load_branches(branches_path))
 
-    target = model.find(node_id)
-    if target is None or target.on_active_path:
-        return False
+        target = model.find(node_id)
+        if target is None or target.on_active_path:
+            return False
 
-    doomed: set[int] = set()
-    stack = [target]
-    while stack:
-        node = stack.pop()
-        doomed.add(id(node))
-        stack.extend(node.children)
+        doomed: set[int] = set()
+        stack = [target]
+        while stack:
+            node = stack.pop()
+            doomed.add(id(node))
+            stack.extend(node.children)
 
-    survivors = [n for n in model.nodes if not n.on_active_path and id(n) not in doomed]
+        survivors = [n for n in model.nodes if not n.on_active_path and id(n) not in doomed]
 
-    # A survivor's parent is always on the active path or another survivor (we drop
-    # whole subtrees), so backfilling ids on both keeps every reference resolvable.
-    for node in model.active_path:
-        node.frame_id = _set_frame_id(node.items)
-    for node in survivors:
-        node.frame_id = _set_frame_id(node.items)
+        # A survivor's parent is always on the active path or another survivor (we drop
+        # whole subtrees), so backfilling ids on both keeps every reference resolvable.
+        for node in model.active_path:
+            node.frame_id = _set_frame_id(node.items)
+        for node in survivors:
+            node.frame_id = _set_frame_id(node.items)
 
-    new_history: list = []
-    for node in model.active_path:
-        new_history.extend(node.items)
-    new_frames = [
-        {
-            "parent_frame_id": node.parent.frame_id if node.parent is not None else ROOT,
-            "items": node.items,
-        }
-        for node in survivors
-    ]
+        new_history: list = []
+        for node in model.active_path:
+            new_history.extend(node.items)
+        new_frames = [
+            {
+                "parent_frame_id": node.parent.frame_id if node.parent is not None else ROOT,
+                "items": node.items,
+            }
+            for node in survivors
+        ]
 
-    save_history(new_history, history_file)
-    save_branches(new_frames, branches_path)
-    return True
+        save_history(new_history, history_file)
+        save_branches(new_frames, branches_path)
+        return True

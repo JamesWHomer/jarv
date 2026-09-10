@@ -748,14 +748,16 @@ class UsageRecordingTests(unittest.TestCase):
 
         self.assertEqual([record["session_id"] for record in records], ["new"])
 
-    def test_malformed_or_missing_global_usage_fails_soft(self):
+    def test_missing_usage_is_empty_but_malformed_usage_raises(self):
         with TemporaryDirectory() as tmp:
             missing_path = Path(tmp) / "missing.json"
             malformed_path = Path(tmp) / "usage.json"
             malformed_path.write_text("{not json", encoding="utf-8")
 
             self.assertEqual(load_global_usage_records(missing_path, warn=False), [])
-            self.assertEqual(load_global_usage_records(malformed_path, warn=False), [])
+            from jarv.storage import StorageError
+            with self.assertRaises(StorageError):
+                load_global_usage_records(malformed_path, warn=False)
 
 
 class FormatTokensCompactTests(unittest.TestCase):

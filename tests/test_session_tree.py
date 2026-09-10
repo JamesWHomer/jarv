@@ -229,11 +229,13 @@ class BranchSidecarTests(unittest.TestCase):
             save_branches(records, path)
             self.assertEqual(load_branches(path), records)
 
-    def test_corrupt_file_returns_empty(self):
+    def test_corrupt_file_raises(self):
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "branches-x.json"
             path.write_text("{ not json", encoding="utf-8")
-            self.assertEqual(load_branches(path), [])
+            from jarv.storage import StorageError
+            with self.assertRaises(StorageError):
+                load_branches(path)
 
     def test_missing_file_returns_empty(self):
         with TemporaryDirectory() as tmp:

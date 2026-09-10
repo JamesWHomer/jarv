@@ -1,3 +1,5 @@
+from .storage import read_json, write_json, transaction, StorageError
+from contextlib import nullcontext
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -141,10 +143,8 @@ def _empty_global_usage() -> dict:
 
 
 def load_usage(path: Path, session_id: str | None = None, warn: bool = True) -> dict:
-    if not path.exists():
-        return _empty_usage(session_id)
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = read_json(path, {}, dict)
     except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
         if warn:
             console.print(f"[yellow]Ignoring malformed usage data:[/yellow] {e}")
@@ -161,20 +161,13 @@ def load_usage(path: Path, session_id: str | None = None, warn: bool = True) -> 
 
 
 def save_usage(data: dict, path: Path, warn: bool = True) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        path.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
-    except OSError as e:
-        if warn:
-            console.print(f"[yellow]Could not save usage data:[/yellow] {e}")
+    write_json(path, data, snapshot=data if hasattr(data, "baseline") else None)
 
 
 def load_global_usage(path: Path | None = None, warn: bool = True) -> dict:
     path = path or global_usage_file()
-    if not path.exists():
-        return _empty_global_usage()
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = read_json(path, {}, dict)
     except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
         if warn:
             console.print(f"[yellow]Ignoring malformed usage data:[/yellow] {e}")
@@ -195,12 +188,7 @@ def load_global_usage(path: Path | None = None, warn: bool = True) -> dict:
 
 def save_global_usage(data: dict, path: Path | None = None, warn: bool = True) -> None:
     path = path or global_usage_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    except OSError as e:
-        if warn:
-            console.print(f"[yellow]Could not save usage data:[/yellow] {e}")
+    write_json(path, data, snapshot=data if hasattr(data, "baseline") else None)
 
 
 def _value(obj: Any, key: str) -> Any:
@@ -814,7 +802,7 @@ def record_response_usage(
             else:
                 record["cost_status"] = "unknown"
 
-        with _usage_lock:
+        with _usage_lock, (transaction(usage_path) if usage_path is not None else nullcontext()):
             if usage_path is not None:
                 data = load_usage(usage_path, session_id, warn=False)
                 data["version"] = USAGE_VERSION
@@ -849,6 +837,8 @@ def record_response_usage(
                 save_usage(data, usage_path, warn=False)
             if record_global:
                 _append_global_usage_record_unlocked(record, global_usage_path, warn=False)
+    except StorageError:
+        raise
     except Exception:
         return
 

@@ -1,4 +1,4 @@
-import json
+from .storage import read_json, write_json, StorageError
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -38,10 +38,9 @@ class ArtifactStore:
 
 def load_artifact_store(path: Path) -> ArtifactStore:
     store = ArtifactStore()
-    if not path.exists():
-        return store
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = read_json(path, {}, dict)
+        store.baseline = data.baseline
         if isinstance(data, dict):
             for label, item in data.items():
                 if isinstance(item, dict):
@@ -51,6 +50,8 @@ def load_artifact_store(path: Path) -> ArtifactStore:
                         item.get("tldr", ""),
                         item.get("owner_label", label),
                     )
+    except StorageError:
+        raise
     except Exception as e:
         console.print(f"[yellow]Could not load artifact store:[/yellow] {e}")
     return store
@@ -68,7 +69,4 @@ def save_artifact_store(store: ArtifactStore, path: Path) -> None:
             }
             for label, art in store._items.items()
         }
-    try:
-        path.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
-    except OSError as e:
-        console.print(f"[yellow]Could not save artifact store:[/yellow] {e}")
+    write_json(path, data, snapshot=store)

@@ -1,62 +1,44 @@
 import hashlib
-import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .storage import read_json, write_json, transaction, delete_json, StorageError, JsonList
 from .display import console
 from .paths import CONFIG_DIR, SESSIONS_DIR, SESSIONS_FILE
 from .unicode_safety import sanitize_json_value
 
 
 def load_history(path: Path) -> list:
-    if not path.exists():
-        return []
-    try:
-        history = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(history, list):
-            return sanitize_json_value(history)
-        console.print(f"[yellow]Ignoring invalid history format:[/yellow] {path}")
-    except json.JSONDecodeError as e:
-        console.print(f"[yellow]Ignoring malformed history:[/yellow] {e}")
-    except (OSError, UnicodeDecodeError) as e:
-        console.print(f"[yellow]Could not read history:[/yellow] {e}")
-    return []
+    data = read_json(path, [], list)
+    data[:] = sanitize_json_value(data)
+    return data
 
 
 def save_history(history: list, path: Path) -> None:
-    CONFIG_DIR.mkdir(exist_ok=True)
-    try:
-        path.write_text(json.dumps(sanitize_json_value(history), separators=(",", ":")), encoding="utf-8")
-    except OSError as e:
-        console.print(f"[yellow]Could not save history:[/yellow] {e}")
+    write_json(path, sanitize_json_value(history), snapshot=history if hasattr(history, "baseline") else None)
+
+
+class SessionMetadata(dict):
+    """Carry the original snapshot across other metadata reads."""
 
 
 def load_sessions() -> dict:
-    if not SESSIONS_FILE.exists():
-        return {"terminals": {}, "sessions": {}}
-    try:
-        data = json.loads(SESSIONS_FILE.read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            data = sanitize_json_value(data)
-            data.setdefault("terminals", {})
-            data.setdefault("sessions", {})
-            if isinstance(data["terminals"], dict) and isinstance(data["sessions"], dict):
-                return data
-    except json.JSONDecodeError as e:
-        console.print(f"[yellow]Ignoring malformed sessions metadata:[/yellow] {e}")
-    except (OSError, UnicodeDecodeError) as e:
-        console.print(f"[yellow]Could not read sessions metadata:[/yellow] {e}")
-    return {"terminals": {}, "sessions": {}}
+    raw = read_json(SESSIONS_FILE, {"terminals": {}, "sessions": {}}, dict)
+    data = sanitize_json_value(raw)
+    data.setdefault("terminals", {})
+    data.setdefault("sessions", {})
+    if not isinstance(data["terminals"], dict) or not isinstance(data["sessions"], dict):
+        raise StorageError(f"Invalid sessions metadata: {SESSIONS_FILE}")
+    result = SessionMetadata(data)
+    result.baseline = raw.baseline
+    return result
 
 
 def save_sessions(data: dict) -> None:
-    CONFIG_DIR.mkdir(exist_ok=True)
-    try:
-        SESSIONS_FILE.write_text(json.dumps(sanitize_json_value(data), indent=2), encoding="utf-8")
-    except OSError as e:
-        console.print(f"[yellow]Could not save sessions metadata:[/yellow] {e}")
+    write_json(SESSIONS_FILE, sanitize_json_value(data), merge=True,
+               snapshot=data if isinstance(data, SessionMetadata) else None)
 
 
 def utc_now() -> datetime:
@@ -149,12 +131,14 @@ def migrate_flat_session_files() -> None:
     if not files_to_move:
         return
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-    for src in files_to_move:
-        dest = SESSIONS_DIR / src.name
-        if not dest.exists():
-            src.rename(dest)
-        else:
-            src.unlink()
+    with transaction(CONFIG_DIR / "sessions.json"):
+        for src in files_to_move:
+            dest = SESSIONS_DIR / src.name
+            value = read_json(src, {}, (dict, list))
+            if dest.exists() and read_json(dest, {}, (dict, list)) != value:
+                raise StorageError(f"Conflicting legacy session files: {src} and {dest}")
+            write_json(dest, value)
+            delete_json(src)
 
 
 def artifact_file_for(history_path: Path) -> Path:
@@ -266,23 +250,11 @@ def redo_file_for(history_path: Path) -> Path:
 
 
 def load_redo_stack(path: Path) -> list[list]:
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(data, list):
-            return [frame for frame in data if isinstance(frame, list)]
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-        pass
-    return []
+    return read_json(path, [], list)
 
 
 def save_redo_stack(stack: list[list], path: Path) -> None:
-    CONFIG_DIR.mkdir(exist_ok=True)
-    try:
-        path.write_text(json.dumps(stack, indent=2), encoding="utf-8")
-    except OSError as e:
-        console.print(f"[yellow]Could not save redo stack:[/yellow] {e}")
+    write_json(path, sanitize_json_value(stack), snapshot=stack if hasattr(stack, "baseline") else None)
 
 
 def branches_file_for(history_path: Path) -> Path:
@@ -291,30 +263,14 @@ def branches_file_for(history_path: Path) -> Path:
 
 
 def load_branches(path: Path) -> list[dict]:
-    """Return the stored off-spine frames (empty if absent or unreadable).
-
-    Each record is ``{"parent_frame_id": <id | "">, "items": [<frame items>]}``;
-    the frame's own id lives on ``items[0]["id"]``.
-    """
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(data, dict) and isinstance(data.get("frames"), list):
-            return [
-                frame
-                for frame in sanitize_json_value(data["frames"])
-                if isinstance(frame, dict) and isinstance(frame.get("items"), list)
-            ]
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-        pass
-    return []
+    data = read_json(path, {"version": 1, "frames": []}, dict)
+    if not isinstance(data.get("frames"), list):
+        raise StorageError(f"Invalid branches: {path}")
+    frames = JsonList(sanitize_json_value(data["frames"]))
+    frames.baseline = data.baseline
+    return frames
 
 
 def save_branches(frames: list[dict], path: Path) -> None:
-    CONFIG_DIR.mkdir(exist_ok=True)
-    payload = {"version": 1, "frames": frames}
-    try:
-        path.write_text(json.dumps(sanitize_json_value(payload), indent=2), encoding="utf-8")
-    except OSError as e:
-        console.print(f"[yellow]Could not save session branches:[/yellow] {e}")
+    write_json(path, sanitize_json_value({"version": 1, "frames": frames}),
+               snapshot=frames if hasattr(frames, "baseline") else None)

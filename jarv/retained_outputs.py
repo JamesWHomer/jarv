@@ -1,4 +1,4 @@
-import json
+from .storage import read_json, write_json, StorageError
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,10 +38,9 @@ class RetainedOutputStore:
 
 def load_retained_output_store(path: Path) -> RetainedOutputStore:
     store = RetainedOutputStore()
-    if not path.exists():
-        return store
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = read_json(path, {}, dict)
+        store.baseline = data.baseline
         if isinstance(data, dict):
             for output_id, item in data.items():
                 if not isinstance(output_id, str) or not output_id.startswith("cmd_"):
@@ -55,6 +54,8 @@ def load_retained_output_store(path: Path) -> RetainedOutputStore:
                 if isinstance(content, str):
                     with store._lock:
                         store._items[output_id] = RetainedOutput(output_id, content)
+    except StorageError:
+        raise
     except Exception as e:
         console.print(f"[yellow]Could not load retained outputs:[/yellow] {e}")
     return store
@@ -67,7 +68,4 @@ def save_retained_output_store(store: RetainedOutputStore, path: Path) -> None:
             output_id: {"content": item.content}
             for output_id, item in store._items.items()
         }
-    try:
-        path.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
-    except OSError as e:
-        console.print(f"[yellow]Could not save retained outputs:[/yellow] {e}")
+    write_json(path, data, snapshot=store)

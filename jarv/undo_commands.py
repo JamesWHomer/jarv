@@ -1,6 +1,7 @@
 """Undo and redo command handlers."""
 
 from .display import console
+from .storage import transaction, write_json
 from .history import (
     load_history,
     load_redo_stack,
@@ -31,24 +32,25 @@ def _first_user_text(frame: list) -> str:
 def cmd_undo(args: list) -> None:
     n = _parse_count(args)
     ctx = prepare_session_context()
-    history = load_history(ctx.history_file)
-    redo_path = redo_file_for(ctx.history_file)
-    stack = load_redo_stack(redo_path)
+    with transaction(ctx.history_file):
+        history = load_history(ctx.history_file)
+        redo_path = redo_file_for(ctx.history_file)
+        stack = load_redo_stack(redo_path)
 
-    undone: list[list] = []
-    for _ in range(n):
-        history, frame = split_last_exchange(history)
-        if not frame:
-            break
-        undone.append(frame)
-        stack.append(frame)
+        undone: list[list] = []
+        for _ in range(n):
+            history, frame = split_last_exchange(history)
+            if not frame:
+                break
+            undone.append(frame)
+            stack.append(frame)
 
-    if not undone:
-        console.print("[dim]○ Nothing to undo.[/dim]")
-        return
+        if not undone:
+            console.print("[dim]○ Nothing to undo.[/dim]")
+            return
 
-    save_history(history, ctx.history_file)
-    save_redo_stack(stack, redo_path)
+        save_history(history, ctx.history_file)
+        save_redo_stack(stack, redo_path)
 
     if len(undone) == 1:
         text = _first_user_text(undone[0])
@@ -64,24 +66,25 @@ def cmd_undo(args: list) -> None:
 def cmd_redo(args: list) -> None:
     n = _parse_count(args)
     ctx = prepare_session_context()
-    history = load_history(ctx.history_file)
-    redo_path = redo_file_for(ctx.history_file)
-    stack = load_redo_stack(redo_path)
+    with transaction(ctx.history_file):
+        history = load_history(ctx.history_file)
+        redo_path = redo_file_for(ctx.history_file)
+        stack = load_redo_stack(redo_path)
 
-    restored: list[list] = []
-    for _ in range(n):
-        if not stack:
-            break
-        frame = stack.pop()
-        history.extend(frame)
-        restored.append(frame)
+        restored: list[list] = []
+        for _ in range(n):
+            if not stack:
+                break
+            frame = stack.pop()
+            history.extend(frame)
+            restored.append(frame)
 
-    if not restored:
-        console.print("[dim]○ Nothing to redo.[/dim]")
-        return
+        if not restored:
+            console.print("[dim]○ Nothing to redo.[/dim]")
+            return
 
-    save_history(history, ctx.history_file)
-    save_redo_stack(stack, redo_path)
+        save_history(history, ctx.history_file)
+        save_redo_stack(stack, redo_path)
 
     if len(restored) == 1:
         text = _first_user_text(restored[0])

@@ -243,6 +243,8 @@ Turn off **Menu borders** in the Display section of `/settings`, or run `/set he
 
 Each terminal is automatically bound to its own session. Jarv identifies terminals using environment variables (`WT_SESSION`, `TERM_SESSION_ID`, `TMUX`, `STY`) with a parent-process fallback, so history persists across runs in the same terminal.
 
+Session JSON is saved through a shared storage layer with interprocess locks, atomic file replacement, and a recovery journal. History, artifacts, retained outputs, and redo changes commit together; interrupted commits recover on the next access. Independent metadata edits from different terminals merge. Conflicting edits to the same history or metadata field report an error instead of overwriting another terminal's work. Corrupt files also report an error and are preserved for recovery. These protections require all concurrent Jarv processes to use this storage version.
+
 - `/new` starts a fresh session on the next prompt without archiving the current session.
 - `/sessions` opens an interactive browser (arrow keys to navigate, Enter to load, `a` to archive, `d` to delete, `p` to preview, `Tab` to switch views, Ctrl+F to search). Hold `Shift` with `↑`/`↓` to select a range of sessions, then `a` or `d` to archive or delete them together — `u` undoes the whole batch.
 - `/history` opens an interactive transcript where Up/Down scroll and Left/Right jump to the previous or next chat/reply.

@@ -1,6 +1,8 @@
 """Session archive and sidecar file operations."""
 
 from pathlib import Path
+from functools import wraps
+from .storage import transaction, read_json, write_json, delete_json, StorageConflict
 
 from .history import (
     artifact_file_for,
@@ -15,6 +17,23 @@ from .paths import ARCHIVE_DIR
 from .usage import usage_file_for
 
 
+def _coordinated(fn):
+    @wraps(fn)
+    def wrapped(history_path, *args, **kwargs):
+        with transaction(history_path):
+            return fn(history_path, *args, **kwargs)
+    return wrapped
+
+
+def _move(source, destination):
+    if destination.exists():
+        raise StorageConflict(f"Refusing to overwrite existing session file: {destination}")
+    value = read_json(source, {}, (dict, list))
+    write_json(destination, value)
+    delete_json(source)
+
+
+@_coordinated
 def archive_session_files(history_path: Path) -> Path | None:
     """Move history and sidecars for a session into ARCHIVE_DIR.
 
@@ -26,37 +45,38 @@ def archive_session_files(history_path: Path) -> Path | None:
     cleared_at = utc_now().strftime("%Y%m%dT%H%M%SZ")
     stem_suffix = history_path.stem[len("history"):]
     archived_history = ARCHIVE_DIR / f"history-{cleared_at}{stem_suffix}.json"
-    history_path.rename(archived_history)
+    _move(history_path, archived_history)
 
     artifact_path = artifact_file_for(history_path)
     if artifact_path.exists():
-        artifact_path.rename(ARCHIVE_DIR / f"artifacts-{cleared_at}{stem_suffix}.json")
+        _move(artifact_path, ARCHIVE_DIR / f"artifacts-{cleared_at}{stem_suffix}.json")
 
     reads_path = reads_file_for(history_path)
     if reads_path.exists():
-        reads_path.rename(ARCHIVE_DIR / f"reads-{cleared_at}{stem_suffix}.json")
+        _move(reads_path, ARCHIVE_DIR / f"reads-{cleared_at}{stem_suffix}.json")
 
     usage_path = usage_file_for(history_path)
     if usage_path.exists():
-        usage_path.rename(ARCHIVE_DIR / f"usage-{cleared_at}{stem_suffix}.json")
+        _move(usage_path, ARCHIVE_DIR / f"usage-{cleared_at}{stem_suffix}.json")
 
     branches_path = branches_file_for(history_path)
     if branches_path.exists():
-        branches_path.rename(ARCHIVE_DIR / f"branches-{cleared_at}{stem_suffix}.json")
+        _move(branches_path, ARCHIVE_DIR / f"branches-{cleared_at}{stem_suffix}.json")
 
     redo_path = redo_file_for(history_path)
     if redo_path.exists():
-        redo_path.unlink()
+        delete_json(redo_path)
 
     return archived_history
 
 
+@_coordinated
 def unarchive_session_files(archived_history_path: Path, session_id: str) -> Path | None:
     """Reverse archive_session_files for the given session id."""
     if not archived_history_path.exists():
         return None
     restored_history = history_file_for_session(session_id)
-    archived_history_path.rename(restored_history)
+    _move(archived_history_path, restored_history)
 
     archived_dir = archived_history_path.parent
     archived_tail = archived_history_path.stem[len("history"):]  # "-{ts}-{hash}"
@@ -64,9 +84,10 @@ def unarchive_session_files(archived_history_path: Path, session_id: str) -> Pat
     for kind in ("artifacts", "reads", "usage", "branches"):
         sib = archived_dir / f"{kind}{archived_tail}.json"
         if sib.exists():
-            sib.rename(restored_history.parent / f"{kind}{restored_suffix}.json")
+            _move(sib, restored_history.parent / f"{kind}{restored_suffix}.json")
     return restored_history
 
+@_coordinated
 def delete_session_files(history_path: Path) -> None:
     """Permanently remove history and sidecars for a session."""
     for path in (
@@ -77,8 +98,4 @@ def delete_session_files(history_path: Path) -> None:
         redo_file_for(history_path),
         branches_file_for(history_path),
     ):
-        try:
-            if path.exists():
-                path.unlink()
-        except OSError:
-            pass
+        delete_json(path)
