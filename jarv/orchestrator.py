@@ -280,6 +280,9 @@ class ToolExecutionHooks:
     run_spawn: Callable[[dict], str] | None = None
     run_ask_user: Callable[[dict], str] | None = None
     on_tool_error: Callable[[str], None] | None = None
+    on_tool_start: Callable[[object], None] | None = None
+    on_tool_recorded: Callable[[object], None] | None = None
+    on_pending_command: Callable[["PendingRunCommand"], None] | None = None
 
 
 @dataclass
@@ -552,6 +555,7 @@ def dispatch_parallel_safe_tool_batch(
     spawn_observer: "SpawnObserver | None" = None,
     cancellation_token: CancellationToken | None = None,
     retained_store: RetainedOutputStore | None = None,
+    on_tool_start: Callable[[object], None] | None = None,
 ) -> list[ToolBatchResult]:
     results = [ToolBatchResult(None, "") for _ in tool_calls]
     valid: list[tuple[int, object, dict]] = []
@@ -580,6 +584,8 @@ def dispatch_parallel_safe_tool_batch(
         return results
 
     def run_one(item, args: dict) -> ToolOutput:
+        if on_tool_start is not None:
+            on_tool_start(item)
         return dispatch_tool(
             item.name,
             args,
@@ -669,6 +675,8 @@ def dispatch_tool(
     """Execute a non-finish tool call and return the model-visible output string."""
     if name in TOOL_NAMES and not tool_enabled(config, name):
         return f"[tool disabled: {name}]"
+    if name == "spawn" and node.sterile:
+        return "[tool unavailable: sterile agents cannot spawn children]"
 
     if name == "run_command":
         return run_command_tool_output(
@@ -778,6 +786,7 @@ def execute_tool_calls(
                 spawn_observer=spawn_observer,
                 cancellation_token=cancellation_token,
                 retained_store=retained_store,
+                on_tool_start=hooks.on_tool_start,
             )
             for safe_item, batch_result in zip(group, batch_results):
                 output = batch_result.output
@@ -802,11 +811,17 @@ def execute_tool_calls(
                         result.web_search_read_nudge_sent = True
                 output = _maybe_truncate_tool_output(safe_item.name, output, config)
                 append_tool_result(safe_item, output)
+                if hooks.on_tool_recorded is not None:
+                    hooks.on_tool_recorded(safe_item)
             item_index = group_end
             continue
 
         if item.name in TOOL_NAMES and not tool_enabled(config, item.name):
             append_tool_result(item, f"[tool disabled: {item.name}]")
+            item_index += 1
+            continue
+        if item.name == "spawn" and node is not None and node.sterile:
+            append_tool_result(item, "[tool unavailable: sterile agents cannot spawn children]")
             item_index += 1
             continue
 
@@ -829,12 +844,16 @@ def execute_tool_calls(
             item_index += 1
             continue
 
+        if hooks.on_tool_start is not None:
+            hooks.on_tool_start(item)
         if item.name == "run_command" and hooks.run_command is not None:
             output = hooks.run_command(args)
             if isinstance(output, RunCommandDispatchResult):
                 result.pending_command = output.pending_command
                 if result.pending_command is not None and not result.pending_command.call_id:
                     result.pending_command.call_id = str(item.call_id)
+                if result.pending_command is not None and hooks.on_pending_command is not None:
+                    hooks.on_pending_command(result.pending_command)
                 output = output.output
         elif item.name == "edit" and hooks.run_edit is not None:
             output = hooks.run_edit(args)
@@ -861,6 +880,8 @@ def execute_tool_calls(
 
         output = _maybe_truncate_tool_output(item.name, output, config)
         append_tool_result(item, output)
+        if hooks.on_tool_recorded is not None:
+            hooks.on_tool_recorded(item)
         if result.pending_command is not None:
             # The turn now belongs to the held-open interactive command; answer
             # the remaining calls instead of silently dropping them so the
@@ -1080,6 +1101,8 @@ def spawn_batch(
     retained_store: RetainedOutputStore | None = None,
 ) -> list[dict]:
     """Spawn N children in parallel, block until all finish, return status reports."""
+    if parent.sterile:
+        raise ValueError("sterile agents cannot spawn children")
     if len(child_specs) > MAX_SPAWN_CHILDREN:
         raise ValueError(
             f"children must contain at most {MAX_SPAWN_CHILDREN} entries"

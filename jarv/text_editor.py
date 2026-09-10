@@ -1,6 +1,7 @@
 """Reusable cursor-aware text editing primitives for terminal views."""
 
 from rich.text import Text
+from rich.cells import cell_len, get_character_cell_size
 
 from .command_input import TextInput
 
@@ -31,14 +32,17 @@ def visual_rows(value: str, content_width: int) -> list[tuple[int, int]]:
 
     for logical_idx, logical_line in enumerate(logical_lines):
         line_length = len(logical_line)
-        segment_starts = list(range(0, max(1, line_length), content_width))
-        if line_length and line_length % content_width == 0:
-            segment_starts.append(line_length)
-
-        for segment_start in segment_starts:
-            row_start = absolute_start + segment_start
-            row_end = min(row_start + content_width, absolute_start + line_length)
-            rows.append((row_start, row_end))
+        segment_start = 0
+        cells = 0
+        for index, char in enumerate(logical_line):
+            size = get_character_cell_size(char)
+            if size and cells and cells + size > content_width:
+                rows.append((absolute_start + segment_start, absolute_start + index))
+                segment_start, cells = index, 0
+            cells += size
+        rows.append((absolute_start + segment_start, absolute_start + line_length))
+        if cells >= content_width:
+            rows.append((absolute_start + line_length, absolute_start + line_length))
 
         if logical_idx < len(logical_lines) - 1:
             absolute_start += line_length + 1
@@ -55,8 +59,12 @@ def cursor_row_index(rows: list[tuple[int, int]], cursor: int) -> int:
     return matches[-1] if matches else max(0, len(rows) - 1)
 
 
-def _display_value(value: str, *, masked: bool) -> str:
+def _display_value(value: str, *, masked: bool, width: int | None = None) -> str:
     if not masked:
+        if width == 1:
+            # A two-cell glyph cannot be drawn in a one-cell viewport. Keep
+            # string indices stable for editing while displaying a placeholder.
+            return "".join("�" if get_character_cell_size(char) > 1 else char for char in value)
         return value
     return "".join("\n" if char == "\n" else "*" for char in value)
 
@@ -127,9 +135,9 @@ def render_visual_lines(
     selection_style: str = "",
 ) -> tuple[list[Text], int]:
     value = str(state.get("buffer", ""))
-    display = _display_value(value, masked=masked)
+    display = _display_value(value, masked=masked, width=max(1, content_width))
     cursor = max(0, min(int(state.get("cursor", len(value))), len(value)))
-    rows = visual_rows(value, content_width)
+    rows = visual_rows(display, content_width)
     active_row = cursor_row_index(rows, cursor)
     spans = highlight_spans or ()
     rendered: list[Text] = []
@@ -197,16 +205,19 @@ def render_single_line(
     cursor_visible: bool = True,
 ) -> Text:
     value = str(state.get("buffer", ""))
-    display = _display_value(value, masked=masked).replace("\n", " ")
+    display = _display_value(value, masked=masked, width=max(1, width)).replace("\n", " ")
     cursor = max(0, min(int(state.get("cursor", len(value))), len(value)))
     width = max(1, width)
 
-    if cursor == len(display):
-        start = max(0, cursor - max(0, width - 1))
-        end = cursor
-    else:
-        start = max(0, cursor - width + 1)
-        end = min(len(display), start + width)
+    start = cursor
+    used = get_character_cell_size(display[cursor]) if cursor < len(display) else 1
+    while start and used + get_character_cell_size(display[start - 1]) <= width:
+        start -= 1
+        used += get_character_cell_size(display[start])
+    end = cursor + 1 if cursor < len(display) else cursor
+    while end < len(display) and used + get_character_cell_size(display[end]) <= width:
+        used += get_character_cell_size(display[end])
+        end += 1
     segment = display[start:end]
     local_cursor = cursor - start
 
@@ -237,10 +248,17 @@ def _move_vertical(
     current_start, _current_end = rows[current_idx]
     preferred_column = state.get("preferred_visual_column")
     if preferred_column is None:
-        preferred_column = cursor - current_start
+        preferred_column = cell_len(value[current_start:cursor])
     target_idx = max(0, min(len(rows) - 1, current_idx + direction * max(1, count)))
     target_start, target_end = rows[target_idx]
-    state["cursor"] = min(target_start + int(preferred_column), target_end)
+    target_cursor, cells = target_start, 0
+    while target_cursor < target_end:
+        size = get_character_cell_size(value[target_cursor])
+        if cells + size > int(preferred_column):
+            break
+        cells += size
+        target_cursor += 1
+    state["cursor"] = target_cursor
     state["preferred_visual_column"] = preferred_column
 
 

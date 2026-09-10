@@ -67,8 +67,10 @@ def test_redo_with_empty_stack_prints_nothing_to_redo(tmp_path, monkeypatch):
     assert "Nothing to redo" in output.getvalue()
 
 
-def test_parse_count_clamps_garbage_and_zero():
+def test_parse_count_rejects_garbage_and_zero():
+    import pytest
     assert undo_commands._parse_count([]) == 1
-    assert undo_commands._parse_count(["garbage"]) == 1
-    assert undo_commands._parse_count(["0"]) == 1
+    for invalid in (["garbage"], ["0"], ["-1"], ["1", "2"]):
+        with pytest.raises(ValueError):
+            undo_commands._parse_count(invalid)
     assert undo_commands._parse_count(["3"]) == 3

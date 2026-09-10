@@ -17,9 +17,12 @@ def _parse_count(args: list, default: int = 1) -> int:
     if not args:
         return default
     try:
-        return max(1, int(args[0]))
-    except ValueError:
-        return default
+        value = int(args[0])
+        if len(args) != 1 or value < 1:
+            raise ValueError
+        return value
+    except (TypeError, ValueError):
+        raise ValueError("Expected one positive integer count.") from None
 
 
 def _first_user_text(frame: list) -> str:
@@ -29,8 +32,12 @@ def _first_user_text(frame: list) -> str:
     return "(no user message)"
 
 
-def cmd_undo(args: list) -> None:
-    n = _parse_count(args)
+def cmd_undo(args: list) -> int | None:
+    try:
+        n = _parse_count(args)
+    except ValueError as exc:
+        console.print(f"[red]{exc} Usage: /undo [n][/red]")
+        return 2
     ctx = prepare_session_context()
     with transaction(ctx.history_file):
         history = load_history(ctx.history_file)
@@ -63,8 +70,12 @@ def cmd_undo(args: list) -> None:
         console.print(f"[dim]  Run [bold]/redo {len(undone)}[/bold] to put them back.[/dim]")
 
 
-def cmd_redo(args: list) -> None:
-    n = _parse_count(args)
+def cmd_redo(args: list) -> int | None:
+    try:
+        n = _parse_count(args)
+    except ValueError as exc:
+        console.print(f"[red]{exc} Usage: /redo [n][/red]")
+        return 2
     ctx = prepare_session_context()
     with transaction(ctx.history_file):
         history = load_history(ctx.history_file)

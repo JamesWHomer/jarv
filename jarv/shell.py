@@ -1,5 +1,7 @@
 import codecs
+from collections import deque
 import json
+import math
 import os
 import platform
 import signal
@@ -18,6 +20,48 @@ from .display import output_renderable, console
 
 COMMAND_OUTPUT_UNSET = object()
 MAX_COMMAND_OUTPUT_WINDOW_CHARS = 200_000
+MAX_CAPTURE_CHARS = 2_000_000  # Per stream; additional output is drained, not accumulated.
+PROCESS_TERMINATE_GRACE = 0.5
+PROCESS_KILL_GRACE = 1.0
+
+
+class _BoundedOutput:
+    """Keep a stable prefix and rolling suffix, with an explicit loss marker."""
+
+    def __init__(self, limit: int = MAX_CAPTURE_CHARS):
+        self.limit = limit
+        self.head = ""
+        self.tail = deque()
+        self.tail_size = 0
+        self.total = 0
+        self._cached = None
+
+    def append(self, text: str) -> None:
+        self.total += len(text)
+        remaining = self.limit // 2 - len(self.head)
+        if remaining > 0:
+            self.head += text[:remaining]
+            text = text[remaining:]
+        if text:
+            self.tail.append(text)
+            self.tail_size += len(text)
+        tail_limit = self.limit - self.limit // 2
+        while self.tail_size > tail_limit:
+            excess = self.tail_size - tail_limit
+            first = self.tail.popleft()
+            removed = min(excess, len(first))
+            self.tail_size -= removed
+            if removed < len(first):
+                self.tail.appendleft(first[removed:])
+        self._cached = None
+
+    def text(self) -> str:
+        if self._cached is None:
+            omitted = self.total - len(self.head) - self.tail_size
+            marker = (f"\n[command capture limit reached; {omitted} characters "
+                      "omitted from the middle and unavailable for read]\n") if omitted else ""
+            self._cached = self.head + marker + "".join(self.tail)
+        return self._cached
 
 _STATE_CWD_FILE_VAR = "JARV_STATE_CWD_FILE"
 _STATE_ENV_FILE_VAR = "JARV_STATE_ENV_FILE"
@@ -316,8 +360,8 @@ class InteractiveCommandProcess:
         self.proc = proc
         self._shell_state = shell_state
         self._capture = capture
-        self._stdout_parts: list[str] = []
-        self._stderr_parts: list[str] = []
+        self._stdout_parts = _BoundedOutput()
+        self._stderr_parts = _BoundedOutput()
         self._stdout_consumed = 0
         self._stderr_consumed = 0
         self._lock = threading.Lock()
@@ -371,7 +415,7 @@ class InteractiveCommandProcess:
                     bufsize=0,
                     cwd=invocation.cwd,
                     env=invocation.env,
-                    preexec_fn=os.setsid,
+                    start_new_session=True,
                 )
         except Exception:
             if invocation.capture is not None:
@@ -379,7 +423,7 @@ class InteractiveCommandProcess:
             raise
         return cls(command, proc, shell_state, invocation.capture)
 
-    def _read_stream(self, stream, target: list[str]) -> None:
+    def _read_stream(self, stream, target: _BoundedOutput) -> None:
         if stream is None:
             return
         decoder = codecs.getincrementaldecoder("utf-8")("replace")
@@ -410,6 +454,8 @@ class InteractiveCommandProcess:
                 emit(text.replace("\r\n", "\n"))
         except Exception:
             return
+        finally:
+            stream.close()
 
     def snapshot(
         self,
@@ -420,15 +466,20 @@ class InteractiveCommandProcess:
     ) -> InteractiveCommandSnapshot:
         now = time.monotonic()
         with self._lock:
-            stdout = "".join(self._stdout_parts)
-            stderr = "".join(self._stderr_parts)
-            stdout_start = self._stdout_consumed
-            stderr_start = self._stderr_consumed
+            stdout = self._stdout_parts.text()
+            stderr = self._stderr_parts.text()
+            def delta_start(buffer, consumed, text):
+                delta = buffer.total - consumed
+                if buffer.total <= buffer.limit:
+                    return consumed
+                return len(text) - delta if delta <= buffer.tail_size else 0
+            stdout_start = delta_start(self._stdout_parts, self._stdout_consumed, stdout)
+            stderr_start = delta_start(self._stderr_parts, self._stderr_consumed, stderr)
             elapsed_seconds = now - self._started_at
             idle_seconds = now - self._last_output_at
             if consume:
-                self._stdout_consumed = len(stdout)
-                self._stderr_consumed = len(stderr)
+                self._stdout_consumed = self._stdout_parts.total
+                self._stderr_consumed = self._stderr_parts.total
         # Poll once: the process can exit between two calls, which would yield
         # the contradictory ``exited=True, exit_code=None``.
         exit_code = self.proc.poll()
@@ -450,12 +501,12 @@ class InteractiveCommandProcess:
     @property
     def stdout(self) -> str:
         with self._lock:
-            return "".join(self._stdout_parts)
+            return self._stdout_parts.text()
 
     @property
     def stderr(self) -> str:
         with self._lock:
-            return "".join(self._stderr_parts)
+            return self._stderr_parts.text()
 
     def wait_until_idle(
         self,
@@ -482,6 +533,11 @@ class InteractiveCommandProcess:
                 deadline = time.monotonic() + 2.0
                 for thread in (self._stdout_thread, self._stderr_thread):
                     thread.join(timeout=max(0.0, deadline - time.monotonic()))
+                if self._stdout_thread.is_alive() or self._stderr_thread.is_alive():
+                    _kill_process_tree(self.proc)
+                    deadline = time.monotonic() + PROCESS_KILL_GRACE
+                    for thread in (self._stdout_thread, self._stderr_thread):
+                        thread.join(timeout=max(0.0, deadline - time.monotonic()))
                 self._finalize_shell_state()
                 return self.snapshot(consume=True)
             now = time.monotonic()
@@ -552,8 +608,9 @@ class InteractiveCommandProcess:
             self.proc.send_signal(signal.SIGINT)
 
     def kill_tree(self) -> None:
-        if self.proc.poll() is None:
-            _kill_process_tree(self.proc)
+        # The shell can exit before its children. Its process group still
+        # needs cleanup when a child retains a pipe across provider turns.
+        _kill_process_tree(self.proc)
         # Cancel path: a killed shell never wrote the state files, so drop the
         # capture (keeping the previous state) and remove the temp files.
         capture, self._capture = self._capture, None
@@ -668,16 +725,41 @@ def truncate_model_output(output: str, max_chars: int | None, label: str = "tool
 
 def _kill_process_tree(proc: subprocess.Popen) -> None:
     if platform.system() == "Windows":
-        subprocess.run(
-            ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        try:
+            result = subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=PROCESS_KILL_GRACE,
+            )
+            if result.returncode and proc.poll() is None:
+                proc.kill()
+        except (OSError, subprocess.TimeoutExpired):
+            proc.kill()
     else:
         try:
             os.killpg(proc.pid, signal.SIGTERM)
-        except Exception:
+        except OSError:
             proc.kill()
+        # A shell can exit while a child retains its pipes or ignores TERM.
+        # Always escalate the group, even when waiting for the shell succeeds.
+        try:
+            proc.wait(timeout=PROCESS_TERMINATE_GRACE)
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            if proc.poll() is None:
+                proc.kill()
+    try:
+        proc.wait(timeout=PROCESS_KILL_GRACE)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            proc.wait(timeout=PROCESS_KILL_GRACE)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def execute_command(
@@ -688,71 +770,43 @@ def execute_command(
 ) -> CommandResult:
     try:
         timeout = float(timeout)
-        if timeout <= 0:
+        if not math.isfinite(timeout) or timeout <= 0:
             timeout = 60
     except (TypeError, ValueError):
         timeout = 60
 
-    invocation = None
+    process = None
     try:
-        invocation = build_shell_invocation(command, shell_state)
-        if platform.system() == "Windows":
-            proc = subprocess.Popen(
-                invocation.popen_args,
-                shell=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                cwd=invocation.cwd,
-                env=invocation.env,
-                creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
-            )
-        else:
-            proc = subprocess.Popen(
-                invocation.popen_args,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                cwd=invocation.cwd,
-                env=invocation.env,
-                preexec_fn=os.setsid,
-            )
+        process = InteractiveCommandProcess.start(command, shell_state)
+        # Noninteractive commands should see EOF on stdin immediately.
+        process.close_stdin()
         unregister = (
-            cancellation_token.register(lambda: _kill_process_tree(proc))
+            cancellation_token.register(process.kill_tree)
             if cancellation_token is not None else lambda: None
         )
         started = time.monotonic()
         try:
-            while True:
+            while process.proc.poll() is None:
                 if cancellation_token is not None:
                     cancellation_token.throw_if_cancelled()
                 remaining = timeout - (time.monotonic() - started)
                 if remaining <= 0:
                     raise subprocess.TimeoutExpired(command, timeout)
-                try:
-                    stdout, stderr = proc.communicate(timeout=min(0.05, remaining))
-                    if cancellation_token is not None:
-                        cancellation_token.throw_if_cancelled()
-                    if invocation.capture is not None and shell_state is not None:
-                        invocation.capture.apply(shell_state)
-                    return CommandResult(command, stdout or "", stderr or "", proc.returncode, timeout=timeout)
-                except subprocess.TimeoutExpired:
-                    continue
-        except KeyboardInterrupt:
-            _kill_process_tree(proc)
-            proc.wait()
+                time.sleep(min(0.02, remaining))
+            snapshot = process.wait_until_idle(cancellation_token=cancellation_token)
+            return CommandResult(command, snapshot.stdout, snapshot.stderr,
+                                 snapshot.exit_code, timeout=timeout)
+        except (KeyboardInterrupt, TurnCancelled):
+            process.kill_tree()
             raise
         except subprocess.TimeoutExpired:
-            # Killed mid-flight: the state files are unwritten, keep the
-            # previous shell state.
-            _kill_process_tree(proc)
-            stdout, stderr = proc.communicate()
-            return CommandResult(command, stdout or "", stderr or "", proc.returncode, timed_out=True, timeout=timeout)
+            process.kill_tree()
+            deadline = time.monotonic() + PROCESS_KILL_GRACE
+            for thread in (process._stdout_thread, process._stderr_thread):
+                thread.join(timeout=max(0.0, deadline - time.monotonic()))
+            snapshot = process.snapshot()
+            return CommandResult(command, snapshot.stdout, snapshot.stderr,
+                                 snapshot.exit_code, timed_out=True, timeout=timeout)
         finally:
             unregister()
     except KeyboardInterrupt:
@@ -762,8 +816,8 @@ def execute_command(
     except Exception as e:
         return CommandResult(command, "", f"[error: {e}]", None, timeout=timeout)
     finally:
-        if invocation is not None and invocation.capture is not None:
-            invocation.capture.cleanup()
+        if process is not None and (process.proc.poll() is None or process._capture is not None):
+            process.kill_tree()
 
 
 def display_command_result(result: CommandResult) -> None:

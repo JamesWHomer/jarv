@@ -1,5 +1,6 @@
 """Interactive settings command."""
 
+import copy
 import importlib
 import re
 import sys
@@ -12,6 +13,7 @@ from rich import box
 from .config import (
     CONFIG_FILE,
     DEFAULT_CONFIG,
+    build_default_config,
     load_config,
     save_config,
     validate_config,
@@ -62,14 +64,14 @@ from .settings_model_picker import (
 )
 
 
-def _settings_save_validated(config: dict) -> bool:
-    trial = dict(DEFAULT_CONFIG)
-    trial.update(config)
+def _settings_save_validated(config: dict, candidate: dict | None = None) -> bool:
+    trial = build_default_config()
+    trial.update(copy.deepcopy(config if candidate is None else candidate))
     if not validate_config(trial):
         return False
+    save_config(trial)
     config.clear()
     config.update(trial)
-    save_config(config)
     # The single save funnel for quick toggles, the field editors, and reset, so
     # hooking it here means the settings screen repaints in the newly chosen
     # mode on its very next frame -- it renders on this same shared console.
@@ -186,15 +188,17 @@ def _settings_value_text(row: dict, config: dict, *, selected: bool = False) -> 
 
 
 def _settings_apply_quick(row: dict, config: dict) -> tuple[dict, str] | None:
+    original = config
+    config = copy.deepcopy(config)
     key = row["key"]
     kind = row["kind"]
 
     if kind == "bool":
         config[key] = not bool(config.get(key, DEFAULT_CONFIG.get(key, False)))
-        if not _settings_save_validated(config):
-            return config, "config validation failed"
+        if not _settings_save_validated(original, config):
+            return original, "config validation failed"
         state = _settings_value_text(row, config).plain
-        return config, f"saved {row['label']}: {state}"
+        return original, f"saved {row['label']}: {state}"
 
     if kind == "tool_bool":
         name = row["tool_name"]
@@ -207,9 +211,9 @@ def _settings_apply_quick(row: dict, config: dict) -> tuple[dict, str] | None:
             disabled.append(name)
             state = "off"
         config["disabled_tools"] = disabled
-        if not _settings_save_validated(config):
-            return config, "config validation failed"
-        return config, f"saved {row['label']}: {state}"
+        if not _settings_save_validated(original, config):
+            return original, "config validation failed"
+        return original, f"saved {row['label']}: {state}"
 
     if kind == "choice":
         choices = row["choices"]
@@ -231,9 +235,9 @@ def _settings_apply_quick(row: dict, config: dict) -> tuple[dict, str] | None:
             _settings_set_service_tier(config, value)
         else:
             config[key] = value
-        if not _settings_save_validated(config):
-            return config, "config validation failed"
-        return config, f"saved {row['label']}: {_settings_choice_label(value, choices)}"
+        if not _settings_save_validated(original, config):
+            return original, "config validation failed"
+        return original, f"saved {row['label']}: {_settings_choice_label(value, choices)}"
 
     return None
 
@@ -249,6 +253,8 @@ def _settings_reset_value(row: dict, config: dict):
 
 
 def _settings_reset_row(row: dict, config: dict) -> tuple[dict, str]:
+    original = config
+    config = copy.deepcopy(config)
     key = row["key"]
     if row["kind"] == "tool_bool":
         name = row["tool_name"]
@@ -257,8 +263,9 @@ def _settings_reset_row(row: dict, config: dict) -> tuple[dict, str]:
         if name in disabled:
             disabled.remove(name)
             config["disabled_tools"] = disabled
-            _settings_save_validated(config)
-        return config, f"reset {row['label']}"
+            if not _settings_save_validated(original, config):
+                return original, "config validation failed"
+        return original, f"reset {row['label']}"
     if key == "api_key":
         provider = config.get("provider", "openai")
         changed = False
@@ -270,18 +277,21 @@ def _settings_reset_row(row: dict, config: dict) -> tuple[dict, str]:
             config["api_key"] = ""
             changed = True
         if changed:
-            _settings_save_validated(config)
-            return config, "cleared stored API key"
-        return config, "no stored API key"
+            if not _settings_save_validated(original, config):
+                return original, "config validation failed"
+            return original, "cleared stored API key"
+        return original, "no stored API key"
     if key == "service_tier":
         _settings_set_service_tier(config, "standard")
-        _settings_save_validated(config)
-        return config, "reset Processing tier"
+        if not _settings_save_validated(original, config):
+            return original, "config validation failed"
+        return original, "reset Processing tier"
     if key not in DEFAULT_CONFIG:
-        return config, f"{row['label']} has no default"
+        return original, f"{row['label']} has no default"
     config[key] = _settings_reset_value(row, config)
-    _settings_save_validated(config)
-    return config, f"reset {row['label']}"
+    if not _settings_save_validated(original, config):
+        return original, "config validation failed"
+    return original, f"reset {row['label']}"
 
 
 def _settings_reset_action_bar(
@@ -754,27 +764,29 @@ def _settings_desired_editor_height(
 
 
 def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, bool]:
+    original = config
+    config = copy.deepcopy(config)
     row = edit["row"]
     key = row["key"]
     raw_buffer = edit["buffer"]
     raw = raw_buffer.strip()
 
     if edit.get("readonly"):
-        return config, f"{row['label']} unchanged", "dim", True
+        return original, f"{row['label']} unchanged", "dim", True
 
     if key == "provider":
         from .reasoning import reconcile_reasoning_effort
 
         selected_provider = edit.get("selected_provider")
         if not selected_provider:
-            return config, f"{row['label']} unchanged", "dim", True
+            return original, f"{row['label']} unchanged", "dim", True
         old_provider = config.get("provider", "openai")
         old_model = str(config.get("model") or "")
         old_default = _settings_default_model_for_provider(old_provider, config=config)
         provider = selected_provider
         if provider is None:
             edit["error"] = "Unknown provider. Enter a listed number or provider name."
-            return config, edit["error"], "red", False
+            return original, edit["error"], "red", False
         config["provider"] = provider
         provider_models = [name for name, _desc in _settings_model_choices(config)]
         if (
@@ -787,15 +799,15 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
         ):
             config["model"] = _settings_default_model_for_provider(provider, config=config)
         reset_effort = reconcile_reasoning_effort(config)
-        if not _settings_save_validated(config):
+        if not _settings_save_validated(original, config):
             edit["error"] = "Provider change failed validation."
-            return config, edit["error"], "red", False
+            return original, edit["error"], "red", False
         message = f"saved Provider: {_settings_value_text(row, config).plain}"
         if config.get("model") != old_model:
             message += f" (model: {config.get('model')})"
         if reset_effort is not None:
             message += " (reasoning effort reset to default)"
-        return config, message, "green", True
+        return original, message, "green", True
 
     if key == "api_key":
         provider = config.get("provider", "openai")
@@ -806,20 +818,20 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
                 if isinstance(api_keys, dict):
                     api_keys.pop(provider, None)
                 config["api_key"] = ""
-                if not _settings_save_validated(config):
+                if not _settings_save_validated(original, config):
                     edit["error"] = "Could not clear API key."
-                    return config, edit["error"], "red", False
-                return config, "cleared stored API key", "cyan", True
-            return config, "API key unchanged", "dim", True
+                    return original, edit["error"], "red", False
+                return original, "cleared stored API key", "cyan", True
+            return original, "API key unchanged", "dim", True
         if raw.lower() == "clear":
             api_keys = config.get("api_keys")
             if isinstance(api_keys, dict):
                 api_keys.pop(provider, None)
             config["api_key"] = ""
-            if not _settings_save_validated(config):
+            if not _settings_save_validated(original, config):
                 edit["error"] = "Could not clear API key."
-                return config, edit["error"], "red", False
-            return config, "cleared stored API key", "cyan", True
+                return original, edit["error"], "red", False
+            return original, "cleared stored API key", "cyan", True
         from .provider import KEY_PATTERNS
 
         pattern = KEY_PATTERNS.get(provider)
@@ -828,13 +840,13 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
             edit["error"] = (
                 "Key format looks off for this provider. Enter again to save anyway."
             )
-            return config, edit["error"], "yellow", False
+            return original, edit["error"], "yellow", False
         config.setdefault("api_keys", {})[provider] = raw
         config["api_key"] = ""
-        if not _settings_save_validated(config):
+        if not _settings_save_validated(original, config):
             edit["error"] = "Could not save API key."
-            return config, edit["error"], "red", False
-        return config, "saved API key", "green", True
+            return original, edit["error"], "red", False
+        return original, "saved API key", "green", True
 
     if _settings_is_model_picker_key(key):
         warning_model = str(edit.get("model_validation_warning") or "")
@@ -853,7 +865,7 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
                 edit.pop("model_validation_suggestion", None)
                 edit.pop("model_warning_actions", None)
                 edit.pop("model_warning_selection", None)
-                return config, "Continue editing the model name.", "dim", False
+                return original, "Continue editing the model name.", "dim", False
             model = warning_model if action == "continue" else str(action)
             edit.pop("model_validation_warning", None)
             edit.pop("model_validation_suggestion", None)
@@ -867,14 +879,14 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
             else:
                 config["auditor_model"] = model
                 reset_effort = None
-            if not _settings_save_validated(config):
+            if not _settings_save_validated(original, config):
                 edit["error"] = "Model change failed validation."
-                return config, edit["error"], "red", False
+                return original, edit["error"], "red", False
             display = model if model else AUDITOR_DEFAULT_MODEL_CHOICE
             message = f"saved {row['label']}: {display}"
             if reset_effort is not None:
                 message += " (reasoning effort reset to default)"
-            return config, message, "yellow", True
+            return original, message, "yellow", True
 
         models = edit.get("model_choices")
         input_active = bool(edit.get("model_input_active"))
@@ -905,7 +917,7 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
             )
         if key == "model" and not model.strip():
             edit["error"] = "Model must not be empty."
-            return config, edit["error"], "red", False
+            return original, edit["error"], "red", False
         if input_active and model:
             from .model_catalog import cached_provider_has_model
 
@@ -934,7 +946,7 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
                 edit["model_warning_selection"] = 0
                 edit["error"] = ""
                 return (
-                    config,
+                    original,
                     f"Model not found in cached provider list: {model}",
                     "yellow",
                     False,
@@ -947,43 +959,41 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
         else:
             config["auditor_model"] = model
             reset_effort = None
-        if not _settings_save_validated(config):
+        if not _settings_save_validated(original, config):
             edit["error"] = "Model change failed validation."
-            return config, edit["error"], "red", False
+            return original, edit["error"], "red", False
         display = model if model else AUDITOR_DEFAULT_MODEL_CHOICE
         message = f"saved {row['label']}: {display}"
         if reset_effort is not None:
             message += " (reasoning effort reset to default)"
-        return config, message, "green", True
+        return original, message, "green", True
 
     if key == "system_prompt":
         config[key] = raw_buffer
-        if not _settings_save_validated(config):
+        if not _settings_save_validated(original, config):
             edit["error"] = "System prompt failed validation."
-            return config, edit["error"], "red", False
-        return config, f"saved System prompt: {_settings_value_text(row, config).plain}", "green", True
+            return original, edit["error"], "red", False
+        return original, f"saved System prompt: {_settings_value_text(row, config).plain}", "green", True
 
     if row["kind"] == "int":
         try:
             value = int(raw)
-            if value <= 0:
-                raise ValueError
         except ValueError:
-            edit["error"] = "Enter a positive integer."
-            return config, edit["error"], "red", False
+            edit["error"] = "Enter an integer."
+            return original, edit["error"], "red", False
         config[key] = value
-        if not _settings_save_validated(config):
+        if not _settings_save_validated(original, config):
             edit["error"] = "Invalid value for this setting."
-            return config, edit["error"], "red", False
-        return config, f"saved {row['label']}: {value}", "green", True
+            return original, edit["error"], "red", False
+        return original, f"saved {row['label']}: {value}", "green", True
 
     value = "" if raw.lower() == "clear" else raw
     config[key] = value
-    if not _settings_save_validated(config):
+    if not _settings_save_validated(original, config):
         edit["error"] = "Invalid value for this setting."
-        return config, edit["error"], "red", False
+        return original, edit["error"], "red", False
     display = value if value else row.get("empty", "empty")
-    return config, f"saved {row['label']}: {display}", "green", True
+    return original, f"saved {row['label']}: {display}", "green", True
 
 
 def _settings_plain(config: dict) -> None:
@@ -1014,8 +1024,9 @@ def cmd_settings() -> None:
     config = load_config()
     from .reasoning import reconcile_reasoning_effort
 
-    if reconcile_reasoning_effort(config) is not None:
-        _settings_save_validated(config)
+    candidate = copy.deepcopy(config)
+    if reconcile_reasoning_effort(candidate) is not None:
+        _settings_save_validated(config, candidate)
     if not sys.stdin.isatty() or not console.is_terminal:
         _settings_plain(config)
         return

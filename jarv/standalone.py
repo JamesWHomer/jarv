@@ -217,6 +217,16 @@ param(
   [Parameter(Mandatory=$true)][int]$RetryDelayMs
 )
 $ErrorActionPreference = "Stop"
+$temporaryRoot = [IO.Path]::GetFullPath((Split-Path -Parent (Split-Path -Parent $Source)))
+$targetDirectory = [IO.Path]::GetFullPath((Split-Path -Parent $Target))
+$safeCleanup = (
+  [IO.Path]::GetDirectoryName($temporaryRoot) -eq $targetDirectory -and
+  [IO.Path]::GetFileName($temporaryRoot).StartsWith("jarv-update-") -and
+  (Split-Path -Leaf (Split-Path -Parent $Source)) -eq "extract"
+)
+$backup = Join-Path $temporaryRoot "previous-jarv.exe"
+$replaced = $false
+$preserveBackup = $false
 
 function Write-UpdateResult {
   param(
@@ -233,23 +243,53 @@ function Write-UpdateResult {
   Move-Item -LiteralPath $temporaryResult -Destination $ResultFile -Force
 }
 
+function Assert-ExecutableVersion {
+  param([Parameter(Mandatory=$true)][string]$Executable)
+  $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+  $startInfo.FileName = $Executable
+  $startInfo.Arguments = "--version"
+  $startInfo.UseShellExecute = $false
+  $startInfo.CreateNoWindow = $true
+  $startInfo.RedirectStandardOutput = $true
+  $startInfo.RedirectStandardError = $true
+  $probe = New-Object System.Diagnostics.Process
+  $probe.StartInfo = $startInfo
+  try {
+    [void]$probe.Start()
+    $stdout = $probe.StandardOutput.ReadToEndAsync()
+    $stderr = $probe.StandardError.ReadToEndAsync()
+    if (-not $probe.WaitForExit(10000)) {
+      $probe.Kill()
+      throw "Version verification timed out."
+    }
+    if (-not $stdout.Wait(1000) -or -not $stderr.Wait(1000)) {
+      throw "Version verification output did not close."
+    }
+    if ($probe.ExitCode -ne 0) {
+      throw "The executable exited with code $($probe.ExitCode)."
+    }
+    $actualVersion = $stdout.Result.Trim()
+    $expectedOutput = "jarv $ExpectedVersion"
+    if ($actualVersion -ne $expectedOutput) {
+      throw "Expected '$expectedOutput' but got '$actualVersion'."
+    }
+  }
+  finally { $probe.Dispose() }
+}
+
 try {
+  if (-not $safeCleanup) {
+    throw "The update staging directory is not beside the installed executable."
+  }
+  # Verify the candidate while the installed executable is still untouched.
+  Assert-ExecutableVersion -Executable $Source
   Wait-Process -Id $ParentPid -ErrorAction SilentlyContinue
-  $installed = $false
   $lastError = $null
 
   for ($attempt = 1; $attempt -le $RetryCount; $attempt++) {
     try {
-      Copy-Item -LiteralPath $Source -Destination $Target -Force
-      $actualVersion = (& $Target --version 2>&1 | Out-String).Trim()
-      if ($LASTEXITCODE -ne 0) {
-        throw "The updated executable exited with code $LASTEXITCODE."
-      }
-      $expectedOutput = "jarv $ExpectedVersion"
-      if ($actualVersion -ne $expectedOutput) {
-        throw "Expected '$expectedOutput' but got '$actualVersion'."
-      }
-      $installed = $true
+      [IO.File]::Replace($Source, $Target, $backup)
+      $replaced = $true
       break
     }
     catch {
@@ -260,21 +300,34 @@ try {
     }
   }
 
-  if (-not $installed) {
+  if (-not $replaced) {
     throw "Could not replace or verify '$Target' after $RetryCount attempts. $lastError"
   }
 
+  Assert-ExecutableVersion -Executable $Target
   Write-UpdateResult -Status "updated" -Message "Updated successfully to v$ExpectedVersion."
-  $temporaryRoot = Split-Path -Parent (Split-Path -Parent $Source)
-  Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 catch {
   $message = "Update to v$ExpectedVersion failed: $($_.Exception.Message)"
+  if ($replaced) {
+    try {
+      [IO.File]::Replace($backup, $Target, (Join-Path $temporaryRoot "failed-jarv.exe"))
+    }
+    catch {
+      $preserveBackup = $true
+      $message += " Rollback failed; the previous executable is preserved at '$backup'."
+    }
+  }
   try {
     Write-UpdateResult -Status "failed" -Message $message
   }
   catch {}
   exit 1
+}
+finally {
+  if ($safeCleanup -and -not $preserveBackup) {
+    Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
+  }
 }
 """.strip(),
         encoding="utf-8",
@@ -356,16 +409,19 @@ def install_standalone_asset(
 ) -> str:
     target = Path(executable_path or sys.executable).resolve()
     is_windows = os.name == "nt" if windows is None else windows
-    temp_dir = Path(tempfile.mkdtemp(prefix="jarv-update-"))
+    # os.replace / File.Replace require source and target on the same volume.
+    temp_dir = Path(tempfile.mkdtemp(prefix="jarv-update-", dir=target.parent))
     archive = temp_dir / asset.name
+    handed_off = False
     try:
         download_asset(asset, archive)
         extracted = extract_executable(archive, temp_dir / "extract", windows=is_windows)
         if is_windows:
             _stage_windows_updater(extracted, target, asset.version)
+            handed_off = True
             return "staged"
         os.replace(extracted, target)
         return "installed"
-    except Exception:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        raise
+    finally:
+        if not handed_off:
+            shutil.rmtree(temp_dir, ignore_errors=True)

@@ -25,6 +25,49 @@ def _models(*ids):
     return [CatalogModel(id=model_id, created=index) for index, model_id in enumerate(ids, 1)]
 
 
+def test_custom_endpoints_have_independent_persistent_catalogs(tmp_path, monkeypatch):
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(models_dev, "refresh", lambda config: True)
+    first = {"provider": "ollama", "base_url": "http://first.example/v1"}
+    second = {"provider": "ollama", "base_url": "http://second.example/v1"}
+    monkeypatch.setattr(model_catalog, "discover_models", lambda config:
+                        _models("first-model" if config == first else "second-model"))
+    model_catalog.refresh_model_choices(first)
+    model_catalog.refresh_model_choices(second)
+    model_catalog.clear_memory_cache()
+    monkeypatch.setattr(model_catalog, "discover_models", lambda config: [])
+    for config, expected, other in [(first, "first-model", "second-model"),
+                                    (second, "second-model", "first-model")]:
+        assert model_catalog.cached_provider_model_ids(config) == [expected]
+        assert model_catalog.cached_provider_model(config, expected).id == expected
+        assert not model_catalog.cached_provider_has_model(config, other)
+        assert any(model == expected for model, _ in model_catalog.get_cached_model_choices(config))
+        assert any(model == expected for model, _ in model_catalog.refresh_model_choices(config))
+
+
+def test_catalog_endpoint_identity_normalizes_default_and_trailing_slash():
+    default = {"provider": "openai"}
+    explicit = {"provider": "openai", "base_url": "https://API.OPENAI.COM/v1/"}
+    assert model_catalog.catalog_cache_key(default) == model_catalog.catalog_cache_key(explicit)
+    assert model_catalog._cache_path(default) == model_catalog._cache_path(explicit)
+
+
+def test_unscoped_legacy_catalog_is_not_reused_for_any_endpoint(tmp_path, monkeypatch):
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    (tmp_path / "openai.json").write_text(json.dumps({"provider": "openai", "models": [{"id": "old-model"}]}))
+    assert model_catalog.cached_provider_model_ids({"provider": "openai"}) == []
+    assert model_catalog.cached_provider_model_ids({"provider": "openai", "base_url": "https://custom.example/v1"}) == []
+
+
+def test_legacy_filename_with_matching_endpoint_identity_can_be_reused(tmp_path, monkeypatch):
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    config = {"provider": "openai", "base_url": "https://custom.example/v1"}
+    model_catalog._write_cache(config, _models("custom-model"))
+    model_catalog._cache_path(config).replace(tmp_path / "openai.json")
+    assert model_catalog.cached_provider_model_ids(config) == ["custom-model"]
+    assert model_catalog.cached_provider_model_ids({"provider": "openai"}) == []
+
+
 def test_openai_recommendations_update_each_tier_independently():
     choices = recommend_models("openai", _models(
         "gpt-5.5",
@@ -328,7 +371,7 @@ def test_catalog_uses_disk_cache_when_refresh_fails(tmp_path, monkeypatch):
     cached = model_catalog.get_model_choices({"provider": "openai"}, refresh=True)
 
     assert cached == live
-    assert json.loads((tmp_path / "openai.json").read_text())["provider"] == "openai"
+    assert json.loads(model_catalog._cache_path("openai").read_text())["provider"] == "openai"
 
 
 def test_prices_come_from_the_provider_that_sells_the_model(models_dev_catalog):

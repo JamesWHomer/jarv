@@ -4,13 +4,12 @@ import platform
 import sys
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 
 from rich.control import Control, ControlType
 from rich.live import Live
 from rich.live_render import LiveRender
-from rich.markdown import Markdown
 from rich.markup import escape
 from rich.segment import Segment
 from rich.text import Text
@@ -28,6 +27,7 @@ from .display import (
 )
 from .history import (
     artifact_file_for,
+    ephemeral_session_context,
     forget_current_session,
     get_shell_name,
     history_metadata,
@@ -209,7 +209,7 @@ def _agent_check_run_command(prepared, config: dict, **kwargs):
         audit=audit,
         config=config,
         history=kwargs.get("safety_history"),
-        usage_path=kwargs.get("usage_path"),
+        usage_path=None if kwargs.get("incognito") else kwargs.get("usage_path"),
         session_id=kwargs.get("session_id"),
         cancellation_token=kwargs.get("cancellation_token"),
     )
@@ -366,6 +366,7 @@ def _dispatch_run_command_with_ui(
     ui=None,
     interactive_help=None,
     shell_state=None,
+    incognito: bool = False,
 ):
     prepared = prepare_run_command(args, config)
     if isinstance(prepared, str):
@@ -382,6 +383,7 @@ def _dispatch_run_command_with_ui(
         usage_path=usage_path,
         session_id=session_id,
         cancellation_token=cancellation_token,
+        incognito=incognito,
     )
     if not allowed:
         if ui is not None:
@@ -873,7 +875,7 @@ class TurnCheckpointer:
 
     Reads the always-synced ``persistence.history`` / ``renderer.metadata``
     instead of closing over run-locals that are rebound during session prep.
-    ``active_tool_call`` mirrors the tool currently executing so a cancel can
+    Started tools are tracked until their results are recorded so a cancel can
     distinguish "may have made partial changes" from "never ran".
     """
 
@@ -882,7 +884,16 @@ class TurnCheckpointer:
         self.persistence = persistence
         self.renderer = renderer
         self.status_items = status_items  # shared pending_status_history_items list
-        self.active_tool_call = None
+        self.active_tool_calls: set[str] = set()
+        self._tools_lock = threading.Lock()
+
+    def tool_started(self, item) -> None:
+        with self._tools_lock:
+            self.active_tool_calls.add(str(item.call_id))
+
+    def tool_recorded(self, item) -> None:
+        with self._tools_lock:
+            self.active_tool_calls.discard(str(item.call_id))
 
     def flush_status_items(self) -> None:
         if self.status_items:
@@ -930,14 +941,12 @@ class TurnCheckpointer:
             for item in history
             if isinstance(item, dict) and item.get("type") == "function_call"
         }
-        active_call_id = (
-            str(self.active_tool_call.call_id)
-            if self.active_tool_call is not None else None
-        )
+        with self._tools_lock:
+            active_call_ids = set(self.active_tool_calls)
         for item in renderer.tool_calls:
             if str(item.call_id) in recorded_call_ids:
                 continue
-            if str(item.call_id) == active_call_id:
+            if str(item.call_id) in active_call_ids:
                 output = "[cancelled by user; execution may have made partial changes]"
             else:
                 output = "[cancelled by user before execution]"
@@ -1249,6 +1258,7 @@ def _build_tool_hooks(
             ui=ui,
             interactive_help=interactive_help,
             shell_state=root_node.shell_state,
+            incognito=root_node.incognito,
         ),
         run_spawn=lambda args: _dispatch_spawn_with_ui(
             args,
@@ -1277,6 +1287,24 @@ def build_instructions(config: dict, *, cwd: str | None = None) -> str:
     return instructions
 
 
+def _prepare_client_and_instructions(config: dict, client, *, cwd: str):
+    if client is not None:
+        return client, build_instructions(config, cwd=cwd)
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    # Git subprocesses and OS discovery can run while HTTP imports and TLS
+    # setup finish. The request still uses the complete, current instructions.
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="jarv-instructions") as pool:
+        pending = pool.submit(build_instructions, config, cwd=cwd)
+        client = create_client(config)
+        try:
+            return client, pending.result()
+        except BaseException:
+            client.close()
+            raise
+
+
 def run_agent(
     query: str,
     config: dict,
@@ -1286,6 +1314,7 @@ def run_agent(
     incognito: bool = False,
     heads_up: bool = False,
     ui=None,
+    startup_wait=None,
 ) -> AgentRunResult:
     config = dict(config)
     config["tool_call_display"] = resolve_tool_call_display(
@@ -1304,6 +1333,7 @@ def run_agent(
     reads_file = None
     retained_store = None
     usage_path = None
+    pending_interactive_command: PendingRunCommand | None = None
     persistence = SessionPersistence(incognito=incognito)
     persistence.history = history
     pending_status_history_items: list[dict] = []
@@ -1324,21 +1354,48 @@ def run_agent(
     )
     _ui_call(ui, "bind_cancel_token", cancellation_token)
     _ui_call(ui, "start_turn", query, config)
-    renderer.start_response_wait_now()
+    if startup_wait is not None and ui is None:
+        renderer.thought_started, renderer.wait_indicator, renderer.spinner_live = startup_wait
+    else:
+        renderer.start_response_wait_now()
 
     sigint_cancel_scope = cancel_token_on_sigint(cancellation_token)
+
+    def own_pending_command(pending: PendingRunCommand) -> None:
+        nonlocal pending_interactive_command
+        pending_interactive_command = pending
+
+    def cleanup_pending_command() -> None:
+        nonlocal pending_interactive_command
+        pending = pending_interactive_command
+        if pending is None:
+            return
+        pending_interactive_command = None
+        _close_interactive_card_live(pending)
+        try:
+            pending.process.kill_tree()
+        except Exception:
+            pass
+        finally:
+            unregister = getattr(pending, "unregister_cancel", None)
+            if callable(unregister):
+                try:
+                    unregister()
+                except Exception:
+                    pass
+
     try:
         sigint_cancel_scope.__enter__()
-        if client is None:
-            client = create_client(config)
+        instructions_cwd = get_session_shell_state().cwd
+        client, instructions = _prepare_client_and_instructions(config, client, cwd=instructions_cwd)
 
-        if new_session:
+        if new_session and not incognito:
             forget_current_session()
-        session_context = prepare_session_context(
-            mark_message=not incognito,
-            persist_metadata=not incognito,
+        session_context = (
+            ephemeral_session_context() if incognito
+            else prepare_session_context(mark_message=True, persist_metadata=True)
         )
-        with transaction(session_context.history_file):
+        with nullcontext() if incognito else transaction(session_context.history_file):
             persistence.session_context = session_context
             history = [] if (new_session or incognito) else load_history(session_context.history_file)
             persistence.history = history
@@ -1347,14 +1404,14 @@ def run_agent(
             renderer.metadata = metadata
 
             artifact_file = artifact_file_for(session_context.history_file)
-            artifact_store = load_artifact_store(artifact_file)
+            artifact_store = ArtifactStore() if incognito else load_artifact_store(artifact_file)
             persistence.artifact_file = artifact_file
             persistence.artifact_store = artifact_store
             reads_file = reads_file_for(session_context.history_file)
-            retained_store = load_retained_output_store(reads_file)
+            retained_store = RetainedOutputStore() if incognito else load_retained_output_store(reads_file)
             persistence.reads_file = reads_file
             persistence.retained_store = retained_store
-        usage_path = usage_file_for(session_context.history_file)
+        usage_path = None if incognito else usage_file_for(session_context.history_file)
         root_node = AgentNode(
             label="root",
             depth=0,
@@ -1370,8 +1427,6 @@ def run_agent(
 
         history.append({"role": "user", "content": query, "id": new_frame_id(), **metadata})
 
-        instructions_cwd = root_node.shell_state.cwd
-        instructions = build_instructions(config, cwd=instructions_cwd)
         tools = build_agent_tools(config)
         input_items = build_input(
             history,
@@ -1391,8 +1446,6 @@ def run_agent(
         effort = config.get("reasoning_effort")
         if effort:
             kwargs["reasoning"] = {"effort": effort}
-
-        pending_interactive_command: PendingRunCommand | None = None
 
         while True:
             if root_node.shell_state.cwd != instructions_cwd:
@@ -1464,6 +1517,8 @@ def run_agent(
                 elif ui is not None:
                     _ui_call(ui, "finish_assistant_message", renderer.reply_text)
                 elif interactive:
+                    from rich.markdown import Markdown
+
                     console.print(Markdown(flatten_headings(renderer.reply_text)))
                 else:
                     print(renderer.reply_text)
@@ -1513,15 +1568,12 @@ def run_agent(
                     client=client,
                 )
 
-                checkpointer.active_tool_call = (
-                    renderer.tool_calls[0] if renderer.tool_calls else None
-                )
+                tool_hooks.on_tool_start = checkpointer.tool_started
+                tool_hooks.on_tool_recorded = checkpointer.tool_recorded
+                tool_hooks.on_pending_command = own_pending_command
 
                 def _execute_tools(_new_input, append_tool_result):
                     nonlocal web_search_read_nudge_sent
-                    checkpointer.active_tool_call = (
-                        renderer.tool_calls[0] if renderer.tool_calls else None
-                    )
                     result = execute_tool_calls(
                         renderer.tool_calls,
                         node=root_node,
@@ -1535,7 +1587,6 @@ def run_agent(
                         web_search_read_nudge_sent=web_search_read_nudge_sent,
                     )
                     web_search_read_nudge_sent = result.web_search_read_nudge_sent
-                    checkpointer.active_tool_call = None
                     return result
 
                 kwargs["input"], _exec_result = run_tool_execution_round(
@@ -1559,33 +1610,25 @@ def run_agent(
                 checkpointer.flush_status_items()
                 history.append({"role": "assistant", "content": renderer.reply_text, **metadata})
                 persistence.save_turn()
-                _print_agent_usage_if_enabled(
-                    config,
-                    usage_path,
-                    session_context.session_id,
-                    ui=ui,
-                    heads_up=heads_up,
-                )
+                if not incognito:
+                    _print_agent_usage_if_enabled(
+                        config,
+                        usage_path,
+                        session_context.session_id,
+                        ui=ui,
+                        heads_up=heads_up,
+                    )
                 break
         return AgentRunResult()
     except (KeyboardInterrupt, TurnCancelled):
         cancellation_token.cancel()
-        pending = locals().get("pending_interactive_command")
-        if pending is not None:
-            # Close the held-open card Live before the checkpoint prints below,
-            # so its final frame isn't corrupted by intervening console output.
-            _close_interactive_card_live(pending)
-            try:
-                pending.process.kill_tree()
-            except Exception:
-                pass
-            if callable(getattr(pending, "unregister_cancel", None)):
-                pending.unregister_cancel()
+        cleanup_pending_command()
         if session_context is not None:
             checkpointer.checkpoint_cancelled_turn()
         return AgentRunResult(cancelled=True, prompt=query)
     except (ProviderError, Exception) as e:
-        _close_interactive_card_live(locals().get("pending_interactive_command"))
+        cancellation_token.cancel()
+        cleanup_pending_command()
         label = "API error" if isinstance(e, ProviderError) else "Unexpected error"
         message = f"{label}: {e}"
         if ui is not None:
@@ -1600,7 +1643,6 @@ def run_agent(
         sigint_cancel_scope.__exit__(None, None, None)
         _ui_call(ui, "unbind_cancel_token")
         renderer.stop_live()
-        # Safety net: close any interactive card Live the paths above missed.
-        _close_interactive_card_live(locals().get("pending_interactive_command"))
+        cleanup_pending_command()
 
 

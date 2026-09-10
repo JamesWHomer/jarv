@@ -26,6 +26,7 @@ from .web import (
 
 MAX_READ_SIZE = 200_000
 MAX_IMAGE_READ_BYTES = 10 * 1024 * 1024
+MAX_PDF_READ_BYTES = 20 * 1024 * 1024
 _IMAGE_EXTENSION_MEDIA_TYPES = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -107,6 +108,8 @@ class ReadSource:
     image: "ReadImage | None" = None
     metadata: tuple[str, ...] = ()
     untrusted: bool = False
+    content_offset: int = 0
+    total_size: int | None = None
 
 
 @dataclass(frozen=True)
@@ -125,6 +128,9 @@ def retain_command_output(
     if len(output) <= head_chars + tail_chars or retained_store is None:
         return truncate_command_output(output, head_chars, tail_chars), None
     output_id = retained_store.put(output)
+    retained = retained_store.get(output_id)
+    if retained is not None:
+        output = retained.content
     rendered = truncate_command_output(
         output,
         head_chars,
@@ -262,11 +268,13 @@ def _resolve_source(
     config: dict,
     cancellation_token: CancellationToken | None,
     cwd: str | Path | None = None,
+    offset: int = 0,
+    size: int = MAX_READ_SIZE,
 ) -> ReadSource | str:
     if value.startswith("cmd_"):
         retained = retained_store.get(value)
         if retained is None:
-            return f"[read error: retained output '{value}' not found]"
+            return f"[read error: retained output '{value}' not found; older outputs expire when the retention limit is reached]"
         return ReadSource("retained command output", value, content=retained.content)
 
     if artifact_store.exists(value):
@@ -370,12 +378,38 @@ def _resolve_source(
     if not resolved.is_file():
         return f"[read error: local path is not a file: {value}]"
     try:
-        data = resolved.read_bytes()
+        with resolved.open("rb") as stream:
+            prefix = stream.read(32)
+            pdf = _is_pdf_path(str(resolved)) or is_pdf_bytes(prefix)
+            media_type = _detect_image_media_type(prefix, label=str(resolved))
+            if pdf or media_type is not None:
+                limit = MAX_PDF_READ_BYTES if pdf else MAX_IMAGE_READ_BYTES
+                data = prefix + stream.read(max(0, limit + 1 - len(prefix)))
+                if len(data) > limit:
+                    return f"[read error: local {'PDF' if pdf else 'image'} is too large, exceeding {limit} byte limit]"
+            else:
+                data = None
+        if data is None:
+            # Count Unicode characters without materializing the whole file;
+            # only the requested page remains in memory. Preserve CRLF bytes
+            # in offsets, matching the original UTF-8 decode behavior.
+            chunks = []
+            total = 0
+            with resolved.open("r", encoding="utf-8", errors="replace", newline="") as stream:
+                while chunk := stream.read(64 * 1024):
+                    if cancellation_token is not None:
+                        cancellation_token.throw_if_cancelled()
+                    start = max(0, offset - total)
+                    end = min(len(chunk), offset + size - total)
+                    if start < end:
+                        chunks.append(chunk[start:end])
+                    total += len(chunk)
+            return ReadSource("local file", str(resolved), content="".join(chunks),
+                              content_offset=offset, total_size=total)
     except OSError as exc:
         return f"[read error: could not read local file: {exc}]"
-    if _is_pdf_path(str(resolved)) or is_pdf_bytes(data):
+    if pdf:
         return _source_from_pdf("local PDF", str(resolved), data)
-    media_type = _detect_image_media_type(data, label=str(resolved))
     if media_type is not None:
         size_error = _image_too_large_error(str(resolved), len(data))
         if size_error is not None:
@@ -393,14 +427,14 @@ def _resolve_source(
 
 def _render_text_read_result(source: ReadSource, offset: int, size: int) -> str:
     content = source.content or ""
-    total_size = len(content)
+    total_size = len(content) if source.total_size is None else source.total_size
     if offset > total_size:
         return (
             f"[read error: offset {offset} is beyond end of input "
             f"(total size {total_size})]"
         )
     end = min(total_size, offset + size)
-    chunk = content[offset:end]
+    chunk = content[offset - source.content_offset:end - source.content_offset]
     eof = end >= total_size
 
     lines = [
@@ -492,6 +526,8 @@ def dispatch_read_tool(
         config=config,
         cancellation_token=cancellation_token,
         cwd=cwd,
+        offset=offset,
+        size=size,
     )
     if isinstance(source, str):
         return source

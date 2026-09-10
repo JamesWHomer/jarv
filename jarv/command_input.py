@@ -1,6 +1,7 @@
 """Keyboard input helpers shared by interactive command screens."""
 
 import atexit
+import codecs
 import os
 import re
 import sys
@@ -21,6 +22,7 @@ CURSOR_HIDE = "\x1b[?25l"
 CURSOR_SHOW = "\x1b[?25h"
 ANSI_RESET = "\x1b[0m"
 _PENDING_KEYS: deque[str] = deque()
+_POSIX_READER = None
 _REPEATABLE_NAV_KEYS = frozenset({"UP", "DOWN", "LEFT", "RIGHT", "PAGEUP", "PAGEDOWN"})
 _MOUSE_WHEEL_KEYS = {
     0: "MOUSE_WHEEL_UP",
@@ -574,24 +576,27 @@ def _windows_virtual_terminal_input():
 
 def _read_until_any(chars: set[str]) -> str:
     data = ""
-    while True:
-        ch = sys.stdin.read(1)
+    while len(data) < 128:
+        ch = _read_posix_available_char()
         if not ch:
             return data
         data += ch
         if ch in chars:
             return data
+    return data
 
 
 def _read_until_sequence(sequence: str) -> str:
-    data = ""
+    data = []
+    tail = ""
     while True:
-        ch = sys.stdin.read(1)
+        ch = _read_posix_available_char(timeout=0.5)
         if not ch:
-            return data
-        data += ch
-        if data.endswith(sequence):
-            return data[: -len(sequence)]
+            return "".join(data)
+        data.append(ch)
+        tail = (tail + ch)[-len(sequence):]
+        if tail == sequence:
+            return "".join(data[:-len(sequence)])
 
 
 def _windows_key_available() -> bool:
@@ -979,14 +984,15 @@ def _read_posix_csi_tail(first: str) -> tuple[str, str]:
     is the terminating byte (``""`` if the stream ran dry first).
     """
     params = first
-    while True:
-        nxt = sys.stdin.read(1)
+    while len(params) < 128:
+        nxt = _read_posix_available_char()
         if not nxt:
             return params, ""
         if nxt.isdigit() or nxt == ";":
             params += nxt
             continue
         return params, nxt
+    return params, ""
 
 
 def _read_windows_csi_tail(msvcrt, first: str, timeout: float) -> tuple[str, str]:
@@ -1027,16 +1033,55 @@ def _terminal_size_changed() -> bool:
     return True
 
 
-def _read_posix_char() -> str | None:
-    import select
+class _PosixInputReader:
+    """Decode fd bytes without TextIO prefetch hiding keys from select()."""
 
+    def __init__(self, stream):
+        self.stream = stream
+        self.fd = stream.fileno()
+        self.decoder = codecs.getincrementaldecoder(
+            getattr(stream, "encoding", None) or "utf-8"
+        )(errors="replace")
+        self.chars: deque[str] = deque()
+        self.eof = False
+
+    def read(self, timeout: float) -> str:
+        import select
+
+        deadline = time.monotonic() + timeout
+        while not self.chars and not self.eof:
+            remaining = max(0.0, deadline - time.monotonic())
+            if not select.select([self.fd], [], [], remaining)[0]:
+                return ""
+            try:
+                raw = os.read(self.fd, 1)
+            except InterruptedError:
+                continue
+            self.eof = not raw
+            self.chars.extend(self.decoder.decode(raw, final=self.eof))
+        return self.chars.popleft() if self.chars else ""
+
+
+def _posix_reader() -> _PosixInputReader:
+    global _POSIX_READER
+    if _POSIX_READER is None or _POSIX_READER.stream is not sys.stdin:
+        _POSIX_READER = _PosixInputReader(sys.stdin)
+    return _POSIX_READER
+
+
+def _read_posix_available_char(timeout: float = 0.05) -> str:
+    """Bound continuation reads, keeping partial Unicode bytes for the next call."""
+    return _posix_reader().read(timeout)
+
+
+def _read_posix_char() -> str | None:
     if _terminal_size_changed():
         return None
 
     while True:
-        readable, _, _ = select.select([sys.stdin], [], [], _POSIX_INPUT_POLL_INTERVAL)
-        if readable:
-            return sys.stdin.read(1)
+        ch = _read_posix_available_char(_POSIX_INPUT_POLL_INTERVAL)
+        if ch or _posix_reader().eof:
+            return ch
         if _terminal_size_changed():
             return None
 
@@ -1053,7 +1098,8 @@ def _key_available() -> bool:
             import msvcrt
             return bool(msvcrt.kbhit())
         import select
-        return bool(select.select([sys.stdin], [], [], 0)[0])
+        reader = _posix_reader()
+        return bool(reader.chars or select.select([reader.fd], [], [], 0)[0])
     except (ImportError, OSError, TypeError, ValueError):
         return False
 
@@ -1326,33 +1372,26 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
             if ch is None:
                 return "RESIZE"
             if ch == "\x1b":
-                ch2 = sys.stdin.read(1)
+                ch2 = _read_posix_available_char()
                 if ch2 == "[":
-                    ch3 = sys.stdin.read(1)
+                    ch3 = _read_posix_available_char()
+                    if not ch3:
+                        _posix_reader().chars.appendleft("[")
+                        return "ESC"
                     if ch3 == "<":
                         return _parse_sgr_mouse(
                             _read_until_any({"M", "m"}),
                             translate_wheel=translate_mouse_wheel,
                         )
-                    if ch3 == "2":
-                        sequence = ch3 + _read_until_any({"~"})
-                        if sequence == "200~":
+                    if ch3.isdigit():
+                        params, final = _read_posix_csi_tail(ch3)
+                        if params == "200" and final == "~":
                             return TextInput(
                                 strip_sgr_mouse_sequences(
                                     _read_until_sequence("\x1b[201~")
                                 )
                             )
-                        return "OTHER"
-                    if ch3 == "1":
-                        # Modified navigation key: ESC [ 1 ; <mod> <final>
-                        # (Ctrl/Shift + arrow). Consume the full sequence so its
-                        # modifier byte and final letter don't leak as raw input.
-                        params, final = _read_posix_csi_tail("1")
                         return _csi_token(params, final)
-                    if ch3 in ("5", "6"):
-                        sys.stdin.read(1)  # consume trailing ~
-                    if ch3 == "3":
-                        sys.stdin.read(1)  # consume trailing ~
                     return {
                         "A": "UP", "B": "DOWN", "D": "LEFT", "C": "RIGHT",
                         "H": "HOME", "F": "END",
@@ -1361,6 +1400,8 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
                 if ch2 in ("v", "V"):
                     # Alt+V (ESC-prefixed): image-paste fallback binding.
                     return "ALT_V"
+                if ch2:
+                    _posix_reader().chars.appendleft(ch2)
                 return "ESC"
             if ch == "\r":
                 return "ENTER"

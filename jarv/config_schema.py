@@ -56,7 +56,7 @@ class ConfigField:
 CONFIG_FIELDS: tuple[ConfigField, ...] = (
     ConfigField("provider", "openai", label="Provider", section="account", desc="choose an API provider", ui_kind="setup", about="API provider. Options: openai, openrouter, anthropic, gemini, groq, deepseek, together, fireworks, ollama, lm_studio, vllm."),
     ConfigField("api_key", "", label="API key", section="account", desc="store or replace the active provider key", ui_kind="setup", about="API key. Can also be provided via provider-specific env vars (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.)."),
-    ConfigField("api_keys", {}),
+    ConfigField("api_keys", {}, validator="string_map"),
     ConfigField("base_url", "", label="Base URL", section="account", desc="optional custom endpoint", ui_kind="text", empty="provider default", about="Custom API base URL. Overrides the provider's default endpoint."),
     ConfigField("model", "gpt-5.4-mini", label="Model", section="behaviour", desc="pick from the provider presets or enter a model", ui_kind="setup", about="Model name."),
     ConfigField("service_tiers", {}, validator="service_tiers"),
@@ -208,9 +208,24 @@ def validate_config_fields(
     ok = True
     for field in CONFIG_FIELDS:
         key = field.key
-        if field.validator == "positive_int":
+        if field.validator == "bool":
+            if not isinstance(config.get(key, field.default), bool):
+                report(f"[red]Config '{key}' must be a boolean (true or false).[/red]")
+                ok = False
+        elif field.validator == "string_map":
+            value = config.get(key, field.default)
+            if not isinstance(value, dict) or any(
+                not isinstance(name, str) or not isinstance(item, str)
+                for name, item in value.items()
+            ):
+                report(f"[red]Config '{key}' must be an object with string values.[/red]")
+                ok = False
+        elif field.validator == "positive_int":
             try:
-                value = int(config.get(key, field.default))
+                raw = config.get(key, field.default)
+                if isinstance(raw, (bool, float)):
+                    raise ValueError
+                value = int(raw)
                 if value <= 0:
                     raise ValueError
                 config[key] = value
@@ -219,7 +234,10 @@ def validate_config_fields(
                 ok = False
         elif field.validator == "non_negative_int":
             try:
-                value = int(config.get(key, field.default))
+                raw = config.get(key, field.default)
+                if isinstance(raw, (bool, float)):
+                    raise ValueError
+                value = int(raw)
                 if value < 0:
                     raise ValueError
                 config[key] = value

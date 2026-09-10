@@ -1,5 +1,6 @@
 from jarv.command_input import TextInput
 from jarv.text_editor import (
+    visual_rows,
     apply_text_editor_key,
     initialize_text_editor,
     render_single_line,
@@ -7,6 +8,44 @@ from jarv.text_editor import (
     render_visual_lines,
     selection_bounds,
 )
+
+
+def test_wide_and_combining_text_wraps_by_terminal_cells():
+    assert visual_rows("界界界界", 4) == [(0, 2), (2, 4), (4, 4)]
+    assert visual_rows("e\u0301e\u0301x", 2) == [(0, 4), (4, 5)]
+    state = {}
+    initialize_text_editor(state, "界界界界", multiline=True)
+    lines, cursor = render_visual_lines(state, 4)
+    assert [line.cell_len for line in lines] == [4, 4, 1]
+    assert cursor == 2
+
+
+def test_vertical_motion_preserves_display_column_for_wide_text():
+    state = {}
+    initialize_text_editor(state, "界a\n1234", multiline=True)
+    state["cursor"] = 1
+    apply_text_editor_key(state, "DOWN", content_width=8, allow_newlines=True)
+    assert state["cursor"] == 5
+    apply_text_editor_key(state, "UP", content_width=8, allow_newlines=True)
+    assert state["cursor"] == 1
+
+
+def test_single_line_wide_text_fits_and_keeps_cursor_visible():
+    state = {}
+    initialize_text_editor(state, "界界界界")
+    rendered = render_single_line(state, 4)
+    assert rendered.plain == "界 "
+    assert rendered.cell_len <= 4
+
+
+def test_one_cell_editor_uses_placeholder_without_changing_wide_text():
+    state = {}
+    initialize_text_editor(state, "界界", multiline=True)
+    state["cursor"] = 0
+    assert render_single_line(state, 1).cell_len == 1
+    lines, _ = render_visual_lines(state, 1)
+    assert all(line.cell_len <= 1 for line in lines)
+    assert state["buffer"] == "界界"
 
 
 def test_single_line_editor_inserts_and_deletes_at_cursor():

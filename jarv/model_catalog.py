@@ -6,13 +6,14 @@ import hashlib
 import json
 import re
 import threading
+import tempfile
 import time
+from contextlib import suppress
 from functools import lru_cache
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
-
-import httpx
+from urllib.parse import urlsplit, urlunsplit
 
 from . import models_dev
 from .paths import CONFIG_DIR
@@ -44,15 +45,45 @@ _MEMORY_CHOICES: dict[str, list[tuple[str, str]]] = {}
 _CACHE_LOCK = threading.RLock()
 
 
+def _catalog_config(config: dict | str) -> dict:
+    return {"provider": config} if isinstance(config, str) else config
+
+
+def _catalog_endpoint(config: dict) -> str:
+    from .anthropic_http import ANTHROPIC_API_URL
+    from .gemini_http import GEMINI_API_URL
+    from .openai_http import OPENAI_API_URL
+
+    provider = str(config.get("provider", "openai"))
+    defaults = {
+        "openai": OPENAI_API_URL,
+        "anthropic": ANTHROPIC_API_URL,
+        "gemini": GEMINI_API_URL,
+    }
+    endpoint = str(config.get("base_url") or PROVIDERS.get(provider, {}).get("base_url")
+                   or defaults.get(provider, "")).strip().rstrip("/")
+    parts = urlsplit(endpoint)
+    credentials, separator, host = parts.netloc.rpartition("@")
+    netloc = credentials + separator + host.lower() if separator else parts.netloc.lower()
+    return urlunsplit((parts.scheme.lower(), netloc, parts.path, parts.query, ""))
+
+
 def catalog_cache_key(config: dict) -> str:
     provider = str(config.get("provider", "openai"))
-    base_url = str(config.get("base_url") or "")
-    return f"{provider}|{base_url}"
+    return f"{provider}|{_catalog_endpoint(config)}"
 
 
-def _cache_path(provider: str) -> Path:
+def _legacy_cache_path(provider: str) -> Path:
     safe_provider = re.sub(r"[^a-zA-Z0-9_.-]+", "_", provider)
     return CACHE_DIR / f"{safe_provider}.json"
+
+
+def _cache_path(config: dict | str) -> Path:
+    config = _catalog_config(config)
+    provider = str(config.get("provider", "openai"))
+    digest = hashlib.sha256(catalog_cache_key(config).encode("utf-8")).hexdigest()[:24]
+    legacy = _legacy_cache_path(provider)
+    return legacy.with_name(f"{legacy.stem}-{digest}.json")
 
 
 def _openrouter_endpoints_path(model: str) -> Path:
@@ -60,29 +91,48 @@ def _openrouter_endpoints_path(model: str) -> Path:
     return CACHE_DIR / OPENROUTER_ENDPOINTS_DIR / f"{digest}.json"
 
 
-def _write_cache(provider: str, models: list[CatalogModel]) -> None:
+def _write_cache(config: dict | str, models: list[CatalogModel]) -> None:
+    config = _catalog_config(config)
+    temporary = None
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         payload = {
-            "provider": provider,
+            "provider": str(config.get("provider", "openai")),
+            "cache_key": hashlib.sha256(catalog_cache_key(config).encode("utf-8")).hexdigest(),
             "fetched_at": time.time(),
             "models": [asdict(model) for model in models],
         }
-        path = _cache_path(provider)
-        temporary = path.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        path = _cache_path(config)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=CACHE_DIR,
+                                         suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(payload, stream, indent=2)
         temporary.replace(path)
         model_pricing_values.cache_clear()
     except OSError:
         pass
+    finally:
+        if temporary is not None:
+            with suppress(OSError):
+                temporary.unlink(missing_ok=True)
 
 
-def _read_cache(provider: str) -> list[CatalogModel]:
+def _read_cache(config: dict | str) -> list[CatalogModel]:
+    config = _catalog_config(config)
+    provider = str(config.get("provider", "openai"))
+    path = _cache_path(config)
+    # A legacy filename can be reused only if its payload records the matching
+    # endpoint identity. Older unscoped files could have come from any endpoint.
+    if not path.exists():
+        path = _legacy_cache_path(provider)
     try:
-        payload = json.loads(_cache_path(provider).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return []
     items = payload.get("models") if isinstance(payload, dict) else None
+    expected_key = hashlib.sha256(catalog_cache_key(config).encode("utf-8")).hexdigest()
+    if isinstance(payload, dict) and payload.get("cache_key") != expected_key:
+        return []
     if not isinstance(items, list):
         return []
     result: list[CatalogModel] = []
@@ -234,6 +284,8 @@ def discover_openrouter_endpoints(
     model: str,
 ) -> list[dict[str, Any]]:
     """Fetch route-specific metadata for one OpenRouter model."""
+    import httpx
+
     timeout = float(config.get("model_catalog_timeout", 10))
     connect_timeout = float(config.get("model_catalog_connect_timeout", 5))
     url = f"{OPENROUTER_MODELS_URL}/{model}/endpoints"
@@ -312,7 +364,7 @@ def cached_provider_model(
     return next(
         (
             item
-            for item in _read_cache(provider)
+            for item in _read_cache(config)
             if item.id.lower() == target
         ),
         None,
@@ -878,7 +930,7 @@ def get_cached_model_choices(config: dict) -> list[tuple[str, str]]:
         if key in _MEMORY_CHOICES:
             return list(_MEMORY_CHOICES[key])
 
-    models = _read_cache(provider)
+    models = _read_cache(config)
     choices = _merge_fallbacks(provider, recommend_models(provider, models))
     with _CACHE_LOCK:
         _MEMORY_CHOICES[key] = list(choices)
@@ -893,13 +945,13 @@ def cached_provider_has_model(config: dict, model: str | None) -> bool:
     if not target:
         return False
     provider = str(config.get("provider", "openai"))
-    return any(item.id.lower() == target for item in _read_cache(provider))
+    return any(item.id.lower() == target for item in _read_cache(config))
 
 
 def cached_provider_model_ids(config: dict) -> list[str]:
     """Return model IDs from the active provider's cached catalog."""
     provider = str(config.get("provider", "openai"))
-    return [item.id for item in _read_cache(provider)]
+    return [item.id for item in _read_cache(config)]
 
 
 def refresh_model_choices(config: dict) -> list[tuple[str, str]]:
@@ -914,9 +966,9 @@ def refresh_model_choices(config: dict) -> list[tuple[str, str]]:
     except Exception:
         models = []
     if models:
-        _write_cache(provider, models)
+        _write_cache(config, models)
     else:
-        models = _read_cache(provider)
+        models = _read_cache(config)
     if provider == "openrouter" and config.get("model"):
         refresh_openrouter_endpoints(config, str(config["model"]))
 

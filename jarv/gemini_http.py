@@ -354,6 +354,7 @@ def stream_content(
     if served_tier:
         final["service_tier"] = served_tier
     reasoning_started = False
+    finished = False
     try:
         for _event_name, chunk in iter_sse_json("Gemini", response):
             if cancellation_token is not None:
@@ -368,10 +369,15 @@ def stream_content(
                 )
             if isinstance(chunk.get("usageMetadata"), dict):
                 final["usageMetadata"] = chunk["usageMetadata"]
+            if isinstance(chunk.get("promptFeedback"), dict):
+                final["promptFeedback"] = chunk["promptFeedback"]
+                # A blocked prompt has no candidate, but is a terminal response.
+                finished = finished or bool(chunk["promptFeedback"].get("blockReason"))
             candidates = chunk.get("candidates")
             if not isinstance(candidates, list) or not candidates:
                 continue
             final["candidates"] = candidates
+            finished = finished or bool(candidates[0].get("finishReason"))
             content = candidates[0].get("content")
             parts = content.get("parts") if isinstance(content, dict) else []
             if not isinstance(parts, list):
@@ -407,6 +413,12 @@ def stream_content(
                         ),
                         "provider_content": [dict(part)],
                     }
+        if cancellation_token is not None:
+            cancellation_token.throw_if_cancelled()
+        if not finished:
+            from .provider import RetryableStreamError
+
+            raise RetryableStreamError("Gemini stream ended before finishReason")
         if reasoning_started:
             yield {
                 "type": "reasoning_done",

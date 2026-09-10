@@ -228,9 +228,9 @@ class AgentInputTests(unittest.TestCase):
         result.pending_command.live_depth_cm.__exit__(None, None, None)
 
     def test_run_command_runs_to_completion_when_interactive_is_disabled(self):
-        # interactive_commands is off by default: run_command must not open an
-        # InteractiveCommandProcess, and it returns the finished output rather
-        # than a dispatch result the turn loop would hand back to the model.
+        # With interaction disabled the tool returns finished output, rather
+        # than handing a pending command back to the model. The shell may reuse
+        # its streaming capture internally to keep output memory bounded.
         stream = io.StringIO()
         test_console = Console(
             file=stream,
@@ -241,16 +241,9 @@ class AgentInputTests(unittest.TestCase):
         config = {**DEFAULT_CONFIG, "tool_call_display": "fullscreen"}
         self.assertFalse(config["interactive_commands"])
 
-        def refuse_start(*_args, **_kwargs):
-            raise AssertionError("interactive process started while disabled")
-
         with (
             patch("jarv.agent.console", test_console),
             patch("jarv.agent.check_command", return_value=(True, "")),
-            patch(
-                "jarv.agent.InteractiveCommandProcess.start",
-                side_effect=refuse_start,
-            ),
         ):
             result = _dispatch_run_command_with_ui({"command": "echo ok"}, config)
 
@@ -950,7 +943,8 @@ class AgentInputTests(unittest.TestCase):
                 def __init__(self, *_args, **_kwargs):
                     pass
 
-                def start(self):
+                def start(self, refresh=False):
+                    assert refresh
                     events.append("live_start")
 
                 def stop(self):

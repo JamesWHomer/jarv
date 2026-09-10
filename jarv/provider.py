@@ -553,6 +553,7 @@ def _stream_chat_completions(
     started_tool_indices: set[int] = set()
     final_chunk: dict[str, Any] = {}
     reasoning_started = False
+    finished = False
     for chunk in stream_chat(
         client,
         payload,
@@ -600,10 +601,14 @@ def _stream_chat_completions(
                         name=acc["name"],
                     )
         if choice.get("finish_reason"):
+            finished = True
+            final_chunk["finish_reason"] = choice["finish_reason"]
             yield from _flush_tool_calls(accumulators)
 
     if cancellation_token is not None:
         cancellation_token.throw_if_cancelled()
+    if not finished:
+        raise RetryableStreamError("Chat Completions stream ended before finish_reason")
     yield StreamDone(response=final_chunk)
 
 

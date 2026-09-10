@@ -7,6 +7,8 @@ from typing import Any
 
 
 PDF_MAGIC = b"%PDF-"
+MAX_PDF_TEXT_CHARS = 2_000_000
+MAX_PDF_PAGES = 1000
 
 _PDF_READER_CLASS: Any | None = None
 _PDF_READER_LOCK = Lock()
@@ -116,23 +118,38 @@ def extract_pdf_text(data: bytes) -> ExtractedPdfText:
 
     parts: list[str] = []
     has_text = False
+    total_chars = 0
+    truncated = False
     for page_index, page in enumerate(reader.pages, start=1):
+        if page_index > MAX_PDF_PAGES or total_chars >= MAX_PDF_TEXT_CHARS:
+            truncated = True
+            break
         try:
             page_text = _normalize_page_text(page.extract_text() or "")
         except Exception as exc:
             raise PdfExtractionError(
                 f"could not extract text from PDF page {page_index}: {exc}"
             ) from exc
-        parts.append(f"--- Page {page_index} of {page_count} ---")
+        marker = f"--- Page {page_index} of {page_count} ---"
+        parts.append(marker)
+        total_chars += len(marker) + 4
         if page_text:
-            parts.append(page_text)
+            remaining = max(0, MAX_PDF_TEXT_CHARS - total_chars)
+            parts.append(page_text[:remaining])
+            total_chars += min(len(page_text), remaining)
+            truncated = truncated or len(page_text) > remaining
             has_text = True
+        if truncated:
+            break
 
     if not has_text:
         raise PdfExtractionError(
             "PDF contained no extractable text; scanned/image-only PDFs are not supported"
         )
 
+    if truncated:
+        parts.append("[PDF extraction limit reached; remaining text is unavailable in this read. "
+                     "Split the PDF into smaller documents to read the rest.]")
     return ExtractedPdfText(
         text="\n\n".join(parts),
         page_count=page_count,

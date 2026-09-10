@@ -147,11 +147,10 @@ class ShellOutputLimitTests(unittest.TestCase):
         class FakeProcess:
             pid = 123
             returncode = None
+            stdout = stderr = stdin = None
 
-            def communicate(self, timeout=None):
-                if killed.is_set():
-                    return "", ""
-                raise subprocess.TimeoutExpired("cmd", timeout)
+            def poll(self):
+                return 1 if killed.is_set() else None
 
         timer = threading.Timer(0.02, token.cancel)
         timer.start()

@@ -48,7 +48,7 @@ def load_config() -> dict:
     migrate_flat_session_files()
     if not CONFIG_FILE.exists():
         CONFIG_FILE.write_text(json.dumps(DEFAULT_CONFIG, indent=2), encoding="utf-8")
-        return dict(DEFAULT_CONFIG)
+        return build_default_config()
     try:
         config = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
@@ -71,7 +71,7 @@ def load_config() -> dict:
         config.setdefault("colour", not config.pop("monochrome"))
         changed = True
 
-    for k, v in DEFAULT_CONFIG.items():
+    for k, v in build_default_config().items():
         if k not in config:
             config[k] = v
             changed = True
@@ -79,6 +79,11 @@ def load_config() -> dict:
     if config.get("read_only_command_display") in LEGACY_READ_ONLY_COMMAND_DISPLAY_CHOICES:
         config["read_only_command_display"] = "fullscreen"
         changed = True
+
+    # Reject malformed containers and flags before migrations or consumers use
+    # them (for example, a string "false" is truthy in Python).
+    if not validate_config_fields(config, report=_console().print):
+        sys.exit(1)
 
     # Migrate legacy flat api_key → per-provider api_keys
     if config.get("api_key") and not config.get("api_keys"):
@@ -137,6 +142,8 @@ def validate_config(config: dict) -> bool:
 
     console = _console()
     ok = validate_config_fields(config, report=console.print)
+    if not ok:
+        return False
 
     model = config.get("model")
     if not isinstance(model, str) or not model.strip():

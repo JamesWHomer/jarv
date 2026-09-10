@@ -821,11 +821,11 @@ class UsageScreen(AltScreenApp):
             self._scroll(key, repeat)
 
 
-def cmd_usage(args: list[str] | None = None) -> None:
+def cmd_usage(args: list[str] | None = None) -> int | None:
     scope_key, error = parse_usage_scope(args)
     if error is not None:
         console.print(jarv_panel(Text(error, style="yellow"), "usage"))
-        return
+        return 2
 
     if scope_key in SCOPE_KEYS and interactive_terminal() and read_only_display_mode() != "print":
         UsageScreen(initial_scope=scope_key).run()

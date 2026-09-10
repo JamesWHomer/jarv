@@ -1,25 +1,32 @@
 import sys
+import io
+import os
 from collections import deque
 from types import SimpleNamespace
+
+import pytest
 
 from jarv import command_input
 
 
 class FakeStdin:
     def __init__(self, text: str):
-        self._chars = list(text)
+        self._bytes = bytearray(text.encode("utf-8"))
 
     def fileno(self):
         return 0
 
     def read(self, count: int):
-        if count != 1 or not self._chars:
-            return ""
-        return self._chars.pop(0)
+        raise AssertionError("POSIX keys must bypass buffered TextIO reads")
+
+    def read_bytes(self, count: int):
+        result = bytes(self._bytes[:count])
+        del self._bytes[:count]
+        return result
 
     @property
     def remaining(self):
-        return "".join(self._chars)
+        return self._bytes.decode("utf-8", errors="replace")
 
 
 def _install_posix_input(monkeypatch, text: str) -> FakeStdin:
@@ -31,6 +38,7 @@ def _install_posix_input(monkeypatch, text: str) -> FakeStdin:
     command_input._LAST_TERMINAL_SIZE = None
     monkeypatch.setattr(command_input.sys, "platform", "linux")
     monkeypatch.setattr(command_input.sys, "stdin", stdin)
+    monkeypatch.setattr(command_input.os, "read", lambda _fd, count: stdin.read_bytes(count))
     monkeypatch.setattr(command_input.os, "get_terminal_size", no_terminal_size)
     monkeypatch.setitem(
         sys.modules,
@@ -1322,3 +1330,54 @@ def test_requeue_key_returns_key_to_pending_queue():
     command_input.requeue_key("ENTER")
     assert command_input._read_key() == "ENTER"
     assert not command_input._PENDING_KEYS
+
+
+def test_posix_lone_escape_and_incomplete_csi_return_without_another_key(monkeypatch):
+    for sequence, expected in (("\x1b", "ESC"), ("\x1b[1;", "OTHER")):
+        _install_posix_input(monkeypatch, sequence)
+        assert command_input._read_key(text_mode=True) == expected
+
+
+def test_posix_escape_preserves_following_key_and_normalizes_controls(monkeypatch):
+    _install_posix_input(monkeypatch, "\x1bé\x1b\r\x1b\x03")
+    assert command_input._read_key(text_mode=True) == "ESC"
+    assert command_input._key_available()
+    assert command_input._read_key(text_mode=True) == "é"
+    assert command_input._read_key(text_mode=True) == "ESC"
+    assert command_input._read_key(text_mode=True) == "ENTER"
+    assert command_input._read_key(text_mode=True) == "ESC"
+    with pytest.raises(KeyboardInterrupt):
+        command_input._read_key(text_mode=True)
+
+
+def test_posix_unicode_decoder_survives_a_gap_between_utf8_bytes(monkeypatch):
+    stdin = _install_posix_input(monkeypatch, "")
+    stdin._bytes.extend(b"\xe7")
+    assert command_input._read_posix_available_char(timeout=0) == ""
+    stdin._bytes.extend(b"\x95\x8c")
+    assert command_input._read_key(text_mode=True) == "界"
+    assert stdin.remaining == ""
+
+
+def test_posix_bracketed_paste_handles_unicode_and_missing_terminator(monkeypatch):
+    for sequence in ("\x1b[200~é界\n🙂\x1b[201~", "\x1b[200~é界\n🙂"):
+        _install_posix_input(monkeypatch, sequence)
+        assert command_input._read_key(text_mode=True) == command_input.TextInput("é界\n🙂")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="select on pipe fds requires POSIX")
+def test_posix_fd_reader_does_not_prefetch_escape_tail_into_textio(monkeypatch):
+    read_fd, write_fd = os.pipe()
+    try:
+        with os.fdopen(read_fd, "rb") as binary:
+            stdin = io.TextIOWrapper(binary, encoding="utf-8")
+            monkeypatch.setattr(command_input.sys, "stdin", stdin)
+            os.write(write_fd, "\x1b[A界".encode("utf-8"))
+            assert command_input._read_posix_available_char() == "\x1b"
+            assert command_input._key_available()
+            assert command_input._read_posix_available_char() == "["
+            assert command_input._read_posix_available_char() == "A"
+            assert command_input._read_posix_available_char() == "界"
+            assert not command_input._key_available()
+    finally:
+        os.close(write_fd)

@@ -1,10 +1,13 @@
 import io
 import json
+import os
+import shutil
 import subprocess
 import zipfile
 from contextlib import nullcontext
 from pathlib import Path
 
+import pytest
 from rich.console import Console
 
 from jarv import cli, commands, standalone, update_check
@@ -367,6 +370,87 @@ def test_windows_standalone_update_stages_handoff(monkeypatch, tmp_path):
     assert staged
     assert staged[0][1] == target.resolve()
     assert staged[0][2] == "0.15.1"
+    assert staged[0][0].parent.parent.parent == target.parent
+    assert staged[0][0].exists()
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_unix_standalone_replacement_stages_on_target_volume_and_cleans_up(monkeypatch, tmp_path, fail):
+    target = tmp_path / "jarv"
+    target.write_bytes(b"old")
+    asset = standalone.ReleaseAsset("0.15.1", "linux", "x86_64", "jarv.zip", "unused", "unused")
+
+    def download(asset, destination):
+        assert destination.parent.parent == target.parent
+        with zipfile.ZipFile(destination, "w") as archive:
+            archive.writestr("jarv", b"new")
+
+    def replace(source, destination):
+        assert source.parent.parent.parent == destination.parent
+        if fail:
+            raise OSError("replacement blocked")
+        destination.write_bytes(source.read_bytes())
+
+    monkeypatch.setattr(standalone, "download_asset", download)
+    monkeypatch.setattr(standalone.os, "replace", replace)
+    if fail:
+        with pytest.raises(OSError, match="replacement blocked"):
+            standalone.install_standalone_asset(asset, executable_path=target, windows=False)
+    else:
+        assert standalone.install_standalone_asset(asset, executable_path=target, windows=False) == "installed"
+    assert target.read_bytes() == (b"old" if fail else b"new")
+    assert not list(tmp_path.glob("jarv-update-*"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="executes the Windows updater helper")
+@pytest.mark.parametrize("failure", ["", "candidate", "installed", "native_invalid"])
+def test_windows_updater_verifies_before_replace_and_rolls_back(monkeypatch, tmp_path, failure):
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    if not powershell:
+        pytest.skip("PowerShell is unavailable")
+    staging = tmp_path / "jarv-update-test"
+    source = staging / "extract" / "jarv.exe"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"new")
+    if failure == "native_invalid":
+        # Exercise the real subprocess version probe with an unrelated native
+        # executable. It must reject the candidate without touching the target.
+        shutil.copyfile(shutil.which("where.exe"), source)
+    target = tmp_path / "jarv.exe"
+    target.write_bytes(b"old")
+    result_file = tmp_path / "update-result.json"
+    calls = []
+    with monkeypatch.context() as patch:
+        patch.setattr(standalone, "WINDOWS_UPDATE_RESULT_FILE", result_file)
+        patch.setattr(standalone.subprocess, "Popen", lambda command, **kwargs: calls.append(command))
+        standalone._stage_windows_updater(source, target, "0.15.1")
+
+    script = source.parent / "jarv-update.ps1"
+    text = script.read_text(encoding="utf-8")
+    start = text.index("function Assert-ExecutableVersion {")
+    end = text.index("\ntry {\n  if (-not $safeCleanup)", start)
+    # Mock version probes, but execute the real helper's replacement, rollback,
+    # result recording and directory cleanup against disposable local files.
+    probe = '''function Assert-ExecutableVersion {
+  param([string]$Executable)
+  if (($Executable -eq $Source -and "FAILURE" -eq "candidate") -or
+      ($Executable -eq $Target -and "FAILURE" -eq "installed")) {
+    throw "simulated version verification failure"
+  }
+}
+'''.replace("FAILURE", failure)
+    if failure != "native_invalid":
+        script.write_text(text[:start] + probe + text[end:], encoding="utf-8")
+    command = calls[0]
+    command[0] = powershell
+    command[command.index("-ParentPid") + 1] = "2147483647"
+    command[command.index("-RetryCount") + 1] = "1"
+    result = subprocess.run(command, capture_output=True, text=True, timeout=20,
+                            creationflags=standalone._windows_updater_creation_flags(allow_breakaway=False))
+    assert result.returncode == (1 if failure else 0), result.stderr
+    assert target.read_bytes() == (b"old" if failure else b"new")
+    assert not staging.exists()
+    assert standalone.consume_windows_update_result(result_file)["status"] == ("failed" if failure else "updated")
 
 
 def test_windows_updater_is_detached_retries_and_records_result(monkeypatch, tmp_path):

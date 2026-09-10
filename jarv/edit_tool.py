@@ -163,7 +163,7 @@ def _load_file(path: Path) -> _EditFile | str:
     try:
         with path.open("rb") as source:
             before = os.fstat(source.fileno())
-            data = source.read()
+            data = source.read(MAX_EDIT_FILE_BYTES + 1)
             after = os.fstat(source.fileno())
         if _revision(before) != _revision(after):
             return _conflict(path)

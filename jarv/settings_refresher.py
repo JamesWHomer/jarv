@@ -1,5 +1,6 @@
 """Background model catalog refresh coordination for settings."""
 
+import copy
 import threading
 from collections.abc import Callable
 
@@ -23,7 +24,7 @@ class _ModelCatalogRefresher:
     ) -> int:
         from .model_catalog import catalog_cache_key
 
-        snapshot = dict(config)
+        snapshot = copy.deepcopy(config)
         key = catalog_cache_key(snapshot)
         with self._lock:
             if self._closed:
