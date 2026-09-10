@@ -1,4 +1,7 @@
 import codecs
+import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -357,16 +360,151 @@ def test_edit_safety_none_never_prompts(workdir, monkeypatch):
 
 def test_edit_reports_write_failure(workdir, monkeypatch):
     target = workdir / "file.txt"
-    target.write_text("alpha\n", encoding="utf-8")
+    target.write_bytes(b"alpha\n")
 
-    def _fail(self, data):
+    def _fail(source, destination):
         raise PermissionError("locked")
 
-    monkeypatch.setattr(Path, "write_bytes", _fail)
+    monkeypatch.setattr(edit_tool.os, "replace", _fail)
 
     output = _edit(_args(target))
 
     assert output.startswith("[edit error: could not write file:")
+    assert target.read_bytes() == b"alpha\n"
+    assert list(workdir.iterdir()) == [target]
+
+
+@pytest.mark.parametrize("change", ["write", "delete", "replace", "same_stat"])
+def test_edit_rejects_changes_during_approval(workdir, monkeypatch, change):
+    target = workdir / "file.txt"
+    target.write_bytes(b"alpha\n")
+    original = target.stat()
+
+    def approve(*args, **kwargs):
+        if change == "delete":
+            target.unlink()
+        elif change == "replace":
+            replacement = workdir / "replacement"
+            replacement.write_bytes(b"alpha\n")
+            os.replace(replacement, target)
+        else:
+            target.write_bytes(b"omega\n")
+            if change == "same_stat":
+                os.utime(target, ns=(original.st_atime_ns, original.st_mtime_ns))
+        return True
+
+    monkeypatch.setattr(edit_tool, "prompt_panel_confirmation", approve)
+    output = _edit(_args(target), config={**DEFAULT_CONFIG, "command_safety": "all"})
+
+    assert output.startswith("[edit conflict:")
+    assert "Read the file and retry" in output
+    if change == "delete":
+        assert not target.exists()
+    else:
+        assert target.read_bytes() == (b"alpha\n" if change == "replace" else b"omega\n")
+    assert not list(workdir.glob(".jarv-edit-*"))
+
+
+def test_edit_serializes_same_file_but_allows_other_files(workdir, monkeypatch):
+    target = workdir / "file.txt"
+    target.write_bytes(b"alpha one\n")
+    other = workdir / "other.txt"
+    other.write_bytes(b"alpha\n")
+    awaiting_approval = threading.Event()
+    release = threading.Event()
+    second_waiting = threading.Event()
+    real_lock = edit_tool._file_edit_lock
+
+    def observe_lock(path, token):
+        if threading.current_thread().name.endswith("_1"):
+            second_waiting.set()
+        return real_lock(path, token)
+
+    def approve(path, diff, config, **kwargs):
+        if path == target.resolve() and "beta" in diff:
+            awaiting_approval.set()
+            assert release.wait(5)
+        return True, ""
+
+    monkeypatch.setattr(edit_tool, "_check_edit", approve)
+    monkeypatch.setattr(edit_tool, "_file_edit_lock", observe_lock)
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        first = pool.submit(_edit, _args(target))
+        try:
+            assert awaiting_approval.wait(5)
+            second = pool.submit(_edit, _args("file.txt", old="one", new="two"))
+            assert second_waiting.wait(5)
+            assert not second.done()
+            independent = pool.submit(_edit, _args(other))
+            assert independent.result(timeout=5).startswith("[EDIT RESULT]")
+        finally:
+            release.set()
+        assert first.result(timeout=5).startswith("[EDIT RESULT]")
+        assert second.result(timeout=5).startswith("[EDIT RESULT]")
+    assert target.read_bytes() == b"beta two\n"
+
+
+def test_edit_stages_complete_file_before_atomic_replace(workdir, monkeypatch):
+    target = workdir / "file.txt"
+    target.write_bytes(codecs.BOM_UTF8 + b"alpha\r\n")
+    real_replace = os.replace
+    seen = []
+
+    def replace(source, destination):
+        assert Path(source).parent == target.parent
+        assert target.read_bytes() == codecs.BOM_UTF8 + b"alpha\r\n"
+        assert Path(source).read_bytes() == codecs.BOM_UTF8 + b"beta\r\n"
+        assert Path(source).stat().st_mode == target.stat().st_mode
+        seen.append(True)
+        real_replace(source, destination)
+
+    monkeypatch.setattr(edit_tool.os, "replace", replace)
+    assert _edit(_args(target)).startswith("[EDIT RESULT]")
+    assert seen == [True]
+    assert list(workdir.iterdir()) == [target]
+
+
+def test_edit_staging_failure_preserves_original(workdir, monkeypatch):
+    target = workdir / "file.txt"
+    target.write_bytes(b"alpha\n")
+
+    def fail(fd):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(edit_tool.os, "fsync", fail)
+    assert _edit(_args(target)).startswith("[edit error: could not write file:")
+    assert target.read_bytes() == b"alpha\n"
+    assert list(workdir.iterdir()) == [target]
+
+
+def test_edit_cancelled_while_waiting_for_file_lock(workdir):
+    from jarv.cancellation import CancellationToken, TurnCancelled
+
+    target = workdir / "file.txt"
+    target.write_bytes(b"alpha\n")
+    token = CancellationToken()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with edit_tool._file_edit_lock(target.resolve(), None):
+            pending = pool.submit(dispatch_edit_tool, _args(target),
+                                  config=NO_PROMPT_CONFIG, cancellation_token=token)
+            token.cancel()
+            with pytest.raises(TurnCancelled):
+                pending.result(timeout=5)
+    assert target.read_bytes() == b"alpha\n"
+    assert _edit(_args(target)).startswith("[EDIT RESULT]")
+
+
+def test_edit_cancelled_after_staging_cleans_up(workdir, monkeypatch):
+    from jarv.cancellation import CancellationToken, TurnCancelled
+
+    target = workdir / "file.txt"
+    target.write_bytes(b"alpha\n")
+    token = CancellationToken()
+    monkeypatch.setattr(edit_tool.os, "fsync", lambda fd: token.cancel())
+    with pytest.raises(TurnCancelled):
+        dispatch_edit_tool(_args(target), config=NO_PROMPT_CONFIG, cancellation_token=token)
+    assert target.read_bytes() == b"alpha\n"
+    assert list(workdir.iterdir()) == [target]
 
 
 # ── Orchestrator integration ──────────────────────────────────────────────

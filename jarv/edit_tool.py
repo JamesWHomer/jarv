@@ -5,6 +5,11 @@ from __future__ import annotations
 import codecs
 import difflib
 import os
+import stat
+import tempfile
+import threading
+import weakref
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +27,38 @@ MAX_EDIT_FILE_BYTES = 5_000_000
 _DIFF_CONTEXT_LINES = 3
 _MAX_DIFF_PREVIEW_LINES = 60
 _RESULT_CONTEXT_LINES = 3
+_FILE_LOCKS = weakref.WeakValueDictionary()
+_FILE_LOCKS_GUARD = threading.Lock()
+
+
+@contextmanager
+def _file_edit_lock(path: Path, token: CancellationToken | None):
+    # Resolved paths make relative paths and symlink aliases share a lock.
+    key = os.path.normcase(str(path))
+    with _FILE_LOCKS_GUARD:
+        lock = _FILE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _FILE_LOCKS[key] = lock
+    while not lock.acquire(timeout=0.1):
+        if token is not None:
+            token.throw_if_cancelled()
+    try:
+        if token is not None:
+            token.throw_if_cancelled()
+        yield
+    finally:
+        lock.release()
+
+
+def _revision(info: os.stat_result) -> tuple:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+            info.st_mode, info.st_ctime_ns)
+
+
+def _conflict(path: Path) -> str:
+    return (f"[edit conflict: {path} changed since it was read; "
+            "no edit was written. Read the file and retry.]")
 
 EDIT_TOOL = {
     "type": "function",
@@ -76,6 +113,9 @@ EDIT_TOOL = {
 class _EditFile:
     text: str
     had_bom: bool
+    data: bytes
+    revision: tuple
+    mode: int
 
 
 def _validate_args(args: dict) -> tuple[str, str, str, bool] | str:
@@ -103,10 +143,10 @@ def _validate_args(args: dict) -> tuple[str, str, str, bool] | str:
     return path.strip(), old_text, new_text, replace_all
 
 
-def _resolve_edit_path(value: str) -> Path | str:
+def _resolve_edit_path(value: str, *, cwd: str | Path | None = None) -> Path | str:
     path = Path(value).expanduser()
     if not path.is_absolute():
-        path = Path.cwd() / path
+        path = (Path(cwd) if cwd is not None else Path.cwd()) / path
     try:
         resolved = path.resolve(strict=True)
     except OSError:
@@ -121,7 +161,12 @@ def _resolve_edit_path(value: str) -> Path | str:
 
 def _load_file(path: Path) -> _EditFile | str:
     try:
-        data = path.read_bytes()
+        with path.open("rb") as source:
+            before = os.fstat(source.fileno())
+            data = source.read()
+            after = os.fstat(source.fileno())
+        if _revision(before) != _revision(after):
+            return _conflict(path)
     except OSError as exc:
         return f"[edit error: could not read file: {exc}]"
     if len(data) > MAX_EDIT_FILE_BYTES:
@@ -132,13 +177,53 @@ def _load_file(path: Path) -> _EditFile | str:
     if b"\x00" in data:
         return f"[edit error: {path} appears to be a binary file]"
     had_bom = data.startswith(codecs.BOM_UTF8)
+    original_data = data
     if had_bom:
         data = data[len(codecs.BOM_UTF8):]
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         return f"[edit error: {path} is not valid UTF-8 text]"
-    return _EditFile(text=text, had_bom=had_bom)
+    return _EditFile(text=text, had_bom=had_bom, data=original_data,
+                     revision=_revision(after), mode=stat.S_IMODE(after.st_mode))
+
+
+def _commit_edit(path: Path, loaded: _EditFile, data: bytes,
+                 token: CancellationToken | None) -> str | None:
+    temporary = None
+    try:
+        # Same-directory staging keeps replacement on the same filesystem.
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".jarv-edit-",
+                                         delete=False) as staged:
+            temporary = Path(staged.name)
+            staged.write(data)
+            staged.flush()
+            os.fsync(staged.fileno())
+        temporary.chmod(loaded.mode)
+        if token is not None:
+            token.throw_if_cancelled()
+        try:
+            with path.open("rb") as current:
+                before = os.fstat(current.fileno())
+                current_data = current.read(MAX_EDIT_FILE_BYTES + 1)
+                after = os.fstat(current.fileno())
+            if (current_data != loaded.data
+                    or _revision(before) != loaded.revision
+                    or _revision(after) != loaded.revision
+                    # Windows stat/fstat can report different ctime meanings.
+                    or _revision(path.lstat())[:-1] != loaded.revision[:-1]):
+                return _conflict(path)
+        except OSError:
+            return _conflict(path)
+        # The per-path lock excludes sibling Jarv edits through replacement.
+        # External writers do not honor it; portable replace is not a CAS.
+        os.replace(temporary, path)
+    except OSError as exc:
+        return f"[edit error: could not write file: {exc}]"
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return None
 
 
 def _apply_replacement(
@@ -238,7 +323,7 @@ def _system_path_prefixes() -> list[str]:
     return prefixes
 
 
-def classify_edit(resolved: Path) -> tuple[bool, str]:
+def classify_edit(resolved: Path, *, cwd: str | Path | None = None) -> tuple[bool, str]:
     """Return (risky, reason) for editing ``resolved``."""
     posix = str(resolved).replace("\\", "/").lower()
     for prefix in _system_path_prefixes():
@@ -259,7 +344,7 @@ def classify_edit(resolved: Path) -> tuple[bool, str]:
         return True, "credentials directory"
 
     try:
-        cwd = Path.cwd().resolve()
+        cwd = (Path(cwd) if cwd is not None else Path.cwd()).resolve()
         in_cwd = resolved.is_relative_to(cwd)
     except OSError:
         in_cwd = False
@@ -274,7 +359,9 @@ def classify_edit(resolved: Path) -> tuple[bool, str]:
     return False, ""
 
 
-def _check_edit(resolved: Path, diff_text: str, config: dict) -> tuple[bool, str]:
+def _check_edit(
+    resolved: Path, diff_text: str, config: dict, *, cwd: str | Path | None = None,
+) -> tuple[bool, str]:
     """Gate an edit per command_safety. Returns (allowed, denial_message)."""
     level = get_setting(config, "command_safety")
     if level == "none":
@@ -283,7 +370,7 @@ def _check_edit(resolved: Path, diff_text: str, config: dict) -> tuple[bool, str
     if level == "all":
         reason = "all edits require approval"
     else:
-        risky, reason = classify_edit(resolved)
+        risky, reason = classify_edit(resolved, cwd=cwd)
         if not risky:
             return True, ""
 
@@ -348,6 +435,7 @@ def dispatch_edit_tool(
     *,
     config: dict,
     cancellation_token: CancellationToken | None = None,
+    cwd: str | Path | None = None,
 ) -> ToolOutput:
     if not isinstance(args, dict):
         return "[tool argument error: edit arguments must be an object]"
@@ -359,9 +447,17 @@ def dispatch_edit_tool(
     if cancellation_token is not None:
         cancellation_token.throw_if_cancelled()
 
-    resolved = _resolve_edit_path(value)
+    resolved = _resolve_edit_path(value, cwd=cwd)
     if isinstance(resolved, str):
         return resolved
+    with _file_edit_lock(resolved, cancellation_token):
+        return _edit_locked(resolved, old_text, new_text, replace_all,
+                            config, cancellation_token, cwd=cwd)
+
+
+def _edit_locked(resolved: Path, old_text: str, new_text: str, replace_all: bool,
+                 config: dict, cancellation_token: CancellationToken | None,
+                 *, cwd: str | Path | None = None) -> ToolOutput:
     loaded = _load_file(resolved)
     if isinstance(loaded, str):
         return loaded
@@ -374,7 +470,7 @@ def dispatch_edit_tool(
     new_content, count = replaced
 
     diff_text = build_edit_diff(loaded.text, new_content, str(resolved))
-    allowed, denial = _check_edit(resolved, diff_text, config)
+    allowed, denial = _check_edit(resolved, diff_text, config, cwd=cwd)
     if not allowed:
         return denial
 
@@ -384,9 +480,8 @@ def dispatch_edit_tool(
     data = new_content.encode("utf-8")
     if loaded.had_bom:
         data = codecs.BOM_UTF8 + data
-    try:
-        resolved.write_bytes(data)
-    except OSError as exc:
-        return f"[edit error: could not write file: {exc}]"
+    error = _commit_edit(resolved, loaded, data, cancellation_token)
+    if error is not None:
+        return error
 
     return _format_result(resolved, count, loaded.text, new_content)
