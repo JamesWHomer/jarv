@@ -322,8 +322,12 @@ def _setup_session(tmp_path, monkeypatch, history_items):
     monkeypatch.setattr(
         session_commands,
         "prepare_session_context",
-        lambda: SimpleNamespace(history_file=history_file),
+        lambda: SimpleNamespace(history_file=history_file, session_id="test-session"),
     )
+    data = {"sessions": {"test-session": {"history_file": str(history_file)}},
+            "terminals": {"terminal": "test-session", "other": "test-session"}}
+    monkeypatch.setattr(session_commands, "load_sessions", lambda: data)
+    monkeypatch.setattr(session_commands, "save_sessions", lambda updated: None)
     console, output = make_console()
     monkeypatch.setattr(session_commands, "console", console)
     return history_file, output
@@ -345,6 +349,10 @@ def test_cmd_archive_moves_history_and_sidecars(tmp_path, monkeypatch):
     assert not history_file.exists()
     assert list(archive_dir.glob("history-*.json"))
     assert forgotten == [True]
+    data = session_commands.load_sessions()
+    assert data["sessions"]["test-session"]["archived"] is True
+    assert data["sessions"]["test-session"]["history_file"] == str(next(archive_dir.glob("history-*.json")))
+    assert data["terminals"] == {}
     rendered = output.getvalue()
     assert "Session archived to" in rendered
     assert "New session starts" in rendered

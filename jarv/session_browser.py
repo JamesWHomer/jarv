@@ -26,7 +26,7 @@ from .history import (
     utc_now,
 )
 from .session_render import _history_visual_lines, _session_row_widths
-from .session_store import archive_session_files, delete_session_files, unarchive_session_files
+from .session_store import archive_session_files, delete_session_files, unarchive_session_files, mark_session_archived, session_metadata_transaction
 from .tui_frame import panel_width
 from .tui_panel import MenuPanel, menu_frame_rows, menu_inner_width
 from .tui_layout import append_bottom_footer, clip_text
@@ -114,12 +114,12 @@ def _sessions_plain(sessions: dict, terminals: dict) -> None:
     console.print(jarv_panel(Group(*footer_parts), title="sessions", subtitle=f"{shown}/{total}"))
 
 
-def _cmd_sessions_load(prefix: str) -> None:
+def _cmd_sessions_load(prefix: str) -> int:
     data = load_sessions()
     sessions = data["sessions"]
     if not sessions:
         console.print("[yellow]No sessions exist yet.[/yellow]")
-        return
+        return 1
     if prefix in sessions:
         session_id = prefix
     else:
@@ -127,22 +127,40 @@ def _cmd_sessions_load(prefix: str) -> None:
         if not matches:
             console.print(f"[bold red]✗[/bold red] [red]No session matches:[/red] [bold]{prefix}[/bold]")
             console.print("[dim]  Run [bold]jarv /sessions[/bold] to see available sessions.[/dim]")
-            return
+            return 1
         if len(matches) > 1:
             console.print(f"[bold yellow]?[/bold yellow] [yellow]Ambiguous prefix[/yellow] [bold]{prefix}[/bold] [dim]matches {len(matches)} sessions:[/dim]")
             for m in matches:
                 console.print(f"  [dim]•[/dim] [cyan]{m}[/cyan]")
-            return
+            return 1
         session_id = matches[0]
+    meta = sessions[session_id]
+    if meta.get("archived"):
+        path = meta.get("history_file")
+        if not path:
+            console.print("[red]Archived session files are missing.[/red]")
+            return 1
+        with session_metadata_transaction(Path(path), data):
+            restored = unarchive_session_files(Path(path), session_id)
+            if restored is None:
+                console.print("[red]Archived session files are missing.[/red]")
+                return 1
+            meta["history_file"] = str(restored)
+            meta.pop("archived", None)
+            meta.pop("archived_at", None)
+            save_sessions(data)
     set_terminal_session(session_id)
     label = sessions[session_id].get("label", session_id)
     console.print(f"[bold green]✓[/bold green] [green]Loaded[/green] [bold cyan]{_short_session_id(session_id)}[/bold cyan] [dim]({label})[/dim]")
+    return 0
 
 
-def cmd_sessions(args: list | None = None) -> None:
+def cmd_sessions(args: list | None = None) -> int | None:
     if args:
-        _cmd_sessions_load(args[0])
-        return
+        if len(args) != 1:
+            console.print("[red]Usage: /sessions [id][/red]")
+            return 2
+        return _cmd_sessions_load(args[0])
     data = load_sessions()
     sessions = data["sessions"]
     terminals = data["terminals"]
@@ -936,7 +954,6 @@ class SessionBrowserScreen(AltScreenApp):
                     restored.append(sid)
             if not restored:
                 return (("○ nothing left to undo", "dim"), [])
-            save_sessions(self.data)
             label = self._batch_label(restored)
             if kind == "did_archive":
                 return ((f"↺ restored {label}", "green"), restored)
@@ -966,15 +983,20 @@ class SessionBrowserScreen(AltScreenApp):
         if row["archived"]:
             meta = self.sessions.get(row["sid"], {})
             hp_str = meta.get("history_file")
-            if hp_str:
+            if not hp_str:
+                self.flash = ("Archived session files are missing; session was not loaded.", "red")
+                return
+            with session_metadata_transaction(Path(hp_str), self.data):
                 restored = unarchive_session_files(Path(hp_str), row["sid"])
-                if restored is not None:
-                    meta["history_file"] = str(restored)
-                    meta.pop("archived", None)
-                    meta.pop("archived_at", None)
-                    row["archived"] = False
-                    save_sessions(self.data)
-                    self.auto_restored = True
+                if restored is None:
+                    self.flash = ("Archived session files are missing; session was not loaded.", "red")
+                    return
+                meta["history_file"] = str(restored)
+                meta.pop("archived", None)
+                meta.pop("archived_at", None)
+                save_sessions(self.data)
+            row["archived"] = False
+            self.auto_restored = True
         set_terminal_session(row["sid"])
         self.loaded_row = row
         self.stop()
@@ -991,15 +1013,14 @@ class SessionBrowserScreen(AltScreenApp):
         sid = row["sid"]
         meta = self.sessions.get(sid, {})
         hp_str = meta.get("history_file")
-        archived_path = archive_session_files(Path(hp_str)) if hp_str else None
-        if archived_path is None:
+        if not hp_str:
             return False
-        meta["history_file"] = str(archived_path)
-        meta["archived"] = True
-        meta["archived_at"] = isoformat_utc(utc_now())
-        for term_id, mapped_sid in list(self.terminals.items()):
-            if mapped_sid == sid:
-                self.terminals.pop(term_id)
+        with session_metadata_transaction(Path(hp_str), self.data):
+            archived_path = archive_session_files(Path(hp_str))
+            if archived_path is None:
+                return False
+            mark_session_archived(self.data, sid, archived_path)
+            save_sessions(self.data)
         row["archived"] = True
         row["is_current"] = False
         return True
@@ -1014,11 +1035,19 @@ class SessionBrowserScreen(AltScreenApp):
         sid = row["sid"]
         meta = self.sessions.get(sid, {})
         hp_str = meta.get("history_file")
-        restored = unarchive_session_files(Path(hp_str), sid) if hp_str else None
-        if restored is not None:
-            meta["history_file"] = str(restored)
-        meta.pop("archived", None)
-        meta.pop("archived_at", None)
+        if hp_str:
+            with session_metadata_transaction(Path(hp_str), self.data):
+                restored = unarchive_session_files(Path(hp_str), sid)
+                if restored is not None:
+                    meta["history_file"] = str(restored)
+                meta.pop("archived", None)
+                meta.pop("archived_at", None)
+                save_sessions(self.data)
+        else:
+            restored = None
+            meta.pop("archived", None)
+            meta.pop("archived_at", None)
+            save_sessions(self.data)
         row["archived"] = False
         return restored is not None
 
@@ -1049,7 +1078,6 @@ class SessionBrowserScreen(AltScreenApp):
             self.flash = (f"○ nothing to archive for {label}", "dim")
             return
 
-        save_sessions(self.data)
         # Rows that just left this view stay painted in place until the cursor
         # moves, so a batch doesn't vanish out from under the user.
         ghost_view = "archived" if unarchiving else "active"

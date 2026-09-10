@@ -102,6 +102,23 @@ class TreeNode:
     on_active_path: bool = False
     is_active_leaf: bool = False
 
+    @property
+    def original_prompt(self) -> str:
+        for item in self.items:
+            if _is_user(item):
+                content = item.get("content", "")
+                if isinstance(content, list):
+                    # Display flattening strips block whitespace, which would
+                    # change pasted code when it becomes an editable prompt.
+                    return "\n".join(
+                        str(block.get("text") or "")
+                        if isinstance(block, dict) and block.get("type") in {"input_text", "text", "output_text"}
+                        else _history_content_to_str([block])
+                        for block in content
+                    )
+                return _history_content_to_str(content)
+        return ""
+
 
 @dataclass
 class TreeModel:
@@ -197,21 +214,35 @@ def build_tree(history: list, branches: list[dict]) -> TreeModel:
     for _parent_id, node in pending:
         roots.append(node)
 
+    # Break corrupt parent cycles, preserving their frames as a rooted tree.
+    checked: set[int] = set()
+    for candidate in by_id.values():
+        trail: set[int] = set()
+        current = candidate
+        while current is not None and id(current) not in checked:
+            if id(current) in trail:
+                parent = current.parent
+                parent.children = [child for child in parent.children if child is not current]
+                current.parent = None
+                roots.append(current)
+                break
+            trail.add(id(current))
+            current = current.parent
+        checked.update(trail)
+
     # Order each node's children so the active continuation leads, then flatten
     # depth-first into display order with correct depth.
     def _order(node: TreeNode) -> None:
         node.children.sort(key=lambda c: (not c.on_active_path,))
 
-    def _walk(node: TreeNode, depth: int) -> None:
+    roots.sort(key=lambda c: (not c.on_active_path,))
+    stack = [(node, 0) for node in reversed(roots)]
+    while stack:
+        node, depth = stack.pop()
         node.depth = depth
         nodes_in_order.append(node)
         _order(node)
-        for child in node.children:
-            _walk(child, depth + 1)
-
-    roots.sort(key=lambda c: (not c.on_active_path,))
-    for root in roots:
-        _walk(root, 0)
+        stack.extend((child, depth + 1) for child in reversed(node.children))
 
     active_path = [n for n in active_nodes]
     return TreeModel(roots=roots, nodes=nodes_in_order, by_id=by_id, active_path=active_path)

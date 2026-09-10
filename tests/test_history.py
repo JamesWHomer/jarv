@@ -172,3 +172,24 @@ def test_save_then_load_sessions_round_trips(tmp_path, monkeypatch):
 
 if __name__ == "__main__":
     unittest.main()
+def test_tmux_panes_have_distinct_sessions_even_inside_same_host_terminal(monkeypatch):
+    monkeypatch.setenv("WT_SESSION", "shared-tab")
+    monkeypatch.setenv("TMUX", "/tmp/tmux/server,123,0")
+    monkeypatch.setenv("TMUX_PANE", "%1")
+    first = history.detect_terminal()[0]
+    monkeypatch.setenv("TMUX_PANE", "%2")
+    second = history.detect_terminal()[0]
+    assert first.startswith("tmux-pane-")
+    assert first != second
+
+
+def test_archived_default_session_is_never_reopened_as_empty_history(monkeypatch, tmp_path):
+    monkeypatch.setattr(history, "SESSIONS_DIR", tmp_path / "sessions")
+    monkeypatch.setattr(history, "SESSIONS_FILE", tmp_path / "sessions.json")
+    monkeypatch.setattr(history, "detect_terminal", lambda: ("terminal", "Terminal"))
+    history.save_sessions({"terminals": {}, "sessions": {"terminal": {
+        "archived": True, "history_file": "archived-history.json"}}})
+    context = history.prepare_session_context(mark_message=True)
+    data = history.load_sessions()
+    assert context.session_id != "terminal"
+    assert data["sessions"]["terminal"]["history_file"] == "archived-history.json"

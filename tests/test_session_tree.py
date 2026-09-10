@@ -70,6 +70,12 @@ class FrameSplittingTests(unittest.TestCase):
 
 
 class BuildTreeTests(unittest.TestCase):
+    def test_original_prompt_preserves_structured_text_whitespace(self):
+        content = [{"type": "input_text", "text": "\n  if ready:\n    run()\n"}]
+        model = build_tree(frame(content, fid="structured"), [])
+        self.assertEqual(model.nodes[0].original_prompt, content[0]["text"])
+        self.assertEqual(model.nodes[0].prompt_text, "if ready: run()")
+
     def test_linear_history_is_a_spine(self):
         history = history_of(frame("a", fid="f0"), frame("b", fid="f1"), frame("c", fid="f2"))
         model = build_tree(history, [])
@@ -244,3 +250,34 @@ class BranchSidecarTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+def test_long_history_builds_tree_and_connectors_without_recursion():
+    from jarv.tree_browser import TreeBrowserScreen
+
+    history = [{"role": "user", "id": str(i), "content": str(i)} for i in range(1500)]
+    model = build_tree(history, [])
+    assert len(model.nodes) == 1500
+    assert model.nodes[-1].depth == 1499
+    screen = TreeBrowserScreen(model=model)
+    assert len(screen.connectors) == 1500
+    assert max(map(len, screen.connectors.values())) <= 74
+    assert "1499" in screen._row(model.nodes[-1], True, 30).plain
+
+
+def test_tree_edit_preserves_prompt_whitespace():
+    from jarv.tree_browser import TreeBrowserScreen
+
+    original = "  Explain:\n    if ready:\n        run()\n"
+    model = build_tree([{"role": "user", "content": original}], [])
+    assert model.nodes[0].prompt_text == "Explain: if ready: run()"
+    screen = TreeBrowserScreen(model=model)
+    screen.on_key("e", 1)
+    assert screen.outcome.prefill == original
+
+
+def test_corrupt_branch_cycle_preserves_all_frames_as_tree():
+    model = build_tree([], [
+        {"parent_frame_id": "b", "items": [{"role": "user", "id": "a", "content": "a"}]},
+        {"parent_frame_id": "a", "items": [{"role": "user", "id": "b", "content": "b"}]},
+    ])
+    assert len(model.roots) == 1
+    assert {node.frame_id for node in model.nodes} == {"a", "b"}

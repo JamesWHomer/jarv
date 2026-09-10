@@ -2,6 +2,8 @@
 
 from pathlib import Path
 from functools import wraps
+from contextlib import contextmanager
+import copy
 from .storage import transaction, read_json, write_json, delete_json, StorageConflict
 
 from .history import (
@@ -12,6 +14,7 @@ from .history import (
     reads_file_for,
     redo_file_for,
     utc_now,
+    isoformat_utc,
 )
 from .paths import ARCHIVE_DIR
 from .usage import usage_file_for
@@ -31,6 +34,31 @@ def _move(source, destination):
     value = read_json(source, {}, (dict, list))
     write_json(destination, value)
     delete_json(source)
+
+
+def mark_session_archived(data: dict, session_id: str, archived_path: Path) -> None:
+    """Apply the metadata half of an archive consistently for every entry point."""
+    meta = data["sessions"].setdefault(session_id, {})
+    meta.update(history_file=str(archived_path), archived=True,
+                archived_at=isoformat_utc(utc_now()))
+    for terminal_id, mapped_id in list(data["terminals"].items()):
+        if mapped_id == session_id:
+            del data["terminals"][terminal_id]
+
+
+@contextmanager
+def session_metadata_transaction(history_path: Path, data: dict):
+    """Commit files and metadata together, restoring the browser state on error."""
+    original = copy.deepcopy(data)
+    try:
+        with transaction(history_path):
+            yield
+    except BaseException:
+        # Keep the shared sessions/terminals mappings used by the browser.
+        for key in ("sessions", "terminals"):
+            data[key].clear()
+            data[key].update(original[key])
+        raise
 
 
 @_coordinated

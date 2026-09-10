@@ -11,8 +11,11 @@ from .history import (
     forget_current_session,
     load_history,
     prepare_session_context,
+    load_sessions,
+    save_sessions,
 )
 from . import session_store as _session_store
+from .storage import transaction
 
 _SESSION_RENDER_EXPORTS = {
     "_history_visual_lines",
@@ -36,13 +39,18 @@ def cmd_archive() -> None:
     session_context = prepare_session_context()
     history_path = session_context.history_file
 
-    archived_history = _session_store.archive_session_files(history_path)
+    with transaction(history_path):
+        archived_history = _session_store.archive_session_files(history_path)
+        if archived_history is not None:
+            data = load_sessions()
+            _session_store.mark_session_archived(data, session_context.session_id, archived_history)
+            save_sessions(data)
+    forget_current_session()
     if archived_history is not None:
         console.print(f"[bold cyan]▸[/bold cyan] [dim]Session archived to[/dim] [cyan]{archived_history}[/cyan]")
     else:
         console.print("[dim]○ No history to archive.[/dim]")
 
-    forget_current_session()
     if archived_history is not None:
         console.print("[bold green]✓[/bold green] [green]New session starts on your next message.[/green]")
 

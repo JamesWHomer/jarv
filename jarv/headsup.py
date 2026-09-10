@@ -49,7 +49,9 @@ from .display import (
     terminal_size,
     tool_card,
 )
-from .history import forget_current_session, load_history, prepare_session_context
+from .history import (
+    ephemeral_session_context, forget_current_session, load_history, prepare_session_context,
+)
 from .intro_animation import render_intro
 from .model_catalog import get_image_output_capability
 from .safety import ConfirmRequest, clear_confirm_handler, set_confirm_handler
@@ -738,8 +740,11 @@ class HeadsupApp(AltScreenApp):
         self._initial_history_synced = False
         if self._started_new_session:
             forget_current_session()
-        self.session_context = prepare_session_context(persist_metadata=False)
-        self.usage_path = usage_file_for(self.session_context.history_file)
+        self.session_context = (
+            ephemeral_session_context() if self.incognito
+            else prepare_session_context(persist_metadata=False)
+        )
+        self.usage_path = None if self.incognito else usage_file_for(self.session_context.history_file)
         self._prompt_history = (
             []
             if self.incognito or self._started_new_session
@@ -1592,6 +1597,22 @@ class HeadsupApp(AltScreenApp):
                     style="yellow",
                 ))
                 return None
+        if self.incognito:
+            if command == "/new":
+                self.session_context = ephemeral_session_context()
+                self._sync_transcript_from_history()
+                self._restart_idle_animation()
+                self.set_prompt_notice(None)
+                return None
+            if command in {
+                "/undo", "/redo", "/archive", "/session", "/sessions",
+                "/tree", "/history", "/usage",
+            }:
+                self.add_notice(Text(
+                    f"{command} is unavailable in incognito; session history and usage aren't saved.",
+                    style="yellow",
+                ))
+                return None
         if command == "/tree":
             self._run_tree()
             return None
@@ -1951,6 +1972,8 @@ class HeadsupApp(AltScreenApp):
         )
 
     def _refresh_session_context(self) -> bool:
+        if self.incognito:
+            return False
         old_session_id = self.session_context.session_id
         self.session_context = prepare_session_context(persist_metadata=False)
         self.usage_path = usage_file_for(self.session_context.history_file)
@@ -1991,7 +2014,7 @@ class HeadsupApp(AltScreenApp):
         self,
         trailing_notice: RenderableType | None = None,
     ) -> None:
-        history = load_history(self.session_context.history_file)
+        history = [] if self.incognito else load_history(self.session_context.history_file)
         entries: list[TranscriptEntry] = [self._initial_notice_entry()]
         for item_index, item in enumerate(history):
             if not isinstance(item, dict):
@@ -2065,6 +2088,8 @@ class HeadsupApp(AltScreenApp):
         self.refresh()
 
     def _load_prompt_history(self) -> list[str]:
+        if self.incognito:
+            return []
         try:
             return self._history_user_messages(load_history(self.session_context.history_file))
         except Exception:
@@ -2647,7 +2672,7 @@ class HeadsupApp(AltScreenApp):
             return cached[4].copy()
 
         try:
-            usage = load_usage(self.usage_path, session_id, warn=False)
+            usage = {} if self.incognito else load_usage(self.usage_path, session_id, warn=False)
         except Exception:
             usage = {}
         totals = usage.get("totals") if isinstance(usage.get("totals"), dict) else {}

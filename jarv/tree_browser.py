@@ -67,19 +67,22 @@ class TreeBrowserScreen(AltScreenApp):
     def _compute_connectors(self) -> dict[int, str]:
         conn: dict[int, str] = {}
 
-        def walk(node, trail: list[bool]) -> None:
+        # Keep only the visible end of very deep paths. Storing each full
+        # ancestry string would otherwise use quadratic memory in long chats.
+        max_trail = 24
+        stack = [(root, [], False) for root in reversed(self.model.roots)]
+        while stack:
+            node, trail, shortened = stack.pop()
             if not trail:
                 conn[id(node)] = ""
             else:
                 segs = ["   " if is_last else "│  " for is_last in trail[:-1]]
                 segs.append("└─ " if trail[-1] else "├─ ")
-                conn[id(node)] = "".join(segs)
+                conn[id(node)] = ("… " if shortened else "") + "".join(segs)
             kids = node.children
-            for idx, child in enumerate(kids):
-                walk(child, trail + [idx == len(kids) - 1])
-
-        for root in self.model.roots:
-            walk(root, [])
+            stack.extend((child, (trail + [idx == len(kids) - 1])[-max_trail:],
+                          shortened or len(trail) >= max_trail)
+                         for idx, child in reversed(list(enumerate(kids))))
         return conn
 
     # ------------------------------------------------------------------ #
@@ -128,6 +131,10 @@ class TreeBrowserScreen(AltScreenApp):
 
     def _row(self, node, selected: bool, inner: int) -> Text:
         conn = self.connectors.get(id(node), "")
+        connector_budget = max(0, inner // 2 - 3)
+        if len(conn) > connector_budget:
+            conn = ("… " + conn[-(connector_budget - 2):]
+                    if connector_budget > 2 else "…"[:connector_budget])
         glyph = "● " if node.is_active_leaf else ""
         tag = f"  ⑂{len(node.children)}" if len(node.children) > 1 else ""
         used = 3 + len(conn) + len(glyph) + len(tag)
@@ -240,7 +247,7 @@ class TreeBrowserScreen(AltScreenApp):
             self.stop()
         elif key in ("e", "E"):
             if not node.children:  # edit only on leaves
-                self.outcome = TreeOutcome("edit", parent_id_of(node), node.prompt_text)
+                self.outcome = TreeOutcome("edit", parent_id_of(node), node.original_prompt)
                 self.stop()
         elif key in ("d", "D"):
             self._on_delete(node)

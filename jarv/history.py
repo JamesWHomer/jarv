@@ -97,6 +97,10 @@ def get_windows_console_id() -> tuple[str, str] | None:
 def detect_terminal() -> tuple[str, str]:
     """Return (terminal_id, label) for the current terminal."""
     candidates = [
+        ("tmux-pane", "|".join([os.environ.get("TMUX", ""), os.environ["TMUX_PANE"]])
+         if os.environ.get("TMUX_PANE") else None),
+        ("screen-window", "|".join([os.environ["STY"], os.environ["WINDOW"]])
+         if os.environ.get("STY") and os.environ.get("WINDOW") else None),
         ("windows-terminal", os.environ.get("WT_SESSION")),
         ("term-session", os.environ.get("TERM_SESSION_ID")),
         ("tmux", os.environ.get("TMUX")),
@@ -164,6 +168,19 @@ class SessionContext:
     now: datetime
 
 
+def ephemeral_session_context() -> SessionContext:
+    """Allocate a private session identity without opening persistent storage."""
+    import uuid
+
+    session_id = f"incognito-{uuid.uuid4().hex}"
+    return SessionContext(
+        session_id=session_id,
+        session_label="incognito",
+        history_file=SESSIONS_DIR / f"history-{session_id}.json",
+        now=utc_now(),
+    )
+
+
 def prepare_session_context(
     mark_message: bool = False,
     *,
@@ -180,6 +197,9 @@ def prepare_session_context(
     session_id = terminals.get(terminal_id)
     if session_id is None:
         session_id = terminal_id
+    if sessions.get(session_id, {}).get("archived"):
+        import uuid
+        session_id = f"{terminal_id}-{uuid.uuid4().hex[:8]}"
     terminals[terminal_id] = session_id
 
     history_path = history_file_for_session(session_id)

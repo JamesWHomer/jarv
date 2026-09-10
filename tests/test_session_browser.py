@@ -1,4 +1,5 @@
 import io
+from contextlib import nullcontext
 from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
@@ -33,6 +34,25 @@ def _extra_sessions(count):
 class TtyStdin:
     def isatty(self):
         return True
+
+
+def test_missing_archive_does_not_activate_a_different_session(monkeypatch):
+    screen = object.__new__(session_browser.SessionBrowserScreen)
+    screen.sessions = {"old": {"archived": True, "history_file": "missing.json"}}
+    screen.data = {"sessions": screen.sessions, "terminals": {}}
+    screen.loaded_row = None
+    row = {"sid": "old", "archived": True}
+    loaded = []
+    monkeypatch.setattr(session_browser, "unarchive_session_files", lambda *args: None)
+    monkeypatch.setattr(session_browser, "session_metadata_transaction", lambda *args: nullcontext())
+    monkeypatch.setattr(session_browser, "set_terminal_session", loaded.append)
+
+    screen._activate_row(row)
+
+    assert loaded == []
+    assert screen.loaded_row is None
+    assert row["archived"] is True
+    assert "missing" in screen.flash[0]
 
 
 def _run_sessions_with_keys(monkeypatch, keys, extra_sessions=None):
@@ -91,6 +111,7 @@ def _run_sessions_with_keys(monkeypatch, keys, extra_sessions=None):
     monkeypatch.setattr(session_browser, "save_sessions", lambda _data: None)
     monkeypatch.setattr(session_browser, "set_terminal_session", loaded_sessions.append)
     monkeypatch.setattr(session_browser, "archive_session_files", fake_archive)
+    monkeypatch.setattr(session_browser, "session_metadata_transaction", lambda *args: nullcontext())
     monkeypatch.setattr(session_browser, "unarchive_session_files", fake_unarchive)
     monkeypatch.setattr(session_browser, "delete_session_files", fake_delete)
 
