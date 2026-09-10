@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
 from .context_budget import trim_turn_input
+from .retained_outputs import RetainedOutputStore
 from .provider import (
     ReasoningDone,
     ReasoningStarted,
@@ -87,6 +88,7 @@ def run_tool_execution_round(
     execute_tool_calls_fn: Callable[[list, Callable], Any],
     reasoning_kwargs: dict | None = None,
     tool_result_kwargs: dict | None = None,
+    retained_store: RetainedOutputStore | None = None,
 ) -> tuple[list, Any]:
     """Append reasoning/tool results and trim input — shared root/subagent tool round."""
     new_input: list = []
@@ -111,5 +113,6 @@ def run_tool_execution_round(
         config=config,
         instructions=instructions,
         tools=tools,
+        retained_store=retained_store,
     )
     return trimmed, exec_result

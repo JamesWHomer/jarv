@@ -261,6 +261,7 @@ def _resolve_source(
     retained_store: RetainedOutputStore,
     config: dict,
     cancellation_token: CancellationToken | None,
+    cwd: str | Path | None = None,
 ) -> ReadSource | str:
     if value.startswith("cmd_"):
         retained = retained_store.get(value)
@@ -361,7 +362,7 @@ def _resolve_source(
         return f"[read error: unsupported URL scheme '{parsed.scheme}']"
 
     if not path.is_absolute():
-        path = Path.cwd() / path
+        path = (Path(cwd) if cwd is not None else Path.cwd()) / path
     try:
         resolved = path.resolve(strict=True)
     except (OSError, RuntimeError):
@@ -472,6 +473,7 @@ def dispatch_read_tool(
     retained_store: RetainedOutputStore,
     config: dict,
     cancellation_token: CancellationToken | None = None,
+    cwd: str | Path | None = None,
 ) -> ToolOutput:
     if not isinstance(args, dict):
         return "[tool argument error: read arguments must be an object]"
@@ -489,6 +491,7 @@ def dispatch_read_tool(
         retained_store=retained_store,
         config=config,
         cancellation_token=cancellation_token,
+        cwd=cwd,
     )
     if isinstance(source, str):
         return source
@@ -506,6 +509,7 @@ def dispatch_read_batch(
     retained_store: RetainedOutputStore,
     config: dict,
     cancellation_token: CancellationToken | None = None,
+    cwd: str | Path | None = None,
 ) -> list[ToolOutput]:
     if not args_list:
         return []
@@ -518,6 +522,7 @@ def dispatch_read_batch(
                 retained_store=retained_store,
                 config=config,
                 cancellation_token=cancellation_token,
+                cwd=cwd,
             )
         ]
 
@@ -534,6 +539,7 @@ def dispatch_read_batch(
             retained_store=retained_store,
             config=config,
             cancellation_token=cancellation_token,
+            cwd=cwd,
         ): index
         for index, args in enumerate(args_list)
     }

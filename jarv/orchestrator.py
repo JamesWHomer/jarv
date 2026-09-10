@@ -241,6 +241,10 @@ class AgentNode:
     incognito: bool = False
     shell_state: ShellState | None = None
 
+    def __post_init__(self) -> None:
+        if self.shell_state is None:
+            self.shell_state = ShellState.initial()
+
 
 def tool_enabled(config: dict, name: str) -> bool:
     """Return whether a user-facing tool is enabled in config."""
@@ -684,6 +688,7 @@ def dispatch_tool(
     if name == "read":
         return dispatch_read_tool(
             args,
+            cwd=node.shell_state.cwd,
             visible_labels=node.visible_labels,
             artifact_store=store,
             retained_store=retained_store or RetainedOutputStore(),
@@ -694,6 +699,7 @@ def dispatch_tool(
     if name == "edit":
         return dispatch_edit_tool(
             args,
+            cwd=node.shell_state.cwd,
             config=config,
             cancellation_token=cancellation_token,
         )
@@ -911,6 +917,20 @@ def run_subagent_loop(
         "finish() is the only way your output is ever seen. You must call it even for the simplest task."
     ) + _format_deps_block(node, store)
 
+    from .agent_ui import get_system_info
+    from .project_context import build_project_context
+
+    base_instructions = instructions
+    instructions_cwd = node.shell_state.cwd
+
+    def contextual_instructions(cwd: str) -> str:
+        parts = [base_instructions, "System info:\n" + get_system_info(cwd=cwd)]
+        context = build_project_context(config, cwd=cwd)
+        if context:
+            parts.append(context)
+        return "\n\n".join(parts)
+
+    instructions = contextual_instructions(instructions_cwd)
     tools = build_subagent_tools(node.sterile, config)
     input_items: list[dict] = [{"role": "user", "content": node.task}]
 
@@ -930,6 +950,9 @@ def run_subagent_loop(
     web_search_read_nudge_sent = False
 
     while True:
+        if node.shell_state.cwd != instructions_cwd:
+            instructions_cwd = node.shell_state.cwd
+            kwargs["instructions"] = contextual_instructions(instructions_cwd)
         if cancellation_token is not None:
             cancellation_token.throw_if_cancelled()
         context_breakdown = estimate_context_breakdown(
@@ -1011,6 +1034,7 @@ def run_subagent_loop(
             config=config,
             instructions=kwargs["instructions"],
             tools=kwargs["tools"],
+            retained_store=retained_store,
             execute_tool_calls_fn=lambda new_input, append_tool_result: execute_tool_calls(
                 tool_calls,
                 node=node,

@@ -466,7 +466,7 @@ class AgentInputTests(unittest.TestCase):
         )
         self.assertEqual(history, original)
 
-    def test_build_input_drops_orphaned_tool_pairs_when_budget_is_tight(self):
+    def test_build_input_preserves_tool_pairs_when_budget_is_tight(self):
         history = [
             {"role": "user", "content": "run a command"},
             {
@@ -496,7 +496,7 @@ class AgentInputTests(unittest.TestCase):
                 instructions="",
                 tools=[],
             )),
-            0,
+            4,
         )
 
     def test_run_agent_persists_full_history_when_compaction_triggers(self):

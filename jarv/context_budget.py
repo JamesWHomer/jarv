@@ -6,6 +6,7 @@ from typing import Any
 
 from .config import get_setting, setting_default
 from .tool_outputs import summarize_tool_output
+from .retained_outputs import RetainedOutputStore
 from .usage import estimate_context_breakdown, estimate_item_tokens, resolve_context_window
 
 
@@ -83,26 +84,25 @@ def estimate_history_tokens(model: str, history: list) -> int:
 
 
 def trim_items_to_budget(items: list[dict], model: str, budget: int) -> list[dict]:
-    """Keep the newest suffix of API items that fits within ``budget`` tokens."""
+    """Keep complete turns, always preserving the newest even if it exceeds budget.
+
+    The budget is soft when a single turn cannot fit: losing executed actions
+    is worse than letting the caller handle an oversized context.
+    """
     if budget <= 0 or not items:
         return []
 
-    kept: list[dict] = []
+    items = _align_slice_to_user(items)
+    ranges = iter_turn_ranges(items)
+    start = len(items)
     used = 0
-    for item in reversed(items):
-        if not isinstance(item, dict):
-            continue
-        count = estimate_item_tokens(model, item)
-        if kept and used + count > budget:
+    for turn_start, turn_end in reversed(ranges):
+        count = estimate_api_items_tokens(model, items[turn_start:turn_end])
+        if start < len(items) and used + count > budget:
             break
-        if not kept and count > budget:
-            kept.append(item)
-            break
-        kept.append(item)
+        start = turn_start
         used += count
-
-    kept.reverse()
-    return _align_slice_to_user(kept)
+    return items[start:]
 
 
 def _should_compact_history(
@@ -124,6 +124,7 @@ def build_input(
     config: dict,
     instructions: str = "",
     tools: list | None = None,
+    retained_store: RetainedOutputStore | None = None,
 ) -> list[dict]:
     """Convert stored history to Responses API input within the token budget."""
     tools = tools or []
@@ -142,7 +143,44 @@ def build_input(
         )
     api_items = history_to_api_items(source)
     budget = history_token_budget(model, config, instructions, tools)
-    return trim_items_to_budget(api_items, model, budget)
+    return _trim_with_retained_outputs(api_items, model, budget, retained_store)
+
+
+def _trim_with_retained_outputs(
+    items: list[dict], model: str, budget: int,
+    retained_store: RetainedOutputStore | None,
+) -> list[dict]:
+    kept = trim_items_to_budget(items, model, budget)
+    if retained_store is None:
+        return kept
+    # Reduce the largest results first. Never rewrite call arguments, IDs, or
+    # reasoning signatures. Copies leave the full stored transcript untouched.
+    for index in sorted(
+        range(len(kept)),
+        key=lambda i: estimate_item_tokens(model, kept[i]), reverse=True,
+    ):
+        if estimate_api_items_tokens(model, kept) <= budget:
+            break
+        item = kept[index]
+        if item.get("type") != "function_call_output":
+            continue
+        output = item.get("output")
+        # Preserve multimodal payloads; flattening them would lose image data.
+        if not isinstance(output, str) or output.startswith("[Retained tool result"):
+            continue
+        preview = output[:160] + "\n...\n" + output[-160:]
+        if len(output) <= len(preview) + 160:
+            continue
+        output_id = retained_store.put(output)
+        kept[index] = {
+            **item,
+            "output": (
+                f'[Retained tool result: {output_id}]\n'
+                f'Retrieve with read(input="{output_id}", offset=0, size=2000).\n'
+                f"{preview}"
+            ),
+        }
+    return kept
 
 
 def trim_turn_input(
@@ -152,20 +190,16 @@ def trim_turn_input(
     config: dict,
     instructions: str,
     tools: list,
+    retained_store: RetainedOutputStore | None = None,
 ) -> list[dict]:
     """Trim in-turn ``kwargs['input']`` growth to the active token budget."""
     budget = turn_input_token_budget(model, config, instructions, tools)
-    trimmed = trim_items_to_budget(
+    return _trim_with_retained_outputs(
         [item for item in input_items if isinstance(item, dict)],
         model,
         budget,
+        retained_store,
     )
-    if trimmed:
-        return trimmed
-    for item in reversed(input_items):
-        if isinstance(item, dict) and item.get("role") == "user":
-            return [item]
-    return []
 
 
 def _is_turn_start(item: dict) -> bool:
@@ -238,10 +272,13 @@ def compact_oldest_turns(
     modified = False
     while estimate_history_tokens(model, history) > target_tokens:
         ranges = iter_turn_ranges(history)
-        if len(ranges) <= 1:
+        candidates = [
+            (start, end) for start, end in ranges[:-1]
+            if history[start].get("type") != "compacted_summary"
+        ]
+        if not candidates:
             break
-        start, end = ranges[0]
-        before_tokens = estimate_history_tokens(model, history)
+        start, end = candidates[0]
         summary = summarize_turn_items(history[start:end])
         history[start:end] = [{
             "role": "user",
@@ -249,8 +286,6 @@ def compact_oldest_turns(
             "content": summary,
         }]
         modified = True
-        if estimate_history_tokens(model, history) >= before_tokens:
-            break
     return modified
 
 

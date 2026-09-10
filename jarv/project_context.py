@@ -116,10 +116,10 @@ def build_git_block(cwd: Path) -> str:
     return "\n".join(lines)
 
 
-def build_project_context(config: dict) -> str:
+def build_project_context(config: dict, *, cwd: str | Path | None = None) -> str:
     if not get_setting(config, "project_context"):
         return ""
-    cwd = Path(os.getcwd())
+    cwd = (Path(cwd) if cwd is not None else Path.cwd()).resolve()
     git_root = _git_toplevel(cwd)
 
     parts = []

@@ -1,3 +1,4 @@
+from .storage import transaction, delete_json, StorageError
 import os
 import platform
 import sys
@@ -179,16 +180,20 @@ class SessionPersistence:
     def save(self, *, clear_redo: bool = False) -> None:
         if self.incognito:
             return
-        if self.session_context is not None:
-            if clear_redo:
-                redo_path = redo_file_for(self.session_context.history_file)
-                if redo_path.exists():
-                    redo_path.unlink()
-            save_history(self.history, self.session_context.history_file)
-        if self.artifact_store is not None and self.artifact_file is not None:
-            save_artifact_store(self.artifact_store, self.artifact_file)
-        if self.retained_store is not None and self.reads_file is not None:
-            save_retained_output_store(self.retained_store, self.reads_file)
+        path = (self.session_context.history_file if self.session_context is not None
+                else self.artifact_file or self.reads_file)
+        if path is None:
+            return
+        with transaction(path):
+            if self.session_context is not None:
+                if clear_redo:
+                    redo_path = redo_file_for(self.session_context.history_file)
+                    delete_json(redo_path)
+                save_history(self.history, self.session_context.history_file)
+            if self.artifact_store is not None and self.artifact_file is not None:
+                save_artifact_store(self.artifact_store, self.artifact_file)
+            if self.retained_store is not None and self.reads_file is not None:
+                save_retained_output_store(self.retained_store, self.reads_file)
 
     def save_turn(self) -> None:
         """Persist the turn and drop any stale redo checkpoint."""
@@ -1212,6 +1217,7 @@ def _build_tool_hooks(
     def _run_edit(edit_args: dict) -> str:
         output = dispatch_edit_tool(
             edit_args,
+            cwd=root_node.shell_state.cwd,
             config=config,
             cancellation_token=cancellation_token,
         )
@@ -1259,12 +1265,13 @@ def _build_tool_hooks(
     )
 
 
-def build_instructions(config: dict) -> str:
+def build_instructions(config: dict, *, cwd: str | None = None) -> str:
     # Advertise the persisted shell cwd so later heads-up prompts in the same
     # process stay truthful after the model has cd'd elsewhere.
-    system_info = get_system_info(cwd=get_session_shell_state().cwd)
+    cwd = cwd if cwd is not None else get_session_shell_state().cwd
+    system_info = get_system_info(cwd=cwd)
     instructions = config["system_prompt"] + f"\n\nSystem info:\n{system_info}"
-    project_context = build_project_context(config)
+    project_context = build_project_context(config, cwd=cwd)
     if project_context:
         instructions += "\n\n" + project_context
     return instructions
@@ -1331,21 +1338,22 @@ def run_agent(
             mark_message=not incognito,
             persist_metadata=not incognito,
         )
-        persistence.session_context = session_context
-        history = [] if (new_session or incognito) else load_history(session_context.history_file)
-        persistence.history = history
-        web_search_read_nudge_sent = history_has_web_search_read_nudge(history)
-        metadata = history_metadata(session_context)
-        renderer.metadata = metadata
+        with transaction(session_context.history_file):
+            persistence.session_context = session_context
+            history = [] if (new_session or incognito) else load_history(session_context.history_file)
+            persistence.history = history
+            web_search_read_nudge_sent = history_has_web_search_read_nudge(history)
+            metadata = history_metadata(session_context)
+            renderer.metadata = metadata
 
-        artifact_file = artifact_file_for(session_context.history_file)
-        artifact_store = load_artifact_store(artifact_file)
-        persistence.artifact_file = artifact_file
-        persistence.artifact_store = artifact_store
-        reads_file = reads_file_for(session_context.history_file)
-        retained_store = load_retained_output_store(reads_file)
-        persistence.reads_file = reads_file
-        persistence.retained_store = retained_store
+            artifact_file = artifact_file_for(session_context.history_file)
+            artifact_store = load_artifact_store(artifact_file)
+            persistence.artifact_file = artifact_file
+            persistence.artifact_store = artifact_store
+            reads_file = reads_file_for(session_context.history_file)
+            retained_store = load_retained_output_store(reads_file)
+            persistence.reads_file = reads_file
+            persistence.retained_store = retained_store
         usage_path = usage_file_for(session_context.history_file)
         root_node = AgentNode(
             label="root",
@@ -1362,7 +1370,8 @@ def run_agent(
 
         history.append({"role": "user", "content": query, "id": new_frame_id(), **metadata})
 
-        instructions = build_instructions(config)
+        instructions_cwd = root_node.shell_state.cwd
+        instructions = build_instructions(config, cwd=instructions_cwd)
         tools = build_agent_tools(config)
         input_items = build_input(
             history,
@@ -1370,6 +1379,7 @@ def run_agent(
             config=config,
             instructions=instructions,
             tools=tools,
+            retained_store=retained_store,
         )
 
         kwargs = dict(
@@ -1385,6 +1395,9 @@ def run_agent(
         pending_interactive_command: PendingRunCommand | None = None
 
         while True:
+            if root_node.shell_state.cwd != instructions_cwd:
+                instructions_cwd = root_node.shell_state.cwd
+                kwargs["instructions"] = build_instructions(config, cwd=instructions_cwd)
             renderer.begin_turn(pending_interactive_command)
 
             renderer.ensure_response_wait()
@@ -1478,6 +1491,7 @@ def run_agent(
                     config=config,
                     instructions=kwargs["instructions"],
                     tools=kwargs["tools"],
+                    retained_store=retained_store,
                 )
                 continue
 
@@ -1531,6 +1545,7 @@ def run_agent(
                     config=config,
                     instructions=kwargs["instructions"],
                     tools=kwargs["tools"],
+                    retained_store=retained_store,
                     reasoning_kwargs={"history": history, "metadata": metadata},
                     tool_result_kwargs={"history": history, "metadata": metadata},
                     execute_tool_calls_fn=_execute_tools,
@@ -1578,7 +1593,8 @@ def run_agent(
         else:
             style = "red"
             console.print(f"[{style}]{label}:[/{style}] {escape(str(e))}")
-        checkpointer.flush_error_state()
+        if not isinstance(e, StorageError):
+            checkpointer.flush_error_state()
         return AgentRunResult(error=str(e))
     finally:
         sigint_cancel_scope.__exit__(None, None, None)

@@ -17,6 +17,7 @@ from jarv.context_budget import (
     trim_turn_input,
 )
 from jarv.model_catalog import CatalogModel
+from jarv.retained_outputs import RetainedOutputStore
 from jarv.usage import estimate_item_tokens, resolve_context_window
 
 
@@ -88,7 +89,7 @@ class ContextBudgetTests(unittest.TestCase):
         )
         self.assertEqual(len(history), 4)
 
-    def test_build_input_drops_orphaned_tool_pairs_when_budget_is_tight(self):
+    def test_build_input_preserves_tool_pairs_when_budget_is_tight(self):
         config = {**self._tiny_config(), "context_window_fallback": 80}
         model = "unknown-model"
         history = [
@@ -116,7 +117,9 @@ class ContextBudgetTests(unittest.TestCase):
             tools=[],
         )
 
-        self.assertEqual(api_items, [])
+        self.assertEqual([i.get("type") for i in api_items],
+                         [None, "function_call", "function_call_output", None])
+        self.assertEqual(api_items[1]["call_id"], api_items[2]["call_id"])
 
     def test_trim_turn_input_limits_within_turn_growth(self):
         config = self._tiny_config()
@@ -139,16 +142,73 @@ class ContextBudgetTests(unittest.TestCase):
             },
         ]
 
+        store = RetainedOutputStore()
         trimmed = trim_turn_input(
             input_items,
             model=model,
             config=config,
             instructions=instructions,
             tools=tools,
+            retained_store=store,
         )
 
-        self.assertLess(len(trimmed), len(input_items))
+        self.assertEqual(len(trimmed), len(input_items))
         self.assertEqual(trimmed[0]["role"], "user")
+        self.assertEqual(trimmed[1], input_items[1])
+        self.assertEqual(trimmed[2]["call_id"], "call_1")
+        ref = trimmed[2]["output"].split(": ", 1)[1].split("]", 1)[0]
+        self.assertEqual(store.get(ref).content, input_items[2]["output"])
+        self.assertEqual(trim_turn_input(
+            trimmed, model=model, config=config, instructions=instructions,
+            tools=tools, retained_store=store,
+        ), trimmed)
+
+    def test_compaction_advances_past_summaries_and_preserves_latest_turn(self):
+        history = []
+        for label in ("first", "second", "latest"):
+            history.extend([
+                {"role": "user", "content": label},
+                {"role": "assistant", "content": label + " x" * 1000},
+            ])
+        latest = history[-2:]
+        kwargs = dict(model="unknown-model", config=self._tiny_config(),
+                      instructions="", tools=[], target_tokens=1)
+        compact_oldest_turns(history, **kwargs)
+        self.assertEqual(len(history), 4)
+        self.assertIn("User: first", history[0]["content"])
+        self.assertIn("User: second", history[1]["content"])
+        self.assertEqual(history[-2:], latest)
+        self.assertFalse(compact_oldest_turns(history, **kwargs))
+        self.assertEqual(history[0]["content"].count("[Compacted earlier conversation]"), 1)
+
+    def test_active_parallel_pairs_survive_repeated_trimming(self):
+        store = RetainedOutputStore()
+        items = [{"role": "user", "content": "perform the edits"}]
+        for number in range(3):
+            calls = [
+                {"type": "function_call", "call_id": f"{number}-{i}",
+                 "name": "edit", "arguments": '{"path":"file.txt"}'}
+                for i in range(2)
+            ]
+            outputs = [
+                {"type": "function_call_output", "call_id": call["call_id"],
+                 "output": "Edit succeeded\n" + "details " * 2000}
+                for call in calls
+            ]
+            items = trim_turn_input(
+                items + calls + outputs, model="unknown-model",
+                config=self._tiny_config(), instructions="", tools=[],
+                retained_store=store,
+            )
+            self.assertEqual(len(items), 1 + (number + 1) * 4)
+            self.assertEqual(
+                [i["call_id"] for i in items if i.get("type") == "function_call"],
+                [i["call_id"] for i in items if i.get("type") == "function_call_output"],
+            )
+        self.assertEqual(trim_turn_input(
+            items, model="unknown-model", config=self._tiny_config(),
+            instructions="", tools=[],
+        ), items)
 
     def test_summarize_turn_items_includes_roles(self):
         summary = summarize_turn_items([
