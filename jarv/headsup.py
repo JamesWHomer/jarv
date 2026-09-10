@@ -93,6 +93,13 @@ SlashHandler = Callable[
 ]
 MaybeCommand = Callable[[str, list[str]], tuple[bool, str, list[str]] | None]
 
+# These commands can replace/delete the history or change the active checkout.
+# Session browsers and /tree must be guarded before opening their action menus.
+_SESSION_CHANGING_SLASH_COMMANDS = frozenset({
+    "/new", "/undo", "/redo", "/archive", "/session", "/sessions", "/tree",
+    "/uninstall",
+})
+
 _FULLSCREEN_SLASH_COMMANDS = frozenset({
     "/about",
     "/config",
@@ -1570,6 +1577,21 @@ class HeadsupApp(AltScreenApp):
 
     def _run_slash(self, command: str, rest: list[str]) -> str | None:
         """Run one slash command; returns "exit" when heads-up must stop."""
+        if command in _SESSION_CHANGING_SLASH_COMMANDS:
+            with self.lock:
+                busy = self._agent_busy
+            if busy:
+                # Cancellation is only a request: the worker may still be saving
+                # history or running a post-turn hook. Keep the guard in place
+                # until it releases ownership (including any queued messages).
+                # Dispatch runs on the input loop, the only place that starts
+                # an idle worker, so no new turn can start after this check.
+                self.add_notice(Text(
+                    f"{command} is unavailable during an active turn. "
+                    "Wait for completion, or cancel with Esc, then retry.",
+                    style="yellow",
+                ))
+                return None
         if command == "/tree":
             self._run_tree()
             return None

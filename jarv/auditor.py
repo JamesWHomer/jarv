@@ -602,15 +602,17 @@ def _parse_loose_verdict(text: str) -> tuple[bool, str] | None:
 
     lowered = normalized.lower()
 
-    allow_match = re.search(r"\ballow(?:ed)?\b\s*[:=-]?\s*(true|yes|y)\b", lowered)
+    allow_match = re.match(r"^\s*allow(?:ed)?\b\s*[:=-]?\s*(true|yes|y)\b", lowered)
     deny_match = re.search(r"\b(?:allow(?:ed)?\b\s*[:=-]?\s*(false|no|n)|deny|denied)\b", lowered)
-    leading_allow = re.match(r"^\s*(?:verdict\s*[:=-]\s*)?(allow|approved|safe)\b", lowered)
+    leading_allow = re.match(r"^\s*(?:verdict\s*[:=-]\s*)?(allow|approved|safe)(?:\s*$|\s+[-–—]\s+)", lowered)
     leading_deny = re.match(r"^\s*(?:verdict\s*[:=-]\s*)?(deny|denied|reject|rejected|unsafe)\b", lowered)
 
-    if allow_match or leading_allow:
-        return True, _loose_reason(normalized, "auditor allowed command")
+    # A negative value or conflicting denial must never become an approval
+    # merely because the response starts with the schema label "ALLOW".
     if deny_match or leading_deny:
         return False, _loose_reason(normalized, "auditor denied command")
+    if allow_match or leading_allow:
+        return True, _loose_reason(normalized, "auditor allowed command")
     return None
 
 

@@ -2216,6 +2216,82 @@ class HeadsupTests(unittest.TestCase):
         self.assertTrue(token.cancelled)
         app.unbind_cancel_token()
 
+    def test_session_commands_wait_for_worker_cleanup_after_cancellation(self):
+        started = threading.Event()
+        release = threading.Event()
+        hook_started = threading.Event()
+        release_hook = threading.Event()
+        token = CancellationToken()
+        app, _test_console, _output = self._app()
+        app.live = self._FakeLive()
+
+        def run_agent(*_args, **_kwargs):
+            app.bind_cancel_token(token)
+            started.set()
+            release.wait(timeout=5.0)
+            app.unbind_cancel_token()
+            return SimpleNamespace(cancelled=False)
+
+        def on_complete(_result):
+            hook_started.set()
+            release_hook.wait(timeout=5.0)
+
+        app.agent_import["module"] = SimpleNamespace(run_agent=run_agent)
+        commands = (
+            ("/new", []), ("/undo", ["2"]), ("/redo", []),
+            ("/archive", []), ("/session", []), ("/sessions", []),
+            ("/session", ["other"]), ("/sessions", ["other"]),
+            ("/tree", []), ("/uninstall", ["--purge"]),
+        )
+        with (
+            patch.object(app, "handle_slash", return_value=(app.config, app.client)) as handler,
+            patch.object(app, "_run_interactive_slash") as interactive,
+            patch.object(app, "_run_tree") as tree,
+            patch.object(app, "_run_uninstall") as uninstall,
+            patch.object(app, "_sync_after_slash"),
+        ):
+            try:
+                app._run_agent_query("working", on_complete=on_complete)
+                self.assertTrue(started.wait(timeout=1.0))
+                for stage in ("running", "cancelling", "post-turn hook"):
+                    if stage == "cancelling":
+                        self.assertTrue(app._cancel_active_turn())
+                    elif stage == "post-turn hook":
+                        release.set()
+                        self.assertTrue(hook_started.wait(timeout=1.0))
+                    for command, rest in commands:
+                        with self.subTest(stage=stage, command=command, rest=rest):
+                            app._handle_query(" ".join([command] + rest))
+                            handler.assert_not_called()
+                            interactive.assert_not_called()
+                            tree.assert_not_called()
+                            uninstall.assert_not_called()
+                self.assertIn("Wait for completion", self._entry_text(app))
+            finally:
+                release.set()
+                release_hook.set()
+                app._wait_for_agent_idle(timeout=2.0)
+
+            self.assertFalse(app._agent_busy)
+            for command, rest in commands:
+                app._run_slash(command, rest)
+            self.assertEqual(handler.call_count, 6)
+            self.assertEqual(interactive.call_count, 2)
+            tree.assert_called_once_with()
+            uninstall.assert_called_once_with(["--purge"])
+
+    def test_session_command_alias_cannot_bypass_busy_guard(self):
+        app, _test_console, _output = self._app()
+        app._agent_busy = True
+        with (
+            patch.object(app, "_confirm_command_alias", return_value=True),
+            patch.object(app, "handle_slash") as handler,
+        ):
+            app._handle_query("new")
+            app._handle_query("jarv /archive")
+        handler.assert_not_called()
+        self.assertIn("unavailable during an active turn", self._entry_text(app))
+
     def test_read_only_slash_commands_use_fullscreen_handoff(self):
         calls = []
 

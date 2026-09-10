@@ -518,6 +518,7 @@ def _audit_gate(
     from .auditor import audit_command
 
     body = _build_confirmation_body(command, reason)
+    auto_approve = (config or {}).get("auditor_auto_approve", True)
 
     # Non-interactive fallback. Skipped when a handler owns the display: the
     # heads-up app can prompt even though stdout is its alt screen.
@@ -535,7 +536,9 @@ def _audit_gate(
         )
         if allow:
             console.print(f"[green]  ✓ auditor:[/green] [dim]{auditor_reason}[/dim]")
-            return True, ""
+            if auto_approve:
+                return True, ""
+            return False, "[command denied — manual approval required; auditor auto-approval disabled]"
         return False, f"[command denied — auditor: {auditor_reason}]"
 
     audit_state: dict = {"done": False, "allow": False, "reason": ""}
@@ -563,7 +566,6 @@ def _audit_gate(
     thread = threading.Thread(target=_run_auditor, daemon=True)
     thread.start()
 
-    auto_approve = (config or {}).get("auditor_auto_approve", True)
     approved = request_confirmation(ConfirmRequest(
         body=body,
         command=command,

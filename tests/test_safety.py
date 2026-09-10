@@ -23,6 +23,42 @@ class ConfirmHandlerRegistryTests(unittest.TestCase):
     def tearDown(self):
         clear_confirm_handler()
 
+    def test_redirected_auditor_respects_approval_policy(self):
+        for auto_approve in (False, True):
+            for verdict in (False, True):
+                with self.subTest(auto_approve=auto_approve, verdict=verdict), patch(
+                    "jarv.safety.sys.stdout.isatty", return_value=False
+                ), patch(
+                    "jarv.auditor.audit_command", return_value=(verdict, "test verdict")
+                ), patch("jarv.safety.console.print"), patch(
+                    "jarv.safety.request_confirmation"
+                ) as confirm:
+                    allowed, denial = check_command(
+                        "rm -rf /", "risky", audit=True,
+                        config={"auditor_auto_approve": auto_approve},
+                    )
+                    self.assertEqual(allowed, auto_approve and verdict)
+                    self.assertEqual(bool(denial), not allowed)
+                    confirm.assert_not_called()
+
+    def test_interactive_auditor_passes_approval_policy(self):
+        for isatty in (False, True):
+            for auto_approve in (False, True):
+                with self.subTest(isatty=isatty, auto_approve=auto_approve):
+                    def handler(request):
+                        self.assertEqual(request.auto_approve, auto_approve)
+                        return False
+
+                    set_confirm_handler(handler)
+                    with patch("jarv.safety.sys.stdout.isatty", return_value=isatty), patch(
+                        "jarv.auditor.audit_command", return_value=(True, "safe")
+                    ):
+                        allowed, _ = check_command(
+                            "rm -rf /", "risky", audit=True,
+                            config={"auditor_auto_approve": auto_approve},
+                        )
+                    self.assertFalse(allowed)
+
     def test_set_and_clear_handler(self):
         self.assertFalse(confirm_handler_active())
         set_confirm_handler(lambda request: True)

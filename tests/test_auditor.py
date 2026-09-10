@@ -1,3 +1,5 @@
+import pytest
+
 from jarv.auditor import _parse_response
 from jarv.auditor import _call_anthropic
 from jarv.auditor import _call_gemini
@@ -106,6 +108,21 @@ def test_parse_response_accepts_allow_key_value_text():
 
 def test_parse_response_accepts_leading_allow_verdict():
     assert _parse_response("ALLOW - harmless package resolution check")[0] is True
+
+
+@pytest.mark.parametrize("response", [
+    "ALLOW: false. This is unsafe.",
+    "allow: no\nreason: deletes user files",
+    "ALLOWED = n",
+    "ALLOW: true\nDENY - deletes user files",
+    "DENY - allow: true would be unsafe",
+    "ALLOW: maybe",
+    "ALLOW: unsafe",
+    "ALLOW is not recommended",
+    "Do not use allow: true for this command",
+])
+def test_parse_response_never_approves_negative_or_unclear_text(response):
+    assert _parse_response(response)[0] is False
 
 
 def test_parse_response_accepts_leading_deny_verdict():
