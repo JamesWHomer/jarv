@@ -130,7 +130,7 @@ class CliStdinTests(unittest.TestCase):
         ):
             cli.main()
 
-        run_slash.assert_called_once_with("/history", [])
+        run_slash.assert_called_once_with("/history", [], exit_on_error=True)
         self.assertEqual(stdin.tell(), 0)
 
     def test_main_returns_update_failure_exit_code(self):

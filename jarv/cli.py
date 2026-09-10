@@ -81,7 +81,7 @@ def _lazy_commands():
     return build_dispatch()
 
 
-def _run_slash_command(command: str, rest: list[str]) -> bool:
+def _run_slash_command(command: str, rest: list[str], *, exit_on_error: bool = False) -> bool:
     """Run a slash command. Returns True if handled, False if unknown."""
     dispatch = _lazy_commands()
     entry = dispatch.get(command)
@@ -91,10 +91,15 @@ def _run_slash_command(command: str, rest: list[str]) -> bool:
     handler, needs_nudge, takes_rest = entry
     if needs_nudge:
         _setup_nudge()
-    if takes_rest:
-        handler(rest)
-    else:
-        handler()
+    if rest and not takes_rest:
+        _console().print(f"[red]{command} does not accept arguments.[/red]")
+        if exit_on_error:
+            raise SystemExit(2)
+        return True
+    outcome = handler(rest) if takes_rest else handler()
+    status = outcome if type(outcome) is int else 0
+    if status and exit_on_error:
+        raise SystemExit(status)
     return True
 
 
@@ -205,22 +210,26 @@ def _maybe_command(first_word: str, rest: list[str]) -> tuple[bool, str, list[st
     return None
 
 
-def cmd_setup(rest: list[str] | None = None) -> dict | None:
-    """Run the interactive setup wizard. Returns config or None."""
+def cmd_setup(rest: list[str] | None = None) -> dict | int | None:
+    """Run setup, returning its config or a command failure/cancellation status."""
     from .setup import run_setup_wizard, SETUP_STEPS
     console = _console()
     step = None
     if rest:
+        if len(rest) > 1:
+            console.print("[red]Usage: /setup [step][/red]")
+            return 2
         step = rest[0].lower().lstrip("-")
         if step not in SETUP_STEPS:
             console.print(f"[red]Unknown setup step '{step}'.[/red]")
             console.print(f"[dim]Available: {', '.join(sorted(SETUP_STEPS))}[/dim]")
-            return None
+            return 2
     try:
-        return run_setup_wizard(step=step)
+        result = run_setup_wizard(step=step)
+        return result if result is not None else 130
     except (EOFError, KeyboardInterrupt):
         console.print("\n[dim]Setup cancelled.[/dim]")
-        return None
+        return 130
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -308,8 +317,13 @@ def main() -> None:
             parser.error(f"unrecognized arguments: {' '.join(unknown)}")
     query_parts: list[str] = args.query
     console = _console()
-    _print_previous_update_result()
-    _print_previous_uninstall_result()
+    from .paths import CONFIG_DIR, UNINSTALL_RESULT_FILE
+
+    # Import the updater only when there is a result to report.
+    if (CONFIG_DIR / "update-result.json").is_file():
+        _print_previous_update_result()
+    if UNINSTALL_RESULT_FILE.is_file():
+        _print_previous_uninstall_result()
 
     # "jarv help" permanent alias (only when help is the sole argument)
     if len(query_parts) == 1 and query_parts[0].lower() == "help":
@@ -320,22 +334,11 @@ def main() -> None:
     # Slash commands — flags are silently ignored for these
     if query_parts and query_parts[0].startswith("/"):
         command = query_parts[0].lower()
-        if command in {"/update", "/uninstall"}:
-            if command == "/update":
-                from .commands import cmd_update
-
-                status = cmd_update()
-            else:
-                from .uninstall import cmd_uninstall
-
-                status = cmd_uninstall(query_parts[1:])
-            if status:
-                raise SystemExit(status)
-            return
-        if not _run_slash_command(command, query_parts[1:]):
+        if not _run_slash_command(command, query_parts[1:], exit_on_error=True):
             console.print(f"[red]Unknown command:[/red] {command}")
             _print_command_suggestions(command)
             console.print("[dim]Run [bold]jarv /help[/bold] for a list of commands.[/dim]")
+            raise SystemExit(2)
         return
 
     # Check if user typed a command name without the slash (e.g. "jarv set" instead of "jarv /set")
@@ -343,8 +346,9 @@ def main() -> None:
         result = _maybe_command(query_parts[0], query_parts[1:])
         if result is not None:
             _, command, rest = result
-            if not _run_slash_command(command, rest):
+            if not _run_slash_command(command, rest, exit_on_error=True):
                 console.print(f"[red]Unknown command:[/red] {command}")
+                raise SystemExit(2)
             return
 
     # First-run: auto-trigger setup wizard if no config exists yet
@@ -353,8 +357,8 @@ def main() -> None:
     config = dict(load_config())
     if not args.provider and not is_setup_complete(config):
         result = cmd_setup()
-        if result is None or not is_setup_complete(result):
-            sys.exit(1)
+        if not isinstance(result, dict) or not is_setup_complete(result):
+            sys.exit(result if type(result) is int else 1)
         config = result
 
     config = _apply_cli_overrides(config, args)
@@ -394,15 +398,27 @@ def main() -> None:
         run_heads_up_mode(config, client, args=args, agent_loader=agent_loader)
         return
 
-    if config.get("check_updates", True):
-        from .update_check import _check_update_background, maybe_print_update_available
-
-        maybe_print_update_available()
-        threading.Thread(target=_check_update_background, daemon=True).start()
-
-    from .agent import run_agent
+    startup_wait = None
     try:
-        result = run_agent(query, config, client=None, new_session=args.new, incognito=args.incognito)
+        if sys.stdout.isatty():
+            import time
+            from .response_wait import start_response_wait
+
+            started = time.perf_counter()
+            indicator, live = start_response_wait(True, started, console=console)
+            startup_wait = (started, indicator, live)
+
+        if config.get("check_updates", True):
+            from .update_check import _check_update_background, maybe_print_update_available
+
+            maybe_print_update_available()
+            threading.Thread(target=_check_update_background, daemon=True).start()
+
+        from .agent import run_agent
+
+        wait_kwargs = {"startup_wait": startup_wait} if startup_wait is not None else {}
+        result = run_agent(query, config, client=None, new_session=args.new,
+                           incognito=args.incognito, **wait_kwargs)
         if getattr(result, "cancelled", False) is True:
             console.print("\n[dim]Cancelled.[/dim]")
             sys.exit(130)
@@ -411,6 +427,10 @@ def main() -> None:
     except KeyboardInterrupt:
         console.print("\n[dim]Cancelled.[/dim]")
         sys.exit(130)
+    finally:
+        # Also restore the terminal if importing the agent fails or is cancelled.
+        if startup_wait is not None:
+            startup_wait[2].stop()
 
 
 def run_heads_up_mode(

@@ -11,7 +11,6 @@ from rich.console import Group
 from rich.control import Control, ControlType
 from rich.live import Live
 from rich.live_render import LiveRender
-from rich.markdown import Markdown
 from rich.segment import Segment
 from rich.text import Text
 
@@ -39,6 +38,12 @@ from .orchestrator import (
 )
 from .retained_outputs import RetainedOutputStore
 from .usage import format_cost, format_int, load_usage, usage_cost_summary
+from .response_wait import (
+    _THINKING_FRAMES,
+    ResponseWaitIndicator,
+    response_wait_label,
+    start_response_wait,
+)
 
 
 def _ui_call(ui, method: str, *args, **kwargs):
@@ -94,18 +99,7 @@ def _replace_terminal_rows(row_count: int) -> bool:
     return True
 
 
-_THINKING_FRAMES = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"]
 STREAM_PREVIEW_REFRESH_INTERVAL = 1 / 12
-
-
-def response_wait_label(has_reasoning: bool) -> str:
-    """Return the live wait label for the response stream.
-
-    Interactive ``run_command`` continuations never reach this label: their
-    "deciding next input" footer is owned by :class:`InteractiveCommandCard`,
-    which stands in for the response-wait spinner for the whole session.
-    """
-    return "Thinking" if has_reasoning else "Waiting"
 
 
 _TOOL_ACTIVITY_LABELS = {
@@ -126,21 +120,6 @@ def tool_activity_label(tool_names: tuple[str, ...]) -> str:
         tool_names[0],
         ("Preparing action", "Prepared action"),
     )[0]
-
-
-class ResponseWaitIndicator:
-    """Animated response wait line with live elapsed timer."""
-
-    def __init__(self, start_time: float):
-        self._start = start_time
-        self.has_reasoning = False
-
-    def __rich_console__(self, console, options):
-        now = time.perf_counter()
-        elapsed = now - self._start
-        frame = _THINKING_FRAMES[int(now * 10) % len(_THINKING_FRAMES)]
-        label = response_wait_label(self.has_reasoning)
-        yield Text(f"{frame}  {label}\u2026  {int(elapsed)}s")
 
 
 class ToolActivityIndicator:
@@ -354,18 +333,7 @@ def _start_response_wait_indicator(
     interactive: bool,
     start_time: float,
 ) -> tuple[ResponseWaitIndicator | None, Live | None]:
-    if not interactive:
-        return None, None
-    wait_indicator = ResponseWaitIndicator(start_time)
-    spinner_live = Live(
-        wait_indicator,
-        refresh_per_second=4,
-        console=console,
-        auto_refresh=True,
-        transient=True,
-    )
-    spinner_live.start()
-    return wait_indicator, spinner_live
+    return start_response_wait(interactive, start_time, console=console, live_factory=Live)
 
 
 def _markdown_tail_source(text: str, max_chars: int) -> str:
@@ -423,6 +391,8 @@ class TailMarkdown:
         # block grows to `max_lines` and then holds steady — no one-row jump
         # when the hint first appears at the overflow threshold.
         content_budget = max(0, max_lines - 1)
+        from rich.markdown import Markdown
+
         md = Markdown(self._text)
         lines = console.render_lines(md, options, pad=False)
         hidden = max(0, len(lines) - content_budget)
@@ -728,6 +698,8 @@ def _dispatch_ask_user(args: dict, config: dict | None = None, ui=None) -> str:
         display_mode = get_setting(config, "tool_call_display")
         if display_mode == "auto":
             display_mode = "print"
+        from rich.markdown import Markdown
+
         question_renderable = Markdown(flatten_headings(question))
         if display_mode == "print":
             console.print(

@@ -76,13 +76,13 @@ def _mask_config_value(key: str, value) -> str:
     return f"[green]{repr(value)}[/green]"
 
 
-def cmd_set(args: list) -> None:
+def cmd_set(args: list) -> int:
     from .config import DEFAULT_CONFIG, load_config, save_config, validate_config
 
     if len(args) < 2:
         console.print(status_line("✗", "jarv /set <key> <value>", prefix_style="bold red", message_style="dim"))
         console.print(f"  [dim]Keys: {', '.join(DEFAULT_CONFIG.keys())}[/dim]")
-        return
+        return 2
     key, raw = args[0], " ".join(args[1:])
     if key not in DEFAULT_CONFIG:
         console.print(
@@ -98,23 +98,24 @@ def cmd_set(args: list) -> None:
 
         reconcile_reasoning_effort(trial)
     if not validate_config(trial):
-        return
+        return 2
     save_config(trial)
     display = _mask_config_value(key, value)
     console.print(f"[bold cyan]✓[/bold cyan] [bold cyan]{key}[/bold cyan] [dim]=[/dim] {display}")
+    return 0
 
 
-def cmd_unset(args: list) -> None:
+def cmd_unset(args: list) -> int:
     from .config import DEFAULT_CONFIG, load_config, save_config, validate_config
 
-    if not args:
+    if len(args) != 1:
         console.print(status_line("✗", "jarv /unset <key>", prefix_style="bold red", message_style="dim"))
-        return
+        return 2
     key = args[0]
     config = load_config()
     if key not in config:
         console.print(f"[yellow]○[/yellow] [bold]{key}[/bold] [dim]is not set.[/dim]")
-        return
+        return 1
     if key in DEFAULT_CONFIG:
         trial = dict(config)
         trial[key] = DEFAULT_CONFIG[key]
@@ -123,16 +124,17 @@ def cmd_unset(args: list) -> None:
 
             reconcile_reasoning_effort(trial)
         if not validate_config(trial):
-            return
+            return 2
         save_config(trial)
         console.print(f"[bold cyan]↺[/bold cyan] [bold cyan]{key}[/bold cyan] [dim]reset to default →[/dim] [green]{repr(DEFAULT_CONFIG[key])}[/green]")
     else:
         trial = dict(config)
         del trial[key]
         if not validate_config(trial):
-            return
+            return 2
         save_config(trial)
         console.print(f"[bold cyan]✓[/bold cyan] [bold cyan]{key}[/bold cyan] [dim]removed.[/dim]")
+    return 0
 
 
 def _command_help_rows(names: list[str]) -> list[tuple[str, str, str]]:

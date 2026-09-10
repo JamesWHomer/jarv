@@ -4,7 +4,9 @@ Run with the checkout's Python: scripts/benchmark/benchmark_coldstart.py.
 TTY detection is simulated at 100x30; rendering goes to a pipe, not a terminal
 emulator. OS/bytecode caches are not cleared. Every sample includes Python
 startup, imports, and CLI dispatch. Menus stop after the real first refresh;
-one-shot stops its timer when a loopback server receives the first model POST.
+one-shot records the first visible stdout bytes and the arrival of the first
+model POST at a loopback server (an upper bound on request-send latency).
+Terminal one-shot cases simulate a TTY; the original one-shot case uses a pipe.
 """
 from __future__ import annotations
 
@@ -14,6 +16,7 @@ import os
 import platform
 import queue
 import random
+import re
 import statistics
 import subprocess
 import sys
@@ -28,9 +31,10 @@ ROOT = Path(__file__).resolve().parents[2]
 CHILD = r'''
 import os, sys
 mode = sys.argv.pop(1)
-if mode == "menu":
+if mode in ("menu", "request-tty"):
     sys.stdin.isatty = lambda: True
     sys.stdout.isatty = lambda: True
+if mode == "menu":
     os.environ["JARV_BENCH_STOP_AFTER_PAINT"] = "1"
 if os.environ.get("JARV_BENCH_PROFILE"):
     import cProfile
@@ -54,6 +58,8 @@ save_history([
 '''
 CASES = [
     ("one-shot", "request", ["--incognito", "Reply with OK."]),
+    ("one-shot terminal", "request-tty", ["--incognito", "Reply with OK."]),
+    ("one-shot saved", "request-tty", ["--new", "Reply with OK."]),
     ("headsup", "menu", ["--incognito"]),
     *[(name, "menu", ["/" + name]) for name in
       ("settings", "setup", "sessions", "tree", "history", "usage", "help", "about", "config")],
@@ -61,6 +67,46 @@ CASES = [
     ("CLI help", "exit", ["--help"]),
     ("settings print", "exit", ["/settings"]),
 ]
+
+
+def run_child(command, *, env):
+    """Drain both pipes, timestamping visible output without unbuffering the CLI."""
+    chunks = {"stdout": [], "stderr": []}
+    first_print = []
+    ansi = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]")
+
+    def drain(stream, name):
+        with stream:
+            while chunk := stream.read1(4096):
+                received = time.perf_counter_ns()
+                chunks[name].append(chunk)
+                if name == "stdout" and not first_print:
+                    visible = ansi.sub(b"", b"".join(chunks[name])).strip()
+                    if visible:
+                        first_print.append(received)
+
+    started = time.perf_counter_ns()
+    process = subprocess.Popen(command, cwd=ROOT, env=env, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    readers = [threading.Thread(target=drain, args=(getattr(process, name), name))
+               for name in chunks]
+    for reader in readers:
+        reader.start()
+    try:
+        process.wait(timeout=30)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        for reader in readers:
+            reader.join()
+    ended = time.perf_counter_ns()
+    result = subprocess.CompletedProcess(
+        command, process.returncode,
+        **{name: b"".join(parts).decode("utf-8", errors="replace")
+           for name, parts in chunks.items()},
+    )
+    return result, started, ended, first_print[0] if first_print else None
 
 
 def main():
@@ -123,12 +169,8 @@ def main():
                 for name, mode, cli_args in cases:
                     if args.reps == 1:
                         print(f"Measuring {name}", flush=True)
-                    started = time.perf_counter_ns()
-                    result = subprocess.run([sys.executable, "-c", CHILD, mode, *cli_args],
-                                            cwd=ROOT, env=env, stdin=subprocess.DEVNULL,
-                                            capture_output=True, text=True, encoding="utf-8",
-                                            errors="replace", timeout=30)
-                    ended = time.perf_counter_ns()
+                    result, started, ended, first_print = run_child(
+                        [sys.executable, "-c", CHILD, mode, *cli_args], env=env)
                     if result.returncode:
                         raise RuntimeError(f"{name}: exit {result.returncode}\n{result.stderr[-2000:]}")
                     label = None
@@ -139,11 +181,13 @@ def main():
                             raise RuntimeError(f"{name}: no first-paint marker\n{result.stdout[-1000:]}\n{result.stderr[-1000:]}")
                         ended = int(marks[0].split()[1])
                         label = labels[0]
-                    elif mode == "request":
+                    elif mode.startswith("request"):
                         ended, label = requests.get(timeout=2)
                         if label != "/v1/chat/completions":
                             raise RuntimeError(f"Unexpected one-shot request: {label}")
-                    samples[name].append({"ms": (ended - started) / 1e6, "marker": label, "exit_code": result.returncode})
+                    samples[name].append({"ms": (ended - started) / 1e6, "marker": label,
+                                          "first_print_ms": (first_print - started) / 1e6 if first_print else None,
+                                          "exit_code": result.returncode})
                 print(f"Completed round {repetition + 1}/{args.reps}", flush=True)
     finally:
         server.shutdown()
@@ -153,16 +197,19 @@ def main():
         values = [sample["ms"] for sample in samples[name]]
         rows.append(dict(name=name, endpoint=mode, args=cli_args, median_ms=statistics.median(values),
                          min_ms=min(values), max_ms=max(values), samples=samples[name]))
+        prints = [sample["first_print_ms"] for sample in samples[name] if sample["first_print_ms"] is not None]
+        rows[-1]["first_print_median_ms"] = statistics.median(prints) if prints else None
     payload = dict(timestamp=datetime.now(timezone.utc).isoformat(), python=sys.version,
                    executable=sys.executable, platform=platform.platform(),
                    methodology=__doc__, reps=args.reps, terminal="simulated TTY 100x30, NO_COLOR=1",
-                   fixture="isolated home, one session, one exchange; incognito agent modes; Ollama-compatible loopback mock",
+                   fixture="isolated home, seeded one-exchange session; incognito and fresh saved one-shot modes; Ollama-compatible loopback mock",
                    results=rows)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    print(f"{'case':<18} {'median ms':>10} {'min ms':>10} {'max ms':>10}")
+    print(f"{'case':<18} {'median ms':>10} {'min ms':>10} {'max ms':>10} {'first print':>12}")
     for row in rows:
-        print(f"{row['name']:<18} {row['median_ms']:10.1f} {row['min_ms']:10.1f} {row['max_ms']:10.1f}")
+        first = row['first_print_median_ms']
+        print(f"{row['name']:<18} {row['median_ms']:10.1f} {row['min_ms']:10.1f} {row['max_ms']:10.1f} {f'{first:.1f}' if first is not None else '-':>12}")
     print(f"Saved {args.output}")
 
 

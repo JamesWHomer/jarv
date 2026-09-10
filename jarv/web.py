@@ -6,10 +6,11 @@ import json
 import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, unquote, urljoin, urlsplit, urlunsplit
 
-import httpx
+if TYPE_CHECKING:
+    import httpx
 
 from . import __version__
 from .cancellation import CancellationToken
@@ -448,6 +449,8 @@ def _validated_url(value: object) -> str:
 
 
 def _create_client(timeout: float) -> httpx.Client:
+    import httpx
+
     return httpx.Client(
         timeout=httpx.Timeout(timeout, connect=min(timeout, 10.0)),
         follow_redirects=False,
@@ -470,6 +473,8 @@ def _request_bytes(
     form_data: dict[str, str] | None = None,
     cancellation_token: CancellationToken | None = None,
 ) -> tuple[str, str, bytes]:
+    import httpx
+
     client = _create_client(timeout)
     unregister = (
         cancellation_token.register(client.close)
