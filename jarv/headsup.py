@@ -14,7 +14,6 @@ from typing import Callable
 from rich.cells import cell_len
 from rich.console import Console, Group, RenderableType
 from rich.live import Live
-from rich.markdown import Markdown
 from rich.markup import escape
 from rich.text import Text
 
@@ -31,13 +30,15 @@ from .command_input import (
 )
 from .command_menu import MenuEntry, argument_entries, filter_entries, menu_entries
 from .command_registry import COMMANDS, parse_command_alias
-from .agent_ui import (
-    _THINKING_FRAMES,
+from .ui_status import (
     STREAM_PREVIEW_REFRESH_INTERVAL,
-    response_wait_label,
     thought_complete_indicator,
     tool_activity_label,
     tool_complete_indicator,
+)
+from .response_wait import (
+    _THINKING_FRAMES,
+    response_wait_label,
 )
 from .config import get_setting
 from .display import (
@@ -419,6 +420,8 @@ class HeadsupAgentUI:
         self.app.add_usage(renderable)
 
     def ask_user(self, question: str, _config: dict) -> str:
+        from rich.markdown import Markdown
+
         question_renderable = Markdown(flatten_headings(question))
         self.app.upsert_live_tool(
             "ask_user",
@@ -684,7 +687,7 @@ class HeadsupApp(AltScreenApp):
         client,
         *,
         args: argparse.Namespace | None,
-        agent_loader: tuple[dict, threading.Event],
+        agent_loader: tuple[dict, threading.Event] | None,
         handle_slash: SlashHandler,
         maybe_command: MaybeCommand,
         render_console: Console = console,
@@ -704,7 +707,8 @@ class HeadsupApp(AltScreenApp):
         configure_menu_border(get_setting(self.config, "headsup_border"))
         self.client = client
         self.args = args
-        self.agent_import, self.agent_ready = agent_loader
+        self._load_agent_on_query = agent_loader is None
+        self.agent_import, self.agent_ready = agent_loader or ({}, threading.Event())
         self.handle_slash = handle_slash
         self.maybe_command = maybe_command
         self.entries: list[TranscriptEntry] = [self._initial_notice_entry()]
@@ -718,6 +722,7 @@ class HeadsupApp(AltScreenApp):
         self.lock = threading.RLock()
         self._exit_armed = False
         self._cancel_token: CancellationToken | None = None
+        self._startup_cancel_token: CancellationToken | None = None
         self._live_tool_index: dict[str, int] = {}
         self._refresh_suspended = 0
         self._foreground_input_active = False
@@ -1165,6 +1170,8 @@ class HeadsupApp(AltScreenApp):
         return self._upsert(index, "status", renderable)
 
     def upsert_assistant_message(self, index: int | None, text: str) -> int:
+        from rich.markdown import Markdown
+
         return self._upsert(
             index,
             "assistant",
@@ -1503,7 +1510,13 @@ class HeadsupApp(AltScreenApp):
         # on_key, so we just record the token. (A background esc-listener thread
         # was removed: it only ever ran for the non-foreground adapter path that
         # no longer exists, and it raced the polled reader for the same stdin.)
-        self._cancel_token = token
+        with self.lock:
+            # Preserve an Esc pressed during imports/client setup across the
+            # handoff to the agent's own token, including a concurrent cancel.
+            startup = self._startup_cancel_token
+            if startup is not None and startup is not token:
+                startup.register(token.cancel)
+            self._cancel_token = token
 
     def unbind_cancel_token(self) -> None:
         self._cancel_token = None
@@ -1759,10 +1772,35 @@ class HeadsupApp(AltScreenApp):
             on_complete(result)
 
     def _run_agent_query_now(self, query: str):
+        with self.lock:
+            startup = self._startup_cancel_token or CancellationToken()
+            self._startup_cancel_token = startup
+            self._cancel_token = startup
         try:
-            self.agent_ready.wait()
+            # This runs on the turn worker while the UI continues accepting
+            # input. Idle menus need neither the agent nor an HTTP transport.
+            if self._load_agent_on_query:
+                from . import agent
+
+                self.agent_import["module"] = agent
+                self.agent_ready.set()
+                self._load_agent_on_query = False
+            while not self.agent_ready.wait(timeout=0.05):
+                startup.throw_if_cancelled()
+            startup.throw_if_cancelled()
             if "error" in self.agent_import:
                 raise self.agent_import["error"]
+            config = self.config
+            if self.client is None:
+                from .provider import create_client
+
+                client = create_client(config)
+                if startup.cancelled or self.config is not config:
+                    client.close()
+                    startup.cancel()
+                    startup.throw_if_cancelled()
+                self.client = client
+            startup.throw_if_cancelled()
             ui = HeadsupAgentUI(self)
             # The loop's on_tick polls the active UI to animate spinners and live
             # tool cards (this replaced the UI's old background ticker thread).
@@ -1770,7 +1808,7 @@ class HeadsupApp(AltScreenApp):
             try:
                 result = self.agent_import["module"].run_agent(
                     query,
-                    self.config,
+                    config,
                     self.client,
                     heads_up=True,
                     incognito=self.incognito,
@@ -1791,12 +1829,23 @@ class HeadsupApp(AltScreenApp):
             elif isinstance(getattr(result, "error", None), str):
                 self.add_notice(Text("Turn failed.", style="red"))
             return result
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, TurnCancelled):
             with self.lock:
                 if not str(self.editor.get("buffer", "")) and self._answer_request is None:
                     initialize_text_editor(self.editor, query)
             self.add_notice(Text("Cancelled.", style="yellow"))
             return None
+        except Exception as exc:
+            # Import/transport failures now happen on a worker, so report them
+            # in the menu and leave it usable for /setup and retry.
+            self.add_notice(Text(f"Could not start turn: {exc}", style="bold red"))
+            return None
+        finally:
+            with self.lock:
+                if self._cancel_token is startup:
+                    self._cancel_token = None
+                if self._startup_cancel_token is startup:
+                    self._startup_cancel_token = None
 
     def _queue_or_start_agent_query(self, query: str, on_complete: Callable | None = None) -> None:
         with self.lock:
@@ -1819,6 +1868,10 @@ class HeadsupApp(AltScreenApp):
             daemon=True,
         )
         with self.lock:
+            # Bind before starting the worker: even an immediate Esc/exit must
+            # prevent the first request from being sent after setup finishes.
+            self._startup_cancel_token = CancellationToken()
+            self._cancel_token = self._startup_cancel_token
             self._agent_thread = thread
         thread.start()
 
@@ -2065,6 +2118,8 @@ class HeadsupApp(AltScreenApp):
                     )
                 )
             elif role == "assistant":
+                from rich.markdown import Markdown
+
                 entries.append(
                     TranscriptEntry(
                         "assistant",
@@ -2724,7 +2779,7 @@ def run_heads_up_mode(
     client,
     *,
     args: argparse.Namespace | None,
-    agent_loader: tuple[dict, threading.Event],
+    agent_loader: tuple[dict, threading.Event] | None,
     handle_slash: SlashHandler,
     maybe_command: MaybeCommand,
 ) -> None:

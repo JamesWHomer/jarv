@@ -81,7 +81,7 @@ class CliStdinTests(unittest.TestCase):
             patch.object(cli, "load_config", return_value=config),
             patch("jarv.config.is_setup_complete", return_value=True),
             patch.object(cli, "validate_config", return_value=True),
-            patch("jarv.provider.resolve_api_key", return_value="key"),
+            patch("jarv.provider_auth.resolve_api_key", return_value="key"),
             patch("jarv.provider.create_client", return_value=object()) as create_client,
             patch("jarv.agent.run_agent") as run_agent,
         ):
@@ -109,7 +109,7 @@ class CliStdinTests(unittest.TestCase):
             patch("jarv.config.is_setup_complete", return_value=False),
             patch.object(cli, "cmd_setup") as setup,
             patch.object(cli, "validate_config", return_value=True),
-            patch("jarv.provider.resolve_api_key", return_value="key") as resolve_key,
+            patch("jarv.provider_auth.resolve_api_key", return_value="key") as resolve_key,
             patch("jarv.agent.run_agent") as run_agent,
         ):
             cli.main()
@@ -158,7 +158,7 @@ class CliStdinTests(unittest.TestCase):
             patch.object(cli, "load_config", return_value=config),
             patch("jarv.config.is_setup_complete", return_value=True),
             patch.object(cli, "validate_config", return_value=True),
-            patch("jarv.provider.resolve_api_key", return_value="key"),
+            patch("jarv.provider_auth.resolve_api_key", return_value="key"),
             patch("jarv.provider.create_client", return_value=object()) as create_client,
             patch("jarv.agent.run_agent") as run_agent,
         ):
@@ -184,7 +184,7 @@ class CliStdinTests(unittest.TestCase):
             patch.object(cli, "load_config", return_value=config),
             patch("jarv.config.is_setup_complete", return_value=True),
             patch.object(cli, "validate_config", return_value=True),
-            patch("jarv.provider.resolve_api_key", return_value="key"),
+            patch("jarv.provider_auth.resolve_api_key", return_value="key"),
             patch("jarv.provider.create_client", return_value=object()),
             patch.object(cli, "run_heads_up_mode") as heads_up,
         ):
@@ -206,7 +206,7 @@ class CliStdinTests(unittest.TestCase):
             patch.object(cli, "load_config", return_value=config),
             patch("jarv.config.is_setup_complete", return_value=True),
             patch.object(cli, "validate_config", return_value=True),
-            patch("jarv.provider.resolve_api_key", return_value="key"),
+            patch("jarv.provider_auth.resolve_api_key", return_value="key"),
             patch("jarv.agent.run_agent", return_value=SimpleNamespace(cancelled=True)),
         ):
             with self.assertRaises(SystemExit) as raised:

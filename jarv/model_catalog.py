@@ -50,18 +50,24 @@ def _catalog_config(config: dict | str) -> dict:
 
 
 def _catalog_endpoint(config: dict) -> str:
-    from .anthropic_http import ANTHROPIC_API_URL
-    from .gemini_http import GEMINI_API_URL
-    from .openai_http import OPENAI_API_URL
-
     provider = str(config.get("provider", "openai"))
-    defaults = {
-        "openai": OPENAI_API_URL,
-        "anthropic": ANTHROPIC_API_URL,
-        "gemini": GEMINI_API_URL,
-    }
-    endpoint = str(config.get("base_url") or PROVIDERS.get(provider, {}).get("base_url")
-                   or defaults.get(provider, "")).strip().rstrip("/")
+    endpoint = config.get("base_url") or PROVIDERS.get(provider, {}).get("base_url")
+    # Cached menu metadata needs only the endpoint identity. A configured URL
+    # (including local providers) does not require any HTTP backend imports.
+    if not endpoint:
+        if provider == "openai":
+            from .openai_http import OPENAI_API_URL
+
+            endpoint = OPENAI_API_URL
+        elif provider == "anthropic":
+            from .anthropic_http import ANTHROPIC_API_URL
+
+            endpoint = ANTHROPIC_API_URL
+        elif provider == "gemini":
+            from .gemini_http import GEMINI_API_URL
+
+            endpoint = GEMINI_API_URL
+    endpoint = str(endpoint or "").strip().rstrip("/")
     parts = urlsplit(endpoint)
     credentials, separator, host = parts.netloc.rpartition("@")
     netloc = credentials + separator + host.lower() if separator else parts.netloc.lower()

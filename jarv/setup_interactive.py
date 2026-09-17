@@ -31,7 +31,7 @@ from rich.text import Text
 from .config import save_config
 from .display import console, terminal_size
 from .intro_animation import render_intro
-from .provider import LOCAL_PROVIDERS, PROVIDERS
+from .provider_catalog import LOCAL_PROVIDERS, PROVIDERS
 from .settings_command import _settings_begin_edit, _settings_rows
 from .settings_editor import apply_catalog_refresh, apply_editor_key, render_editor_panel
 from .settings_refresher import _ModelCatalogRefresher

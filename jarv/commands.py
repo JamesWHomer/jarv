@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.metadata
 import json
 import shutil
 import subprocess
@@ -360,6 +359,8 @@ def _installation_manager() -> str:
 
 
 def _is_editable_install() -> bool:
+    import importlib.metadata
+
     try:
         direct_url = importlib.metadata.distribution("jarv").read_text("direct_url.json")
         if not direct_url:

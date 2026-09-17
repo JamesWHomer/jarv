@@ -1,5 +1,4 @@
 import argparse
-import importlib
 import os
 import sys
 import threading
@@ -52,22 +51,6 @@ def _print_previous_uninstall_result() -> None:
     message = result["message"] or "The previous uninstall did not complete."
     console.print(Text.assemble(("✗ ", "bold red"), (message, "red")))
     console.print("[dim]Run [bold]jarv /uninstall[/bold] to retry.[/dim]")
-
-
-def _start_agent_import() -> tuple[dict, threading.Event]:
-    state: dict = {}
-    ready = threading.Event()
-
-    def load() -> None:
-        try:
-            state["module"] = importlib.import_module("jarv.agent")
-        except BaseException as exc:
-            state["error"] = exc
-        finally:
-            ready.set()
-
-    threading.Thread(target=load, daemon=True, name="jarv-agent-import").start()
-    return state, ready
 
 
 def _setup_nudge() -> None:
@@ -134,12 +117,14 @@ def _reload_heads_up_runtime(
     args: argparse.Namespace,
 ) -> tuple[dict, object]:
     """Reload config from disk and recreate the API client when needed."""
-    from .provider import create_client
-
     refreshed = _apply_cli_overrides(load_config(), args)
     if not validate_config(refreshed):
         return config, client
-    if _client_needs_refresh(config, refreshed) or client is None:
+    # An unopened heads-up session has no transport yet. Keep config-only
+    # changes cheap; the first submitted prompt will use the refreshed config.
+    if client is not None and _client_needs_refresh(config, refreshed):
+        from .provider import create_client
+
         client = create_client(refreshed)
     return refreshed, client
 
@@ -371,7 +356,8 @@ def main() -> None:
     configure_output_display_lines(config.get("tool_output_display_lines", "auto"))
     configure_monochrome(not config.get("colour", True))
 
-    from .provider import resolve_api_key, LOCAL_PROVIDERS
+    from .provider_auth import resolve_api_key
+    from .provider_catalog import LOCAL_PROVIDERS
 
     provider_name = config.get("provider", "openai")
     api_key = resolve_api_key(config)
@@ -391,11 +377,7 @@ def main() -> None:
     query = _compose_query(query_parts, stdin_text, stdin_truncated)
 
     if not query:
-        from .provider import create_client
-
-        agent_loader = _start_agent_import()
-        client = create_client(config)
-        run_heads_up_mode(config, client, args=args, agent_loader=agent_loader)
+        run_heads_up_mode(config, None, args=args)
         return
 
     startup_wait = None
@@ -463,7 +445,7 @@ def run_heads_up_mode(
         config,
         client,
         args=args,
-        agent_loader=agent_loader or _start_agent_import(),
+        agent_loader=agent_loader,
         handle_slash=handle_slash,
         maybe_command=_maybe_command,
     )

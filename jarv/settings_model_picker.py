@@ -710,7 +710,7 @@ def _settings_provider_display_label(label: str) -> str:
 
 
 def _settings_provider_note(provider_key: str) -> str:
-    from .provider import LOCAL_PROVIDERS, PROVIDERS
+    from .provider_catalog import LOCAL_PROVIDERS, PROVIDERS
 
     notes = {
         "openai": "OpenAI-hosted models through the Responses API",
@@ -740,7 +740,7 @@ def _settings_provider_choice_lines(
     selected_provider: str | None = None,
     max_lines: int | None = None,
 ) -> list[Text]:
-    from .provider import LOCAL_PROVIDERS
+    from .provider_catalog import LOCAL_PROVIDERS
 
     if max_lines is not None and max_lines <= 0:
         return []

@@ -28,7 +28,7 @@ from .history import (
     save_branches,
     save_history,
 )
-from .session_render import _history_content_to_str
+from .tool_outputs import flatten_content_text as _history_content_to_str
 
 #: Sentinel parent id meaning "attaches at the root" (an alternative first prompt).
 ROOT = ""

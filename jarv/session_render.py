@@ -4,7 +4,6 @@ import json
 import re
 
 from rich.console import Group
-from rich.markdown import Markdown
 from rich.text import Text
 
 from .display import (
@@ -20,13 +19,14 @@ from .tool_outputs import (
     summarize_tool_output,
     tool_output_failed,
 )
-from .web import SEARCH_ENGINE_LABEL
 
-# Kept as an alias: headsup.py and session_tree.py import this name.
+# Kept as an alias for heads-up and existing session-render callers.
 _history_content_to_str = flatten_content_text
 
 
 def _markdown_to_text_lines(content: str, width: int) -> list[Text]:
+    from rich.markdown import Markdown
+
     return rendered_text_lines(Markdown(flatten_headings(content)), width)
 
 
@@ -300,8 +300,12 @@ def _tool_call_renderable(
                         Text(f"  {title}", style="dim", no_wrap=True, overflow="ellipsis")
                     )
         body = Group(*parts)
+        from .web import SEARCH_ENGINE_LABEL
+
         metadata = SEARCH_ENGINE_LABEL
     elif name == "ask_user" and args is not None:
+        from rich.markdown import Markdown
+
         parts = [Markdown(flatten_headings(str(args.get("question", ""))))]
         if output:
             answer = Text("> ", style="bold cyan")

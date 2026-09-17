@@ -109,7 +109,7 @@ def _settings_set_service_tier(config: dict, tier: str) -> None:
 
 
 def _settings_has_api_key(config: dict) -> tuple[bool, str]:
-    from .provider import LOCAL_PROVIDERS, PROVIDERS
+    from .provider_catalog import LOCAL_PROVIDERS, PROVIDERS
     from .provider_auth import api_key_source
 
     provider = config.get("provider", "openai")
@@ -130,7 +130,7 @@ def _settings_rows(config: dict) -> list[dict]:
 
 
 def _settings_value_text(row: dict, config: dict, *, selected: bool = False) -> Text:
-    from .provider import PROVIDERS
+    from .provider_catalog import PROVIDERS
 
     key = row["key"]
     kind = row["kind"]
@@ -365,7 +365,7 @@ def _settings_begin_edit(row: dict, config: dict) -> dict:
         buffer = str(config.get(key, DEFAULT_CONFIG.get(key, "")))
 
     if key == "api_key":
-        from .provider import LOCAL_PROVIDERS
+        from .provider_catalog import LOCAL_PROVIDERS
         from .provider_auth import api_key_source
 
         provider = config.get("provider", "openai")
@@ -556,7 +556,7 @@ def _settings_editor_lines(
     if edit is None:
         return []
 
-    from .provider import PROVIDERS
+    from .provider_catalog import PROVIDERS
 
     row = edit["row"]
     key = row["key"]
@@ -832,7 +832,7 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
                 edit["error"] = "Could not clear API key."
                 return original, edit["error"], "red", False
             return original, "cleared stored API key", "cyan", True
-        from .provider import KEY_PATTERNS
+        from .provider_catalog import KEY_PATTERNS
 
         pattern = KEY_PATTERNS.get(provider)
         if pattern and not edit.get("format_warned") and not re.match(pattern, raw):
