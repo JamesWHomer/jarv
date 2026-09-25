@@ -103,8 +103,7 @@ def test_openai_recommendations_prefer_gpt_56_named_tiers():
     ]
 
 
-def test_openai_recommendations_promote_codenames_jarv_has_never_seen():
-    """A release ships into the flagship slot without a Jarv release first."""
+def test_openai_recommendations_keep_astra_and_sol_in_separate_slots():
     choices = recommend_models("openai", _models(
         "gpt-5.6-sol",
         "gpt-5.6-terra",
@@ -112,11 +111,60 @@ def test_openai_recommendations_promote_codenames_jarv_has_never_seen():
         "gpt-6-astra",
     ))
 
-    assert choices[0] == ("gpt-6-astra", "Flagship - latest GPT")
+    assert choices[0] == ("gpt-6-astra", "Premium - latest GPT Astra")
     assert [model for model, _description in choices] == [
         "gpt-6-astra",
+        "gpt-5.6-sol",
         "gpt-5.6-terra",
         "gpt-5.6-luna",
+    ]
+
+
+def test_openai_recommendations_keep_astra_first_after_sol_and_luna_release():
+    choices = recommend_models("openai", _models(
+        "gpt-6-astra",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-6-sol",
+        "gpt-6-luna",
+    ))
+
+    assert [model for model, _description in choices] == [
+        "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-5.6-terra",
+        "gpt-6-luna",
+    ]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_openai_recommendations_choose_highest_numeric_release_per_family(reverse):
+    ids = [
+        f"gpt-{version}-{family}"
+        for family in ("luna", "terra", "sol", "astra")
+        for version in ("6.10", "6.9", "6", "5.6")
+    ]
+    # A newer release in a lower-ranked family must not change the family order.
+    ids.extend(["gpt-7-sol", "gpt-10-luna", "gpt-6.10-astra-pro"])
+    choices = recommend_models("openai", _models(*(reversed(ids) if reverse else ids)))
+
+    assert [model for model, _description in choices] == [
+        "gpt-6.10-astra",
+        "gpt-7-sol",
+        "gpt-6.10-terra",
+        "gpt-10-luna",
+    ]
+
+
+def test_openai_offline_presets_keep_all_four_ranked_families(monkeypatch):
+    monkeypatch.setattr(model_catalog, "_catalog_models", lambda _provider: [])
+
+    assert [model for model, _description in model_catalog._merge_fallbacks("openai", [])] == [
+        "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-5.6-terra",
+        "gpt-6-luna",
     ]
 
 

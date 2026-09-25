@@ -171,9 +171,10 @@ PROVIDER_CHOICES = [
 # back to the snapshot before these.
 FALLBACK_PROVIDER_MODELS = {
     "openai": [
-        ("gpt-6-astra", "Flagship — largest, smartest"),
+        ("gpt-6-astra", "Premium — largest, smartest"),
+        ("gpt-6-sol", "Flagship — capable, versatile"),
         ("gpt-5.6-terra", "Balanced — faster, cheaper"),
-        ("gpt-5.6-luna", "Budget — smallest, fastest"),
+        ("gpt-6-luna", "Budget — smallest, fastest"),
     ],
     "anthropic": [
         ("claude-opus-5", "Flagship — most capable"),

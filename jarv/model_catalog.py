@@ -624,11 +624,17 @@ def _choose_versions(
 _OPENAI_PATTERN = re.compile(
     r"^gpt-(?P<major>\d+)(?:\.(?P<minor>\d+))?(?P<variant>(?:-[a-z]+)*)$"
 )
-# Trailing words that mark a smaller, cheaper cut of a release. Any other word
-# is read as a codename for the general-purpose model itself (gpt-5.6-sol,
-# gpt-6-astra), so a release reaches the flagship slot the day it lands instead
-# of waiting for Jarv to learn its name.
-_OPENAI_TIERS = {"mini": "mini", "terra": "mini", "nano": "nano", "luna": "nano"}
+# Named families have independent slots, ordered Astra, Sol, Terra, Luna.
+# Keep legacy mini/nano aliases and the general-purpose flagship fallback.
+# Version numbers rank releases within a slot, never across these families.
+_OPENAI_TIERS = {
+    "astra": "premium",
+    "sol": "flagship",
+    "terra": "mini",
+    "mini": "mini",
+    "luna": "nano",
+    "nano": "nano",
+}
 # Lineages that run alongside the general-purpose model rather than replace it.
 _OPENAI_SPECIALIZED = frozenset({
     "audio",
@@ -676,6 +682,7 @@ def _openai_choices(models: list[CatalogModel]) -> list[tuple[str, str]]:
 
     result = []
     for tier, description in (
+        ("premium", "Premium - latest GPT Astra"),
         ("flagship", "Flagship - latest GPT"),
         ("mini", "Balanced - latest GPT mini"),
         ("nano", "Budget - latest GPT nano"),
