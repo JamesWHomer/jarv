@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v6
         with:
@@ -36,6 +38,33 @@ jobs:
                   f"Tag {tag} does not match pyproject.toml={project} and jarv/__init__.py={package_version}"
               )
           PY
+
+      - name: Extract release notes from annotated tag
+        shell: bash
+        run: |
+          git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+
+          tag_type="$(git cat-file -t "refs/tags/${GITHUB_REF_NAME}")"
+          if [ "$tag_type" != "tag" ]; then
+            echo "::error::${GITHUB_REF_NAME} is not an annotated tag. Create releases with: git tag -a ${GITHUB_REF_NAME} -F release-notes.md"
+            exit 1
+          fi
+
+          git for-each-ref "refs/tags/${GITHUB_REF_NAME}" --format='%(contents:body)' > release-notes.md
+
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "::error::Annotated tag ${GITHUB_REF_NAME} has no release-notes body. Use a tag message with a title line, blank line, then release notes."
+            exit 1
+          fi
+
+          echo "Release notes:"
+          cat release-notes.md
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: error
 
       - name: Run tests
         run: |
@@ -62,9 +91,11 @@ jobs:
         with:
           name: python-dist
           path: dist/
+          if-no-files-found: error
 
   publish-pypi:
-    needs: build-python
+    # Wait for every standalone build, manifest, and checksum before publishing.
+    needs: [build-python, release-metadata]
     runs-on: ubuntu-24.04
     environment: pypi
     permissions:
@@ -213,6 +244,7 @@ jobs:
         with:
           name: standalone-${{ matrix.platform }}-${{ matrix.arch }}
           path: release-builds/*
+          if-no-files-found: error
 
   release-metadata:
     needs: build-standalone
@@ -242,6 +274,7 @@ jobs:
         with:
           name: release-assets
           path: release-assets/
+          if-no-files-found: error
 
   github-release:
     needs: [build-python, publish-pypi, release-metadata]
@@ -249,10 +282,6 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
       - uses: actions/download-artifact@v8
         with:
           name: python-dist
@@ -263,26 +292,9 @@ jobs:
           name: release-assets
           path: release-assets/
 
-      - name: Extract release notes from annotated tag
-        shell: bash
-        run: |
-          git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
-
-          tag_type="$(git cat-file -t "refs/tags/${GITHUB_REF_NAME}")"
-          if [ "$tag_type" != "tag" ]; then
-            echo "::error::${GITHUB_REF_NAME} is not an annotated tag. Create releases with: git tag -a ${GITHUB_REF_NAME} -F release-notes.md"
-            exit 1
-          fi
-
-          git for-each-ref "refs/tags/${GITHUB_REF_NAME}" --format='%(contents:body)' > release-notes.md
-
-          if ! grep -q '[^[:space:]]' release-notes.md; then
-            echo "::error::Annotated tag ${GITHUB_REF_NAME} has no release-notes body. Use a tag message with a title line, blank line, then release notes."
-            exit 1
-          fi
-
-          echo "Release notes:"
-          cat release-notes.md
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-notes
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
