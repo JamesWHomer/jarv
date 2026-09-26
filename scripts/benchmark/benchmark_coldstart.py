@@ -61,17 +61,22 @@ finally:
         profiler.dump_stats(os.environ["JARV_BENCH_PROFILE"])
 '''
 SEED = '''
+import os
 from jarv.history import prepare_session_context, save_history
 ctx = prepare_session_context(mark_message=True)
-save_history([
-    {"role": "user", "content": "Say hello", "id": "bench-user"},
-    {"role": "assistant", "content": "Hello!", "id": "bench-assistant"},
-], ctx.history_file)
+history = []
+for i in range(int(os.environ.get("JARV_BENCH_HISTORY_TURNS", "1"))):
+    history.extend([
+        {"role": "user", "content": "Say hello", "id": f"bench-user-{i}"},
+        {"role": "assistant", "content": "Hello!", "id": f"bench-assistant-{i}"},
+    ])
+save_history(history, ctx.history_file)
 '''
 CASES = [
     ("one-shot", "request", ["--incognito", "Reply with OK."]),
     ("one-shot terminal", "request-tty", ["--incognito", "Reply with OK."]),
     ("one-shot saved", "request-tty", ["--new", "Reply with OK."]),
+    ("one-shot resumed", "request-tty", ["Reply with OK."]),
     ("headsup", "menu", ["--incognito"]),
     ("headsup saved", "menu", []),
     *[(name, "menu", ["/" + name]) for name in
@@ -79,6 +84,8 @@ CASES = [
     ("version", "exit", ["--version"]),
     ("CLI help", "exit", ["--help"]),
     ("settings print", "exit", ["/settings"]),
+    *[(name + " print", "exit", ["/" + name]) for name in
+      ("help", "about", "config", "history", "usage", "sessions", "tree")],
 ]
 
 
@@ -128,10 +135,18 @@ def main():
     parser.add_argument("--case", action="append", choices=[case[0] for case in CASES])
     parser.add_argument("--profile", type=Path, help="Save cProfile data (requires one --case and --reps 1)")
     parser.add_argument("--menu-input", action="store_true", help="Measure real key handling and its repaint too")
+    parser.add_argument("--history-turns", type=int, default=1)
+    parser.add_argument("--single-core", action="store_true", help="Constrain this process and its children to one logical CPU")
     parser.add_argument("--output", type=Path, default=ROOT / "build/benchmarks/coldstart.json")
     args = parser.parse_args()
     if args.reps < 1:
         parser.error("--reps must be positive")
+    if args.history_turns < 1:
+        parser.error("--history-turns must be positive")
+    cpu = None
+    if args.single_core:
+        from benchmark_support import pin_single_cpu
+        cpu = pin_single_cpu()
     if args.profile and (not args.case or len(args.case) != 1 or args.reps != 1):
         parser.error("--profile requires one --case and --reps 1")
     selected_cases = [case for case in CASES if not args.case or case[0] in args.case]
@@ -162,6 +177,7 @@ def main():
     try:
         with tempfile.TemporaryDirectory(prefix="jarv-coldstart-") as tmp:
             env = os.environ.copy()
+            env["JARV_BENCH_HISTORY_TURNS"] = str(args.history_turns)
             if args.menu_input:
                 env["JARV_BENCH_MENU_INPUT"] = "1"
             if args.profile:
@@ -178,17 +194,23 @@ def main():
                       "api_key": "", "api_keys": {}, "read_only_command_display": "fullscreen"}
             (config_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
             subprocess.run([sys.executable, "-c", SEED], cwd=ROOT, env=env, check=True, capture_output=True)
+            seed_files = {path: path.read_bytes() for path in config_dir.rglob("*.json")}
             rng = random.Random(42)
             for repetition in range(args.reps):
                 cases = list(selected_cases)
                 rng.shuffle(cases)
                 for name, mode, cli_args in cases:
+                    # A saved one-shot changes the active session. Restore the
+                    # seeded fixture before every sample, outside the timer.
+                    for path, content in seed_files.items():
+                        path.write_bytes(content)
                     if args.reps == 1:
                         print(f"Measuring {name}", flush=True)
                     result, started, ended, first_print = run_child(
                         [sys.executable, "-c", CHILD, mode, *cli_args], env=env)
                     if result.returncode:
                         raise RuntimeError(f"{name}: exit {result.returncode}\n{result.stderr[-2000:]}")
+                    completed = ended
                     label = None
                     if mode == "menu":
                         marks = [line for line in result.stderr.splitlines() if line.startswith("BENCH_READY ")]
@@ -202,6 +224,7 @@ def main():
                         if label != "/v1/chat/completions":
                             raise RuntimeError(f"Unexpected one-shot request: {label}")
                     samples[name].append({"ms": (ended - started) / 1e6, "marker": label,
+                                          "completion_ms": (completed - started) / 1e6,
                                           "first_print_ms": (first_print - started) / 1e6 if first_print else None,
                                           "exit_code": result.returncode})
                     if mode == "menu" and args.menu_input:
@@ -226,6 +249,7 @@ def main():
                          min_ms=min(values), max_ms=max(values), samples=samples[name]))
         prints = [sample["first_print_ms"] for sample in samples[name] if sample["first_print_ms"] is not None]
         rows[-1]["first_print_median_ms"] = statistics.median(prints) if prints else None
+        rows[-1]["completion_median_ms"] = statistics.median(sample["completion_ms"] for sample in samples[name])
         for field in ("first_key_ms", "input_ready_ms", "input_paint_ms"):
             values = [sample[field] for sample in samples[name] if field in sample]
             if values:
@@ -233,8 +257,9 @@ def main():
     payload = dict(timestamp=datetime.now(timezone.utc).isoformat(), python=sys.version,
                    executable=sys.executable, platform=platform.platform(),
                    methodology=__doc__, reps=args.reps, menu_input=args.menu_input,
+                   history_turns=args.history_turns, single_cpu=cpu,
                    terminal="simulated TTY 100x30, NO_COLOR=1",
-                   fixture="isolated home, seeded one-exchange session; incognito and fresh saved one-shot modes; Ollama-compatible loopback mock",
+                   fixture="isolated home, restored seeded session per sample; incognito, fresh saved and resumed one-shot modes; Ollama-compatible loopback mock",
                    results=rows)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
