@@ -4,14 +4,21 @@ import sys
 import threading
 
 from . import __version__
-from .command_registry import (
-    CONFIG_MUTATING_COMMANDS,
-    build_dispatch,
-    command_takes_rest,
-)
-from .config import load_config, validate_config
 
 STDIN_LABEL = "Input from stdin"
+
+
+def load_config() -> dict:
+    # --help and --version need neither storage nor the configuration schema.
+    from .config import load_config as load
+
+    return load()
+
+
+def validate_config(config: dict) -> bool:
+    from .config import validate_config as validate
+
+    return validate(config)
 
 
 def _console():
@@ -61,6 +68,8 @@ def _setup_nudge() -> None:
 
 
 def _lazy_commands():
+    from .command_registry import build_dispatch
+
     return build_dispatch()
 
 
@@ -139,6 +148,8 @@ def _handle_heads_up_slash_command(
     unknown_help_hint: bool = False,
 ) -> tuple[dict, object]:
     """Run a slash command and reload heads-up runtime after config changes."""
+    from .command_registry import CONFIG_MUTATING_COMMANDS
+
     handled = _run_slash_command(command, rest)
     if not handled:
         console = _console()
@@ -171,6 +182,8 @@ def _maybe_command(first_word: str, rest: list[str]) -> tuple[bool, str, list[st
     Returns (is_command, command, rest) if the user confirms it's a command,
     None if they want to treat it as a regular message.
     """
+    from .command_registry import command_takes_rest
+
     name = first_word.lower()
     takes_rest = command_takes_rest(name)
     if takes_rest is None:

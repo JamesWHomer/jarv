@@ -153,13 +153,17 @@ def _trim_with_retained_outputs(
     kept = trim_items_to_budget(items, model, budget)
     if retained_store is None:
         return kept
+    counts = [estimate_item_tokens(model, item) for item in kept]
+    used = sum(counts)
+    if used <= budget:
+        return kept
     # Reduce the largest results first. Never rewrite call arguments, IDs, or
     # reasoning signatures. Copies leave the full stored transcript untouched.
     for index in sorted(
         range(len(kept)),
-        key=lambda i: estimate_item_tokens(model, kept[i]), reverse=True,
+        key=counts.__getitem__, reverse=True,
     ):
-        if estimate_api_items_tokens(model, kept) <= budget:
+        if used <= budget:
             break
         item = kept[index]
         if item.get("type") != "function_call_output":
@@ -180,6 +184,7 @@ def _trim_with_retained_outputs(
                 f"{preview}"
             ),
         }
+        used += estimate_item_tokens(model, kept[index]) - counts[index]
     return kept
 
 
@@ -269,24 +274,33 @@ def compact_oldest_turns(
     Mutates ``history`` in place. Callers should pass a copy when the original
     stored transcript must be preserved.
     """
-    modified = False
-    while estimate_history_tokens(model, history) > target_tokens:
-        ranges = iter_turn_ranges(history)
-        candidates = [
-            (start, end) for start, end in ranges[:-1]
-            if history[start].get("type") != "compacted_summary"
-        ]
-        if not candidates:
+    used = estimate_history_tokens(model, history)
+    if used <= target_tokens:
+        return False
+    # Token estimates are additive. Count each replaced turn once and rebuild
+    # the prefix once, preserving the same summaries and stopping boundary.
+    prefix = []
+    replaced_end = 0
+    for start, end in iter_turn_ranges(history)[:-1]:
+        if used <= target_tokens:
             break
-        start, end = candidates[0]
+        if history[start].get("type") == "compacted_summary":
+            continue
         summary = summarize_turn_items(history[start:end])
-        history[start:end] = [{
+        replacement = {
             "role": "user",
             "type": "compacted_summary",
             "content": summary,
-        }]
-        modified = True
-    return modified
+        }
+        used += (estimate_history_tokens(model, [replacement])
+                 - estimate_history_tokens(model, history[start:end]))
+        prefix.extend(history[replaced_end:start])
+        prefix.append(replacement)
+        replaced_end = end
+    if not replaced_end:
+        return False
+    history[:replaced_end] = prefix
+    return True
 
 
 def compact_history_view(

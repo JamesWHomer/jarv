@@ -361,6 +361,8 @@ def configure_output_display_lines(setting) -> None:
 
 
 def flatten_headings(text: str) -> str:
+    if "#" not in text:
+        return text
     return re.sub(r"^#{1,6}\s+(.+)$", r"**\1**", text, flags=re.MULTILINE)
 
 

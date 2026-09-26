@@ -194,6 +194,21 @@ def _sanitize_editor_key(key: str) -> str:
     return TextInput(text)
 
 
+class _HistoryMarkdown:
+    """Parse saved Markdown only when its transcript entry becomes visible."""
+
+    def __init__(self, content: str):
+        self.content = content
+        self._markdown = None
+
+    def __rich_console__(self, console, options):
+        if self._markdown is None:
+            from rich.markdown import Markdown
+
+            self._markdown = Markdown(flatten_headings(self.content))
+        yield self._markdown
+
+
 @dataclass
 class TranscriptEntry:
     kind: str
@@ -1006,8 +1021,7 @@ class HeadsupApp(AltScreenApp):
             rows = _transcript_rows_for(
                 layout.body_height, len(prompt_lines) + (1 if menu_open else 0)
             )
-            transcript = self._transcript_lines(inner_width)
-            visible, self.scroll_offset = window_transcript(transcript, rows, self.scroll_offset)
+            visible, self.scroll_offset = self._transcript_window(inner_width, rows, self.scroll_offset)
             show_intro = (
                 not self._idle_anim_stop.is_set()
                 and self.scroll_offset == 0
@@ -2118,12 +2132,10 @@ class HeadsupApp(AltScreenApp):
                     )
                 )
             elif role == "assistant":
-                from rich.markdown import Markdown
-
                 entries.append(
                     TranscriptEntry(
                         "assistant",
-                        Markdown(flatten_headings(content)),
+                        _HistoryMarkdown(content),
                     )
                 )
         if trailing_notice is not None:
@@ -2578,6 +2590,23 @@ class HeadsupApp(AltScreenApp):
             rendered = entry.rendered_lines(width)
             lines.extend(rendered or [Text("")])
         return lines or [Text("")]
+
+    def _transcript_window(self, width: int, rows: int, scroll_offset: int) -> tuple[list[Text], int]:
+        # Work back from the newest entry until the viewport is covered. Older
+        # entries stay intact and are rendered on demand when scrolling up.
+        needed = rows + max(0, scroll_offset)
+        chunks = []
+        count = 0
+        for entry in reversed(self.entries):
+            lines = entry.rendered_lines(width) or [Text("")]
+            if entry.spacer_before:
+                lines = [Text(""), *lines]
+            chunks.append(lines)
+            count += len(lines)
+            if count >= needed:
+                break
+        transcript = [line for chunk in reversed(chunks) for line in chunk]
+        return window_transcript(transcript or [Text("")], rows, scroll_offset)
 
     def _prompt_label(self) -> str:
         request = self._answer_request

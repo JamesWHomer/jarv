@@ -32,6 +32,15 @@ def visual_rows(value: str, content_width: int) -> list[tuple[int, int]]:
 
     for logical_idx, logical_line in enumerate(logical_lines):
         line_length = len(logical_line)
+        if logical_line.isascii() and logical_line.isprintable():
+            # Printable ASCII occupies exactly one cell per character. Keep
+            # the Unicode path for controls, combining marks and wide glyphs.
+            rows.extend((absolute_start + start, absolute_start + min(start + content_width, line_length))
+                        for start in range(0, line_length, content_width))
+            if line_length % content_width == 0:
+                rows.append((absolute_start + line_length, absolute_start + line_length))
+            absolute_start += line_length + 1
+            continue
         segment_start = 0
         cells = 0
         for index, char in enumerate(logical_line):
@@ -134,32 +143,13 @@ def render_visual_lines(
     selection_span: tuple[int, int] | None = None,
     selection_style: str = "",
 ) -> tuple[list[Text], int]:
-    value = str(state.get("buffer", ""))
-    display = _display_value(value, masked=masked, width=max(1, content_width))
-    cursor = max(0, min(int(state.get("cursor", len(value))), len(value)))
-    rows = visual_rows(display, content_width)
-    active_row = cursor_row_index(rows, cursor)
-    spans = highlight_spans or ()
-    rendered: list[Text] = []
-
-    for idx, (row_start, row_end) in enumerate(rows):
-        segment = display[row_start:row_end]
-        line = Text(indent)
-        _append_segment(
-            line,
-            segment,
-            row_start,
-            (cursor - row_start) if idx == active_row else None,
-            spans=spans,
-            base_style=text_style,
-            highlight_style=highlight_style,
-            cursor_style=cursor_style,
-            selection=selection_span,
-            selection_style=selection_style,
-        )
-        rendered.append(line)
-
-    return rendered, active_row
+    lines, cursor, _ = render_visual_line_window(
+        state, content_width, indent=indent, masked=masked,
+        text_style=text_style, cursor_style=cursor_style,
+        highlight_spans=highlight_spans, highlight_style=highlight_style,
+        selection_span=selection_span, selection_style=selection_style,
+    )
+    return lines, cursor
 
 
 def render_visual_line_window(
@@ -176,23 +166,37 @@ def render_visual_line_window(
     selection_span: tuple[int, int] | None = None,
     selection_style: str = "",
 ) -> tuple[list[Text], int, int]:
-    lines, cursor_idx = render_visual_lines(
-        state,
-        content_width,
-        indent=indent,
-        masked=masked,
-        text_style=text_style,
-        cursor_style=cursor_style,
-        highlight_spans=highlight_spans,
-        highlight_style=highlight_style,
-        selection_span=selection_span,
-        selection_style=selection_style,
-    )
-    if max_lines is None:
-        return lines, cursor_idx, 0
-    visible_count = max(1, max_lines)
-    start = max(0, min(cursor_idx - visible_count + 1, len(lines) - visible_count))
-    return lines[start : start + visible_count], cursor_idx - start, start
+    value = str(state.get("buffer", ""))
+    display = _display_value(value, masked=masked, width=max(1, content_width))
+    cursor = max(0, min(int(state.get("cursor", len(value))), len(value)))
+    rows = visual_rows(display, content_width)
+    active_row = cursor_row_index(rows, cursor)
+    visible_count = len(rows) if max_lines is None else max(1, max_lines)
+    start = max(0, min(active_row - visible_count + 1, len(rows) - visible_count))
+    spans = highlight_spans or ()
+    rendered: list[Text] = []
+
+    # Lay out the full draft to preserve cursor/wrap semantics, but only build
+    # styled Text objects for rows that can actually appear in the viewport.
+    for idx in range(start, min(len(rows), start + visible_count)):
+        row_start, row_end = rows[idx]
+        segment = display[row_start:row_end]
+        line = Text(indent)
+        _append_segment(
+            line,
+            segment,
+            row_start,
+            (cursor - row_start) if idx == active_row else None,
+            spans=spans,
+            base_style=text_style,
+            highlight_style=highlight_style,
+            cursor_style=cursor_style,
+            selection=selection_span,
+            selection_style=selection_style,
+        )
+        rendered.append(line)
+
+    return rendered, active_row - start, start
 
 
 def render_single_line(

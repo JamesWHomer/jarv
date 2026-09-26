@@ -6,6 +6,8 @@ from typing import Any
 
 def sanitize_text(value: str) -> str:
     """Replace lone surrogate code points so text can be encoded as UTF-8."""
+    if value.isascii():
+        return value
     return value.encode("utf-8", errors="replace").decode("utf-8")
 
 
