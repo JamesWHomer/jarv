@@ -41,7 +41,7 @@ SETTINGS_TOOL_LABELS = {
 class ConfigField:
     key: str
     default: Any
-    validator: str = "any"
+    validator: str = "string"
     choices: tuple[str, ...] = ()
     label: str = ""
     section: str = ""
@@ -60,7 +60,7 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
     ConfigField("base_url", "", label="Base URL", section="account", desc="optional custom endpoint", ui_kind="text", empty="provider default", about="Custom API base URL. Overrides the provider's default endpoint."),
     ConfigField("model", "gpt-5.4-mini", label="Model", section="behaviour", desc="pick from the provider presets or enter a model", ui_kind="setup", about="Model name."),
     ConfigField("service_tiers", {}, validator="service_tiers"),
-    ConfigField("reasoning_effort", "", label="Reasoning effort", section="behaviour", desc="model-supported reasoning effort", ui_kind="choice", about="Model-supported reasoning effort. Empty uses the provider/model default; `none` explicitly disables reasoning only where supported."),
+    ConfigField("reasoning_effort", "", validator="nullable_string", label="Reasoning effort", section="behaviour", desc="model-supported reasoning effort", ui_kind="choice", about="Model-supported reasoning effort. Empty uses the provider/model default; `none` explicitly disables reasoning only where supported."),
     ConfigField("context_budget_ratio", 0.75, validator="ratio", about="Share of the context window used for input."),
     ConfigField("context_compaction_threshold", 0.85, validator="ratio", about="Fill ratio that triggers history compaction."),
     ConfigField("context_output_reserve_ratio", 0.15, validator="ratio", about="Context window share reserved for model output."),
@@ -86,7 +86,7 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
         about="Command confirmation level. `all` = confirm every command, `risky` = confirm only dangerous commands, `none` = no confirmation.",
     ),
     ConfigField("audit", True, validator="bool", label="Auditor", section="command review", desc="LLM reviews flagged commands first", ui_kind="bool", about="When `true`, flagged commands are sent to a fast LLM auditor (uses extra tokens). Applies to `run_command` only; flagged `edit` calls show a diff for manual approval."),
-    ConfigField("auditor_auto_approve", True, validator="bool", label="Audit auto-accept", section="command review", desc="auto-run commands the auditor marks safe", ui_kind="bool", about="When `true`, the auditor auto-approves commands it deems safe. When `false`, the auditor only shows a recommendation."),
+    ConfigField("auditor_auto_approve", True, validator="bool", label="Audit auto-accept", section="command review", desc="auto-run commands the auditor marks safe under risky approval", ui_kind="bool", about="When `true`, the auditor auto-approves commands it deems safe under `command_safety=risky`. When `false`, the auditor only shows a recommendation. With `command_safety=all`, human approval is always required."),
     ConfigField("auditor_model", "", label="Auditor model", section="command review", desc="use the active model unless overridden", ui_kind="text", empty="default", about="Model used for the auditor. Empty = use the active model."),
     ConfigField("system_prompt", DEFAULT_SYSTEM_PROMPT, label="System prompt", section="behaviour", desc="instructions sent before each request", ui_kind="text", multiline=True, about="Instructions sent to the model before each request."),
     ConfigField("project_context", True, validator="bool", label="Project context", section="behaviour", desc="read JARV.md/AGENTS.md and git status into the prompt", ui_kind="bool", about="When `true`, jarv reads JARV.md/AGENTS.md/CLAUDE.md from the working directory (walking up to the git root) plus git branch, status, and recent commits into the system prompt on every request."),
@@ -137,6 +137,28 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
 )
 
 CONFIG_FIELD_BY_KEY = {field.key: field for field in CONFIG_FIELDS}
+
+
+def parse_config_value(key: str, raw: str) -> Any:
+    """Parse /set input using the field's validator, preserving text verbatim.
+
+    Leave invalid literals unchanged so validation reports the field's expected
+    type and range. Unknown keys have no declared type and remain strings.
+    """
+    field = CONFIG_FIELD_BY_KEY.get(key)
+    if field is None:
+        return raw
+    if field.validator == "bool":
+        if raw.lower() in ("true", "false"):
+            return raw.lower() == "true"
+    try:
+        if field.validator in ("positive_int", "non_negative_int", "display_lines"):
+            return int(raw)
+        if field.validator == "ratio":
+            return float(raw)
+    except ValueError:
+        pass
+    return raw
 
 
 def build_default_config() -> dict:
@@ -208,7 +230,14 @@ def validate_config_fields(
     ok = True
     for field in CONFIG_FIELDS:
         key = field.key
-        if field.validator == "bool":
+        if field.validator in ("string", "nullable_string"):
+            value = config.get(key, field.default)
+            if field.validator == "nullable_string" and value is None:
+                continue
+            if not isinstance(value, str):
+                report(f"[red]Config '{key}' must be a string.[/red]")
+                ok = False
+        elif field.validator == "bool":
             if not isinstance(config.get(key, field.default), bool):
                 report(f"[red]Config '{key}' must be a boolean (true or false).[/red]")
                 ok = False
@@ -285,7 +314,7 @@ def validate_config_fields(
                 config[key] = "auto"
             else:
                 try:
-                    if isinstance(value, bool):
+                    if isinstance(value, (bool, float)):
                         raise ValueError
                     number = int(value)
                     if number < 3:

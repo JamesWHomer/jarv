@@ -14,6 +14,7 @@ from .config_schema import (
     validate_config_fields,
 )
 from .paths import CONFIG_DIR, CONFIG_FILE
+from .storage import StorageError, read_json, transaction, write_json
 
 DEFAULT_CONFIG = build_default_config()
 
@@ -43,30 +44,35 @@ def _console():
     return console
 
 def load_config() -> dict:
-    CONFIG_DIR.mkdir(exist_ok=True)
+    """Load a settings snapshot whose baseline survives other reads and saves."""
     from .history import migrate_flat_session_files
+
     migrate_flat_session_files()
-    if not CONFIG_FILE.exists():
-        CONFIG_FILE.write_text(json.dumps(DEFAULT_CONFIG, indent=2), encoding="utf-8")
-        return build_default_config()
     try:
-        config = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
-        backup = CONFIG_FILE.with_suffix(".json.bak")
-        CONFIG_FILE.replace(backup)
-        CONFIG_FILE.write_text(json.dumps(DEFAULT_CONFIG, indent=2), encoding="utf-8")
-        console = _console()
-        console.print(f"[red]Config file was invalid JSON:[/red] {e}")
-        console.print(f"[yellow]Backed it up to[/yellow] {backup}")
-        console.print(f"[green]Created a fresh config at[/green] {CONFIG_FILE}")
+        # Recover interrupted commits before reading; keep first-run creation
+        # and migrations under the same lock as ordinary settings saves.
+        with transaction(CONFIG_FILE):
+            config = _load_config()
+    except StorageError as e:
+        _console().print(f"[red]Could not load config:[/red] {e}")
         sys.exit(1)
-    except (OSError, UnicodeDecodeError) as e:
-        _console().print(f"[red]Could not read config:[/red] {e}")
-        sys.exit(1)
-    if not isinstance(config, dict):
-        _console().print(f"[red]Config must be a JSON object:[/red] {CONFIG_FILE}")
-        sys.exit(1)
-    changed = False
+
+    # Every entry point funnels through here -- including the slash commands
+    # dispatched before cli.main() loads the run config -- so this is the one
+    # place that reaches /help, /settings, and the heads-up TUI alike.
+    from .display import configure_monochrome
+    from .tui_panel import configure_menu_border
+
+    configure_monochrome(not get_setting(config, "colour"))
+    configure_menu_border(get_setting(config, "headsup_border"))
+
+    return config
+
+
+def _load_config() -> dict:
+    """Initialize or migrate settings while the caller holds the storage lock."""
+    config = read_json(CONFIG_FILE, {}, dict)
+    changed = config.baseline is None
     if "monochrome" in config:
         config.setdefault("colour", not config.pop("monochrome"))
         changed = True
@@ -94,16 +100,6 @@ def load_config() -> dict:
 
     if changed:
         save_config(config)
-
-    # Every entry point funnels through here -- including the slash commands
-    # dispatched before cli.main() loads the run config -- so this is the one
-    # place that reaches /help, /settings, and the heads-up TUI alike.
-    from .display import configure_monochrome
-    from .tui_panel import configure_menu_border
-
-    configure_monochrome(not get_setting(config, "colour"))
-    configure_menu_border(get_setting(config, "headsup_border"))
-
     return config
 
 
@@ -129,10 +125,11 @@ def is_setup_complete(config: dict | None = None) -> bool:
 
 
 def save_config(config: dict) -> None:
-    CONFIG_DIR.mkdir(exist_ok=True)
+    """Atomically merge snapshot edits, rejecting changes to the same setting."""
     try:
-        CONFIG_FILE.write_text(json.dumps(config, indent=2), encoding="utf-8")
-    except OSError as e:
+        write_json(CONFIG_FILE, dict(config), merge=True,
+                   snapshot=config if hasattr(config, "baseline") else None)
+    except StorageError as e:
         _console().print(f"[red]Could not save config:[/red] {e}")
         sys.exit(1)
 

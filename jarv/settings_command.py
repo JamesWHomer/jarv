@@ -65,13 +65,18 @@ from .settings_model_picker import (
 
 
 def _settings_save_validated(config: dict, candidate: dict | None = None) -> bool:
-    trial = build_default_config()
+    # Keep the editor's baseline even when the candidate is a plain dictionary.
+    trial = copy.deepcopy(config)
+    trial.clear()
+    trial.update(build_default_config())
     trial.update(copy.deepcopy(config if candidate is None else candidate))
     if not validate_config(trial):
         return False
     save_config(trial)
     config.clear()
     config.update(trial)
+    if hasattr(trial, "baseline"):
+        config.baseline = copy.deepcopy(trial.baseline)
     # The single save funnel for quick toggles, the field editors, and reset, so
     # hooking it here means the settings screen repaints in the newly chosen
     # mode on its very next frame -- it renders on this same shared console.

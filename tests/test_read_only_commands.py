@@ -44,7 +44,7 @@ def test_load_config_migrates_legacy_read_only_display_modes(monkeypatch, tmp_pa
     loaded = config_module.load_config()
 
     assert loaded["read_only_command_display"] == "fullscreen"
-    assert '"read_only_command_display": "fullscreen"' in config_file.read_text(encoding="utf-8")
+    assert json.loads(config_file.read_text(encoding="utf-8"))["read_only_command_display"] == "fullscreen"
 
 
 def test_validate_config_rejects_invalid_read_only_command_display():
