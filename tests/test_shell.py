@@ -7,7 +7,7 @@ import tempfile
 import threading
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from jarv.cancellation import CancellationToken, TurnCancelled
 from jarv.shell import (
@@ -139,6 +139,31 @@ class ShellOutputLimitTests(unittest.TestCase):
         self.assertTrue(output.endswith("z" * 20))
         self.assertIn("60 characters omitted from the middle", output)
         self.assertNotIn("truncated to 10 characters", output)
+
+    def test_already_cancelled_command_does_not_start_process(self):
+        token = CancellationToken()
+        token.cancel()
+
+        with patch.object(InteractiveCommandProcess, "start") as start:
+            with self.assertRaises(TurnCancelled):
+                execute_command("echo should-not-run", cancellation_token=token)
+
+        start.assert_not_called()
+
+    def test_cancellation_during_process_start_kills_before_stdin_close(self):
+        token = CancellationToken()
+        process = Mock()
+
+        def start(*args):
+            token.cancel()
+            return process
+
+        with patch.object(InteractiveCommandProcess, "start", side_effect=start):
+            with self.assertRaises(TurnCancelled):
+                execute_command("echo should-stop", cancellation_token=token)
+
+        process.kill_tree.assert_called()
+        process.close_stdin.assert_not_called()
 
     def test_cancellation_kills_active_process_tree(self):
         token = CancellationToken()

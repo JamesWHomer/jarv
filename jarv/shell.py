@@ -777,15 +777,19 @@ def execute_command(
 
     process = None
     try:
+        if cancellation_token is not None:
+            cancellation_token.throw_if_cancelled()
         process = InteractiveCommandProcess.start(command, shell_state)
-        # Noninteractive commands should see EOF on stdin immediately.
-        process.close_stdin()
         unregister = (
             cancellation_token.register(process.kill_tree)
             if cancellation_token is not None else lambda: None
         )
         started = time.monotonic()
         try:
+            if cancellation_token is not None:
+                cancellation_token.throw_if_cancelled()
+            # Noninteractive commands should see EOF on stdin immediately.
+            process.close_stdin()
             while process.proc.poll() is None:
                 if cancellation_token is not None:
                     cancellation_token.throw_if_cancelled()

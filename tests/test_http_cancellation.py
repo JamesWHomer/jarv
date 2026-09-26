@@ -1,0 +1,202 @@
+"""Cancellation must stop socket I/O, including before a response exists."""
+
+import socket
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import Mock
+from urllib.parse import urlsplit
+
+import httpx
+import pytest
+
+from jarv.cancellation import CancellationToken, TurnCancelled
+from jarv.http_transport import (
+    create_client, open_stream_response, request_json, send_with_retries,
+)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_cancelled_request_has_no_side_effects(stream):
+    token = CancellationToken()
+    token.cancel()
+    client = Mock()
+
+    with pytest.raises(TurnCancelled):
+        send_with_retries(client, "POST", "/", stream=stream, cancellation_token=token)
+
+    client.build_request.assert_not_called()
+    client.send.assert_not_called()
+
+
+def test_cancellation_during_request_build_prevents_send():
+    token = CancellationToken()
+    client = Mock()
+    client.build_request.side_effect = lambda *a, **k: token.cancel()
+
+    with pytest.raises(TurnCancelled):
+        send_with_retries(client, "POST", "/", cancellation_token=token)
+
+    client.send.assert_not_called()
+
+
+@pytest.mark.parametrize("transport_error", [False, True])
+def test_cancellation_at_send_completion_does_not_return_or_retry(transport_error):
+    token = CancellationToken()
+    response = httpx.Response(200, stream=httpx.ByteStream(b"{}"))
+    client = Mock()
+
+    def send(*args, **kwargs):
+        token.cancel()
+        if transport_error:
+            raise httpx.ReadError("cancelled socket")
+        return response
+
+    client.send.side_effect = send
+    with pytest.raises(TurnCancelled):
+        send_with_retries(
+            client, "POST", "/", stream=True,
+            cancellation_token=token, max_retries=0,
+        )
+
+    client.send.assert_called_once()
+    if not transport_error:
+        assert response.is_closed
+
+
+@pytest.fixture
+def stalled_server():
+    received = threading.Event()
+    disconnected = threading.Event()
+    paths = []
+    connections = []
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            self.path = urlsplit(self.path).path
+            paths.append(self.path)
+            connections.append(self.connection)
+            if self.path == "/ok":
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+                return
+            if self.path in ("/partial_headers", "/delayed"):
+                self.wfile.write(b"HTTP/1.1 200 OK\r\nContent-Len")
+                self.wfile.flush()
+            if self.path == "/delayed":
+                # Exceed several cancellation polling intervals without
+                # exceeding the request's configured read timeout.
+                threading.Event().wait(0.2)
+                self.wfile.write(b"gth: 2\r\n\r\n{}")
+                return
+            if self.path in ("/body", "/error_body", "/stream_body"):
+                self.send_response(400 if self.path == "/error_body" else 200)
+                self.send_header("Content-Length", "100")
+                self.end_headers()
+                self.wfile.flush()
+            received.set()
+            self.connection.settimeout(3)
+            try:
+                if self.connection.recv(1) == b"":
+                    disconnected.set()
+            except (OSError, socket.timeout):
+                pass
+            self.close_connection = True
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server_thread = threading.Thread(
+        target=lambda: server.serve_forever(poll_interval=0.01), daemon=True,
+    )
+    server_thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", received, disconnected, paths, connections
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=1)
+
+
+@pytest.mark.parametrize("connection_mode", ["fresh", "reused", "proxy"])
+@pytest.mark.parametrize("path", [
+    "/headers", "/partial_headers", "/body", "/error_body", "/stream_body",
+])
+def test_cancel_interrupts_stalled_request_and_preserves_client(
+    stalled_server, monkeypatch, connection_mode, path,
+):
+    url, received, disconnected, paths, connections = stalled_server
+    token = CancellationToken()
+    outcomes = []
+    if connection_mode == "proxy":
+        for name in ("HTTP_PROXY", "http_proxy"):
+            monkeypatch.setenv(name, url)
+        for name in ("NO_PROXY", "no_proxy"):
+            monkeypatch.setenv(name, "")
+        url = "http://provider.invalid"
+
+    with create_client(url, {}, timeout=10) as client:
+        if connection_mode == "reused":
+            assert request_json("test", client, "GET", "/ok") == {}
+
+        def request():
+            try:
+                if path == "/body":
+                    request_json("test", client, "GET", path, cancellation_token=token)
+                else:
+                    response, unregister = open_stream_response(
+                        client, "GET", path, provider="test", cancellation_token=token,
+                    )
+                    try:
+                        response.read()
+                    finally:
+                        unregister()
+                        response.close()
+            except BaseException as exc:
+                outcomes.append(exc)
+
+        worker = threading.Thread(target=request, daemon=True)
+        worker.start()
+        try:
+            assert received.wait(2), "server did not receive the request"
+            token.cancel()
+            worker.join(timeout=1)
+            assert not worker.is_alive(), "cancelled request remained blocked on socket I/O"
+            assert len(outcomes) == 1
+            assert isinstance(outcomes[0], TurnCancelled)
+            assert disconnected.wait(1), "cancelled request left its socket open"
+            assert paths.count(path) == 1, "cancelled request was retried"
+            if connection_mode == "reused":
+                assert connections[0] is connections[1]
+            assert not client.is_closed
+            assert request_json(
+                "test", client, "GET", "/ok", cancellation_token=CancellationToken(),
+            ) == {}
+        finally:
+            token.cancel()
+            worker.join(timeout=4)
+
+
+def test_read_polling_preserves_partial_headers_without_resending(stalled_server):
+    url, _, _, paths, _ = stalled_server
+    with create_client(url, {}, timeout=2) as client:
+        assert request_json(
+            "test", client, "GET", "/delayed", cancellation_token=CancellationToken(),
+        ) == {}
+    assert paths == ["/delayed"]
+
+
+def test_read_polling_preserves_configured_timeout(stalled_server):
+    url, _, disconnected, paths, _ = stalled_server
+    with create_client(url, {}, timeout=0.15) as client:
+        with pytest.raises(httpx.ReadTimeout):
+            request_json(
+                "test", client, "GET", "/headers",
+                cancellation_token=CancellationToken(), max_retries=0,
+            )
+    assert disconnected.wait(1)
+    assert paths == ["/headers"]
