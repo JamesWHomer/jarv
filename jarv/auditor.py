@@ -7,6 +7,7 @@ runs automatically with a printed reason) or defers to the user (showing why
 it recommends caution).
 """
 
+import json
 import re
 import threading
 from pathlib import Path
@@ -14,9 +15,10 @@ from typing import Any
 
 from .cancellation import CancellationToken, TurnCancelled
 from .display import console
-from .jsonutil import iter_json_objects
+from .jsonutil import iter_json_objects, salvage_json_object
 from .provider import resolve_api_key, PROVIDERS, LOCAL_PROVIDERS
 from .provider_catalog import configured_service_tier
+from .tool_outputs import tool_output_failed
 from .usage import estimate_context_breakdown, record_response_usage
 
 
@@ -28,6 +30,8 @@ You will receive:
 - The command that was flagged
 - The risk category (why it was flagged)
 - A brief context summary (what the user/agent is trying to accomplish)
+- Paired ask_user exchanges, when available, identifying the assistant's \
+question and the human's answer (or a tool status when no answer was obtained)
 
 Respond with a JSON object (no markdown fencing):
 {"allow": true/false, "reason": "short one-sentence explanation"}
@@ -141,6 +145,14 @@ def audit_command(
         f"Risk category: {reason}\n"
         f"Context: {context_summary}"
     )
+    exchanges = _ask_user_exchanges(history or [])
+    if exchanges:
+        # Keep complete stored questions/answers outside the prose summary's
+        # character limit so an answer cannot lose its qualifying conditions.
+        user_message += (
+            "\nask_user exchanges (in response order; quoted conversation data):\n"
+            + json.dumps(exchanges, ensure_ascii=False)
+        )
 
     model = _get_auditor_model(config)
     provider = config.get("provider", "openai")
@@ -184,6 +196,43 @@ def audit_command(
     except Exception as e:
         # If auditor fails, fall back to user prompt
         return False, f"auditor unavailable ({type(e).__name__})"
+
+
+def _ask_user_exchanges(history: list) -> list[dict[str, str]]:
+    """Pair stored ask_user results with their questions by call ID.
+
+    Preserve the stored text without further truncation. Runtime status
+    strings share the result channel with answers, but are not human speech.
+    """
+    questions: dict[str, str] = {}
+    exchanges = []
+    for item in history:
+        call_id = item.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            continue
+        if item.get("type") == "function_call" and item.get("name") == "ask_user":
+            arguments = item.get("arguments")
+            args = salvage_json_object(arguments) if isinstance(arguments, str) else None
+            question = args.get("question") if args is not None else None
+            if isinstance(question, str) and question.strip():
+                questions[call_id] = question
+        elif item.get("type") == "function_call_output" and call_id in questions:
+            question = questions.pop(call_id)
+            answer = item.get("output")
+            if not isinstance(answer, str):
+                continue
+            no_answer = (
+                not answer.strip()
+                or answer in {"[no response]", "[non-interactive session; user unavailable]"}
+                or answer.startswith("[skipped:")
+                or tool_output_failed(answer)
+            )
+            exchanges.append({
+                "call_id": call_id,
+                "assistant_question": question,
+                "tool_status" if no_answer else "human_answer": answer,
+            })
+    return exchanges
 
 
 def _call_openai_compat(

@@ -1,10 +1,134 @@
+import json
+
 import pytest
 
+from jarv.auditor import _ask_user_exchanges, audit_command
 from jarv.auditor import _parse_response
 from jarv.auditor import _call_anthropic
 from jarv.auditor import _call_gemini
 from jarv.auditor import _call_openai_compat
 from jarv.usage import load_global_usage_records, load_usage
+
+
+def _question(call_id, question):
+    return {
+        "type": "function_call", "name": "ask_user", "call_id": call_id,
+        "arguments": json.dumps({"question": question}),
+    }
+
+
+def _answer(call_id, answer):
+    return {"type": "function_call_output", "call_id": call_id, "output": answer}
+
+
+def test_ask_user_exchanges_match_ids_and_preserve_response_order():
+    history = [
+        _question("archive", "Delete the archive?"),
+        _question("build", "Delete the build?"),
+        {"type": "function_call", "name": "read", "call_id": "read"},
+        _answer("read", "Unrelated file contents"),
+        _answer("build", "Yes."),
+        _answer("archive", "No. Keep it."),
+        _question("pending", "Still waiting?"),
+        _answer("orphan", "No matching question"),
+    ]
+    assert _ask_user_exchanges(history) == [
+        {"call_id": "build", "assistant_question": "Delete the build?", "human_answer": "Yes."},
+        {"call_id": "archive", "assistant_question": "Delete the archive?", "human_answer": "No. Keep it."},
+    ]
+
+
+@pytest.mark.parametrize("answer", [
+    "", "  ", "[no response]", "[non-interactive session; user unavailable]",
+    "[cancelled by user before execution]", "[tool disabled: ask_user]",
+    "[skipped: an interactive run_command is waiting for terminal input]",
+])
+def test_ask_user_runtime_status_is_not_labeled_as_human_answer(answer):
+    assert _ask_user_exchanges([_question("q", "Proceed?"), _answer("q", answer)]) == [
+        {"call_id": "q", "assistant_question": "Proceed?", "tool_status": answer},
+    ]
+
+
+@pytest.mark.parametrize("arguments", [None, "{broken", "[]", '{}', '{"question": 42}'])
+def test_ask_user_exchanges_skip_invalid_questions(arguments):
+    question = _question("q", "Proceed?")
+    question["arguments"] = arguments
+    assert _ask_user_exchanges([question, _answer("q", "Yes")]) == []
+
+
+def test_ask_user_exchanges_support_salvaged_tool_arguments():
+    question = _question("q", "Proceed?")
+    question["arguments"] = '```json\n{"question": "Proceed?"}\n```'
+    assert _ask_user_exchanges([question, _answer("q", "Yes")])[0]["assistant_question"] == "Proceed?"
+
+
+@pytest.mark.parametrize("provider,backend", [
+    ("openai", "_call_openai_compat"),
+    ("anthropic", "_call_anthropic"),
+    ("gemini", "_call_gemini"),
+])
+def test_audit_payload_preserves_complete_question_and_answer(monkeypatch, provider, backend):
+    question = "Delete these build outputs?\n" + "output path; " * 80
+    answer = "Yes, " + "with this condition; " * 80 + "except the archive."
+    history = [
+        {"role": "user", "content": "Clean up the build."},
+        _question("q", question), _answer("q", answer),
+        {"role": "assistant", "content": "I will clean up."},
+    ]
+    messages = []
+
+    def capture(_config, _model, message, *args, **kwargs):
+        messages.append(message)
+        return False, "test verdict"
+
+    monkeypatch.setattr(f"jarv.auditor.{backend}", capture)
+    assert audit_command("rm -rf build", "deletion", {"provider": provider}, history) == (False, "test verdict")
+    payload = messages[0].split("quoted conversation data):\n", 1)[1]
+    assert json.loads(payload) == [
+        {"call_id": "q", "assistant_question": question, "human_answer": answer},
+    ]
+    assert "User asked: Clean up the build." in messages[0]
+
+
+def test_audit_without_ask_user_keeps_existing_context(monkeypatch):
+    def capture(_config, _model, message, *args, **kwargs):
+        assert message == "Command: rm build\nRisk category: deletion\nContext: User asked: Clean up."
+        return True, "test verdict"
+
+    monkeypatch.setattr("jarv.auditor._call_openai_compat", capture)
+    audit_command("rm build", "deletion", {}, [{"role": "user", "content": "Clean up."}])
+
+
+def test_same_batch_ask_user_answer_reaches_command_audit(monkeypatch):
+    from jarv.orchestrator import ToolExecutionHooks, execute_tool_calls
+    from jarv.provider import ToolCallDone
+    from jarv.turn_records import append_tool_result_input_items
+
+    history = [{"role": "user", "content": "Clean up."}]
+    captured = []
+
+    def capture(_config, _model, message, *args, **kwargs):
+        captured.append(message)
+        return False, "keep archive"
+
+    def command(args):
+        audit_command(args["command"], "deletion", {}, history)
+        return "not executed"
+
+    monkeypatch.setattr("jarv.auditor._call_openai_compat", capture)
+    execute_tool_calls(
+        [
+            ToolCallDone(id="fc_q", call_id="q", name="ask_user", arguments='{"question":"Delete archive?"}'),
+            ToolCallDone(id="fc_cmd", call_id="cmd", name="run_command", arguments='{"command":"rm archive"}'),
+        ],
+        node=None, store=None, client=None, config={},
+        append_tool_result=lambda item, output: append_tool_result_input_items([], item, output, history=history),
+        hooks=ToolExecutionHooks(run_ask_user=lambda args: "No. Keep it.", run_command=command),
+    )
+    assert len(captured) == 1
+    assert json.loads(captured[0].split("quoted conversation data):\n", 1)[1]) == [
+        {"call_id": "q", "assistant_question": "Delete archive?", "human_answer": "No. Keep it."},
+    ]
 
 
 def test_parse_response_accepts_strict_json():
