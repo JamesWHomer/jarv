@@ -603,7 +603,7 @@ def _update_outcome_lines(outcome) -> tuple[Text, list[Text]]:
         for line in (outcome.detail or "").splitlines()
         if line.strip()
     ]
-    if outcome.kind == "editable":
+    if outcome.kind in ("editable", "manual"):
         return Text(f"⚠ {outcome.message}", style="yellow"), details
     line = Text("✗ ", style="bold red")
     line.append(outcome.message, style="red")

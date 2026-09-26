@@ -14,14 +14,8 @@ from pathlib import Path
 
 from .clipboard import clipboard_image_dir
 from .display import console
+from .install_channel import InstallChannel, detect_install_channel
 from .paths import CONFIG_DIR, UNINSTALL_RESULT_FILE
-
-
-@dataclass(frozen=True)
-class InstallChannel:
-    kind: str
-    executable: Path
-    manual_command: str | None = None
 
 
 @dataclass(frozen=True)
@@ -35,47 +29,6 @@ class UninstallOutcome:
 
     status: int
     destructive: bool = False
-
-
-def _path_parts(path: Path) -> list[str]:
-    return [part.casefold() for part in path.parts]
-
-
-def _has_adjacent_parts(parts: list[str], first: str, second: str) -> bool:
-    return any(parts[index:index + 2] == [first, second] for index in range(len(parts) - 1))
-
-
-def detect_install_channel() -> InstallChannel:
-    """Detect which installer owns the currently running Jarv executable."""
-    from . import commands, standalone
-
-    executable = Path(sys.executable)
-    if standalone.is_standalone_install():
-        candidates = [executable]
-        with suppress(OSError):
-            resolved = executable.resolve()
-            if resolved != executable:
-                candidates.append(resolved)
-
-        candidate_parts = [_path_parts(path) for path in candidates]
-        if any(_has_adjacent_parts(parts, "microsoft", "winget") for parts in candidate_parts):
-            return InstallChannel("winget", executable, "winget uninstall JamesWHomer.Jarv")
-        if any(_has_adjacent_parts(parts, "scoop", "apps") for parts in candidate_parts):
-            return InstallChannel("scoop", executable, "scoop uninstall jarv")
-        if any("cellar" in parts or "linuxbrew" in parts for parts in candidate_parts):
-            return InstallChannel("brew", executable, "brew uninstall jarv")
-        return InstallChannel("standalone", executable)
-
-    if commands._is_editable_install():
-        return InstallChannel("editable", executable)
-    if commands._is_pipx_env():
-        return InstallChannel("pipx", executable, "pipx uninstall jarv")
-    if commands._is_uv_tool_env():
-        return InstallChannel("uv", executable, "uv tool uninstall jarv")
-    python = str(executable)
-    if " " in python:
-        python = f'"{python}"'
-    return InstallChannel("pip", executable, f"{python} -m pip uninstall jarv")
 
 
 def _normalized_path_entry(value: str | Path) -> str:

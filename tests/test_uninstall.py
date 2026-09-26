@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
-from jarv import cli, commands, standalone, uninstall
+from jarv import cli, commands, install_channel, standalone, uninstall
 
 
 class TTY(io.StringIO):
@@ -57,9 +57,9 @@ def test_detects_frozen_install_channels(monkeypatch, executable, kind, command)
 )
 def test_detects_python_install_channels(monkeypatch, editable, pipx, uv, kind, command):
     monkeypatch.delattr(standalone.sys, "frozen", raising=False)
-    monkeypatch.setattr(commands, "_is_editable_install", lambda: editable)
-    monkeypatch.setattr(commands, "_is_pipx_env", lambda: pipx)
-    monkeypatch.setattr(commands, "_is_uv_tool_env", lambda: uv)
+    monkeypatch.setattr(install_channel, "_is_editable_install", lambda: editable)
+    monkeypatch.setattr(install_channel, "_is_pipx_env", lambda: pipx)
+    monkeypatch.setattr(install_channel, "_is_uv_tool_env", lambda: uv)
 
     channel = uninstall.detect_install_channel()
 

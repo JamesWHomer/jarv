@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-import json
+import copy
 import shutil
 import subprocess
 import sys
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
 
 from . import __version__
 from .config import CONFIG_DIR, CONFIG_FILE
 from .display import console, status_line
+from .install_channel import InstallChannel, detect_install_channel
 
 UPDATE_CHECK_INTERVAL_HOURS = 24
 UPDATE_FLAG_FILE = CONFIG_DIR / "update_available.txt"
@@ -50,22 +50,6 @@ def cmd_btw(args: list | None = None) -> None:
     )
 
 
-def coerce_value(value: str):
-    if value.lower() == "true":
-        return True
-    if value.lower() == "false":
-        return False
-    try:
-        return int(value)
-    except ValueError:
-        pass
-    try:
-        return float(value)
-    except ValueError:
-        pass
-    return value
-
-
 def _mask_config_value(key: str, value) -> str:
     if key == "api_key" and value:
         return "[dim]***[/dim]"
@@ -77,6 +61,7 @@ def _mask_config_value(key: str, value) -> str:
 
 def cmd_set(args: list) -> int:
     from .config import DEFAULT_CONFIG, load_config, save_config, validate_config
+    from .config_schema import parse_config_value
 
     if len(args) < 2:
         console.print(status_line("✗", "jarv /set <key> <value>", prefix_style="bold red", message_style="dim"))
@@ -89,8 +74,8 @@ def cmd_set(args: list) -> int:
             f"[dim](known: {', '.join(DEFAULT_CONFIG.keys())})[/dim]"
         )
     config = load_config()
-    value = coerce_value(raw)
-    trial = dict(config)
+    value = parse_config_value(key, raw)
+    trial = copy.deepcopy(config)
     trial[key] = value
     if key in ("model", "provider"):
         from .reasoning import reconcile_reasoning_effort
@@ -99,7 +84,7 @@ def cmd_set(args: list) -> int:
     if not validate_config(trial):
         return 2
     save_config(trial)
-    display = _mask_config_value(key, value)
+    display = _mask_config_value(key, trial[key])
     console.print(f"[bold cyan]✓[/bold cyan] [bold cyan]{key}[/bold cyan] [dim]=[/dim] {display}")
     return 0
 
@@ -116,7 +101,7 @@ def cmd_unset(args: list) -> int:
         console.print(f"[yellow]○[/yellow] [bold]{key}[/bold] [dim]is not set.[/dim]")
         return 1
     if key in DEFAULT_CONFIG:
-        trial = dict(config)
+        trial = copy.deepcopy(config)
         trial[key] = DEFAULT_CONFIG[key]
         if key in ("model", "provider"):
             from .reasoning import reconcile_reasoning_effort
@@ -127,7 +112,7 @@ def cmd_unset(args: list) -> int:
         save_config(trial)
         console.print(f"[bold cyan]↺[/bold cyan] [bold cyan]{key}[/bold cyan] [dim]reset to default →[/dim] [green]{repr(DEFAULT_CONFIG[key])}[/green]")
     else:
-        trial = dict(config)
+        trial = copy.deepcopy(config)
         del trial[key]
         if not validate_config(trial):
             return 2
@@ -231,7 +216,7 @@ def _about_body() -> Markdown:
 - `jarv /about` - Show this detailed overview.
 - `jarv /setup` - Run the setup wizard to choose a provider, enter an API key, and pick a model.
 - `jarv /config` - Show raw config values. The API key is masked.
-- `jarv /set <key> <value>` - Set a config value. Values like `true`, `false`, integers, and floats are coerced.
+- `jarv /set <key> <value>` - Set a config value. Boolean and numeric settings parse their expected types; text settings preserve the supplied text.
 - `jarv /unset <key>` - Reset a default config key, or remove a custom key.
 - `jarv /history` - Show recent user and assistant messages.
 - `jarv /tree` - Browse the session as a tree; fork, edit, or resume from any earlier prompt.
@@ -311,8 +296,8 @@ Each terminal is bound to exactly one session at a time. By default a fresh term
 
 ## Updates
 
-- `jarv /update` uses GitHub Releases for standalone binaries and PyPI for Python installs. Editable source installs are left untouched.
-- A one-shot `jarv <question>` (arguments on the command line, not heads-up mode) fires a fully non-blocking background check when `check_updates` is true. Standalone installs check GitHub Releases; Python installs check PyPI. If an update is found it is saved locally; the next invocation shows the notification instantly with no network wait.
+- `jarv /update` uses GitHub Releases for direct standalone installs and PyPI for Python installs. Scoop, WinGet, and Homebrew installs show their owning manager's update command to run after exiting Jarv. Editable source installs are left untouched.
+- A one-shot `jarv <question>` (arguments on the command line, not heads-up mode) fires a fully non-blocking background check when `check_updates` is true. Direct standalone installs check GitHub Releases; Python installs check PyPI. Scoop, WinGet, and Homebrew manage their own update availability. If an update is found it is saved locally; the next invocation shows the notification instantly with no network wait.
 - The background check is throttled to at most once every {UPDATE_CHECK_INTERVAL_HOURS} hours.
 - Set `check_updates` to `false` (`jarv /set check_updates false`) to disable the background check entirely.
 - After updating, run `jarv` again to use the new version.
@@ -337,38 +322,6 @@ def print_about(*, mode: str | None = None, include_setup_nudge: bool = True) ->
         include_setup_nudge=include_setup_nudge,
     )
 
-
-
-def _is_pipx_env() -> bool:
-    """Detect if jarv is running inside a pipx-managed virtualenv."""
-    return any(part.lower() == "pipx" for part in Path(sys.executable).parts)
-
-
-def _is_uv_tool_env() -> bool:
-    """Detect the standard uv tool environment path."""
-    parts = [part.lower() for part in Path(sys.executable).parts]
-    return any(parts[index:index + 2] == ["uv", "tools"] for index in range(len(parts) - 1))
-
-
-def _installation_manager() -> str:
-    if _is_pipx_env():
-        return "pipx"
-    if _is_uv_tool_env():
-        return "uv"
-    return "pip"
-
-
-def _is_editable_install() -> bool:
-    import importlib.metadata
-
-    try:
-        direct_url = importlib.metadata.distribution("jarv").read_text("direct_url.json")
-        if not direct_url:
-            return False
-        metadata = json.loads(direct_url)
-        return bool(metadata.get("dir_info", {}).get("editable"))
-    except Exception:
-        return False
 
 
 UPDATE_INSTALL_TIMEOUT_SECONDS = 180
@@ -448,9 +401,11 @@ class UpdateOutcome:
     """Result of an update attempt, independent of how it is displayed.
 
     ``kind`` is one of ``updated`` / ``staged`` / ``current`` / ``editable`` /
-    ``failed``; ``message`` is the one-line plain-text summary and ``detail``
-    an optional multi-line elaboration. Presenters (the CLI printer below, the
-    heads-up transcript) own their styling and restart hints.
+    ``manual`` / ``failed``; ``message`` is the one-line plain-text summary and
+    ``detail`` an optional multi-line elaboration. A ``manual`` handoff leaves
+    the install unchanged and requires the user to run their package manager.
+    Presenters (the CLI printer below, the heads-up transcript) own their styling
+    and restart hints.
     """
 
     kind: str
@@ -475,11 +430,16 @@ def perform_update(stage: UpdateStage) -> UpdateOutcome:
     ``stage`` calls, so callers can run this on a worker thread and render
     progress however suits them.
     """
-    from .standalone import is_standalone_install
-
-    if is_standalone_install():
+    channel = detect_install_channel()
+    if channel.update_command:
+        return UpdateOutcome(
+            "manual",
+            f"Jarv is managed by {channel.kind}; update it with that package manager.",
+            detail=f"Exit Jarv, then run:\n  {channel.update_command}",
+        )
+    if channel.kind == "standalone":
         return _perform_standalone_update(stage)
-    return _perform_python_update(stage)
+    return _perform_python_update(stage, channel)
 
 
 def _perform_standalone_update(stage: UpdateStage) -> UpdateOutcome:
@@ -516,7 +476,7 @@ def _perform_standalone_update(stage: UpdateStage) -> UpdateOutcome:
     return UpdateOutcome("updated", "Updated successfully.", latest=latest)
 
 
-def _perform_python_update(stage: UpdateStage) -> UpdateOutcome:
+def _perform_python_update(stage: UpdateStage, channel: InstallChannel) -> UpdateOutcome:
     stage("Checking for updates")
     release = _fetch_latest_pypi_release()
     if release is None:
@@ -527,7 +487,7 @@ def _perform_python_update(stage: UpdateStage) -> UpdateOutcome:
         if latest != __version__:
             detail += f", PyPI v{latest}"
         return UpdateOutcome("current", "Already up to date.", detail=detail, latest=latest)
-    if _is_editable_install():
+    if channel.kind == "editable":
         return UpdateOutcome(
             "editable",
             "Editable install detected; automatic update skipped.",
@@ -535,7 +495,7 @@ def _perform_python_update(stage: UpdateStage) -> UpdateOutcome:
             latest=latest,
         )
 
-    manager = _installation_manager()
+    manager = channel.kind
     install_target = {
         "pip": "active Python environment",
         "pipx": "pipx tool environment",
@@ -604,6 +564,7 @@ _UPDATE_OUTCOME_STYLES = {
     "staged": ("✓", "green"),
     "current": ("✓", "green"),
     "editable": ("⚠", "yellow"),
+    "manual": ("⚠", "yellow"),
     "failed": ("✗", "red"),
 }
 
@@ -622,24 +583,14 @@ def _print_update_outcome(outcome: UpdateOutcome) -> int:
     elif outcome.kind == "current" and outcome.detail:
         line += f" [dim]({outcome.detail})[/dim]"
     console.print(line)
-    if outcome.kind in ("editable", "failed") and outcome.detail:
+    if outcome.kind in ("editable", "manual", "failed") and outcome.detail:
         console.print(outcome.detail, style="dim")
     return 0 if outcome.ok else 1
 
 
-def _cmd_update_standalone() -> int:
-    with _console_update_stages() as stage:
-        outcome = _perform_standalone_update(stage)
-    return _print_update_outcome(outcome)
-
-
 def cmd_update() -> int:
-    from .standalone import is_standalone_install
-
-    if is_standalone_install():
-        return _cmd_update_standalone()
     with _console_update_stages() as stage:
-        outcome = _perform_python_update(stage)
+        outcome = perform_update(stage)
     return _print_update_outcome(outcome)
 
 

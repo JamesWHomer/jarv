@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
-from jarv import cli, commands, standalone, update_check
+from jarv import cli, commands, install_channel, standalone, update_check
 
 
 def test_fetch_latest_release_returns_exact_version_spec(monkeypatch):
@@ -60,23 +60,94 @@ def test_failed_background_check_is_not_throttled(monkeypatch):
 
 def test_pipx_detection_does_not_resolve_interpreter_symlink(monkeypatch):
     monkeypatch.setattr(
-        commands.sys,
+        install_channel.sys,
         "executable",
         "/home/user/.local/share/pipx/venvs/jarv/bin/python",
     )
 
-    assert commands._is_pipx_env()
+    monkeypatch.setattr(install_channel, "_is_editable_install", lambda: False)
+    assert install_channel.detect_install_channel().kind == "pipx"
 
 
 def test_uv_tool_detection(monkeypatch):
     monkeypatch.setattr(
-        commands.sys,
+        install_channel.sys,
         "executable",
         "C:/Users/test/AppData/Roaming/uv/tools/jarv/Scripts/python.exe",
     )
 
-    assert commands._is_uv_tool_env()
-    assert commands._installation_manager() == "uv"
+    monkeypatch.setattr(install_channel, "_is_editable_install", lambda: False)
+    assert install_channel.detect_install_channel().kind == "uv"
+
+
+@pytest.mark.parametrize(
+    ("executable", "manager", "command"),
+    [
+        ("C:/Users/test/scoop/apps/jarv/current/jarv.exe", "scoop", "scoop update jarv"),
+        (
+            "C:/Users/test/AppData/Local/Microsoft/WinGet/Links/jarv.exe",
+            "winget", "winget upgrade --id JamesWHomer.Jarv --exact",
+        ),
+        ("/opt/homebrew/Cellar/jarv/1.0/bin/jarv", "brew", "brew upgrade jarv"),
+    ],
+)
+def test_managed_updates_handoff_without_self_updating(
+    monkeypatch, tmp_path, executable, manager, command,
+):
+    output = io.StringIO()
+    test_console = Console(file=output, force_terminal=False, color_system=None, width=120)
+    flag = tmp_path / "update_available.txt"
+    flag.write_text("9.9.9", encoding="utf-8")
+    monkeypatch.setattr(commands, "console", test_console)
+    monkeypatch.setattr(commands, "UPDATE_FLAG_FILE", flag)
+    monkeypatch.setattr(standalone, "is_standalone_install", lambda: True)
+    monkeypatch.setattr(install_channel.sys, "executable", executable)
+
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("A managed install must not fetch or install upstream releases")
+
+    monkeypatch.setattr(standalone, "fetch_release_manifest", unexpected)
+    monkeypatch.setattr(standalone, "install_standalone_asset", unexpected)
+    monkeypatch.setattr(update_check, "_fetch_latest_pypi_release", unexpected)
+    monkeypatch.setattr(commands, "_run_update_command", unexpected)
+
+    # Both the interactive worker and the CLI must use the same handoff.
+    outcome = commands.perform_update(unexpected)
+    assert outcome.kind == "manual"
+    assert not outcome.ok
+    assert manager in outcome.message
+    assert command in outcome.detail
+    assert commands.cmd_update() == 1
+    text = output.getvalue()
+    assert command in text
+    assert "Exit Jarv" in text
+    assert "Updated successfully" not in text
+    assert "Update failed" not in text
+    assert flag.read_text(encoding="utf-8") == "9.9.9"
+    assert update_check._fetch_latest_update_version() is None
+
+
+@pytest.mark.parametrize("manager", ["pip", "pipx", "uv"])
+def test_python_update_uses_detected_manager(monkeypatch, tmp_path, manager):
+    monkeypatch.setattr(
+        commands, "detect_install_channel",
+        lambda: install_channel.InstallChannel(manager, Path("python")),
+    )
+    monkeypatch.setattr(commands, "__version__", "0.15.0")
+    monkeypatch.setattr(commands, "_fetch_latest_pypi_release", lambda: ("0.15.1", "jarv==0.15.1"))
+    monkeypatch.setattr(commands, "UPDATE_FLAG_FILE", tmp_path / "update_available.txt")
+    monkeypatch.setattr(commands, "_installed_version", lambda: "0.15.1")
+    monkeypatch.setattr(commands, "_tool_installed_version", lambda _manager: "0.15.1")
+    calls = []
+
+    def run_install(owner, spec):
+        calls.append((owner, spec))
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    monkeypatch.setattr(commands, "_run_update_install", run_install)
+
+    assert commands.perform_update(lambda _stage: None).kind == "updated"
+    assert calls == [(manager, "jarv==0.15.1")]
 
 
 def test_update_installs_exact_artifact_and_verifies_version(monkeypatch, tmp_path):
@@ -91,8 +162,10 @@ def test_update_installs_exact_artifact_and_verifies_version(monkeypatch, tmp_pa
     monkeypatch.setattr(commands, "__version__", "0.15.0")
     monkeypatch.setattr(commands, "UPDATE_FLAG_FILE", tmp_path / "update_available.txt")
     monkeypatch.setattr(commands, "_installed_version", lambda: "0.15.1")
-    monkeypatch.setattr(commands, "_is_editable_install", lambda: False)
-    monkeypatch.setattr(commands, "_installation_manager", lambda: "pip")
+    monkeypatch.setattr(
+        commands, "detect_install_channel",
+        lambda: install_channel.InstallChannel("pip", Path("python")),
+    )
 
     def run_install(manager, spec):
         calls.append((manager, spec))
@@ -118,8 +191,10 @@ def test_update_does_not_report_success_after_noop(monkeypatch):
         lambda: ("0.15.1", "jarv==0.15.1"),
     )
     monkeypatch.setattr(commands, "__version__", "0.15.0")
-    monkeypatch.setattr(commands, "_is_editable_install", lambda: False)
-    monkeypatch.setattr(commands, "_installation_manager", lambda: "pip")
+    monkeypatch.setattr(
+        commands, "detect_install_channel",
+        lambda: install_channel.InstallChannel("pip", Path("python")),
+    )
     monkeypatch.setattr(
         commands,
         "_run_update_install",
@@ -148,8 +223,10 @@ def test_update_verifies_pipx_fallback(monkeypatch):
         lambda: ("0.15.1", "jarv==0.15.1"),
     )
     monkeypatch.setattr(commands, "__version__", "0.15.0")
-    monkeypatch.setattr(commands, "_is_editable_install", lambda: False)
-    monkeypatch.setattr(commands, "_installation_manager", lambda: "pip")
+    monkeypatch.setattr(
+        commands, "detect_install_channel",
+        lambda: install_channel.InstallChannel("pip", Path("python")),
+    )
     monkeypatch.setattr(commands, "_fallback_tool_manager", lambda: "pipx")
     monkeypatch.setattr(commands, "_installed_version", lambda: "0.15.1")
 
@@ -174,7 +251,7 @@ def test_update_skips_editable_install(monkeypatch):
     monkeypatch.setattr(commands, "console", test_console)
     monkeypatch.setattr(commands, "_fetch_latest_pypi_release", lambda: ("0.15.1", "jarv==0.15.1"))
     monkeypatch.setattr(commands, "__version__", "0.15.0")
-    monkeypatch.setattr(commands, "_is_editable_install", lambda: True)
+    monkeypatch.setattr(install_channel, "_is_editable_install", lambda: True)
 
     assert commands.cmd_update() == 1
     assert "Editable install detected" in output.getvalue()
@@ -263,6 +340,7 @@ def test_standalone_download_rejects_checksum_mismatch(monkeypatch, tmp_path):
 
 
 def test_standalone_update_already_current(monkeypatch):
+    monkeypatch.setattr(standalone, "is_standalone_install", lambda: True)
     output = io.StringIO()
     test_console = Console(file=output, force_terminal=False, color_system=None)
 
@@ -270,11 +348,12 @@ def test_standalone_update_already_current(monkeypatch):
     monkeypatch.setattr(commands, "__version__", "0.15.1")
     monkeypatch.setattr(standalone, "fetch_release_manifest", lambda: {"version": "0.15.1", "assets": []})
 
-    assert commands._cmd_update_standalone() == 0
+    assert commands.cmd_update() == 0
     assert "Already up to date" in output.getvalue()
 
 
 def test_standalone_update_fails_when_no_matching_asset(monkeypatch):
+    monkeypatch.setattr(standalone, "is_standalone_install", lambda: True)
     output = io.StringIO()
     test_console = Console(file=output, force_terminal=False, color_system=None)
     manifest = {
@@ -300,11 +379,12 @@ def test_standalone_update_fails_when_no_matching_asset(monkeypatch):
         lambda _value=None, **_kwargs: "x86_64",
     )
 
-    assert commands._cmd_update_standalone() == 1
+    assert commands.cmd_update() == 1
     assert "No standalone release asset matches this system" in output.getvalue()
 
 
 def test_standalone_update_success(monkeypatch, tmp_path):
+    monkeypatch.setattr(standalone, "is_standalone_install", lambda: True)
     output = io.StringIO()
     test_console = Console(file=output, force_terminal=False, color_system=None)
     asset = {
@@ -334,7 +414,7 @@ def test_standalone_update_success(monkeypatch, tmp_path):
 
     monkeypatch.setattr(standalone, "install_standalone_asset", install)
 
-    assert commands._cmd_update_standalone() == 0
+    assert commands.cmd_update() == 0
     assert calls == ["jarv-0.15.1-linux-x86_64.tar.gz"]
     assert "Updated successfully" in output.getvalue()
 

@@ -2490,6 +2490,24 @@ class HeadsupTests(unittest.TestCase):
         self.assertIn("Updated to v9.9.9", text)
         self.assertIn("restart jarv", text)
 
+    def test_managed_update_shows_owner_command_in_transcript(self):
+        app, _test_console, _output = self._app()
+
+        with (
+            patch("jarv.standalone.is_standalone_install", return_value=True),
+            patch("sys.executable", "C:/Users/test/scoop/apps/jarv/current/jarv.exe"),
+            patch("jarv.standalone.fetch_release_manifest", side_effect=AssertionError("No direct update")),
+        ):
+            app._run_slash("/update", [])
+            self.assertTrue(self._wait_for(lambda: app._update_task is None))
+
+        text = self._entry_text(app)
+        self.assertIn("managed by scoop", text)
+        self.assertIn("Exit Jarv", text)
+        self.assertIn("scoop update jarv", text)
+        self.assertNotIn("Updated to", text)
+        self.assertNotIn("Update failed", text)
+
     def test_update_animates_spinner_while_stage_runs(self):
         from jarv.commands import UpdateOutcome
 

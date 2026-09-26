@@ -58,9 +58,16 @@ def _record_check_time() -> None:
 
 
 def _fetch_latest_update_version() -> str | None:
-    from .standalone import is_standalone_install, latest_standalone_version
+    from .install_channel import detect_install_channel
+    from .standalone import latest_standalone_version
 
-    if is_standalone_install():
+    channel = detect_install_channel()
+    # Manager repositories can lag behind upstream releases. Let the owning
+    # manager decide which versions are available instead of advertising an
+    # upstream binary that Jarv must not install over its managed executable.
+    if channel.update_command:
+        return None
+    if channel.kind == "standalone":
         return latest_standalone_version()
     return _fetch_latest_pypi_version()
 
