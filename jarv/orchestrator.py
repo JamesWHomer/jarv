@@ -43,7 +43,10 @@ from .shell import (
     resolve_command_output_window,
     truncate_model_output,
 )
-from .tool_outputs import ToolOutput, summarize_tool_output
+from .tool_outputs import (
+    ToolOutcome, ToolOutput, preserve_tool_outcome, summarize_tool_output,
+    with_tool_outcome,
+)
 from .turn_loop import collect_stream_response, run_tool_execution_round
 from .turn_records import (
     append_reasoning_input_items,
@@ -152,7 +155,11 @@ SPAWN_TOOL = {
                             "type": "string",
                             "minLength": 1,
                             "maxLength": MAX_SPAWN_LABEL_CHARS,
-                            "description": "Unique handle for this child's artifact.",
+                            "description": (
+                                "Session-wide unique handle for this child's artifact. "
+                                "Use a new label for each child, including across "
+                                "successive and nested spawn calls."
+                            ),
                         },
                         "task": {
                             "type": "string",
@@ -349,7 +356,7 @@ def prepare_run_command(args: dict, config: dict) -> RunCommandPrepared | str:
     """Validate run_command args and resolve the model output window."""
     cmd = args.get("command")
     if not isinstance(cmd, str) or not cmd.strip():
-        return "[tool argument error: command must be a non-empty string]"
+        return with_tool_outcome("[tool argument error: command must be a non-empty string]", "failed")
     try:
         head_chars, tail_chars = resolve_command_output_window(
             _optional_arg(args, "head_chars", COMMAND_OUTPUT_UNSET),
@@ -357,7 +364,7 @@ def prepare_run_command(args: dict, config: dict) -> RunCommandPrepared | str:
             get_setting(config, "max_tool_output_chars"),
         )
     except ValueError as e:
-        return f"[tool argument error: {e}]"
+        return with_tool_outcome(f"[tool argument error: {e}]", "failed")
     return RunCommandPrepared(
         cmd=cmd,
         head_chars=head_chars,
@@ -420,13 +427,17 @@ def format_run_command_output(
     retained_store: RetainedOutputStore | None,
 ) -> tuple[str, str | None]:
     """Retain and window shell output for the model."""
-    return retain_command_output(
+    output, output_id = retain_command_output(
         result.full_model_output(),
         prepared.head_chars,
         prepared.tail_chars,
         retained_store,
         prepared.max_tool_output_chars,
     )
+    status = "timed_out" if result.timed_out else (
+        "success" if result.exit_code == 0 else "failed"
+    )
+    return with_tool_outcome(output, ToolOutcome(status, result.exit_code)), output_id
 
 
 def run_command_tool_output(
@@ -455,7 +466,7 @@ def run_command_tool_output(
         incognito=incognito,
     )
     if not allowed:
-        return denial
+        return with_tool_outcome(denial, "denied")
     output, _, _ = execute_run_command(
         prepared,
         config,
@@ -470,11 +481,11 @@ def parse_spawn_children(args: dict) -> list | str:
     """Return child specs or a model-visible error string."""
     children = args.get("children")
     if not isinstance(children, list) or not children:
-        return "[tool argument error: children must be a non-empty list]"
+        return with_tool_outcome("[tool argument error: children must be a non-empty list]", "failed")
     if len(children) > MAX_SPAWN_CHILDREN:
-        return (
+        return with_tool_outcome(
             "[tool argument error: children must contain at most "
-            f"{MAX_SPAWN_CHILDREN} entries]"
+            f"{MAX_SPAWN_CHILDREN} entries]", "failed",
         )
     return children
 
@@ -505,10 +516,13 @@ def spawn_tool_output(
             retained_store=retained_store,
         )
     except DepthExceeded as e:
-        return f"[error: {e}]"
+        return with_tool_outcome(f"[error: {e}]", "failed")
     except ValueError as e:
-        return f"[tool argument error: {e}]"
-    return json.dumps(results)
+        return with_tool_outcome(f"[tool argument error: {e}]", "failed")
+    return with_tool_outcome(
+        json.dumps(results),
+        "success" if all(result.get("status") == "done" for result in results) else "failed",
+    )
 
 
 def history_has_web_search_read_nudge(items: list[dict]) -> bool:
@@ -525,8 +539,8 @@ def history_has_web_search_read_nudge(items: list[dict]) -> bool:
 
 def append_web_search_read_nudge(output: str) -> str:
     if not output:
-        return WEB_SEARCH_READ_NUDGE
-    return output.rstrip() + "\n\n" + WEB_SEARCH_READ_NUDGE
+        return preserve_tool_outcome(WEB_SEARCH_READ_NUDGE, output)
+    return preserve_tool_outcome(output.rstrip() + "\n\n" + WEB_SEARCH_READ_NUDGE, output)
 
 
 def _parse_tool_args(arguments: str | None) -> tuple[dict | None, str | None]:
@@ -539,9 +553,9 @@ def _parse_tool_args(arguments: str | None) -> tuple[dict | None, str | None]:
         salvaged = salvage_json_object(arguments or "")
         if salvaged is not None:
             return salvaged, None
-        return None, f"[tool argument error: invalid JSON: {e}]"
+        return None, with_tool_outcome(f"[tool argument error: invalid JSON: {e}]", "failed")
     if not isinstance(args, dict):
-        return None, "[tool argument error: arguments must be an object]"
+        return None, with_tool_outcome("[tool argument error: arguments must be an object]", "failed")
     return args, None
 
 
@@ -564,13 +578,13 @@ def dispatch_parallel_safe_tool_batch(
         if not tool_call_is_parallel_safe(item.name):
             results[index] = ToolBatchResult(
                 None,
-                f"[tool not parallel-safe: {item.name}]",
+                with_tool_outcome(f"[tool not parallel-safe: {item.name}]", "failed"),
             )
             continue
         if item.name in TOOL_NAMES and not tool_enabled(config, item.name):
             results[index] = ToolBatchResult(
                 None,
-                f"[tool disabled: {item.name}]",
+                with_tool_outcome(f"[tool disabled: {item.name}]", "denied"),
             )
             continue
         args, error = _parse_tool_args(item.arguments)
@@ -674,9 +688,9 @@ def dispatch_tool(
 ) -> ToolOutput:
     """Execute a non-finish tool call and return the model-visible output string."""
     if name in TOOL_NAMES and not tool_enabled(config, name):
-        return f"[tool disabled: {name}]"
+        return with_tool_outcome(f"[tool disabled: {name}]", "denied")
     if name == "spawn" and node.sterile:
-        return "[tool unavailable: sterile agents cannot spawn children]"
+        return with_tool_outcome("[tool unavailable: sterile agents cannot spawn children]", "denied")
 
     if name == "run_command":
         return run_command_tool_output(
@@ -735,7 +749,7 @@ def dispatch_tool(
             retained_store=retained_store,
         )
 
-    return f"[unknown tool: {name}]"
+    return with_tool_outcome(f"[unknown tool: {name}]", "failed")
 
 
 def _max_tool_output_chars(config: dict) -> int:
@@ -745,7 +759,9 @@ def _max_tool_output_chars(config: dict) -> int:
 def _maybe_truncate_tool_output(name: str, output: ToolOutput, config: dict) -> ToolOutput:
     if name in {"run_command", "read"}:
         return output
-    return truncate_model_output(output, _max_tool_output_chars(config))
+    return preserve_tool_outcome(
+        truncate_model_output(output, _max_tool_output_chars(config)), output,
+    )
 
 
 def execute_tool_calls(
@@ -817,11 +833,11 @@ def execute_tool_calls(
             continue
 
         if item.name in TOOL_NAMES and not tool_enabled(config, item.name):
-            append_tool_result(item, f"[tool disabled: {item.name}]")
+            append_tool_result(item, with_tool_outcome(f"[tool disabled: {item.name}]", "denied"))
             item_index += 1
             continue
         if item.name == "spawn" and node is not None and node.sterile:
-            append_tool_result(item, "[tool unavailable: sterile agents cannot spawn children]")
+            append_tool_result(item, with_tool_outcome("[tool unavailable: sterile agents cannot spawn children]", "denied"))
             item_index += 1
             continue
 
@@ -837,7 +853,7 @@ def execute_tool_calls(
             longform = args.get("longform")
             tldr = args.get("tldr")
             if not isinstance(longform, str) or not isinstance(tldr, str):
-                append_tool_result(item, "[finish requires string longform and tldr]")
+                append_tool_result(item, with_tool_outcome("[finish requires string longform and tldr]", "failed"))
             else:
                 result.finished = (longform, tldr)
                 return result
@@ -889,9 +905,9 @@ def execute_tool_calls(
             for skipped in tool_calls[item_index + 1:]:
                 append_tool_result(
                     skipped,
-                    "[skipped: an interactive run_command is waiting for "
+                    with_tool_outcome("[skipped: an interactive run_command is waiting for "
                     "terminal input; this call was not executed — re-issue it "
-                    "after the command finishes]",
+                    "after the command finishes]", "skipped"),
                 )
             return result
         item_index += 1
@@ -1183,6 +1199,10 @@ def spawn_batch(
                 if parent.shell_state is not None else None
             ),
         ))
+
+    # Reserve the entire validated batch before callbacks or workers can spawn
+    # more children against the shared store.
+    store.reserve_labels(seen_labels)
 
     if observer is not None:
         observer.on_spawn_start(parent.label, [n.label for n in nodes])

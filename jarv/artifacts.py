@@ -17,10 +17,30 @@ class Artifact:
 class ArtifactStore:
     def __init__(self) -> None:
         self._items: dict[str, Artifact] = {}
+        self._reserved_labels: set[str] = set()
         self._lock = Lock()
+
+    def reserve_labels(self, labels: set[str]) -> None:
+        """Claim a whole spawn batch atomically, or leave the store unchanged.
+
+        Keep claims for this store's lifetime, even after failure or cancellation:
+        cancelled workers can still be unwinding while another batch starts.
+        Persisted artifacts also block reuse when a session is loaded again.
+        """
+        with self._lock:
+            conflicts = labels & (self._reserved_labels | self._items.keys())
+            if conflicts:
+                label = min(conflicts)
+                raise ValueError(
+                    f"child label '{label}' is already used in this session; "
+                    "choose a new label"
+                )
+            self._reserved_labels.update(labels)
 
     def put(self, label: str, longform: str, tldr: str, owner: str) -> None:
         with self._lock:
+            if label in self._items:
+                raise ValueError(f"artifact label '{label}' already exists")
             self._items[label] = Artifact(label, longform, tldr, owner)
 
     def get(self, label: str) -> Artifact | None:

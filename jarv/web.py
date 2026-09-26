@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 from . import __version__
 from .cancellation import CancellationToken
 from .config import DEFAULT_CONFIG, get_setting
+from .tool_outputs import with_tool_outcome
 
 
 DUCKDUCKGO_HTML_URL = "https://html.duckduckgo.com/html/"
@@ -839,33 +840,34 @@ def dispatch_web_tool(
         if name == "web_search":
             query = args.get("query")
             if not isinstance(query, str) or not query.strip():
-                return "[tool argument error: query must be a non-empty string]"
+                return with_tool_outcome("[tool argument error: query must be a non-empty string]", "failed")
             max_results = args.get("max_results", DEFAULT_SEARCH_RESULTS)
             if max_results is None:
                 max_results = DEFAULT_SEARCH_RESULTS
             if isinstance(max_results, bool) or not isinstance(max_results, int):
-                return "[tool argument error: max_results must be an integer]"
+                return with_tool_outcome("[tool argument error: max_results must be an integer]", "failed")
             if max_results <= 0:
-                return "[tool argument error: max_results must be a positive integer]"
+                return with_tool_outcome("[tool argument error: max_results must be a positive integer]", "failed")
             if max_results > MAX_SEARCH_RESULTS:
-                return (
+                return with_tool_outcome(
                     "[tool argument error: max_results must be at most "
-                    f"{MAX_SEARCH_RESULTS}]"
+                    f"{MAX_SEARCH_RESULTS}]", "failed",
                 )
             offset = args.get("offset", 0)
             if offset is None:
                 offset = 0
             if isinstance(offset, bool) or not isinstance(offset, int):
-                return "[tool argument error: offset must be an integer]"
+                return with_tool_outcome("[tool argument error: offset must be an integer]", "failed")
             if offset < 0:
-                return "[tool argument error: offset must be a non-negative integer]"
-            return search_web(
+                return with_tool_outcome("[tool argument error: offset must be a non-negative integer]", "failed")
+            output = search_web(
                 query.strip(),
                 max_results,
                 offset=offset,
                 timeout=timeout,
                 cancellation_token=cancellation_token,
             )
+            return with_tool_outcome(output, "success")
     except WebToolError as exc:
-        return f"[web error: {exc}]"
-    return f"[unknown tool: {name}]"
+        return with_tool_outcome(f"[web error: {exc}]", "failed")
+    return with_tool_outcome(f"[unknown tool: {name}]", "failed")

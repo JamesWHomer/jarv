@@ -15,9 +15,12 @@ from .display import (
     tool_card,
 )
 from .tool_outputs import (
+    ToolOutcome,
     flatten_content_text,
     summarize_tool_output,
+    tool_outcome,
     tool_output_failed,
+    with_tool_outcome,
 )
 
 # Kept as an alias for heads-up and existing session-render callers.
@@ -57,14 +60,18 @@ def _tool_call_output(history: list, call_index: int, call_id) -> str:
     for item in history[call_index + 1:]:
         if not isinstance(item, dict):
             continue
-        if item.get("role") == "user" or item.get("type") == "function_call":
+        if item.get("role") == "user":
             break
         if (
             item.get("type") == "function_call_output"
             and item.get("call_id") == call_id
         ):
-            return summarize_tool_output(item.get("output", ""))
-    return ""
+            output = summarize_tool_output(item.get("output", ""))
+            if "outcome" in item:
+                outcome = ToolOutcome.from_dict(item["outcome"]) or ToolOutcome("unknown")
+                output = with_tool_outcome(output, outcome)
+            return output
+    return with_tool_outcome("", "unknown")
 
 
 def _next_visible_history_item(history: list, start_index: int) -> dict | None:
@@ -228,9 +235,15 @@ def _tool_call_renderable(
     per tool."""
     name = str(item.get("name") or "unknown")
     args, raw_arguments = _tool_call_arguments(item)
-    failed = args is None or tool_output_failed(output)
+    outcome = tool_outcome(output)
+    failed = tool_output_failed(output)
+    if outcome is None or outcome.status == "unknown":
+        failed = failed or args is None
     status = "failed" if failed else "done"
     status_style = "red" if failed else "green"
+    if not failed and outcome is not None and outcome.status in {"running", "unknown"}:
+        status = outcome.status
+        status_style = "yellow"
     metadata = ""
 
     if name == "run_command" and args is not None:
@@ -333,10 +346,18 @@ def _tool_call_renderable(
                 label = str(child.get("label", "?"))
                 result = result_by_label.get(label, {})
                 line = Text()
-                line.append("\u2713 ", style="bold green")
+                child_status = result.get("status")
+                if child_status == "done":
+                    line.append("\u2713 ", style="bold green")
+                elif child_status == "failed":
+                    line.append("\u2717 ", style="bold red")
+                else:
+                    line.append("? ", style="yellow")
                 line.append(label, style="bold cyan")
                 if result.get("tldr"):
                     line.append(f"  {result['tldr']}", style="dim")
+                elif result.get("reason"):
+                    line.append(f"  {result['reason']}", style="dim red")
                 lines.append(line)
         body = Group(*lines) if lines else Text(raw_arguments, style="dim")
     else:

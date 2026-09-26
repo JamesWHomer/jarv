@@ -12,11 +12,19 @@ def test_tool_output_failed_detects_every_failure_prefix():
         "[tool argument error:": "[tool argument error: invalid JSON]",
         "[unknown tool:": "[unknown tool: frobnicate]",
         "[edit error:": "[edit error: old_text not found]",
+        "[edit conflict:": "[edit conflict: file changed]",
         "[edit denied": "[edit denied by user]",
+        "[command denied": "[command denied by user]",
         "[read error:": "[read error: no such file]",
         "[read image unavailable:": "[read image unavailable: no image capability]",
         "[web error:": "[web error: no search results found]",
         "[tool disabled:": "[tool disabled: web_search]",
+        "[tool unavailable:": "[tool unavailable: sterile agent]",
+        "[tool not parallel-safe:": "[tool not parallel-safe: edit]",
+        "[finish requires": "[finish requires string longform and tldr]",
+        "[skipped:": "[skipped: interactive command waiting]",
+        "[not executed:": "[not executed: interactive command waiting]",
+        "[interactive command aborted:": "[interactive command aborted: round limit]",
     }
     assert set(samples) == set(TOOL_FAILURE_PREFIXES)
     for output in samples.values():

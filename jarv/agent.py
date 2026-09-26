@@ -77,7 +77,7 @@ from .retained_outputs import (
     load_retained_output_store,
     save_retained_output_store,
 )
-from .tool_outputs import ToolOutput
+from .tool_outputs import ToolOutput, with_tool_outcome
 from .turn_loop import StreamCollection, collect_stream_response, run_tool_execution_round
 from .turn_records import (
     append_reasoning_input_items,
@@ -390,7 +390,7 @@ def _dispatch_run_command_with_ui(
             _ui_call(ui, "show_notice", Text(denial, style="dim"))
         else:
             console.print(f"[dim]{denial}[/dim]")
-        return denial
+        return with_tool_outcome(denial, "denied")
 
     if not get_setting(config, "interactive_commands"):
         return _dispatch_run_command_oneshot(
@@ -462,7 +462,7 @@ def _dispatch_run_command_with_ui(
         if callable(unregister_cancel):
             unregister_cancel()
         _stop_interactive_card_live(live, live_depth_cm)
-        return f"[error: {e}]"
+        return with_tool_outcome(f"[error: {e}]", "failed")
 
     if snapshot.exited:
         from .orchestrator import format_run_command_output
@@ -498,9 +498,9 @@ def _dispatch_run_command_with_ui(
     if initial_output.strip() and initial_output.strip() != "(no output)":
         pending.transcript_segments.append(initial_output)
     return RunCommandDispatchResult(
-        _run_command_waiting_prompt(
+        with_tool_outcome(_run_command_waiting_prompt(
             snapshot, include_help=include_help, prepared=prepared
-        ),
+        ), "running"),
         pending,
     )
 
@@ -540,6 +540,7 @@ class _TurnRenderer:
 
     def _reset_turn_state(self) -> None:
         self.reply_text = ""
+        self.response_recorded = False
         self.tool_calls = []
         self.reasoning_items = []
         self.saw_reasoning = False
@@ -904,10 +905,12 @@ class TurnCheckpointer:
         self.flush_status_items()
         history = self.persistence.history
         renderer = self.renderer
-        if renderer.reply_text and not renderer.tool_calls:
+        if renderer.reply_text and not renderer.tool_calls and not renderer.response_recorded:
             history.append(
                 {"role": "assistant", "content": renderer.reply_text, **renderer.metadata}
             )
+        if renderer.response_recorded:
+            self.append_unfinished_tool_results("interrupted by error")
         self.persistence.save()
 
     def checkpoint_cancelled_turn(self) -> None:
@@ -933,49 +936,44 @@ class TurnCheckpointer:
                     stored_reasoning["provider_content"] = item.provider_content
                 history.append(stored_reasoning)
 
-        if renderer.reply_text:
+        if renderer.reply_text and not renderer.response_recorded:
             history.append({"role": "assistant", "content": renderer.reply_text, **metadata})
 
-        recorded_call_ids = {
-            str(item.get("call_id"))
-            for item in history
-            if isinstance(item, dict) and item.get("type") == "function_call"
-        }
-        with self._tools_lock:
-            active_call_ids = set(self.active_tool_calls)
-        for item in renderer.tool_calls:
-            if str(item.call_id) in recorded_call_ids:
-                continue
-            if str(item.call_id) in active_call_ids:
-                output = "[cancelled by user; execution may have made partial changes]"
-            else:
-                output = "[cancelled by user before execution]"
-            stored_call = {
-                "type": "function_call",
-                "id": item.id,
-                "call_id": item.call_id,
-                "name": item.name,
-                "arguments": item.arguments,
-                **metadata,
-            }
-            if item.provider_content:
-                stored_call["provider_content"] = item.provider_content
-            history.extend([
-                stored_call,
-                {
-                    "type": "function_call_output",
-                    "call_id": item.call_id,
-                    "output": output,
-                    **metadata,
-                },
-            ])
-
+        self.append_unfinished_tool_results("cancelled by user", "cancelled")
         history.append({
             "role": "assistant",
             "content": "[Turn cancelled by user.]",
             **metadata,
         })
         self.persistence.save_turn()
+
+    def append_unfinished_tool_results(self, reason: str, outcome: str = "failed") -> None:
+        history = self.persistence.history
+        recorded_call_ids = {
+            str(item.get("call_id"))
+            for item in history
+            if isinstance(item, dict) and item.get("type") == "function_call"
+        }
+        recorded_output_ids = {
+            str(item.get("call_id"))
+            for item in history
+            if isinstance(item, dict) and item.get("type") == "function_call_output"
+        }
+        with self._tools_lock:
+            active_call_ids = set(self.active_tool_calls)
+        for item in self.renderer.tool_calls:
+            if str(item.call_id) in recorded_output_ids:
+                continue
+            if str(item.call_id) in active_call_ids:
+                output = f"[{reason}; execution may have made partial changes]"
+            else:
+                output = f"[{reason} before execution]"
+            append_tool_result_input_items(
+                [], item, with_tool_outcome(output, outcome),
+                history=history,
+                metadata=self.renderer.metadata,
+                include_call=str(item.call_id) not in recorded_call_ids,
+            )
 
 
 def _abort_interactive_command(pending, note: str, ui, input_items: list) -> list:
@@ -994,7 +992,7 @@ def _abort_interactive_command(pending, note: str, ui, input_items: list) -> lis
         pending.process.kill_tree()
     except Exception:
         pass
-    _finalize_interactive_record(pending, note)
+    _finalize_interactive_record(pending, with_tool_outcome(note, "failed"))
     if callable(pending.unregister_cancel):
         pending.unregister_cancel()
         pending.unregister_cancel = None
@@ -1056,8 +1054,8 @@ def _advance_interactive_continuation(
             append_tool_result_input_items(
                 echoed,
                 call,
-                "[not executed: a terminal command is waiting for input; "
-                "reply to the terminal instead of calling tools]",
+                with_tool_outcome("[not executed: a terminal command is waiting for input; "
+                "reply to the terminal instead of calling tools]", "skipped"),
             )
         return (
             input_items + echoed + [{
@@ -1365,12 +1363,17 @@ def run_agent(
         nonlocal pending_interactive_command
         pending_interactive_command = pending
 
-    def cleanup_pending_command() -> None:
+    def cleanup_pending_command(outcome: str = "failed") -> None:
         nonlocal pending_interactive_command
         pending = pending_interactive_command
         if pending is None:
             return
         pending_interactive_command = None
+        _finalize_interactive_record(pending, with_tool_outcome(
+            "[interactive command cancelled]" if outcome == "cancelled" else
+            "[interactive command aborted]",
+            outcome,
+        ))
         _close_interactive_card_live(pending)
         try:
             pending.process.kill_tree()
@@ -1574,6 +1577,7 @@ def run_agent(
 
                 def _execute_tools(_new_input, append_tool_result):
                     nonlocal web_search_read_nudge_sent
+                    renderer.response_recorded = True
                     result = execute_tool_calls(
                         renderer.tool_calls,
                         node=root_node,
@@ -1597,8 +1601,8 @@ def run_agent(
                     instructions=kwargs["instructions"],
                     tools=kwargs["tools"],
                     retained_store=retained_store,
-                    reasoning_kwargs={"history": history, "metadata": metadata},
-                    tool_result_kwargs={"history": history, "metadata": metadata},
+                    history=history,
+                    metadata=metadata,
                     execute_tool_calls_fn=_execute_tools,
                 )
                 pending_interactive_command = _exec_result.pending_command
@@ -1622,7 +1626,7 @@ def run_agent(
         return AgentRunResult()
     except (KeyboardInterrupt, TurnCancelled):
         cancellation_token.cancel()
-        cleanup_pending_command()
+        cleanup_pending_command("cancelled")
         if session_context is not None:
             checkpointer.checkpoint_cancelled_turn()
         return AgentRunResult(cancelled=True, prompt=query)

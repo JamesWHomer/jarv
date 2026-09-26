@@ -20,7 +20,7 @@ from rich.text import Text
 from .cancellation import CancellationToken
 from .config import get_setting
 from .safety import approval_lock, prompt_panel_confirmation
-from .tool_outputs import ToolOutput
+from .tool_outputs import ToolOutput, with_tool_outcome
 
 
 MAX_EDIT_FILE_BYTES = 5_000_000
@@ -438,10 +438,10 @@ def dispatch_edit_tool(
     cwd: str | Path | None = None,
 ) -> ToolOutput:
     if not isinstance(args, dict):
-        return "[tool argument error: edit arguments must be an object]"
+        return with_tool_outcome("[tool argument error: edit arguments must be an object]", "failed")
     validated = _validate_args(args)
     if isinstance(validated, str):
-        return validated
+        return with_tool_outcome(validated, "failed")
     value, old_text, new_text, replace_all = validated
 
     if cancellation_token is not None:
@@ -449,7 +449,7 @@ def dispatch_edit_tool(
 
     resolved = _resolve_edit_path(value, cwd=cwd)
     if isinstance(resolved, str):
-        return resolved
+        return with_tool_outcome(resolved, "failed")
     with _file_edit_lock(resolved, cancellation_token):
         return _edit_locked(resolved, old_text, new_text, replace_all,
                             config, cancellation_token, cwd=cwd)
@@ -460,19 +460,19 @@ def _edit_locked(resolved: Path, old_text: str, new_text: str, replace_all: bool
                  *, cwd: str | Path | None = None) -> ToolOutput:
     loaded = _load_file(resolved)
     if isinstance(loaded, str):
-        return loaded
+        return with_tool_outcome(loaded, "failed")
 
     replaced = _apply_replacement(
         loaded.text, old_text, new_text, replace_all, path=resolved
     )
     if isinstance(replaced, str):
-        return replaced
+        return with_tool_outcome(replaced, "failed")
     new_content, count = replaced
 
     diff_text = build_edit_diff(loaded.text, new_content, str(resolved))
     allowed, denial = _check_edit(resolved, diff_text, config, cwd=cwd)
     if not allowed:
-        return denial
+        return with_tool_outcome(denial, "denied")
 
     if cancellation_token is not None:
         cancellation_token.throw_if_cancelled()
@@ -482,6 +482,6 @@ def _edit_locked(resolved: Path, old_text: str, new_text: str, replace_all: bool
         data = codecs.BOM_UTF8 + data
     error = _commit_edit(resolved, loaded, data, cancellation_token)
     if error is not None:
-        return error
+        return with_tool_outcome(error, "failed")
 
-    return _format_result(resolved, count, loaded.text, new_content)
+    return with_tool_outcome(_format_result(resolved, count, loaded.text, new_content), "success")

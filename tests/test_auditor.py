@@ -1,5 +1,6 @@
 import json
 
+import httpx
 import pytest
 
 from jarv.auditor import _ask_user_exchanges, audit_command
@@ -287,6 +288,86 @@ def _install_fake_chat(monkeypatch, contents, usages=None):
 
     monkeypatch.setattr("jarv.openai_http.create_chat", create_chat)
     return calls
+
+
+@pytest.fixture
+def auditor_http(monkeypatch):
+    requests = []
+    clients = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": '{"allow": true, "reason": "safe status check"}'}}],
+        })
+
+    def create_client(base_url, headers, **_kwargs):
+        client = httpx.Client(
+            base_url=base_url, headers=headers, transport=httpx.MockTransport(handle),
+        )
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr("jarv.auditor._AUDITOR_CLIENTS", {})
+    monkeypatch.setattr("jarv.openai_http.create_http_client", create_client)
+    yield requests, clients
+    for client in clients:
+        client.close()
+
+
+@pytest.mark.parametrize("provider,endpoint_config,expected_url", [
+    ("groq", {"base_url": "https://private.test/groq/v1"}, "https://private.test/groq/v1"),
+    ("openrouter", {"base_url": "https://private.test/router/v1"}, "https://private.test/router/v1"),
+    ("ollama", {"base_url": "http://localhost:9000/v1"}, "http://localhost:9000/v1"),
+    ("openai", {"base_url": "https://private.test/openai/v1"}, "https://private.test/openai/v1"),
+    ("custom", {"base_url": "https://private.test/custom/v1"}, "https://private.test/custom/v1"),
+    ("groq", {}, "https://api.groq.com/openai/v1"),
+    ("groq", {"base_url": ""}, "https://api.groq.com/openai/v1"),
+    ("groq", {"base_url": None}, "https://api.groq.com/openai/v1"),
+    ("openai", {}, "https://api.openai.com/v1"),
+])
+def test_auditor_uses_main_provider_endpoint_policy(auditor_http, provider, endpoint_config, expected_url):
+    from jarv.provider import create_client
+
+    requests, _clients = auditor_http
+    config = {"provider": provider, "api_keys": {provider: "endpoint-key"}, **endpoint_config}
+    original_config = dict(config)
+    with create_client(config) as main_client:
+        main_url = main_client.base_url
+
+    assert audit_command(
+        "git status", "status check", config,
+        [{"role": "user", "content": "Check the private project."}],
+    ) == (True, "safe status check")
+
+    assert len(requests) == 1
+    request = requests[0]
+    assert str(request.url) == expected_url + "/chat/completions"
+    assert request.url == main_url.join("chat/completions")
+    assert request.headers["authorization"] == "Bearer endpoint-key"
+    message = json.loads(request.content)["messages"][1]["content"]
+    assert "Command: git status" in message
+    assert "Check the private project." in message
+    assert config == original_config
+
+
+def test_auditor_cache_keeps_endpoints_and_credentials_separate(auditor_http):
+    requests, clients = auditor_http
+    endpoints_and_keys = [
+        ("https://first.test/v1", "first-key"),
+        ("https://second.test/v1", "first-key"),
+        ("https://first.test/v1", "first-key"),
+        ("https://first.test/v1", "rotated-key"),
+    ]
+    for endpoint, api_key in endpoints_and_keys:
+        config = {"provider": "groq", "base_url": endpoint, "api_key": api_key}
+        assert audit_command("git status", "status check", config) == (True, "safe status check")
+
+    assert len(clients) == 3
+    assert [(str(request.url), request.headers["authorization"]) for request in requests] == [
+        (endpoint + "/chat/completions", f"Bearer {api_key}")
+        for endpoint, api_key in endpoints_and_keys
+    ]
 
 
 def test_openai_compatible_auditor_uses_direct_http(monkeypatch):

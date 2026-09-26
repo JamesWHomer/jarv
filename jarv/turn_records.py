@@ -32,6 +32,31 @@ def append_reasoning_input_items(
             target.append(api_item)
 
 
+def append_assistant_response_input_items(
+    target: list[dict],
+    reasoning_items: list,
+    reply_text: str,
+    tool_calls: list,
+    *,
+    history: list | None = None,
+    metadata: dict | None = None,
+) -> None:
+    """Record the whole assistant response before any tool results."""
+    append_reasoning_input_items(
+        target, reasoning_items, history=history, metadata=metadata,
+    )
+    stored_items = []
+    if reply_text:
+        stored_items.append({"role": "assistant", "content": reply_text, **(metadata or {})})
+    stored_items.extend(function_call_history_item(item, metadata) for item in tool_calls)
+    for stored_item in stored_items:
+        if history is not None:
+            history.append(stored_item)
+        api_item = to_response_input_item(stored_item)
+        if api_item is not None:
+            target.append(api_item)
+
+
 def append_tool_result_input_items(
     target: list[dict],
     item,
@@ -39,12 +64,14 @@ def append_tool_result_input_items(
     *,
     history: list | None = None,
     metadata: dict | None = None,
+    include_call: bool = True,
 ) -> None:
     metadata = metadata or {}
-    for stored_item in (
-        function_call_history_item(item, metadata),
-        function_call_output_item(item.call_id, output, metadata),
-    ):
+    stored_items = []
+    if include_call:
+        stored_items.append(function_call_history_item(item, metadata))
+    stored_items.append(function_call_output_item(item.call_id, output, metadata))
+    for stored_item in stored_items:
         if history is not None:
             history.append(stored_item)
         api_item = to_response_input_item(stored_item)

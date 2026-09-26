@@ -84,10 +84,8 @@ def _get_auditor_client(backend: str, config: dict, info: dict | None = None):
     with _AUDITOR_CLIENTS_LOCK:
         client = _AUDITOR_CLIENTS.get(key)
         if client is None:
-            probe = dict(config)
-            if backend in ("responses", "openai_compat") and info:
-                probe["base_url"] = info.get("base_url") or probe.get("base_url")
-            client = create_client(probe)
+            # Let the main provider factory resolve configured URLs and defaults.
+            client = create_client(config)
             _AUDITOR_CLIENTS[key] = client
         return client
 

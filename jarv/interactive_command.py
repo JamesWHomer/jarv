@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from rich.text import Text
 
 from .orchestrator import PendingRunCommand
+from .tool_outputs import tool_outcome
 
 
 def _format_elapsed_seconds(seconds: float | int | None) -> str:
@@ -540,6 +541,9 @@ def _finalize_interactive_record(pending, final_output: str) -> None:
     if final_output and final_output.strip():
         segments.append(final_output)
     output_item["output"] = "\n".join(segments)
+    outcome = tool_outcome(final_output)
+    if outcome is not None:
+        output_item["outcome"] = outcome.to_dict()
 
 
 def _format_finished_interactive_output(

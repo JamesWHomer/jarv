@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
-from .tool_outputs import ToolOutput
+from .tool_outputs import ToolOutput, tool_outcome
 
 
 def responses_input_id(item_id: str, prefix: str) -> str:
@@ -51,12 +51,16 @@ def function_call_output_item(
     output: ToolOutput,
     metadata: dict | None = None,
 ) -> dict:
-    return {
+    result = {
         "type": "function_call_output",
         "call_id": call_id,
-        "output": output,
+        "output": list(output) if isinstance(output, list) else str(output),
         **(metadata or {}),
     }
+    outcome = tool_outcome(output)
+    if outcome is not None:
+        result["outcome"] = outcome.to_dict()
+    return result
 
 
 def status_history_item(

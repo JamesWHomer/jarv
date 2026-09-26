@@ -43,6 +43,8 @@ To upgrade:
 jarv /update
 ```
 
+Scoop, WinGet, and Homebrew installs show the owning package manager's update command to run after exiting Jarv. Direct standalone and Python installs update automatically; editable source installs are left untouched.
+
 ![jarv update demo](https://github.com/JamesWHomer/jarv/releases/download/readme-assets/update.webp)
 
 ### Uninstall
@@ -178,7 +180,7 @@ Before executing a shell command, jarv can prompt you for confirmation. The `com
 | Level | Behavior |
 | --- | --- |
 | `risky` (default) | Prompts for confirmation when a command matches dangerous patterns — recursive deletion, privilege escalation, network exfiltration, disk formatting, credential access, force pushes, and more. |
-| `all` | Every command requires your explicit approval before running. |
+| `all` | Every command requires your explicit approval before running, even when the auditor recommends approval. |
 | `none` | Commands run immediately with no confirmation prompt. |
 
 The same levels gate `edit` calls: risky edits (files outside the working directory, hidden files, secrets, system paths) show a diff preview for approval under `risky`, every edit does under `all`.
@@ -196,6 +198,7 @@ jarv /set command_safety none     # no prompts
 When the model calls `spawn`, Jarv runs N child agents in parallel. Each child operates independently — running commands, reasoning through subtasks — and terminates by calling `finish` with a detailed report and a short summary. The parent agent can then read any child's full output via `read`.
 
 - **Parallel by default** — all children in a `spawn` call run concurrently in a thread pool.
+- **Unique artifact labels** — use a new child label across successive and nested `spawn` calls in a session. Colliding batches are rejected before any child starts, preserving earlier reports.
 - **Artifacts** — each child's output is stored as a named artifact. The parent (or siblings that declare a dependency) can fetch the full content.
 - **Recursive** — children can themselves spawn further children, up to `max_subagent_depth` levels deep (default 4). Children are sterile by default; the parent must explicitly allow further spawning.
 - **Bounded** — a `spawn` batch cancels unfinished children after `subagent_timeout` seconds (default 600) instead of waiting forever.
@@ -280,12 +283,12 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 | `web_timeout` | `15` | Seconds before a web search or URL read is killed. |
 | `command_safety` | `"risky"` | Command confirmation level: `all` (confirm every command), `risky` (confirm dangerous commands only), `none` (no confirmation). |
 | `audit` | `true` | LLM auditor for flagged commands. |
-| `auditor_auto_approve` | `true` | Let the auditor auto-approve commands it deems safe. |
+| `auditor_auto_approve` | `true` | Let the auditor auto-approve commands it deems safe under `command_safety=risky`. With `all`, human approval is always required. |
 | `auditor_model` | `""` | Auditor model. Empty uses the active `model`. |
 | `max_subagent_depth` | `4` | Maximum nesting depth for spawned subagents. |
 | `subagent_thread_pool_max_workers` | `8` | Max parallel subagents per `spawn` call. |
 | `subagent_timeout` | `600` | Maximum runtime in seconds for one `spawn` batch before unfinished subagents are cancelled. |
-| `check_updates` | `true` | Background update check on startup (non-blocking, throttled to once per 24h; PyPI for Python installs, GitHub Releases for standalone installs). |
+| `check_updates` | `true` | Background update check on startup (non-blocking, throttled to once per 24h; PyPI for Python installs, GitHub Releases for direct standalone installs; Scoop, WinGet, and Homebrew manage their own update availability). |
 | `read_only_command_display` | `"fullscreen"` | Display mode for `/help`, `/about`, `/usage`, and `/config`: temporary `fullscreen` view or permanent `print` output. |
 | `tool_call_display` | `"auto"` | Tool-call layout: `auto` selects `print` for one-shot runs and `fullscreen` in heads-up mode; explicit modes override it. |
 | `print_usage_after_agent` | `false` | Print a compact token usage line after each completed agent run. |

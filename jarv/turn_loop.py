@@ -16,7 +16,7 @@ from .provider import (
     ToolCallDone,
     response_output_text,
 )
-from .turn_records import append_reasoning_input_items, append_tool_result_input_items
+from .turn_records import append_assistant_response_input_items, append_tool_result_input_items
 
 
 @dataclass
@@ -86,16 +86,19 @@ def run_tool_execution_round(
     instructions: str,
     tools: list,
     execute_tool_calls_fn: Callable[[list, Callable], Any],
-    reasoning_kwargs: dict | None = None,
-    tool_result_kwargs: dict | None = None,
+    history: list | None = None,
+    metadata: dict | None = None,
     retained_store: RetainedOutputStore | None = None,
 ) -> tuple[list, Any]:
-    """Append reasoning/tool results and trim input — shared root/subagent tool round."""
+    """Record the assistant response, execute its tools, then trim the input."""
     new_input: list = []
-    append_reasoning_input_items(
+    append_assistant_response_input_items(
         new_input,
         stream_result.reasoning_items,
-        **(reasoning_kwargs or {}),
+        stream_result.reply_text,
+        stream_result.tool_calls,
+        history=history,
+        metadata=metadata,
     )
 
     def append_tool_result(item, output) -> None:
@@ -103,7 +106,9 @@ def run_tool_execution_round(
             new_input,
             item,
             output,
-            **(tool_result_kwargs or {}),
+            history=history,
+            metadata=metadata,
+            include_call=False,
         )
 
     exec_result = execute_tool_calls_fn(new_input, append_tool_result)

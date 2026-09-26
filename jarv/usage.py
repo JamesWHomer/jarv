@@ -507,9 +507,8 @@ def _context_window_from_catalog(model: str, config: dict) -> int | None:
     """Context window as the provider itself advertised it, when it did."""
     from .model_catalog import _read_cache
 
-    provider = str(config.get("provider", "openai"))
     suffix = model.split("/", 1)[-1] if model else ""
-    for catalog_model in _read_cache(provider):
+    for catalog_model in _read_cache(config):
         model_id = catalog_model.id
         if model_id != model and model_id != suffix and not model_id.endswith(f"/{suffix}"):
             continue

@@ -37,6 +37,7 @@ from .orchestrator import (
     spawn_tool_output,
 )
 from .retained_outputs import RetainedOutputStore
+from .tool_outputs import with_tool_outcome
 from .usage import format_cost, format_int, load_usage, usage_cost_summary
 from .response_wait import (
     _THINKING_FRAMES,
@@ -241,7 +242,9 @@ class InteractiveCommandCard:
                 "Idle on stdin — model deciding the next input", style="dim"
             )
         # done
-        if self._exit_code in (None, 0):
+        if self._exit_code is None:
+            return Text("failed", style="bold red")
+        if self._exit_code == 0:
             return Text("exit 0", style="dim")
         return Text(f"exit {self._exit_code}", style="bold red")
 
@@ -298,9 +301,7 @@ class InteractiveCommandCard:
         if footer is not None:
             body_items.append(footer)
         if state == "done":
-            status, status_style = "done", (
-                "green" if exit_code in (None, 0) else "red"
-            )
+            status, status_style = ("done", "green") if exit_code == 0 else ("failed", "red")
         else:
             status, status_style = "waiting", "blue"
         yield tool_card(
@@ -660,13 +661,16 @@ def _dispatch_ask_user(args: dict, config: dict | None = None, ui=None) -> str:
             _ui_call(ui, "show_error", msg)
         else:
             console.print(f"[red]{msg}[/red]")
-        return msg
+        return with_tool_outcome(msg, "failed")
     if ui is not None:
         answer = _ui_call(ui, "ask_user", question, config or DEFAULT_CONFIG)
-        return str(answer) if answer is not None else "[no response]"
+        return with_tool_outcome(
+            str(answer) if answer is not None else "[no response]",
+            "success" if answer is not None else "failed",
+        )
     with _ask_user_terminal_input() as can_prompt:
         if not can_prompt:
-            return "[non-interactive session; user unavailable]"
+            return with_tool_outcome("[non-interactive session; user unavailable]", "failed")
         config = config or DEFAULT_CONFIG
         display_mode = get_setting(config, "tool_call_display")
         if display_mode == "auto":
@@ -701,10 +705,12 @@ def _dispatch_ask_user(args: dict, config: dict | None = None, ui=None) -> str:
         try:
             prompt, prompt_text_style = _ask_user_prompt(display_mode)
             answer = read_editable_line(prompt, text_style=prompt_text_style).strip()
+            outcome = "success"
         except KeyboardInterrupt:
             raise
         except EOFError:
             answer = "[no response]"
+            outcome = "failed"
             if display_mode == "print":
                 console.print(f"\n[dim]{answer}[/dim]")
             else:
@@ -717,12 +723,13 @@ def _dispatch_ask_user(args: dict, config: dict | None = None, ui=None) -> str:
                 tool_card(
                     "ask_user",
                     Group(question_renderable, answer_line),
-                    status="done",
+                    status="done" if outcome == "success" else "failed",
+                    status_style="green" if outcome == "success" else "red",
                     display_mode="fullscreen",
                 )
             )
         print_mode_spacer(config, mode=display_mode)
-        return answer
+        return with_tool_outcome(answer, outcome)
 
 
 def _dispatch_spawn_with_ui(
@@ -822,11 +829,12 @@ def _dispatch_spawn_with_ui(
                 lines.append(line)
             total = len(snap)
             done = sum(1 for s in snap.values() if s["status"] != "running")
+            failed = sum(1 for s in snap.values() if s["status"] not in {"running", "done"})
             yield tool_card(
                 "spawn",
                 Group(*lines),
-                status=f"{done}/{total} done",
-                status_style="green" if done == total else "magenta",
+                status=f"{failed}/{total} failed" if failed else f"{done}/{total} done",
+                status_style="red" if failed else "green" if done == total else "magenta",
                 display_mode=get_setting(config, "tool_call_display"),
             )
 

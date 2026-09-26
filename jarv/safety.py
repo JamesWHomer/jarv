@@ -401,9 +401,10 @@ def check_command(
     - allowed=True  → caller should execute the command.
     - allowed=False → caller should return denial_message to the model.
 
-    When `audit=True`, flagged commands are sent to an LLM auditor. If the
-    auditor approves, the command runs automatically. If it defers, the user
-    gets the standard confirmation prompt with the auditor's reason.
+    When `audit=True`, flagged commands are sent to an LLM auditor. Under
+    `risky`, an approval can run the command when auditor auto-approval is
+    enabled. Under `all`, the auditor is advisory and human approval is
+    always required.
     """
     if safety_level == "none":
         return True, ""
@@ -430,7 +431,7 @@ def _check_command_locked(
         if audit:
             return _audit_gate(
                 command, reason, config, history, usage_path, session_id,
-                cancellation_token,
+                cancellation_token, require_manual_approval=True,
             )
         if not prompt_confirmation(command, reason):
             return False, "[command denied by user — safety level is set to 'all']"
@@ -508,6 +509,8 @@ def _audit_gate(
     usage_path: Path | None,
     session_id: str | None,
     cancellation_token: CancellationToken | None,
+    *,
+    require_manual_approval: bool = False,
 ) -> tuple[bool, str]:
     """Show the safety panel with an integrated auditor spinner.
 
@@ -518,7 +521,10 @@ def _audit_gate(
     from .auditor import audit_command
 
     body = _build_confirmation_body(command, reason)
-    auto_approve = (config or {}).get("auditor_auto_approve", True)
+    auto_approve = (
+        not require_manual_approval
+        and (config or {}).get("auditor_auto_approve", True)
+    )
 
     # Non-interactive fallback. Skipped when a handler owns the display: the
     # heads-up app can prompt even though stdout is its alt screen.
@@ -538,6 +544,8 @@ def _audit_gate(
             console.print(f"[green]  ✓ auditor:[/green] [dim]{auditor_reason}[/dim]")
             if auto_approve:
                 return True, ""
+            if require_manual_approval:
+                return False, "[command denied — manual approval required; safety level is set to 'all']"
             return False, "[command denied — manual approval required; auditor auto-approval disabled]"
         return False, f"[command denied — auditor: {auditor_reason}]"
 

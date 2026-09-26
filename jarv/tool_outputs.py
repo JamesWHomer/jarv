@@ -2,10 +2,77 @@ from __future__ import annotations
 
 import base64
 import re
+from dataclasses import asdict, dataclass
 from typing import Any, TypeAlias
 
 
 ToolOutput: TypeAlias = str | list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class ToolOutcome:
+    """Execution metadata, independent of the model-visible output."""
+
+    status: str
+    exit_code: int | None = None
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: Any) -> ToolOutcome | None:
+        if not isinstance(value, dict):
+            return None
+        status = value.get("status")
+        if status not in (
+            "success", "failed", "denied", "timed_out", "cancelled",
+            "running", "skipped", "unknown",
+        ):
+            return None
+        exit_code = value.get("exit_code")
+        if exit_code is not None and type(exit_code) is not int:
+            return None
+        return cls(status, exit_code)
+
+
+class _ToolText(str):
+    def __new__(cls, output: str, outcome: ToolOutcome):
+        result = super().__new__(cls, output)
+        result.outcome = outcome
+        return result
+
+    def __getnewargs__(self):
+        return str(self), self.outcome
+
+
+class _ToolBlocks(list):
+    def __init__(self, output: list, outcome: ToolOutcome):
+        super().__init__(output)
+        self.outcome = outcome
+
+
+def with_tool_outcome(output: ToolOutput, outcome: ToolOutcome | str) -> ToolOutput:
+    """Carry an outcome without changing existing string/block tool interfaces.
+
+    History builders persist ``outcome`` separately; JSON/provider payloads
+    remain ordinary strings or content blocks. Text transformations must use
+    ``preserve_tool_outcome`` so windowing cannot discard execution metadata.
+    """
+    if isinstance(outcome, str):
+        outcome = ToolOutcome(outcome)
+    if isinstance(output, list):
+        return _ToolBlocks(output, outcome)
+    return _ToolText(output, outcome)
+
+
+def tool_outcome(output: ToolOutput) -> ToolOutcome | None:
+    return getattr(output, "outcome", None)
+
+
+def preserve_tool_outcome(output: ToolOutput, source: ToolOutput) -> ToolOutput:
+    outcome = tool_outcome(source)
+    return with_tool_outcome(output, outcome) if outcome is not None else output
+
 
 _DATA_URL_RE = re.compile(
     r"^data:(?P<media_type>[^;,]+);base64,(?P<data>.*)$",
@@ -40,29 +107,39 @@ def responses_output_text(output: ToolOutput | Any) -> str:
     return str(output or "")
 
 
+# Only sessions written before outcome metadata require these text heuristics.
 TOOL_FAILURE_PREFIXES: tuple[str, ...] = (
     "[error:",
     "[tool argument error:",
     "[unknown tool:",
     "[edit error:",
+    "[edit conflict:",
     "[edit denied",
+    "[command denied",
     "[read error:",
     "[read image unavailable:",
     "[web error:",
     "[tool disabled:",
+    "[tool unavailable:",
+    "[tool not parallel-safe:",
+    "[finish requires",
+    "[skipped:",
+    "[not executed:",
+    "[interactive command aborted:",
 )
 
 
 def tool_output_failed(output_text: str) -> bool:
-    """Single owner of the "did this tool call fail?" rule.
-
-    All dispatch layers encode failures as bracketed output prefixes, and the
-    output string is exactly what session history persists — so this detector
-    works identically for live cards and history re-renders.
-    """
+    """Use execution metadata; text detection is only for legacy history."""
+    outcome = tool_outcome(output_text)
+    if outcome is not None:
+        return outcome.status not in {"success", "running", "unknown"}
     return output_text.startswith(TOOL_FAILURE_PREFIXES) or (
         "cancelled by user" in output_text
-    )
+    ) or bool(re.search(
+        r"(?:^|\n)\[(?:exit code (?!0\])[-\d]+|timed out after [^\n]+)\](?:\n|$)",
+        output_text,
+    ))
 
 
 def flatten_content_text(content: ToolOutput | Any) -> str:
@@ -111,7 +188,7 @@ def flatten_content_text(content: ToolOutput | Any) -> str:
 
 
 def summarize_tool_output(output: ToolOutput | Any) -> str:
-    return flatten_content_text(output)
+    return preserve_tool_outcome(flatten_content_text(output), output)
 
 
 def to_chat_tool_content(output: ToolOutput | Any) -> str | list[dict[str, Any]]:

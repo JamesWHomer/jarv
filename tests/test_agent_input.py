@@ -681,8 +681,9 @@ class AgentInputTests(unittest.TestCase):
         status_items = [item for item in saved if item.get("type") == "status"]
         self.assertEqual(conversation_items[0]["content"], "change the files")
         self.assertEqual(conversation_items[1]["call_id"], "call_active")
-        self.assertIn("may have made partial changes", conversation_items[2]["output"])
-        self.assertEqual(conversation_items[3]["call_id"], "call_pending")
+        self.assertEqual(conversation_items[2]["call_id"], "call_pending")
+        self.assertEqual(conversation_items[3]["call_id"], "call_active")
+        self.assertIn("may have made partial changes", conversation_items[3]["output"])
         self.assertIn("before execution", conversation_items[4]["output"])
         self.assertEqual(conversation_items[5]["content"], "[Turn cancelled by user.]")
         self.assertTrue(any("Started responding in" in item["content"] for item in status_items))

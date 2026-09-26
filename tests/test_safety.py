@@ -23,6 +23,59 @@ class ConfirmHandlerRegistryTests(unittest.TestCase):
     def tearDown(self):
         clear_confirm_handler()
 
+    def test_all_redirected_auditor_cannot_approve(self):
+        for config in (None, {"auditor_auto_approve": True}):
+            for verdict in (False, True):
+                with self.subTest(config=config, verdict=verdict), patch(
+                    "jarv.safety.sys.stdout.isatty", return_value=False
+                ), patch(
+                    "jarv.auditor.audit_command", return_value=(verdict, "test verdict")
+                ), patch("jarv.safety.console.print"), patch(
+                    "jarv.safety.request_confirmation"
+                ) as confirm:
+                    allowed, denial = check_command(
+                        "echo hello", "all", audit=True, config=config,
+                    )
+                    self.assertFalse(allowed)
+                    self.assertIn("denied", denial)
+                    confirm.assert_not_called()
+
+    def test_all_audited_commands_require_handler_approval(self):
+        for isatty in (False, True):
+            for command in ("echo hello", "rm -rf build"):
+                for verdict in (False, True):
+                    for human_approval in (False, True):
+                        with self.subTest(
+                            isatty=isatty, command=command,
+                            verdict=verdict, human_approval=human_approval,
+                        ):
+                            seen = []
+                            auditor_called = threading.Event()
+
+                            def auditor(*args, **kwargs):
+                                auditor_called.set()
+                                return verdict, "test verdict"
+
+                            def handler(request):
+                                seen.append(request)
+                                return human_approval
+
+                            set_confirm_handler(handler)
+                            with patch(
+                                "jarv.safety.sys.stdout.isatty", return_value=isatty
+                            ), patch("jarv.auditor.audit_command", side_effect=auditor):
+                                allowed, denial = check_command(
+                                    command, "all", audit=True,
+                                    config={"auditor_auto_approve": True},
+                                )
+                                self.assertTrue(auditor_called.wait(timeout=1))
+                            self.assertEqual(len(seen), 1)
+                            self.assertEqual(seen[0].command, command)
+                            self.assertIsNotNone(seen[0].audit_state)
+                            self.assertFalse(seen[0].auto_approve)
+                            self.assertEqual(allowed, human_approval)
+                            self.assertEqual(bool(denial), not human_approval)
+
     def test_redirected_auditor_respects_approval_policy(self):
         for auto_approve in (False, True):
             for verdict in (False, True):
@@ -153,6 +206,24 @@ class ConfirmHandlerRegistryTests(unittest.TestCase):
 
 
 class ConsoleFallbackTests(unittest.TestCase):
+    def test_all_audited_console_requires_human_input(self):
+        for response in ("y", "n", "", EOFError):
+            with self.subTest(response=response):
+                fake_console = MagicMock()
+                if response is EOFError:
+                    fake_console.input.side_effect = EOFError
+                else:
+                    fake_console.input.return_value = response
+                with patch("jarv.safety.console", fake_console), patch(
+                    "jarv.safety.sys.stdout.isatty", return_value=True
+                ), patch(
+                    "jarv.auditor.audit_command", return_value=(True, "safe")
+                ), track_live_display():
+                    allowed, denial = check_command("echo hello", "all", audit=True)
+                fake_console.input.assert_called_once()
+                self.assertEqual(allowed, response == "y")
+                self.assertEqual(bool(denial), response != "y")
+
     def test_eof_on_console_prompt_denies(self):
         fake_console = MagicMock()
         fake_console.input.side_effect = EOFError

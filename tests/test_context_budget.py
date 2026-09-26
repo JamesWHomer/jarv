@@ -354,6 +354,40 @@ class ContextBudgetTests(unittest.TestCase):
             999,
         )
 
+    def test_context_budget_uses_endpoint_scoped_catalog_window(self):
+        model = "endpoint-test-model"
+        default_config = {"provider": "openai"}
+        small_config = {**default_config, "base_url": "https://small.example/v1"}
+        large_config = {**default_config, "base_url": "https://large.example/v1"}
+        cases = [
+            (default_config, 131_072),
+            (small_config, 4_096),
+            (large_config, 262_144),
+        ]
+        with TemporaryDirectory() as tmp, patch.object(
+            model_catalog, "CACHE_DIR", Path(tmp),
+        ):
+            for config, window in cases:
+                model_catalog._write_cache(config, [
+                    CatalogModel(id=model, metadata={"context_length": window}),
+                ])
+
+            for config, window in cases:
+                with self.subTest(config=config):
+                    config = {
+                        **config,
+                        "context_budget_ratio": 0.75,
+                        "context_output_reserve_ratio": 0.25,
+                    }
+                    self.assertEqual(resolve_context_window(model, config), window)
+                    status = context_budget_status(
+                        model, config, instructions="", tools=[], history=[],
+                    )
+                    self.assertEqual(status["context_window"], window)
+                    self.assertEqual(
+                        status["history_budget"], window // 2 - status["fixed_tokens"],
+                    )
+
     def test_context_budget_status_reports_fill_ratio(self):
         config = self._tiny_config()
         status = context_budget_status(
