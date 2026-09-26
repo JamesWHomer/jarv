@@ -224,3 +224,4 @@ Feature-Ideas.txt
 # Local-only script dirs; release/install scripts stay tracked
 /scripts/interactive/
 /scripts/headsup_tool_server.py
+/.jarv.lock
