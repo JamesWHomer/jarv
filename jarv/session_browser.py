@@ -281,6 +281,8 @@ class SessionBrowserScreen(AltScreenApp):
     clear_on_resize = False
     first_paint_label = "sessions"
     VIEW_MODES = ("active", "archived", "all")
+    PREVIEW_CACHE_ENTRIES = 24
+    PREVIEW_CACHE_LINES = 40000
 
     def __init__(self, *, data, sessions, terminals, rows, current_session_id, background=True, title_cache=None):
         super().__init__(
@@ -349,11 +351,14 @@ class SessionBrowserScreen(AltScreenApp):
         self.preview_document_cache: tuple | None = None
         self.preview_documents = OrderedDict()
         self.preview_request = None
+        self.preview_request_path = None
         self.preview_checked_at = 0.0
+        self.preview_validated = {}
         self.preview_transfers = {}
         self.preview_roundtrip = None
-        self.preview_resume_at = 0.0
-        self.pending_preview = None
+        self.preview_prefetch = {}
+        self.preview_prefetch_attempts = {}
+        self.preview_direction = 1
         self.loaded_row: dict | None = None
         self.auto_restored = False
         self._last_list_capacity = 1
@@ -516,6 +521,8 @@ class SessionBrowserScreen(AltScreenApp):
             if key == "preview":
                 self.preview_request = None
                 self._notify("Couldn't load the preview.", "red")
+            elif isinstance(key, tuple) and key[0] == "warm_preview":
+                self.preview_prefetch.pop(key[1:], None)
             elif key != "titles":
                 sid = key[1]
                 path = self.index_requested.get(sid)
@@ -528,10 +535,13 @@ class SessionBrowserScreen(AltScreenApp):
                     row.update(snippet=snippet, snippet_loaded=True)
             self.search_revision += 1
             return
-        if key == "preview":
+        if key == "preview" or (isinstance(key, tuple) and key[0] == "warm_preview"):
+            if key != "preview":
+                self.preview_prefetch.pop(key[1:], None)
             sid, width, query, record, lines, document, match = result
             if sid not in self.sessions or self.sessions[sid].get("history_file") != record[0][0]:
-                self.preview_request = None
+                if self.preview_request == (sid, width, query):
+                    self.preview_request = None
                 return
             self._accept_index(sid, record)
             old = self.preview_cache.get((sid, width))
@@ -539,9 +549,23 @@ class SessionBrowserScreen(AltScreenApp):
                 for saved in list(self.preview_documents):
                     if saved[:2] == (sid, width):
                         self.preview_documents.pop(saved)
-            self._bounded_put(self.preview_cache, (sid, width), (record[0], lines))
-            self._bounded_put(self.preview_documents, (sid, width, query), (document, match))
+            self._bounded_put(self.preview_cache, (sid, width), (record[0], lines), limit=self.PREVIEW_CACHE_ENTRIES)
+            self._bounded_put(self.preview_documents, (sid, width, query), (document, match), limit=self.PREVIEW_CACHE_ENTRIES)
+            self.preview_validated[(sid, width)] = time.monotonic()
+            # Bound retained Rich objects as well as the number of sessions.
+            # A single large selected transcript must still remain readable.
+            while len(self.preview_cache) > 1 and sum(len(value[1]) for value in self.preview_cache.values()) > self.PREVIEW_CACHE_LINES:
+                oldest = next(iter(self.preview_cache))
+                if self.preview_request is not None and oldest == self.preview_request[:2]:
+                    self.preview_cache.move_to_end(oldest)
+                    continue
+                self.preview_cache.pop(oldest)
+            for saved in list(self.preview_documents):
+                if saved[:2] not in self.preview_cache:
+                    self.preview_documents.pop(saved)
             transfer = self.preview_transfers.pop((sid, width, query), None)
+            self.preview_validated = {saved: checked for saved, checked in self.preview_validated.items()
+                                      if saved in self.preview_cache}
             if transfer is not None:
                 mapped = reflow_position(transfer[0], transfer[1], document)
                 self.preview_positions[(sid, width, query)] = mapped
@@ -553,17 +577,12 @@ class SessionBrowserScreen(AltScreenApp):
         if self.flash is not None and time.monotonic() >= self.flash_until:
             self.flash = None
             self.invalidate()
-        if self.pending_preview is not None and time.monotonic() >= self.preview_resume_at:
-            sid, width, _ = self.pending_preview
-            self.pending_preview = None
-            self._request_preview(sid, width)
-            self.invalidate()
         # Check the selected transcript for external edits at most once a
         # second. File stats and formatting still happen on the worker.
         if self.background and self.preview_request is not None and time.monotonic() - self.preview_checked_at > 1:
             sid, width, _ = self.preview_request
             self.preview_request = None
-            self._request_preview(sid, width)
+            self._request_preview(sid, width, force=True)
 
     # ------------------------------------------------------------------ #
     # Display helpers
@@ -818,24 +837,35 @@ class SessionBrowserScreen(AltScreenApp):
             self.preview_cache[key] = (stamp, self._build_preview_lines(sid, width))
         return self.preview_cache[key][1]
 
-    def _request_preview(self, sid: str, width: int):
+    def _request_preview(self, sid: str, width: int, *, force=False):
         query = self.search_query.strip().lower()
         request = (sid, width, query)
-        if self._preview_paused():
-            self.pending_preview = request
-            if self.preview_request != request:
-                self.worker.cancel("preview")
-                self.preview_request = None
+        path = self.sessions.get(sid, {}).get("history_file")
+        if self.preview_request == request and self.preview_request_path == path and not force:
             return
-        self.pending_preview = None
-        if self.preview_request == request:
-            return
+        self.worker.cancel("preview")
         for key in list(self.preview_transfers):
             if key != request:
                 self.preview_transfers.pop(key)
         self.preview_request = request
+        self.preview_request_path = path
         self.preview_checked_at = time.monotonic()
-        path = self.sessions.get(sid, {}).get("history_file")
+        checked = self.preview_validated.get((sid, width), 0)
+        if not force and self._cached_preview(request) is not None and self.preview_checked_at - checked < 1:
+            # A freshly prepared neighbour needs no extra I/O on selection.
+            # Tick still revalidates external edits after one second.
+            self.preview_checked_at = checked
+            return
+        if self.preview_prefetch.get(request) == path and request in self.preview_prefetch:
+            self.worker.prioritize(("warm_preview", *request), -2)
+            return
+        # Refreshes can wait for the current neighbour to finish: its cached
+        # contents are already visible. Only a missing preview preempts work.
+        priority = 0 if self._cached_preview(request) is not None else -2
+        self._submit_preview(request, path, key="preview", priority=priority)
+
+    def _submit_preview(self, request, path, *, key, priority):
+        sid, width, query = request
         cached = self.preview_cache.get((sid, width))
         cached_document = self.preview_documents.get(request)
 
@@ -857,16 +887,60 @@ class SessionBrowserScreen(AltScreenApp):
                 document, match = highlighted_transcript(lines, query)
             return sid, width, query, record, lines, document, match
 
-        self.worker.submit("preview", prepare, priority=0)
+        self.worker.submit(key, prepare, priority=priority, preemptible=key != "preview")
 
-    def _preview_paused(self):
-        return (self.background and self.pane_focus == "sessions" and self.preview_sid is None
-                and not self.search_active and time.monotonic() < self.preview_resume_at)
+    def _prefetch_previews(self, visible, width):
+        """Keep a small window ready, favouring the direction of travel."""
+        if not self.background:
+            return
+        selected = self._selected_pos(visible)
+        offsets = [step * direction for step in range(1, 11)
+                   for direction in (self.preview_direction, -self.preview_direction)
+                   if direction == self.preview_direction or step <= 3]
+        requests = [self._preview_key(visible[selected + offset]["sid"], width)
+                    for offset in offsets if 0 <= selected + offset < len(visible)] if width else []
+        wanted = set(requests)
+        if self.preview_request is not None:
+            wanted.add(self.preview_request)
+        for request, path in list(self.preview_prefetch.items()):
+            if request not in wanted or self.sessions.get(request[0], {}).get("history_file") != path:
+                self.worker.cancel(("warm_preview", *request))
+                self.preview_prefetch.pop(request)
+        self.preview_prefetch_attempts = {request: path for request, path in self.preview_prefetch_attempts.items()
+                                          if request in wanted}
+        for rank, request in enumerate(requests):
+            sid = request[0]
+            path = self.sessions.get(sid, {}).get("history_file")
+            cached = self.preview_cache.get(request[:2])
+            if cached is not None and cached[0][0] == path and request in self.preview_documents:
+                continue
+            key = ("warm_preview", *request)
+            priority = rank / 20
+            if request in self.preview_prefetch:
+                self.worker.prioritize(key, priority)
+            elif request not in self.preview_prefetch_attempts or self.preview_prefetch_attempts[request] != path:
+                # Do not repeatedly rebuild oversized or failed neighbours
+                # on every frame. Selecting one still requests it immediately.
+                self.preview_prefetch_attempts[request] = path
+                self.preview_prefetch[request] = path
+                self._submit_preview(request, path, key=key, priority=priority)
+
+    def _cached_preview(self, request):
+        cached = self.preview_cache.get(request[:2])
+        if cached is not None and cached[0][0] == self.sessions.get(request[0], {}).get("history_file"):
+            return self.preview_documents.get(request)
+        return None
 
     def _preview_document(self, sid: str, width: int) -> tuple[list[Text], int | None]:
         if self.background:
             self._request_preview(sid, width)
-            return self.preview_documents.get(self._preview_key(sid, width), ([Text("Loading preview…", style="dim")], None))
+            key = self._preview_key(sid, width)
+            cached = self._cached_preview(key)
+            if cached is not None:
+                self.preview_cache.move_to_end((sid, width))
+                self.preview_documents.move_to_end(key)
+                return cached
+            return [Text("Loading preview…", style="dim")], None
         lines = self._preview_lines(sid, width)
         key = (sid, width, self.search_query, id(lines))
         if self.preview_document_cache is None or self.preview_document_cache[0] != key:
@@ -888,7 +962,7 @@ class SessionBrowserScreen(AltScreenApp):
     def _preview_window(self, sid: str, width: int, height: int) -> tuple[list[Text], int, int]:
         lines, match = self._preview_document(sid, width)
         key = self._preview_key(sid, width)
-        if self.background and key not in self.preview_documents:
+        if self.background and self._cached_preview(key) is None:
             return lines[:height], 0, 0
         initial = self._preview_start(lines, match, height)
         # Keep the latest exchange at the top, even when there is room below
@@ -900,7 +974,7 @@ class SessionBrowserScreen(AltScreenApp):
 
     def _scroll_preview(self, sid: str, width: int, height: int, key: str, repeat: int) -> None:
         _, offset, total = self._preview_window(sid, width, height)
-        if self.background and self._preview_key(sid, width) not in self.preview_documents:
+        if self.background and self._cached_preview(self._preview_key(sid, width)) is None:
             return
         lines, match = self._preview_document(sid, width)
         extent = max(total, self._preview_start(lines, match, height) + height)
@@ -1097,11 +1171,7 @@ class SessionBrowserScreen(AltScreenApp):
             return [Text("No conversation selected.", style="dim")]
         header = self._detail_header(row, width)
         body_height = self._detail_body_height(row, width, height)
-        if self._preview_paused():
-            self._request_preview(row["sid"], width)
-            lines, start, total = [Text("Loading preview…", style="dim")], 0, 0
-        else:
-            lines, start, total = self._preview_window(row["sid"], width, body_height)
+        lines, start, total = self._preview_window(row["sid"], width, body_height)
         parts = header + lines
         parts.extend(Text("") for _ in range(max(0, height - 2 - len(parts))))
         position = scroll_position_hint(start, min(total, start + body_height), total) if total else ""
@@ -1209,6 +1279,7 @@ class SessionBrowserScreen(AltScreenApp):
         else:
             body = left[:body_height]
             body.extend(Text("") for _ in range(body_height - len(body)))
+        self._prefetch_previews(visible, layout["right_width"])
         parts = layout["header"] + body + layout["status"] + layout["footer"]
         return self._panel([fitted(line, layout["inner"]) for line in parts], layout["width"], term_h)
 
@@ -1576,17 +1647,6 @@ class SessionBrowserScreen(AltScreenApp):
     def on_key(self, key: str, repeat: int) -> None:
         repeat_count = repeat
 
-        navigating = (key in SELECTION_KEYS or key in SHIFT_SELECTION_KEYS or key.startswith("MOUSE_WHEEL_"))
-        if (navigating and not self.search_active and self.rename_sid is None
-                and not self.help_open and self.preview_sid is None and self.pane_focus == "sessions"):
-            # Defer formatting through a held-key burst and show a placeholder.
-            # A short pause loads the final selection; entering the preview or
-            # taking any other action bypasses this delay immediately.
-            self.preview_resume_at = time.monotonic() + 0.08
-        else:
-            self.preview_resume_at = 0.0
-            self.pending_preview = None
-
         if self.rename_sid is not None:
             self._on_key_rename(key, repeat)
             return
@@ -1646,6 +1706,7 @@ class SessionBrowserScreen(AltScreenApp):
             return
 
         if key in SHIFT_SELECTION_KEYS:
+            self.preview_direction = -1 if key == "SHIFT_UP" else 1
             self._extend_selection(key, repeat_count, visible)
             return
 
@@ -1660,6 +1721,8 @@ class SessionBrowserScreen(AltScreenApp):
                 nav_key, repeat_count, selected=sel, total=n_vis, page=self._max_vis()
             )
             if nav is not None:
+                if nav != sel:
+                    self.preview_direction = 1 if nav > sel else -1
                 self.selected_sid = visible[nav]["sid"]
             self.ghost_sids = set()
             # An unmodified move ends the range -- Shift is what holds it open.

@@ -427,6 +427,7 @@ def test_cold_search_and_navigation_never_wait_for_history_io(picker, monkeypatc
 
 def test_obsolete_preview_is_cancelled_and_cannot_replace_new_selection(picker, monkeypatch):
     picker.background = True
+    monkeypatch.setattr(picker, "_prefetch_previews", lambda *_: None)
     entered, release = threading.Event(), threading.Event()
     builds = []
 
@@ -492,6 +493,7 @@ def test_shortcut_hints_take_one_row_with_secondary_actions_on_right(picker, mon
 
 def test_background_preview_reuses_formatting_but_refreshes_changed_history(picker, monkeypatch):
     picker.background = True
+    monkeypatch.setattr(picker, "_prefetch_previews", lambda *_: None)
     calls = []
     formatter = browser._history_visual_lines
 
@@ -693,62 +695,144 @@ def test_held_arrows_are_delivered_one_step_per_frame_in_order(picker, monkeypat
     assert not command_input._PENDING_KEYS
 
 
-def test_held_navigation_shows_selected_title_and_loading_then_loads_final_row(picker, monkeypatch):
+def test_held_navigation_uses_prewarmed_previews_without_waiting_for_io(picker, monkeypatch):
     picker.background = True
-    clock = [100.0]
-    monkeypatch.setattr(browser, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    entered, release = threading.Event(), threading.Event()
+    read_document = picker._read_document
+
+    def blocked_read(path):
+        entered.set()
+        assert release.wait(5)
+        return read_document(path)
+
     try:
         render(picker, monkeypatch)
-        initial = picker.preview_request
-        wait_for_browser(picker, lambda: initial in picker.preview_documents)
-        render(picker, monkeypatch)
-        assert "Match the host" in render(picker, monkeypatch)
-        submitted = []
-        submit = picker.worker.submit
-
-        def capture(key, *args, **kwargs):
-            if key == "preview":
-                submitted.append(key)
-            return submit(key, *args, **kwargs)
-
-        monkeypatch.setattr(picker.worker, "submit", capture)
-        for _ in range(2):
-            picker.on_key("DOWN", 1)
+        wait_for_browser(picker, lambda: len(picker.preview_documents) == 3)
+        monkeypatch.setattr(picker, "_read_document", blocked_read)
+        picker.preview_checked_at = 0
+        picker.on_tick()
+        assert entered.wait(2)
+        for key in ["DOWN", "DOWN", "UP", "UP"] * 3:
+            picker.on_key(key, 1)
             output = render(picker, monkeypatch)
-            clock[0] += 0.03
-            assert "Loading preview…" in output
-            assert "Match the host" not in output
+            assert "Loading preview…" not in output
+            expected = {picker.rows[0]["sid"]: "Match the host",
+                        picker.rows[1]["sid"]: "user: Check memory usage",
+                        picker.rows[2]["sid"]: "user: Set up Python"}[picker.selected_sid]
+            assert expected in output
             layout = picker._list_layout(picker._visible_rows_list())
             detail = picker._detail_lines(layout["current"], layout["right_width"], layout["body_height"] - 1)
             assert detail[0].plain == picker._title(layout["current"])
-        assert not submitted
-        assert picker.selected_sid == picker.rows[2]["sid"]
-        clock[0] += 0.06
-        picker.on_tick()
-        final = picker.preview_request
-        wait_for_browser(picker, lambda: final in picker.preview_documents)
-        output = render(picker, monkeypatch)
-        assert submitted == ["preview"]
-        assert "Loading preview…" not in output
-        assert "user: Set up Python" in output
+        assert entered.wait(2)
     finally:
+        release.set()
         picker.worker.close()
+        picker.worker.thread.join(timeout=2)
 
 
-def test_entering_preview_bypasses_scroll_settle_delay(picker, monkeypatch):
+def test_cold_preview_starts_on_scroll_without_a_settle_delay(picker, monkeypatch):
     picker.background = True
+    monkeypatch.setattr(picker, "_prefetch_previews", lambda *_: None)
+    entered, release = threading.Event(), threading.Event()
+    read_document = picker._read_document
+
+    def blocked_read(path):
+        entered.set()
+        assert release.wait(5)
+        return read_document(path)
+
     try:
         render(picker, monkeypatch)
+        wait_for_browser(picker, lambda: picker.preview_request in picker.preview_documents)
+        monkeypatch.setattr(picker, "_read_document", blocked_read)
         picker.on_key("DOWN", 1)
-        render(picker, monkeypatch)
-        assert picker.pending_preview is not None
+        output = render(picker, monkeypatch)
+        assert entered.wait(2)  # No tick, timeout, or pane switch is needed.
+        assert "Loading preview…" in output and "Match the host" not in output
+        request = picker.preview_request
+        version = picker.worker.versions["preview"]
+        assert request[0] == picker.selected_sid
         picker.on_key("RIGHT", 1)
         render(picker, monkeypatch)
-        assert picker.pending_preview is None
-        assert picker.preview_request[0] == picker.selected_sid
+        assert picker.worker.versions["preview"] == version
         assert picker.pane_focus == "preview"
+        release.set()
+        wait_for_browser(picker, lambda: request in picker.preview_documents)
+        assert "user: Check memory usage" in render(picker, monkeypatch)
+    finally:
+        release.set()
+        picker.worker.close()
+        picker.worker.thread.join(timeout=2)
+
+
+@pytest.mark.parametrize("index", [0, 1])
+def test_prewarmed_preview_rejects_a_changed_history_path(picker, monkeypatch, tmp_path, index):
+    picker.background = True
+    entered, release = threading.Event(), threading.Event()
+    read_document = picker._read_document
+    replacement = tmp_path / "replacement.json"
+    replacement.write_text(json.dumps([{"role": "user", "content": "Replacement conversation"}]), encoding="utf-8")
+
+    def blocked_read(path):
+        if path == str(replacement):
+            entered.set()
+            assert release.wait(5)
+        return read_document(path)
+
+    try:
+        render(picker, monkeypatch)
+        wait_for_browser(picker, lambda: len(picker.preview_documents) == 3)
+        picker.sessions[picker.rows[index]["sid"]]["history_file"] = str(replacement)
+        monkeypatch.setattr(picker, "_read_document", blocked_read)
+        if index:
+            picker.on_key("DOWN", 1)
+        output = render(picker, monkeypatch)
+        assert entered.wait(2)
+        assert "Loading preview…" in output
+        assert "user: Check memory usage" not in output and "Match the host" not in output
+        release.set()
+        wait_for_browser(picker, lambda: "Replacement conversation" in picker.search_text_cache.get(picker.selected_sid, ""))
+        assert "user: Replacement conversation" in render(picker, monkeypatch)
+    finally:
+        release.set()
+        picker.worker.close()
+        picker.worker.thread.join(timeout=2)
+
+
+def test_preview_prefetch_bounds_memory_and_does_not_rebuild_evicted_neighbours(picker, monkeypatch):
+    picker.background = True
+    monkeypatch.setattr(picker, "PREVIEW_CACHE_LINES", 16)
+    for index in range(30):
+        row = dict(picker.rows[1], sid=f"extra-{index}")
+        picker.rows.append(row)
+        picker.row_by_sid[row["sid"]] = row
+        picker.sessions[row["sid"]] = dict(picker.sessions[picker.rows[1]["sid"]])
+    builds = []
+
+    def format_preview(history, width, *, cancelled=None):
+        builds.append(1)
+        return [Text(f"line {n}") for n in range(10)]
+
+    monkeypatch.setattr(browser, "_history_visual_lines", format_preview)
+    try:
+        render(picker, monkeypatch)
+        wait_for_browser(picker, lambda: picker.preview_request in picker.preview_documents and not picker.preview_prefetch)
+        assert len(builds) == 11  # Selected session and ten ahead, not all 33.
+        assert sum(len(value[1]) for value in picker.preview_cache.values()) <= 16
+        assert list(picker.preview_documents) == [picker.preview_request]
+        for _ in range(10):
+            render(picker, monkeypatch)
+            picker._drain_queue()
+        assert len(builds) == 11
+        assert not picker.preview_prefetch
+        picker.on_key("DOWN", 1)
+        render(picker, monkeypatch)
+        wait_for_browser(picker, lambda: picker.preview_request in picker.preview_documents and not picker.preview_prefetch)
+        assert "Loading preview…" not in render(picker, monkeypatch)
+        assert len(builds) < 16
     finally:
         picker.worker.close()
+        picker.worker.thread.join(timeout=2)
 
 
 @pytest.mark.parametrize("width,height", [(42, 12), (120, 24)])
