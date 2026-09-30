@@ -374,6 +374,10 @@ def _check_edit(
         if not risky:
             return True, ""
 
+    from .run_control import require_user_input
+    require_user_input(config, f"Manual approval required for edit: {reason}.")
+    control = config.get("_run_control")
+    cancel_kwargs = {"cancellation_token": control.token} if control and control.deadline else {}
     with approval_lock():
         body = Group(
             Text.from_markup(
@@ -389,6 +393,7 @@ def _check_edit(
             question="Allow this edit?",
             kind="edit",
             reason=reason,
+            **cancel_kwargs,
         ):
             return True, ""
     return False, f"[edit denied by user — {reason}]"

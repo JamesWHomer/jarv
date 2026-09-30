@@ -114,7 +114,7 @@ jarv> /new
 
 ### Flags
 
-Flags override config values for a single run and work in both one-shot and heads-up mode.
+Flags override settings for one invocation without changing saved config. Dedicated flags take precedence over `--config`; repeated `--config` keys use the last value. Most flags work in both one-shot and heads-up mode. `--output-format`, `--quiet`, `--verbose`, and `--non-interactive` require a prompt or non-empty stdin and never open heads-up mode. Runtime flags cannot be combined with slash commands.
 
 | Flag | Short | Description |
 | --- | --- | --- |
@@ -125,6 +125,25 @@ Flags override config values for a single run and work in both one-shot and head
 | `--system PROMPT` | `-s` | Override the system prompt |
 | `--new` | | Start a fresh session (ignore prior history, but still save) |
 | `--incognito` | | Don't load or save session history |
+| `--session ID` | | Use or create a named session without rebinding the terminal; archived sessions must be restored first |
+| `--config KEY=VALUE` | `-c` | Repeatable, validated setting override; lists/maps use JSON |
+| `--cwd PATH` | `-C` | Working directory for commands, files, and project context |
+| `--base-url URL` | | Override the provider API endpoint |
+| `--service-tier TIER` | | `standard`, `flex`, or `priority`, where supported by the active provider |
+| `--command-safety LEVEL` | | Override command/edit approval policy: `all`, `risky`, or `none` |
+| `--tools LIST` | | Allow only these comma-separated tools, including for subagents |
+| `--no-tools` | | Disable all agent tools |
+| `--max-turns N` | | Maximum agent model turns shared by the root and all subagents |
+| `--run-timeout SECONDS` | | Cancel the entire agent run at a deadline, including active commands and subagents |
+| `--non-interactive` | | Never prompt for setup, clarification, or approval; fail if user input is required |
+| `--output-format FORMAT` | | Clean final `text`, one `json` result, or streaming `jsonl` events on stdout; diagnostics go to stderr |
+| `--prompt-file PATH` | | Read a UTF-8 prompt file instead of a positional prompt; piped stdin can still be attached |
+| `--system-file PATH` | | Read a UTF-8 system prompt file instead of `--system` |
+| `--no-project-context` | | Skip project instructions and git context |
+| `--no-update-check` | | Skip background update checks |
+| `--no-color` | | Disable colour (also supported through `NO_COLOR`) |
+| `--quiet` | `-q` | Clean one-shot answer with progress suppressed; errors remain on stderr |
+| `--verbose` | | Clean one-shot answer with runtime details and progress on stderr |
 | `--version` | | Print the version and exit |
 
 ```bash
@@ -134,7 +153,21 @@ jarv --effort high "refactor the auth module"
 jarv --new "start fresh without prior context"
 jarv --incognito "one-off task, leave no trace"
 jarv --timeout 120 --system "You are a poet" "write me a haiku"
+git diff | jarv --non-interactive --output-format json --no-tools "review this patch"
+jarv -C ./my-project --session nightly --max-turns 20 --run-timeout 300 "check the project"
+jarv --prompt-file review.txt --system-file reviewer.txt --tools read,web_search
+jarv -c audit=false -c max_tool_output_chars=40000 --command-safety all "investigate"
 ```
+
+`--new`, `--incognito`, and `--session` are mutually exclusive. So are `--tools`/`--no-tools`, `--quiet`/`--verbose`, and `--system`/`--system-file`. File arguments are resolved relative to the directory where Jarv was launched, before `--cwd` is applied. Prompt-file contents are always treated as a prompt, even when they begin with a slash command name.
+
+`--tools` replaces the saved disabled-tool selection for this invocation. Available names are `run_command`, `web_search`, `read`, `edit`, `spawn`, and `ask_user`; subagents keep their internal `finish` tool. To restrict a run to reading, omit both `run_command` and `edit` from the allowlist.
+
+`--non-interactive` preserves the selected safety policy. Commands that need human approval fail with exit code 3; it never implicitly grants approval. Under `risky`, the auditor can still approve a command if auditor auto-approval is enabled. `ask_user` also ends an unattended run with code 3. `--max-turns` counts agent response rounds, including subagent rounds and interactive-command continuations; transport retries, audits, and history compaction do not count. `--run-timeout` uses cooperative cancellation and allows resource cleanup to finish. In heads-up mode, these limits restart for each submitted prompt.
+
+Machine output uses a final result object with `type`, `status`, `text`, `error`, `session_id`, `turns`, and `exit_code`. `status` is `success`, `error`, `cancelled`, `input_required`, or `limit`. JSONL additionally emits `start`, `turn_start`, `text_delta`, `tool_call`, `tool_result`, and `retry` events. Tool events identify the agent and call ID; text deltas identify the root turn. On `retry`, discard that turn's previous deltas; the final result's `text` is authoritative. Progress and errors never enter protocol stdout. Invalid arguments rejected by the parser use normal stderr usage messages before the output protocol starts.
+
+Exit codes: **0** success, **1** agent/provider failure or run limit, **2** invalid invocation, **3** required input unavailable, **130** cancellation. Without explicit output/verbosity flags, existing terminal rendering is preserved.
 
 ## How it works
 

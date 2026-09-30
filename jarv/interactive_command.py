@@ -630,12 +630,17 @@ def _screen_stdin_text(pending, actions, config: dict) -> str | None:
             if level != "all":
                 continue
             reason = "all commands require approval"
+        from .run_control import require_user_input
+        require_user_input(config, f"Manual approval required for command input: {reason}.")
+        control = config.get("_run_control")
+        cancel_kwargs = {"cancellation_token": control.token} if control and control.deadline else {}
         with approval_lock(), _suspended_card_live(pending):
             approved = prompt_confirmation(
                 f"stdin to `{pending.prepared.cmd}`: {text}",
                 reason,
                 kind="stdin",
                 question="Allow this input?",
+                **cancel_kwargs,
             )
         if not approved:
             if not is_risky:

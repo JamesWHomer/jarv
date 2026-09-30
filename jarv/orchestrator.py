@@ -780,10 +780,20 @@ def execute_tool_calls(
 ) -> ToolExecutionResult:
     """Run a model tool-call batch, grouping parallel-safe tools when possible."""
     hooks = hooks or ToolExecutionHooks()
+    from .run_control import emit_event
+    original_append = append_tool_result
+    agent_label = node.label if node is not None else "root"
+
+    def append_tool_result(item, output):
+        original_append(item, output)
+        emit_event(config, "tool_result", agent=agent_label, call_id=item.call_id,
+                   name=item.name, output=summarize_tool_output(output))
     result = ToolExecutionResult(web_search_read_nudge_sent=web_search_read_nudge_sent)
 
     item_index = 0
     while item_index < len(tool_calls):
+        if cancellation_token is not None:
+            cancellation_token.throw_if_cancelled()
         item = tool_calls[item_index]
         if tool_call_is_parallel_safe(item.name):
             group_end = item_index
@@ -793,6 +803,9 @@ def execute_tool_calls(
             ):
                 group_end += 1
             group = tool_calls[item_index:group_end]
+            for safe_item in group:
+                emit_event(config, "tool_call", agent=agent_label, call_id=safe_item.call_id,
+                           name=safe_item.name, arguments=safe_item.arguments)
             batch_results = dispatch_parallel_safe_tool_batch(
                 group,
                 node=node,
@@ -832,6 +845,8 @@ def execute_tool_calls(
             item_index = group_end
             continue
 
+        emit_event(config, "tool_call", agent=agent_label, call_id=item.call_id,
+                   name=item.name, arguments=item.arguments)
         if item.name in TOOL_NAMES and not tool_enabled(config, item.name):
             append_tool_result(item, with_tool_outcome(f"[tool disabled: {item.name}]", "denied"))
             item_index += 1
@@ -987,6 +1002,9 @@ def run_subagent_loop(
     web_search_read_nudge_sent = False
 
     while True:
+        control = config.get("_run_control")
+        if control is not None:
+            control.begin_turn()
         if node.shell_state.cwd != instructions_cwd:
             instructions_cwd = node.shell_state.cwd
             kwargs["instructions"] = contextual_instructions(instructions_cwd)
@@ -1012,6 +1030,8 @@ def run_subagent_loop(
 
         try:
             stream_result = collect_stream_response(make_stream)
+            if control is not None:
+                control.check()
             tool_calls = stream_result.tool_calls
             reasoning_items = stream_result.reasoning_items
             final_response = stream_result.final_response

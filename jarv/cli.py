@@ -2,6 +2,8 @@ import argparse
 import os
 import sys
 import threading
+from contextlib import ExitStack
+from pathlib import Path
 
 from . import __version__
 
@@ -97,21 +99,55 @@ def _run_slash_command(command: str, rest: list[str], *, exit_on_error: bool = F
 
 def _apply_cli_overrides(config: dict, args: argparse.Namespace) -> dict:
     """Apply one-run CLI flag overrides on top of a loaded config."""
-    config = dict(config)
+    import copy
+    config = copy.deepcopy(config)
+    overrides = dict(getattr(args, "config", None) or [])
+    config.update(overrides)
     if args.provider:
         config["provider"] = args.provider
+    from .provider_catalog import PROVIDERS
+    if config.get("provider", "openai") not in PROVIDERS:
+        raise ValueError(f"Unknown provider: {config['provider']!r}")
     if args.model:
         config["model"] = args.model
-    if args.effort:
+    if args.effort is not None:
         config["reasoning_effort"] = args.effort
-    elif args.provider or args.model:
+    elif (args.provider or args.model or "provider" in overrides or "model" in overrides) and "reasoning_effort" not in overrides:
         from .reasoning import reconcile_reasoning_effort
 
         reconcile_reasoning_effort(config)
     if args.timeout is not None:
         config["command_timeout"] = args.timeout
-    if args.system:
+    if args.system is not None:
         config["system_prompt"] = args.system
+    for argument, key in (
+        ("base_url", "base_url"), ("command_safety", "command_safety"),
+        ("system_file_text", "system_prompt"),
+    ):
+        value = getattr(args, argument, None)
+        if value is not None:
+            config[key] = value
+    for argument, key in (("no_project_context", "project_context"),
+                          ("no_update_check", "check_updates"), ("no_color", "colour")):
+        if getattr(args, argument, False):
+            config[key] = False
+    tier = getattr(args, "service_tier", None)
+    if tier is not None:
+        from .provider_catalog import service_tier_choices
+        provider = config.get("provider", "openai")
+        if tier not in service_tier_choices(provider):
+            raise ValueError(f"Service tier {tier!r} is not supported by {provider}.")
+        config.setdefault("service_tiers", {})[provider] = tier
+    allowed = getattr(args, "tools", None)
+    if allowed is not None or getattr(args, "no_tools", False):
+        from .config_schema import TOOL_NAMES
+        config["disabled_tools"] = [name for name in TOOL_NAMES if name not in (allowed or [])]
+    for argument in ("non_interactive", "max_turns", "run_timeout"):
+        value = getattr(args, argument, None)
+        if value:
+            config["_" + argument] = value
+    if getattr(args, "quiet", False):
+        config["_quiet"] = True
     return config
 
 
@@ -230,6 +266,46 @@ def cmd_setup(rest: list[str] | None = None) -> dict | int | None:
         return 130
 
 
+def _positive_int(raw: str) -> int:
+    try:
+        value = int(raw)
+        if value > 0:
+            return value
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError("must be a positive integer")
+
+
+def _config_override(raw: str) -> tuple[str, object]:
+    import json
+    from .config_schema import CONFIG_FIELD_BY_KEY, parse_config_value, validate_config_fields
+
+    key, separator, value = raw.partition("=")
+    field = CONFIG_FIELD_BY_KEY.get(key)
+    if not separator or field is None:
+        raise argparse.ArgumentTypeError("expected a known configuration KEY=VALUE")
+    if field.validator in ("string_map", "service_tiers", "disabled_tools"):
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"{key} requires JSON") from None
+    else:
+        parsed = parse_config_value(key, value)
+    errors = []
+    candidate = {key: parsed}
+    if not validate_config_fields(candidate, report=errors.append):
+        raise argparse.ArgumentTypeError("; ".join(errors).replace("[red]", "").replace("[/red]", ""))
+    return key, candidate[key]
+
+
+def _tool_allowlist(raw: str) -> list[str]:
+    from .config_schema import TOOL_NAMES
+    names = [name.strip() for name in raw.split(",")]
+    if not names or any(name not in TOOL_NAMES for name in names):
+        raise argparse.ArgumentTypeError(f"tools must be a comma-separated list of: {', '.join(TOOL_NAMES)}")
+    return list(dict.fromkeys(names))
+
+
 def _build_parser() -> argparse.ArgumentParser:
     from .provider_catalog import PROVIDERS
 
@@ -237,6 +313,7 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="jarv",
         description="AI-powered CLI agent",
         add_help=True,
+        allow_abbrev=False,
     )
     parser.add_argument("query", nargs="*", help="Prompt to run (omit for heads-up mode)")
     parser.add_argument(
@@ -253,10 +330,33 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="EFFORT",
         help="Override model-supported reasoning effort (none/minimal/low/medium/high/xhigh/max)",
     )
-    parser.add_argument("--timeout", type=int, metavar="SECONDS", help="Override command timeout/check-in seconds")
-    parser.add_argument("-s", "--system", metavar="PROMPT", help="Override system prompt for this run")
-    parser.add_argument("--new", action="store_true", help="Start a fresh session (ignore prior history, but still save)")
-    parser.add_argument("--incognito", action="store_true", help="Don't load or save session history")
+    parser.add_argument("--timeout", type=_positive_int, metavar="SECONDS", help="Override command timeout/check-in seconds")
+    system = parser.add_mutually_exclusive_group()
+    system.add_argument("-s", "--system", metavar="PROMPT", help="Override system prompt for this run")
+    system.add_argument("--system-file", metavar="PATH", help="Read system prompt from a UTF-8 file")
+    session = parser.add_mutually_exclusive_group()
+    session.add_argument("--new", action="store_true", help="Start a fresh session (ignore prior history, but still save)")
+    session.add_argument("--incognito", action="store_true", help="Don't load or save session history")
+    session.add_argument("--session", metavar="ID", help="Use or create a named session for this invocation")
+    parser.add_argument("-c", "--config", type=_config_override, action="append", metavar="KEY=VALUE", help="Override a setting for this run (repeatable; lists/maps use JSON)")
+    parser.add_argument("-C", "--cwd", metavar="PATH", help="Working directory for this invocation")
+    parser.add_argument("--base-url", metavar="URL", help="Override the provider API endpoint")
+    parser.add_argument("--service-tier", choices=("standard", "flex", "priority"), help="Override the active provider's processing tier")
+    parser.add_argument("--command-safety", choices=("all", "risky", "none"), help="Override command/edit approval policy")
+    tool_group = parser.add_mutually_exclusive_group()
+    tool_group.add_argument("--tools", type=_tool_allowlist, metavar="LIST", help="Allow only these comma-separated tools (including for subagents)")
+    tool_group.add_argument("--no-tools", action="store_true", help="Disable all agent tools")
+    parser.add_argument("--max-turns", type=_positive_int, metavar="N", help="Maximum agent model turns, shared with subagents")
+    parser.add_argument("--run-timeout", type=_positive_int, metavar="SECONDS", help="Cancel an entire agent run after this many seconds")
+    parser.add_argument("--non-interactive", action="store_true", help="Never prompt; fail when required user input is unavailable")
+    parser.add_argument("--output-format", choices=("text", "json", "jsonl"), help="One-shot answer format; progress goes to stderr")
+    parser.add_argument("--prompt-file", metavar="PATH", help="Read prompt from a UTF-8 file (instead of positional prompt)")
+    parser.add_argument("--no-project-context", action="store_true", help="Skip project instructions and git context")
+    parser.add_argument("--no-update-check", action="store_true", help="Skip background update checks")
+    parser.add_argument("--no-color", action="store_true", help="Disable output colour")
+    verbosity = parser.add_mutually_exclusive_group()
+    verbosity.add_argument("-q", "--quiet", action="store_true", help="One-shot answer only; suppress progress, preserve errors")
+    verbosity.add_argument("--verbose", action="store_true", help="Show one-shot runtime details and progress on stderr")
     parser.add_argument("--version", action="version", version=f"jarv {__version__}")
     return parser
 
@@ -313,24 +413,95 @@ def main() -> None:
             args.query.extend(unknown)
         else:
             parser.error(f"unrecognized arguments: {' '.join(unknown)}")
+    # Resolve CLI paths before changing cwd, as shells do for other arguments.
+    if args.prompt_file and args.query:
+        parser.error("--prompt-file cannot be combined with a positional prompt")
+    if args.session is not None and (not args.session.strip() or len(args.session) > 128):
+        parser.error("--session must contain 1–128 characters and cannot be blank")
+    if args.query and (args.query[0].startswith("/") or (len(args.query) == 1 and args.query[0].lower() == "help")):
+        _reject_command_flags(parser, args)
+
+    output = None
+    if args.output_format or args.quiet or args.verbose:
+        from .cli_output import CliOutput
+        output = CliOutput(args.output_format or "text", quiet=args.quiet, verbose=args.verbose)
+    with ExitStack() as stack:
+        if output:
+            stack.enter_context(output.route_diagnostics())
+        try:
+            for flag in ("prompt_file", "system_file"):
+                path = getattr(args, flag)
+                if path is not None:
+                    value = Path(path).expanduser().read_text(encoding="utf-8-sig")
+                    if "\x00" in value:
+                        raise ValueError(f"--{flag.replace('_', '-')} must contain text, not binary data")
+                    setattr(args, flag + "_text", value)
+            if args.prompt_file is not None:
+                args.query = [args.prompt_file_text]
+            if args.cwd:
+                old_cwd = os.getcwd()
+                from .shell import get_session_shell_state
+                shell_state = get_session_shell_state()
+                previous_cwd = shell_state.cwd
+                os.chdir(Path(args.cwd).expanduser())
+                stack.callback(os.chdir, old_cwd)
+                shell_state.cwd = os.getcwd()
+                stack.callback(setattr, shell_state, "cwd", previous_cwd)
+            if args.session is not None:
+                from .history import session_override
+                stack.enter_context(session_override(args.session))
+            _main(parser, args, output)
+        except (OSError, ValueError) as exc:
+            if output:
+                output.finish(error=str(exc), status="error", exit_code=2)
+            else:
+                print(f"jarv: {exc}", file=sys.stderr)
+            raise SystemExit(2) from None
+        except SystemExit as exc:
+            if output and not output.finished:
+                output.finish(error="Invocation failed; see stderr for details.",
+                              status="error", exit_code=exc.code or 0)
+            raise
+        except KeyboardInterrupt:
+            if output:
+                output.finish(error="Cancelled.", status="cancelled", exit_code=130)
+            raise SystemExit(130) from None
+        except Exception as exc:
+            if output:
+                output.finish(error=str(exc), status="error", exit_code=1)
+            else:
+                print(f"jarv: {exc}", file=sys.stderr)
+            raise SystemExit(1) from None
+
+
+def _reject_command_flags(parser, args):
+    defaults = vars(parser.parse_args([]))
+    changed = [name for name, value in vars(args).items()
+               if name != "query" and name in defaults and value != defaults[name]]
+    if changed:
+        parser.error("runtime flags cannot be used with slash commands: " +
+                     ", ".join("--" + name.replace("_", "-") for name in changed))
+
+
+def _main(parser, args, output=None) -> None:
     query_parts: list[str] = args.query
     console = _console()
     from .paths import CONFIG_DIR, UNINSTALL_RESULT_FILE
 
     # Import the updater only when there is a result to report.
-    if (CONFIG_DIR / "update-result.json").is_file():
+    if not args.quiet and (CONFIG_DIR / "update-result.json").is_file():
         _print_previous_update_result()
-    if UNINSTALL_RESULT_FILE.is_file():
+    if not args.quiet and UNINSTALL_RESULT_FILE.is_file():
         _print_previous_uninstall_result()
 
     # "jarv help" permanent alias (only when help is the sole argument)
-    if len(query_parts) == 1 and query_parts[0].lower() == "help":
+    if args.prompt_file is None and len(query_parts) == 1 and query_parts[0].lower() == "help":
         from .commands import print_help
         print_help(include_setup_nudge=False)
         return
 
-    # Slash commands — flags are silently ignored for these
-    if query_parts and query_parts[0].startswith("/"):
+    # Prompt-file content is always a prompt, even if it begins with a slash.
+    if query_parts and query_parts[0].startswith("/") and args.prompt_file is None:
         command = query_parts[0].lower()
         if not _run_slash_command(command, query_parts[1:], exit_on_error=True):
             console.print(f"[red]Unknown command:[/red] {command}")
@@ -340,9 +511,11 @@ def main() -> None:
         return
 
     # Check if user typed a command name without the slash (e.g. "jarv set" instead of "jarv /set")
-    if query_parts and not query_parts[0].startswith("/") and not _stdin_is_piped():
+    if (query_parts and not query_parts[0].startswith("/") and not _stdin_is_piped()
+            and not args.non_interactive and not args.prompt_file and output is None):
         result = _maybe_command(query_parts[0], query_parts[1:])
         if result is not None:
+            _reject_command_flags(parser, args)
             _, command, rest = result
             if not _run_slash_command(command, rest, exit_on_error=True):
                 console.print(f"[red]Unknown command:[/red] {command}")
@@ -352,14 +525,21 @@ def main() -> None:
     # First-run: auto-trigger setup wizard if no config exists yet
     from .config import is_setup_complete
 
-    config = dict(load_config())
+    config = _apply_cli_overrides(load_config(), args)
     if not args.provider and not is_setup_complete(config):
+        if args.non_interactive:
+            message = "Setup is incomplete. Configure a provider/API key before using --non-interactive."
+            if output:
+                output.finish(error=message, status="input_required", exit_code=3)
+            else:
+                print(message, file=sys.stderr)
+            raise SystemExit(3)
         result = cmd_setup()
         if not isinstance(result, dict) or not is_setup_complete(result):
             sys.exit(result if type(result) is int else 1)
         config = result
 
-    config = _apply_cli_overrides(config, args)
+        config = _apply_cli_overrides(config, args)
 
     if not validate_config(config):
         sys.exit(1)
@@ -390,12 +570,14 @@ def main() -> None:
     query = _compose_query(query_parts, stdin_text, stdin_truncated)
 
     if not query:
+        if args.non_interactive or output is not None:
+            raise ValueError("A prompt or non-empty stdin is required for one-shot execution.")
         run_heads_up_mode(config, None, args=args)
         return
 
     startup_wait = None
     try:
-        if sys.stdout.isatty():
+        if sys.stdout.isatty() and output is None:
             import time
             from .response_wait import start_response_wait
 
@@ -403,7 +585,7 @@ def main() -> None:
             indicator, live = start_response_wait(True, started, console=console)
             startup_wait = (started, indicator, live)
 
-        if config.get("check_updates", True):
+        if config.get("check_updates", True) and not args.quiet:
             from .update_check import _check_update_background, maybe_print_update_available
 
             maybe_print_update_available()
@@ -412,15 +594,34 @@ def main() -> None:
         from .agent import run_agent
 
         wait_kwargs = {"startup_wait": startup_wait} if startup_wait is not None else {}
+        if output is not None:
+            wait_kwargs["ui"] = output
+            config["_event_sink"] = output.event
         result = run_agent(query, config, client=None, new_session=args.new,
                            incognito=args.incognito, **wait_kwargs)
+        if output is not None:
+            status = getattr(result, "status", "success")
+            # AgentRunResult fields are deliberately primitive protocol values.
+            error = getattr(result, "error", None)
+            error = error if isinstance(error, str) else None
+            cancelled = getattr(result, "cancelled", False) is True
+            exit_code = 130 if cancelled else (3 if status == "input_required" else 1 if error else 0)
+            output.finish(text=getattr(result, "text", ""), error=error,
+                          status="cancelled" if cancelled else status,
+                          session_id=getattr(result, "session_id", None),
+                          turns=getattr(result, "turns", 0), exit_code=exit_code)
         if getattr(result, "cancelled", False) is True:
             console.print("\n[dim]Cancelled.[/dim]")
             sys.exit(130)
         if isinstance(getattr(result, "error", None), str):
-            sys.exit(1)
+            if output is None and getattr(result, "status", None) in ("input_required", "limit"):
+                console.print(f"[red]{result.error}[/red]")
+            sys.exit(3 if getattr(result, "status", None) == "input_required" else 1)
     except KeyboardInterrupt:
-        console.print("\n[dim]Cancelled.[/dim]")
+        if output is not None:
+            output.finish(error="Cancelled.", status="cancelled", exit_code=130)
+        else:
+            console.print("\n[dim]Cancelled.[/dim]")
         sys.exit(130)
     finally:
         # Also restore the terminal if importing the agent fails or is cancelled.

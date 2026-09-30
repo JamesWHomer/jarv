@@ -3,6 +3,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from contextlib import contextmanager
 
 from .storage import read_json, write_json, transaction, delete_json, StorageError, JsonList
 from .display import console
@@ -181,6 +182,23 @@ def ephemeral_session_context() -> SessionContext:
     )
 
 
+_session_override: str | None = None
+
+
+@contextmanager
+def session_override(session_id: str):
+    """Select a session for one invocation without rebinding its terminal."""
+    global _session_override
+    previous = _session_override
+    _session_override = session_id
+    try:
+        if load_sessions()["sessions"].get(session_id, {}).get("archived"):
+            raise ValueError(f"Session {session_id!r} is archived; restore it before resuming.")
+        yield
+    finally:
+        _session_override = previous
+
+
 def prepare_session_context(
     mark_message: bool = False,
     *,
@@ -194,13 +212,16 @@ def prepare_session_context(
     terminals = sessions_data["terminals"]
     sessions = sessions_data["sessions"]
 
-    session_id = terminals.get(terminal_id)
+    session_id = _session_override or terminals.get(terminal_id)
     if session_id is None:
         session_id = terminal_id
     if sessions.get(session_id, {}).get("archived"):
         import uuid
         session_id = f"{terminal_id}-{uuid.uuid4().hex[:8]}"
-    terminals[terminal_id] = session_id
+    if _session_override is None:
+        terminals[terminal_id] = session_id
+    else:
+        terminal_label = session_id
 
     history_path = history_file_for_session(session_id)
     session_existed = session_id in sessions
@@ -236,6 +257,10 @@ def history_metadata(context: SessionContext) -> dict:
 
 
 def set_terminal_session(session_id: str) -> None:
+    global _session_override
+    if _session_override is not None:
+        _session_override = session_id
+        return
     terminal_id, _ = detect_terminal()
     data = load_sessions()
     data["terminals"][terminal_id] = session_id
@@ -245,6 +270,11 @@ def set_terminal_session(session_id: str) -> None:
 def forget_current_session() -> None:
     """Point the current terminal at a brand-new session (keeps old session metadata)."""
     import uuid
+
+    global _session_override
+    if _session_override is not None:
+        _session_override = f"session-{uuid.uuid4().hex}"
+        return
 
     terminal_id, _ = detect_terminal()
     data = load_sessions()

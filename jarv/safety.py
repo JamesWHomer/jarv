@@ -330,7 +330,10 @@ def _console_confirm(request: ConfirmRequest) -> bool:
 
     prompt = f"[bold]{request.question}[/bold] [dim]\\[y/N][/dim] [bold cyan]\u203a[/bold cyan] "
     try:
-        choice = console.input(prompt).strip().lower()
+        if request.cancellation_token is not None:
+            choice = _cancellable_confirmation_input(prompt, request.cancellation_token)
+        else:
+            choice = console.input(prompt).strip().lower()
     except EOFError:
         console.print("[dim]  denied.[/dim]")
         return False
@@ -351,6 +354,7 @@ def prompt_panel_confirmation(
     kind: str = "command",
     command: str | None = None,
     reason: str | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> bool:
     """Show a safety panel with a y/N prompt.  Returns True if approved."""
     return request_confirmation(ConfirmRequest(
@@ -360,6 +364,7 @@ def prompt_panel_confirmation(
         kind=kind,
         command=command,
         reason=reason,
+        cancellation_token=cancellation_token,
     ))
 
 
@@ -374,6 +379,7 @@ def prompt_confirmation(
     *,
     kind: str = "command",
     question: str = "Allow this command?",
+    cancellation_token: CancellationToken | None = None,
 ) -> bool:
     """Ask the user to approve a risky command.  Returns True if approved."""
     return prompt_panel_confirmation(
@@ -382,6 +388,7 @@ def prompt_confirmation(
         kind=kind,
         command=command,
         reason=reason,
+        **({"cancellation_token": cancellation_token} if cancellation_token is not None else {}),
     )
 
 
@@ -426,14 +433,18 @@ def _check_command_locked(
     session_id: str | None,
     cancellation_token: CancellationToken | None,
 ) -> tuple[bool, str]:
+    from .run_control import require_user_input
+    control = (config or {}).get("_run_control")
+    cancel_kwargs = {"cancellation_token": control.token} if control and control.deadline else {}
     if safety_level == "all":
         reason = "all commands require approval"
+        require_user_input(config, "Manual approval required: command safety is set to 'all'.")
         if audit:
             return _audit_gate(
                 command, reason, config, history, usage_path, session_id,
                 cancellation_token, require_manual_approval=True,
             )
-        if not prompt_confirmation(command, reason):
+        if not prompt_confirmation(command, reason, **cancel_kwargs):
             return False, "[command denied by user — safety level is set to 'all']"
         return True, ""
 
@@ -445,7 +456,8 @@ def _check_command_locked(
                 command, reason, config, history, usage_path, session_id,
                 cancellation_token,
             )
-        if not prompt_confirmation(command, reason):
+        require_user_input(config, f"Manual approval required for risky command: {reason}.")
+        if not prompt_confirmation(command, reason, **cancel_kwargs):
             return False, f"[command denied by user — detected as risky: {reason}]"
     return True, ""
 
@@ -528,9 +540,10 @@ def _audit_gate(
 
     # Non-interactive fallback. Skipped when a handler owns the display: the
     # heads-up app can prompt even though stdout is its alt screen.
-    if not confirm_handler_active() and not sys.stdout.isatty():
-        console.print()
-        console.print(_safety_card(body))
+    if (config or {}).get("_non_interactive") or (not confirm_handler_active() and not sys.stdout.isatty()):
+        if not (config or {}).get("_quiet"):
+            console.print()
+            console.print(_safety_card(body))
         allow, auditor_reason = audit_command(
             command,
             reason,
@@ -541,12 +554,17 @@ def _audit_gate(
             cancellation_token=cancellation_token,
         )
         if allow:
-            console.print(f"[green]  ✓ auditor:[/green] [dim]{auditor_reason}[/dim]")
+            if not (config or {}).get("_quiet"):
+                console.print(f"[green]  ✓ auditor:[/green] [dim]{auditor_reason}[/dim]")
             if auto_approve:
                 return True, ""
+            from .run_control import require_user_input
+            require_user_input(config, "Manual approval required; auditor auto-approval is disabled.")
             if require_manual_approval:
                 return False, "[command denied — manual approval required; safety level is set to 'all']"
             return False, "[command denied — manual approval required; auditor auto-approval disabled]"
+        from .run_control import require_user_input
+        require_user_input(config, f"Command requires user review; auditor: {auditor_reason}")
         return False, f"[command denied — auditor: {auditor_reason}]"
 
     audit_state: dict = {"done": False, "allow": False, "reason": ""}
@@ -626,7 +644,10 @@ def _audit_poll_without_live(
         end="",
     )
     try:
-        choice = console.input("").strip().lower()
+        if cancellation_token is not None:
+            choice = _cancellable_confirmation_input("", cancellation_token)
+        else:
+            choice = console.input("").strip().lower()
     except EOFError:
         console.print("[dim]  denied.[/dim]")
         return False
@@ -636,6 +657,16 @@ def _audit_poll_without_live(
     else:
         console.print("[red]  ✗ denied[/red]\n")
     return approved
+
+
+def _cancellable_confirmation_input(prompt, token):
+    """Poll terminal input so a run deadline also interrupts approval waits."""
+    if not sys.stdin.isatty():
+        token.throw_if_cancelled()
+        raise EOFError
+    from .command_input import read_editable_line
+    plain_prompt = Text.from_markup(prompt).plain if prompt else "Allow this command? [y/N] > "
+    return read_editable_line(plain_prompt, cancellation_token=token).strip().lower()
 
 
 def _read_key():

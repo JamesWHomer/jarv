@@ -76,7 +76,7 @@ def print_mode_spacer(config: dict, *, mode: str | None = None) -> None:
     the raw config value.
     """
     effective = mode if mode is not None else get_setting(config, "tool_call_display")
-    if effective == "print":
+    if effective == "print" and not config.get("_quiet"):
         console.print()
 
 
@@ -654,6 +654,8 @@ def _ask_user_prompt(display_mode: str) -> tuple[str, str]:
 
 
 def _dispatch_ask_user(args: dict, config: dict | None = None, ui=None) -> str:
+    from .run_control import require_user_input
+    require_user_input(config, "User input required: ask_user is unavailable in non-interactive mode.")
     question = args.get("question")
     if not isinstance(question, str) or not question.strip():
         msg = "[tool argument error: question must be a non-empty string]"
@@ -704,7 +706,9 @@ def _dispatch_ask_user(args: dict, config: dict | None = None, ui=None) -> str:
             )
         try:
             prompt, prompt_text_style = _ask_user_prompt(display_mode)
-            answer = read_editable_line(prompt, text_style=prompt_text_style).strip()
+            control = config.get("_run_control")
+            cancel_kwargs = {"cancellation_token": control.token} if control and control.deadline else {}
+            answer = read_editable_line(prompt, text_style=prompt_text_style, **cancel_kwargs).strip()
             outcome = "success"
         except KeyboardInterrupt:
             raise

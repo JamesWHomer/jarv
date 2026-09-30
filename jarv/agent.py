@@ -154,6 +154,10 @@ class AgentRunResult:
     cancelled: bool = False
     prompt: str | None = None
     error: str | None = None
+    text: str = ""
+    session_id: str | None = None
+    turns: int = 0
+    status: str = "success"
 
 
 class SessionPersistence:
@@ -1339,6 +1343,10 @@ def run_agent(
     # prompt of the session only; later prompts carry just state.
     interactive_help = {"sent": False}
     cancellation_token = CancellationToken()
+    from .run_control import RunControl, RunStopped, emit_event
+    control = RunControl(cancellation_token, max_turns=config.get("_max_turns"),
+                         timeout=config.get("_run_timeout"))
+    config["_run_control"] = control
     renderer = _TurnRenderer(
         ui=ui,
         interactive=interactive,
@@ -1389,8 +1397,10 @@ def run_agent(
 
     try:
         sigint_cancel_scope.__enter__()
+        control.check()
         instructions_cwd = get_session_shell_state().cwd
         client, instructions = _prepare_client_and_instructions(config, client, cwd=instructions_cwd)
+        control.check()
 
         if new_session and not incognito:
             forget_current_session()
@@ -1450,7 +1460,11 @@ def run_agent(
         if effort:
             kwargs["reasoning"] = {"effort": effort}
 
+        turn_number = 0
         while True:
+            control.begin_turn()
+            turn_number += 1
+            emit_event(config, "turn_start", agent="root", turn=turn_number)
             if root_node.shell_state.cwd != instructions_cwd:
                 instructions_cwd = root_node.shell_state.cwd
                 kwargs["instructions"] = build_instructions(config, cwd=instructions_cwd)
@@ -1485,12 +1499,24 @@ def run_agent(
                     cancellation_token=cancellation_token,
                 )
 
+            def on_stream_event(event, collected):
+                control.check()
+                renderer.on_stream_event(event, collected)
+                if isinstance(event, TextDelta):
+                    emit_event(config, "text_delta", agent="root", turn=turn_number, text=event.delta)
+
+            def on_retry():
+                control.check()
+                emit_event(config, "retry", agent="root", turn=turn_number)
+                renderer.on_stream_retry()
+
             stream_result = collect_stream_response(
                 make_stream,
-                on_event=renderer.on_stream_event,
+                on_event=on_stream_event,
                 on_attempt_end=renderer.on_stream_attempt_end,
-                on_retry=renderer.on_stream_retry,
+                on_retry=on_retry,
             )
+            control.check()
             renderer.adopt_stream_result(stream_result)
             final_response = stream_result.final_response
             if not incognito:
@@ -1623,13 +1649,21 @@ def run_agent(
                         heads_up=heads_up,
                     )
                 break
-        return AgentRunResult()
-    except (KeyboardInterrupt, TurnCancelled):
+        control.check()
+        return AgentRunResult(text=renderer.reply_text, session_id=session_context.session_id,
+                              turns=control.turns)
+    except (KeyboardInterrupt, TurnCancelled) as exc:
         cancellation_token.cancel()
         cleanup_pending_command("cancelled")
         if session_context is not None:
             checkpointer.checkpoint_cancelled_turn()
-        return AgentRunResult(cancelled=True, prompt=query)
+        error = control.error or (str(exc) if isinstance(exc, RunStopped) else None)
+        status = control.status or (exc.status if isinstance(exc, RunStopped) else "cancelled")
+        if error and ui is not None:
+            _ui_call(ui, "show_error", error)
+        return AgentRunResult(cancelled=error is None, prompt=query, error=error,
+                              session_id=session_context.session_id if session_context else None,
+                              turns=control.turns, status=status)
     except (ProviderError, Exception) as e:
         cancellation_token.cancel()
         cleanup_pending_command()
@@ -1642,8 +1676,11 @@ def run_agent(
             console.print(f"[{style}]{label}:[/{style}] {escape(str(e))}")
         if not isinstance(e, StorageError):
             checkpointer.flush_error_state()
-        return AgentRunResult(error=str(e))
+        return AgentRunResult(error=control.error or str(e), status=control.status or "error",
+                              session_id=session_context.session_id if session_context else None,
+                              turns=control.turns)
     finally:
+        control.close()
         sigint_cancel_scope.__exit__(None, None, None)
         _ui_call(ui, "unbind_cancel_token")
         renderer.stop_live()

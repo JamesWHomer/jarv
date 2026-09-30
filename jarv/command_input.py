@@ -1486,6 +1486,7 @@ def read_editable_line(
     read_key=None,
     key_available=None,
     write=None,
+    cancellation_token=None,
 ) -> str:
     """Read one editable line with cross-platform raw key handling.
 
@@ -1529,6 +1530,11 @@ def read_editable_line(
         )
         try:
             while True:
+                if cancellation_token is not None:
+                    cancellation_token.throw_if_cancelled()
+                    if not pending and not key_available():
+                        time.sleep(0.02)
+                        continue
                 try:
                     key = pending.popleft() if pending else read_key()
                 except KeyboardInterrupt:
