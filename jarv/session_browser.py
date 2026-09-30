@@ -1,13 +1,12 @@
 """Interactive and plain /sessions browser."""
 
 import sys
-import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 
 from rich import box
 from rich.console import Group
-from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -17,7 +16,6 @@ from .display import console, jarv_panel, terminal_size
 from .tui_app import AltScreenApp
 from .history import (
     detect_terminal,
-    isoformat_utc,
     load_history,
     load_sessions,
     parse_timestamp,
@@ -25,11 +23,21 @@ from .history import (
     set_terminal_session,
     utc_now,
 )
-from .session_render import _history_visual_lines, _session_row_widths
+from .session_render import _history_visual_lines
+from .session_browser_work import BrowserWorker
+from .session_titles import SessionTitleCache
+from .session_browser_live import SessionBrowserLive as Live
+from .session_browser_render import (
+    beside, conversation_title, first_prompt, fitted, highlighted, highlighted_transcript, match_excerpt,
+    one_line, pane_heading, reflow_position, session_row,
+)
+from .text_editor import initialize_text_editor, apply_text_editor_key, render_single_line
+from .tool_outputs import flatten_content_text
 from .session_store import archive_session_files, delete_session_files, unarchive_session_files, mark_session_archived, session_metadata_transaction
+from .storage import StorageError
 from .tui_frame import panel_width
 from .tui_panel import MenuPanel, menu_frame_rows, menu_inner_width
-from .tui_layout import append_bottom_footer, clip_text
+from .tui_layout import append_bottom_footer
 from .tui_overlay import (
     SELECTION_KEYS,
     SHIFT_SELECTION_KEYS,
@@ -65,9 +73,9 @@ def _sessions_plain(sessions: dict, terminals: dict) -> None:
 
     table = Table(box=box.SIMPLE_HEAD, show_header=True, padding=(0, 2), header_style="bold cyan", pad_edge=False)
     table.add_column("", no_wrap=True, width=1)
-    table.add_column("ID prefix", style="bold cyan", no_wrap=True)
+    table.add_column("Conversation")
     table.add_column("Last active", style="dim", no_wrap=True)
-    table.add_column("First message")
+    table.add_column("ID prefix", style="dim", no_wrap=True)
 
     for sid in sorted_sessions:
         meta = sessions[sid]
@@ -95,15 +103,13 @@ def _sessions_plain(sessions: dict, terminals: dict) -> None:
             history_path = Path(history_path_str)
             if history_path.exists():
                 history = load_history(history_path)
-                for item in history:
-                    if isinstance(item, dict) and item.get("role") == "user":
-                        content = str(item.get("content", "")).replace("\n", " ").strip()
-                        if content:
-                            snippet = content[:72] + ("..." if len(content) > 72 else "")
-                            break
+                snippet = first_prompt(history)
 
         marker = "[green]●[/green]" if sid == current_session_id else ""
-        table.add_row(marker, _short_session_id(sid), time_str, snippet or "[dim]no messages[/dim]")
+        title = Text(conversation_title(meta, snippet), no_wrap=True, overflow="ellipsis")
+        if meta.get("archived"):
+            title.append(" [archived]", style="dim")
+        table.add_row(marker, title, time_str, _short_session_id(sid))
 
     total = len(sessions)
     shown = len(sorted_sessions)
@@ -150,8 +156,11 @@ def _cmd_sessions_load(prefix: str) -> int:
             meta.pop("archived_at", None)
             save_sessions(data)
     set_terminal_session(session_id)
-    label = sessions[session_id].get("label", session_id)
-    console.print(f"[bold green]✓[/bold green] [green]Loaded[/green] [bold cyan]{_short_session_id(session_id)}[/bold cyan] [dim]({label})[/dim]")
+    label = sessions[session_id].get("title") or sessions[session_id].get("label", session_id)
+    notice = Text("✓ Loaded ", style="green")
+    notice.append(str(label), style="bold")
+    notice.append(f" ({_short_session_id(session_id)})", style="dim")
+    console.print(notice)
     return 0
 
 
@@ -184,8 +193,10 @@ def cmd_sessions(args: list | None = None) -> int | None:
 
     sorted_sessions = sorted(sessions.keys(), key=sort_key, reverse=True)
 
-    # Precompute cheap display data only. History and usage sidecars are loaded
-    # lazily for visible rows so first paint is bounded by viewport size.
+    # Full indexing stays on the worker. Prepare visible names separately.
+    from .history import SESSIONS_FILE
+    title_cache = SessionTitleCache(SESSIONS_FILE.with_name("session-titles.json"),
+                                    (meta.get("history_file") for meta in sessions.values()))
     rows: list[dict] = []
     for sid in sorted_sessions:
         meta = sessions[sid]
@@ -212,12 +223,20 @@ def cmd_sessions(args: list | None = None) -> int | None:
             cached_snippet = meta.get("first_message")
         if not isinstance(cached_snippet, str):
             cached_snippet = ""
-        snippet = cached_snippet[:60] + ("..." if len(cached_snippet) > 60 else "")
+        snippet = one_line(cached_snippet)[:240]
+        age = (now.astimezone().date() - ts.astimezone().date()).days if ts else None
+        date_group = (
+            "Today" if age is not None and age <= 0 else
+            "Yesterday" if age == 1 else
+            "Earlier this week" if age is not None and age < 7 else
+            "Older" if age is not None else "Unknown date"
+        )
 
         rows.append({
             "sid": sid,
             "short_id": _short_session_id(sid),
             "time_str": time_str,
+            "date_group": date_group,
             "snippet": snippet,
             "snippet_loaded": bool(cached_snippet),
             "is_current": sid == current_session_id,
@@ -230,19 +249,21 @@ def cmd_sessions(args: list | None = None) -> int | None:
         terminals=terminals,
         rows=rows,
         current_session_id=current_session_id,
+        title_cache=title_cache,
     )
+    screen.prepare_titles()
     screen.run()
 
     loaded_row = screen.loaded_row
     if loaded_row is not None:
-        label = sessions.get(loaded_row["sid"], {}).get("label", loaded_row["sid"])
+        label = screen._title(loaded_row)
         prefix = "Restored & loaded" if screen.auto_restored else "Loaded"
-        console.print(
-            f"[bold green]✓[/bold green] [green]{prefix}[/green] "
-            f"[bold cyan]{loaded_row['short_id']}[/bold cyan] [dim]({label})[/dim]"
-        )
+        notice = Text(f"✓ {prefix} ", style="green")
+        notice.append(label, style="bold")
+        notice.append(f" ({loaded_row['short_id']})", style="dim")
+        console.print(notice)
         return
-    console.print("[dim]○ Cancelled.[/dim]")
+    console.print("[dim]Sessions closed.[/dim]")
 
 
 class SessionBrowserScreen(AltScreenApp):
@@ -250,18 +271,18 @@ class SessionBrowserScreen(AltScreenApp):
 
     Was a ~900-line closure in ``cmd_sessions``; the closures are now methods and
     the bespoke ``Live`` loop is the shared :class:`AltScreenApp` loop. A daemon
-    prefetch thread warms the transcript-search cache and a ``threading.Timer``
-    backs the 5-second undo window; neither paints -- they only mutate state and
-    request a repaint, the loop is the sole renderer.
+    worker indexes history and prepares previews without blocking input. Undo
+    remains available for the lifetime of the browser; only the main loop
+    accepts worker results, paints, or changes session metadata.
     """
 
     use_mouse_capture = True
     use_bracketed_paste = False
     clear_on_resize = False
     first_paint_label = "sessions"
-    UNDO_WINDOW = 5.0
+    VIEW_MODES = ("active", "archived", "all")
 
-    def __init__(self, *, data, sessions, terminals, rows, current_session_id):
+    def __init__(self, *, data, sessions, terminals, rows, current_session_id, background=True, title_cache=None):
         super().__init__(
             console=console,
             live_factory=self._browser_live_factory,
@@ -280,13 +301,35 @@ class SessionBrowserScreen(AltScreenApp):
         # is still the same one that armed it.
         self.arm_delete_sids: frozenset[str] | None = None
         self.flash: tuple[str, str] | None = None  # (message, style) shown above the footer
+        self.flash_until = 0.0
         self.search_query = ""
         self.search_active = False  # input bar focused for typing
-        self.search_text_cache: dict[str, str] = {}  # sid -> lowercased transcript text
-        self.last_action: dict | None = None  # most recent undoable action (5s window)
-        self.undo_lock = threading.Lock()
-        # When rows are archived/unarchived from a filtered view, keep them
-        # visible in place (with their new aesthetic) until the cursor moves.
+        self.search_editor: dict = {}
+        initialize_text_editor(self.search_editor, "")
+        self.search_text_cache: dict[str, str] = {}  # sid -> transcript text
+        self.search_folded_cache: dict[str, str] = {}
+        self.search_revision = 0
+        self.visible_cache = None
+        self.excerpt_cache = OrderedDict()
+        self.indexed_paths = {}
+        self.exchange_counts = {}
+        self.row_by_sid = {row["sid"]: row for row in rows}
+        # Synchronous mode is useful for static renderers and deterministic
+        # state tests. The interactive browser always uses background work.
+        self.background = background
+        self.title_cache = title_cache
+        self.worker = BrowserWorker(lambda result: self.post_app_event("browser_work", result))
+        self.history_cache = OrderedDict()  # accessed only by the worker
+        self.index_requested = {}
+        self.prefetch_started = False
+        self.detail_cache: tuple | None = None
+        self.undo_actions: list[dict] = []
+        self.rename_sid: str | None = None
+        self.rename_editor: dict = {}
+        self.help_open = False
+        self.help_offset = 0
+        self.help_total = 0
+        # Renaming a search match can retain it until the cursor moves.
         self.ghost_sids: set[str] = set()
         self.selected_sid: str | None = next(
             (r["sid"] for r in rows if r["is_current"] and not r["archived"]),
@@ -296,22 +339,31 @@ class SessionBrowserScreen(AltScreenApp):
         # range started; an empty ``marked_sids`` means "act on the cursor row".
         self.anchor_sid: str | None = None
         self.marked_sids: set[str] = set()
+        self.persistent_selection = False
         self.offset = 0
+        self.pane_focus = "sessions"
         self.preview_sid: str | None = None
-        self.preview_offset = 0
-        self.preview_cache: dict[tuple[str, int], list[Text]] = {}
-        self.prefetch_stop = threading.Event()
-        self.prefetch_thread: threading.Thread | None = None
+        self.preview_return_focus = "sessions"
+        self.preview_positions: dict[tuple[str, int, str], int] = {}
+        self.preview_cache = OrderedDict()
+        self.preview_document_cache: tuple | None = None
+        self.preview_documents = OrderedDict()
+        self.preview_request = None
+        self.preview_checked_at = 0.0
+        self.preview_transfers = {}
+        self.preview_roundtrip = None
+        self.preview_resume_at = 0.0
+        self.pending_preview = None
         self.loaded_row: dict | None = None
         self.auto_restored = False
-        self._last_undo_tick = 0.0
+        self._last_list_capacity = 1
 
     # ------------------------------------------------------------------ #
     # AltScreenApp wiring (module symbols resolved at call time so tests
     # patching ``jarv.session_browser.*`` keep driving the loop).
     # ------------------------------------------------------------------ #
     def _read_browser_key(self) -> tuple[str, int]:
-        text_mode = self.search_active and self.preview_sid is None
+        text_mode = self.rename_sid is not None or (self.search_active and self.preview_sid is None)
         return _read_key_with_repeats(
             text_mode=text_mode,
             repeatable=()
@@ -331,6 +383,9 @@ class SessionBrowserScreen(AltScreenApp):
             # Raw wheel tokens: the list maps them onto selection movement and
             # the preview takes 3-line steps (see on_key / _on_key_preview).
             translate_mouse_wheel=False,
+            # A fast picker can paint each step. Draining a whole repeat burst
+            # here makes held arrows skip visibly over intermediate rows.
+            max_count=1,
         )
 
     def _browser_key_available(self) -> bool:
@@ -357,47 +412,180 @@ class SessionBrowserScreen(AltScreenApp):
         self.stop()
 
     def on_stop(self) -> None:
-        self.prefetch_stop.set()
+        self.worker.close()
         self._commit_pending()
 
-    def on_tick(self) -> None:
-        # Animate the undo-window countdown and clear it once it lapses.
-        if self.last_action is not None:
-            now = time.monotonic()
-            if now - self._last_undo_tick >= 0.25:
-                self._last_undo_tick = now
-                self.invalidate()
+    def on_start(self) -> None:
+        self._start_prefetch()
+
+    def prepare_titles(self):
+        if self.title_cache is None:
+            return
+        for row in self.rows:
+            snippet = self.title_cache.get(self.sessions[row["sid"]].get("history_file"))
+            if snippet is not None:
+                row.update(snippet=snippet, snippet_loaded=True)
+        visible = self._visible_rows_list()
+        selected = self._selected_pos(visible)
+        height = terminal_size(console=self.console)[1]
+        # Include date headings and either possible position of the cursor.
+        # Bound cold work by the viewport and 25 ms, never the full collection.
+        deadline = time.monotonic() + .025
+        for row in visible[max(0, selected - height):max(height, selected + 1)]:
+            if time.monotonic() >= deadline:
+                break
+            meta = self.sessions[row["sid"]]
+            if not row.get("snippet_loaded") and not meta.get("title"):
+                snippet = self.title_cache.read(meta.get("history_file"))
+                if snippet is not None:
+                    row.update(snippet=snippet, snippet_loaded=True)
+
+    @staticmethod
+    def _bounded_put(cache, key, value, limit=12):
+        cache[key] = value
+        cache.move_to_end(key)
+        while len(cache) > limit:
+            cache.popitem(last=False)
+
+    def _read_document(self, path):
+        """Load once for indexing and previewing, off the input thread."""
+        try:
+            stat = Path(path).stat() if path else None
+        except OSError:
+            stat = None
+        stamp = (path, stat.st_mtime_ns if stat else None, stat.st_size if stat else None)
+        cached = self.history_cache.get(path)
+        if cached is not None and cached[0] == stamp:
+            self.history_cache.move_to_end(path)
+            return cached
+        error = ""
+        try:
+            history = load_history(Path(path)) if stat else []
+            if not stat:
+                error = "History file is unavailable."
+        except Exception:
+            history, error = [], "Couldn't read this conversation."
+        chunks = [flatten_content_text(item.get("content", "")) for item in history if isinstance(item, dict)]
+        text = "\n".join(chunks)
+        count = sum(item.get("role") == "user" for item in history if isinstance(item, dict))
+        record = (stamp, history, text, text.lower(), first_prompt(history)[:240], count, error)
+        if not error and self.title_cache is not None and self.title_cache.remember(stamp, record[4]):
+            self.title_cache.save()
+        self._bounded_put(self.history_cache, path, record, limit=8)
+        return record
+
+    def _accept_index(self, sid, record):
+        stamp, _, text, folded, snippet, count, _ = record
+        if sid not in self.sessions:
+            self.index_requested.pop(sid, None)
+            return
+        if self.sessions[sid].get("history_file") != stamp[0]:
+            # Archiving/restoring can move a file while it is being indexed.
+            # Retry its new location instead of leaving a permanent gap.
+            self.index_requested.pop(sid, None)
+            row = self.row_by_sid.get(sid)
+            if row is not None:
+                self._request_index(row)
+            return
+        if self.indexed_paths.get(sid) == stamp:
+            return
+        self.indexed_paths[sid] = stamp
+        self.search_text_cache[sid] = text
+        self.search_folded_cache[sid] = folded
+        self.exchange_counts[sid] = count
+        row = self.row_by_sid.get(sid)
+        if row is not None:
+            row.update(snippet=snippet, snippet_loaded=True)
+        self.search_revision += 1
+
+    def _request_index(self, row, *, priority=2):
+        sid = row["sid"]
+        path = self.sessions.get(sid, {}).get("history_file")
+        if sid in self.index_requested and self.index_requested[sid] == path:
+            return
+        self.index_requested[sid] = path
+        self.worker.submit(("index", sid), lambda cancelled: (sid, self._read_document(path)), priority=priority)
+
+    def on_app_event(self, event):
+        if event.kind != "browser_work":
+            return
+        key, version, result, error = event.payload
+        if not self.worker.current(key, version):
+            return
+        if error:
+            if key == "preview":
+                self.preview_request = None
+                self._notify("Couldn't load the preview.", "red")
+            elif key != "titles":
+                sid = key[1]
+                path = self.index_requested.get(sid)
+                self._accept_index(sid, ((path, None, None), [], "", "", "", 0, error))
+            return
+        if key == "titles":
+            for sid, path, snippet in result:
+                row = self.row_by_sid.get(sid)
+                if row is not None and self.sessions.get(sid, {}).get("history_file") == path:
+                    row.update(snippet=snippet, snippet_loaded=True)
+            self.search_revision += 1
+            return
+        if key == "preview":
+            sid, width, query, record, lines, document, match = result
+            if sid not in self.sessions or self.sessions[sid].get("history_file") != record[0][0]:
+                self.preview_request = None
+                return
+            self._accept_index(sid, record)
+            old = self.preview_cache.get((sid, width))
+            if old is not None and old[0] != record[0]:
+                for saved in list(self.preview_documents):
+                    if saved[:2] == (sid, width):
+                        self.preview_documents.pop(saved)
+            self._bounded_put(self.preview_cache, (sid, width), (record[0], lines))
+            self._bounded_put(self.preview_documents, (sid, width, query), (document, match))
+            transfer = self.preview_transfers.pop((sid, width, query), None)
+            if transfer is not None:
+                mapped = reflow_position(transfer[0], transfer[1], document)
+                self.preview_positions[(sid, width, query)] = mapped
+                self.preview_roundtrip = (sid, transfer[2], width, transfer[1], mapped)
+        else:
+            self._accept_index(*result)
+
+    def on_tick(self):
+        if self.flash is not None and time.monotonic() >= self.flash_until:
+            self.flash = None
+            self.invalidate()
+        if self.pending_preview is not None and time.monotonic() >= self.preview_resume_at:
+            sid, width, _ = self.pending_preview
+            self.pending_preview = None
+            self._request_preview(sid, width)
+            self.invalidate()
+        # Check the selected transcript for external edits at most once a
+        # second. File stats and formatting still happen on the worker.
+        if self.background and self.preview_request is not None and time.monotonic() - self.preview_checked_at > 1:
+            sid, width, _ = self.preview_request
+            self.preview_request = None
+            self._request_preview(sid, width)
 
     # ------------------------------------------------------------------ #
     # Display helpers
     # ------------------------------------------------------------------ #
-    def _truncate(self, value: str, width: int) -> str:
-        return clip_text(value, width)
+    def _notify(self, message: str, style: str = "cyan") -> None:
+        self.flash = (one_line(message), style)
+        self.flash_until = time.monotonic() + (8.0 if style in ("red", "yellow") else 4.0)
 
-    def _content_rows(self, term_h: int, has_status: bool, show_footer: bool, has_search: bool = False) -> int:
-        # Panel border = 2 rows. Header consumes 1 row. Footer = 2 rows (blank + controls).
-        content = max(1, term_h - menu_frame_rows() - 1)
-        if show_footer:
-            content -= 2
-        if has_status:
-            content -= 1
-        if has_search:
-            content -= 1
-        return max(1, content)
+    def _truncate(self, value: str, width: int) -> str:
+        return fitted(value, width).plain
 
     def _max_vis(self, has_status: bool = False) -> int:
-        _, term_h = terminal_size(console=console)
-        has_search = bool(self.search_active or self.search_query)
-        return self._content_rows(term_h, has_status, show_footer=term_h >= 6, has_search=has_search)
+        return self._last_list_capacity
 
     def _fast_search_text(self, r: dict) -> str:
         # Cheap fields available without disk I/O — exact short id, full sid,
         # the user's first-message snippet, and the session label.
         meta = self.sessions.get(r["sid"], {})
         label = meta.get("label", "") if isinstance(meta.get("label"), str) else ""
-        return f"{r['short_id']} {r['sid']} {r.get('snippet', '')} {label}".lower()
+        return f"{r['short_id']} {r['sid']} {r.get('snippet', '')} {label} {meta.get('title', '')}".lower()
 
-    def _first_user_snippet(self, meta: dict, width: int = 60) -> str:
+    def _first_user_snippet(self, meta: dict, width: int = 240) -> str:
         hp_str = meta.get("history_file")
         if not hp_str:
             return ""
@@ -408,16 +596,20 @@ class SessionBrowserScreen(AltScreenApp):
             history = load_history(hp)
         except Exception:
             return ""
-        for item in history:
-            if isinstance(item, dict) and item.get("role") == "user":
-                content = str(item.get("content", "")).replace("\n", " ").strip()
-                if content:
-                    return content[:width] + ("..." if len(content) > width else "")
-        return ""
+        return first_prompt(history)[:width]
+
+    def _title(self, row: dict) -> str:
+        self._ensure_row_metadata(row)
+        if not row.get("snippet_loaded") and not self.sessions.get(row["sid"], {}).get("title"):
+            return self.sessions.get(row["sid"], {}).get("label") or "Loading conversation…"
+        return conversation_title(self.sessions.get(row["sid"], {}), row.get("snippet", ""))
 
     def _ensure_row_metadata(self, r: dict) -> None:
         meta = self.sessions.get(r["sid"], {})
         if not r.get("snippet_loaded"):
+            if self.background:
+                self._request_index(r, priority=1)
+                return
             r["snippet"] = self._first_user_snippet(meta)
             r["snippet_loaded"] = True
 
@@ -425,9 +617,6 @@ class SessionBrowserScreen(AltScreenApp):
         meta = self.sessions.get(sid, {})
         hp_str = meta.get("history_file")
         chunks: list[str] = []
-        label = meta.get("label")
-        if isinstance(label, str):
-            chunks.append(label)
         if hp_str:
             hp = Path(hp_str)
             if hp.exists():
@@ -438,46 +627,51 @@ class SessionBrowserScreen(AltScreenApp):
                 for item in history:
                     if not isinstance(item, dict):
                         continue
-                    content = item.get("content", "")
-                    if isinstance(content, str):
-                        chunks.append(content)
-                    elif isinstance(content, list):
-                        for c in content:
-                            if isinstance(c, dict):
-                                t = c.get("text") if c.get("type") == "text" else c.get("content")
-                                if isinstance(t, str):
-                                    chunks.append(t)
-        return "\n".join(chunks).lower()
+                    chunks.append(flatten_content_text(item.get("content", "")))
+        return "\n".join(chunks)
 
     def _search_text(self, sid: str) -> str:
         cached = self.search_text_cache.get(sid)
         if cached is not None:
             return cached
+        if self.background:
+            return ""
         text = self._build_search_text(sid)
         self.search_text_cache[sid] = text
+        self.search_folded_cache[sid] = text.lower()
         return text
 
-    def _prefetch_worker(self) -> None:
-        for r in self.rows:
-            if self.prefetch_stop.is_set():
-                return
-            sid = r["sid"]
-            if sid in self.search_text_cache:
-                continue
-            try:
-                text = self._build_search_text(sid)
-            except Exception:
-                text = ""
-            self.search_text_cache[sid] = text
-
     def _start_prefetch(self) -> None:
-        if self.prefetch_thread is not None:
+        if self.prefetch_started or not self.background:
             return
-        self.prefetch_thread = threading.Thread(target=self._prefetch_worker, daemon=True)
-        self.prefetch_thread.start()
+        self.prefetch_started = True
+        if self.title_cache is not None:
+            paths = [(row["sid"], self.sessions[row["sid"]].get("history_file")) for row in self.rows]
+
+            def load_titles(cancelled):
+                result = []
+                for sid, path in paths:
+                    if cancelled():
+                        break
+                    snippet = self.title_cache.read(path)
+                    if snippet is not None:
+                        result.append((sid, path, snippet))
+                self.title_cache.save()
+                return result
+
+            self.worker.submit("titles", load_titles, priority=-1)
+        for row in self.rows:
+            self._request_index(row)
 
     def _visible_rows_list(self) -> list[dict]:
         q = self.search_query.lower().strip()
+        if q:
+            self._start_prefetch()
+        signature = (q, self.view_mode, frozenset(self.ghost_sids), self.search_revision,
+                     tuple((r["sid"], r["archived"], r.get("snippet", ""),
+                            self.sessions.get(r["sid"], {}).get("title", "")) for r in self.rows))
+        if self.visible_cache is not None and self.visible_cache[0] == signature:
+            return self.visible_cache[1]
 
         def keep(r: dict) -> bool:
             if r["sid"] in self.ghost_sids:
@@ -489,11 +683,15 @@ class SessionBrowserScreen(AltScreenApp):
             if q:
                 if q in self._fast_search_text(r):
                     return True
-                if q not in self._search_text(r["sid"]):
+                if r["sid"] not in self.search_folded_cache and not self.background:
+                    self._search_text(r["sid"])
+                if q not in self.search_folded_cache.get(r["sid"], ""):
                     return False
             return True
 
-        return [r for r in self.rows if keep(r)]
+        visible = [r for r in self.rows if keep(r)]
+        self.visible_cache = (signature, visible)
+        return visible
 
     def _selected_pos(self, visible: list[dict]) -> int:
         for i, r in enumerate(visible):
@@ -505,6 +703,7 @@ class SessionBrowserScreen(AltScreenApp):
         """Drop the Shift+arrow range back to a lone cursor."""
         self.anchor_sid = None
         self.marked_sids = set()
+        self.persistent_selection = False
 
     def _target_rows(self, visible: list[dict]) -> list[dict]:
         """Rows an action applies to: the marked span, else the cursor row.
@@ -524,6 +723,7 @@ class SessionBrowserScreen(AltScreenApp):
         """Grow or shrink the Shift+arrow range, carrying the cursor with it."""
         if not visible:
             return
+        self.persistent_selection = False
         sel = self._selected_pos(visible)
         if self.anchor_sid is None or not any(r["sid"] == self.anchor_sid for r in visible):
             self.anchor_sid = visible[sel]["sid"]
@@ -545,44 +745,42 @@ class SessionBrowserScreen(AltScreenApp):
         self.ghost_sids = set()
 
     def _subtitle(self) -> str:
-        n_active = sum(1 for r in self.rows if not r["archived"])
-        n_archived = len(self.rows) - n_active
-        if self.view_mode == "active":
-            counts = f"[dim]{n_active} active[/dim]"
-        elif self.view_mode == "archived":
-            counts = f"[dim]{n_archived} archived[/dim]"
-        else:
-            counts = f"[dim]{n_active} active · {n_archived} archived[/dim]"
-        n_marked = len(self.marked_sids)
-        if n_marked > 1:
-            return f"{counts} [bold cyan]· {n_marked} selected[/bold cyan]"
-        return counts
+        count = len(self.rows)
+        selected = f" · {len(self.marked_sids)} selected" if self.marked_sids else ""
+        return f"{count} sessions{selected}"
 
-    def _footer_text(self) -> str:
-        if self.search_active:
-            return "type to filter   Enter apply   Esc back   Backspace delete"
-        cur_visible = self._visible_rows_list()
-        cur = cur_visible[self._selected_pos(cur_visible)] if cur_visible else None
-        a_hint = "a unarchive" if (cur and cur["archived"]) else "a archive"
-        d_hint = "d delete"
-        n_targets = len(self._target_rows(cur_visible))
-        if n_targets > 1:
-            a_hint = f"{a_hint} {n_targets}"
-            d_hint = f"{d_hint} {n_targets}"
-        find_hint = "^F edit search" if self.search_query else "^F find"
-        parts = [
-            # "navigate" trimmed to "nav" to pay for most of the select hint --
-            # this line already overflows a narrow terminal and gets clipped.
-            "←→/↑↓ nav", "⇧↑↓ select", "Enter load", "p preview", d_hint,
-            a_hint, f"Tab view: {self.view_mode}", find_hint,
-        ]
-        action = self.last_action
-        if action is not None:
-            remaining = action["deadline"] - time.time()
-            if remaining > 0:
-                parts.append(f"u undo ({int(remaining) + 1}s)")
-        parts.append("q cancel")
-        return "   ".join(parts)
+    def _footer_lines(self, width: int, cur: dict | None) -> list[Text]:
+        if self.rename_sid is not None:
+            primary, secondary = "Enter Save  Esc Cancel", "Empty title uses the first prompt"
+        elif self.arm_delete_sids:
+            return [fitted(Text("d Confirm · any other key cancels", style="red"), width)]
+        elif self.search_active:
+            primary, secondary = "Enter / ↓ Results  Esc Clear", "←→ Edit text  Tab View"
+        elif cur is None:
+            primary, secondary = "Ctrl+F Search  Tab View  Esc Close", "? Help"
+        else:
+            action = "Restore & resume" if cur["archived"] else "Resume"
+            if self.pane_focus == "preview":
+                primary = f"↑↓ Scroll  ← Sessions  Enter {action}  Ctrl+F Search  Tab View  Esc Back"
+                secondary = "PgUp/PgDn Page  Home/End Jump  p Expand  ? Help"
+            else:
+                primary = f"↑↓ Move  → Preview  Enter {action}  Ctrl+F Search  Tab View  Esc Close"
+                secondary = (f"{len(self.marked_sids)} selected  a {'Restore' if cur['archived'] else 'Archive'}  d Delete  ? Help"
+                             if self.marked_sids else "Space Select  a Archive  r Rename  p Expand  ? Help")
+                if cur["archived"] and not self.marked_sids:
+                    secondary = "Space Select  a Restore  r Rename  p Expand  ? Help"
+            if Text(primary).cell_len > width:
+                primary = f"Enter {action}  Ctrl+F Search  Esc Close"
+            if Text(primary).cell_len > width:
+                primary = "Enter Open  Ctrl+F Find  Esc" if width >= 28 else "↵ Open Ctrl+F Find Esc"
+        line = fitted(Text(primary, style="dim"), width)
+        if line.cell_len + Text(secondary).cell_len + 3 > width:
+            secondary = secondary.replace("  ", " ")
+        if line.cell_len + Text(secondary).cell_len + 3 > width:
+            secondary = "? Help" if self.rename_sid is None and not self.search_active else ""
+        if secondary and line.cell_len + len(secondary) + 2 <= width:
+            line.append(" " * (width - line.cell_len - len(secondary)) + secondary, style="dim")
+        return [line]
 
     def _build_preview_lines(self, sid: str, width: int) -> list[Text]:
         meta = self.sessions.get(sid, {})
@@ -604,336 +802,444 @@ class SessionBrowserScreen(AltScreenApp):
             return [Text("(couldn't read history)", style="dim")]
 
     def _preview_lines(self, sid: str, width: int) -> list[Text]:
-        cache_key = (sid, width)
-        if cache_key not in self.preview_cache:
-            self.preview_cache[cache_key] = self._build_preview_lines(sid, width)
-        return self.preview_cache[cache_key]
+        if self.background:
+            self._request_preview(sid, width)
+            cached = self.preview_cache.get((sid, width))
+            return cached[1] if cached else [Text("Loading preview…", style="dim")]
+        path = self.sessions.get(sid, {}).get("history_file")
+        try:
+            stat = Path(path).stat() if path else None
+        except OSError:
+            stat = None
+        stamp = (path, stat.st_mtime_ns if stat else None, stat.st_size if stat else None)
+        key = (sid, width)
+        cached = self.preview_cache.get(key)
+        if cached is None or cached[0] != stamp:
+            self.preview_cache[key] = (stamp, self._build_preview_lines(sid, width))
+        return self.preview_cache[key][1]
+
+    def _request_preview(self, sid: str, width: int):
+        query = self.search_query.strip().lower()
+        request = (sid, width, query)
+        if self._preview_paused():
+            self.pending_preview = request
+            if self.preview_request != request:
+                self.worker.cancel("preview")
+                self.preview_request = None
+            return
+        self.pending_preview = None
+        if self.preview_request == request:
+            return
+        for key in list(self.preview_transfers):
+            if key != request:
+                self.preview_transfers.pop(key)
+        self.preview_request = request
+        self.preview_checked_at = time.monotonic()
+        path = self.sessions.get(sid, {}).get("history_file")
+        cached = self.preview_cache.get((sid, width))
+        cached_document = self.preview_documents.get(request)
+
+        def prepare(cancelled):
+            record = self._read_document(path)
+            if cancelled():
+                return None
+            if cached is not None and cached[0] == record[0]:
+                lines = cached[1]
+            elif record[-1]:
+                lines = [Text(record[-1], style="dim")]
+            else:
+                lines = _history_visual_lines(record[1], width, cancelled=cancelled) or [Text("(empty conversation)", style="dim")]
+            if cancelled():
+                return None
+            if cached_document is not None and cached is not None and cached[0] == record[0]:
+                document, match = cached_document
+            else:
+                document, match = highlighted_transcript(lines, query)
+            return sid, width, query, record, lines, document, match
+
+        self.worker.submit("preview", prepare, priority=0)
+
+    def _preview_paused(self):
+        return (self.background and self.pane_focus == "sessions" and self.preview_sid is None
+                and not self.search_active and time.monotonic() < self.preview_resume_at)
+
+    def _preview_document(self, sid: str, width: int) -> tuple[list[Text], int | None]:
+        if self.background:
+            self._request_preview(sid, width)
+            return self.preview_documents.get(self._preview_key(sid, width), ([Text("Loading preview…", style="dim")], None))
+        lines = self._preview_lines(sid, width)
+        key = (sid, width, self.search_query, id(lines))
+        if self.preview_document_cache is None or self.preview_document_cache[0] != key:
+            self.preview_document_cache = (key, *highlighted_transcript(lines, self.search_query))
+        return self.preview_document_cache[1:]
+
+    def _preview_key(self, sid: str, width: int) -> tuple[str, int, str]:
+        return sid, width, self.search_query.strip().lower()
+
+    def _preview_start(self, lines: list[Text], match: int | None, height: int) -> int:
+        if match is not None:
+            return max(0, match - 1)
+        start = next((i for i in range(len(lines) - 1, -1, -1)
+                      if lines[i].plain.startswith("user: ")), 0)
+        # Long piped prompts should not hide the answer on first opening.
+        answer = next((i for i in range(start + 1, len(lines)) if lines[i].plain == "jarv:"), None)
+        return answer if answer is not None and answer - start > max(3, height // 3) else start
+
+    def _preview_window(self, sid: str, width: int, height: int) -> tuple[list[Text], int, int]:
+        lines, match = self._preview_document(sid, width)
+        key = self._preview_key(sid, width)
+        if self.background and key not in self.preview_documents:
+            return lines[:height], 0, 0
+        initial = self._preview_start(lines, match, height)
+        # Keep the latest exchange at the top, even when there is room below
+        # it. Padding the scroll extent avoids jumping back to older turns.
+        extent = max(len(lines), initial + height)
+        start = clamp_scroll_offset(self.preview_positions.get(key, initial), extent, max(1, height))
+        self.preview_positions[key] = start
+        return lines[start:start + height], start, len(lines)
+
+    def _scroll_preview(self, sid: str, width: int, height: int, key: str, repeat: int) -> None:
+        _, offset, total = self._preview_window(sid, width, height)
+        if self.background and self._preview_key(sid, width) not in self.preview_documents:
+            return
+        lines, match = self._preview_document(sid, width)
+        extent = max(total, self._preview_start(lines, match, height) + height)
+        self.preview_positions[self._preview_key(sid, width)] = apply_scroll_keys(
+            key, repeat, offset=offset, total=extent, body_rows=height,
+        )
+
+    def _full_preview_geometry(self) -> tuple[int, int, int, int]:
+        term_w, term_h = terminal_size(console=console)
+        width = panel_width(term_w)
+        body_rows, _ = body_content_rows(term_h)
+        return width, term_h, menu_inner_width(width), max(1, body_rows - 1)
 
     def _render_preview(self) -> Panel:
+        width, term_h, inner_width, body_rows = self._full_preview_geometry()
+        sid = self.preview_sid or ""
+        lines, start, total = self._preview_window(sid, inner_width, body_rows)
+        meta = self.sessions.get(sid, {})
+        row = next((r for r in self.rows if r["sid"] == sid), None)
+        title = self._title(row) if row is not None else meta.get("title", "Untitled conversation")
+        parts = [fitted(Text(title, style="bold"), inner_width), *lines]
+        if self.flash is not None:
+            parts = parts[:max(1, body_rows - 1)]
+            parts.extend(Text("") for _ in range(max(0, body_rows - 1 - len(parts))))
+            parts.append(fitted(Text(self.flash[0], style=self.flash[1]), inner_width))
+        if term_h >= 6:
+            position = scroll_position_hint(start, min(total, start + body_rows), total)
+            action = "Restore & resume" if meta.get("archived") else "Resume"
+            options = [
+                f"↑↓ Scroll   ← Back   p Collapse   Enter {action}   Esc Back   ·   {position}",
+                f"↑↓ Scroll   ← Back   Enter {action}   Esc Back",
+                "↑↓ Scroll  ↵ Restore+resume  Esc Back" if meta.get("archived") else "↑↓ Scroll  Enter Resume  Esc Back",
+                "↕ Scroll ↵ Restore+resume Esc" if meta.get("archived") else "↕ Scroll ↵ Resume Esc Back",
+            ]
+            controls = next((value for value in options if Text(value).cell_len <= inner_width), "↑↓ Scroll  Esc Back")
+            append_bottom_footer(parts, term_h, Text(controls, style="dim"))
+        return jarv_panel(Group(*parts), "preview", subtitle=_short_session_id(sid) or None,
+                          padding=(0, 1), width=width, height=term_h)
+
+    def _search_bar(self, width: int) -> Text:
+        line = Text("Search: ", style="bold cyan" if self.search_active else "dim")
+        indexed = sum(sid in self.indexed_paths for sid in self.sessions)
+        remaining = len(self.sessions) - indexed
+        indexing = self.background and self.search_query and remaining > 0
+        hint = f"Searching… {indexed}/{len(self.sessions)}" if indexing else "Ctrl+F Search"
+        room = max(1, width - len(hint) - line.cell_len - 2) if width >= 60 else max(1, width - line.cell_len)
+        if self.search_active:
+            line.append_text(render_single_line(self.search_editor, room, text_style="bold"))
+        else:
+            line.append_text(fitted(Text(self.search_query or "conversations…", style="bold" if self.search_query else "dim"), room))
+        if width >= 60 and line.cell_len + len(hint) + 2 <= width:
+            line.append(" " * (width - line.cell_len - len(hint)) + hint, style="dim")
+        return fitted(line, width)
+
+    def _tabs(self, width: int) -> Text:
+        active = sum(not r["archived"] for r in self.rows)
+        counts = {"active": active, "archived": len(self.rows) - active, "all": len(self.rows)}
+        compact = width < 48
+        line = Text()
+        for index, mode in enumerate(self.VIEW_MODES):
+            count = counts[mode]
+            label = (mode.title() if not compact else {"active": "Act", "archived": "Arc", "all": "All"}[mode])
+            label = f"{label} {count}"
+            if index:
+                line.append("  " if compact else "   ")
+            line.append(f"[{label}]" if mode == self.view_mode else label,
+                        style="bold cyan" if mode == self.view_mode else "dim")
+        return fitted(line, width)
+
+    def _status_lines(self, width: int, visible: list[dict]) -> list[Text]:
+        if self.rename_sid is not None:
+            line = Text("Rename: ", style="bold cyan")
+            line.append_text(render_single_line(self.rename_editor, max(1, width - 8), text_style="bold"))
+            return [fitted(line, width)]
+        targets = self._target_rows(visible)
+        if self.arm_delete_sids and self.arm_delete_sids == {r["sid"] for r in targets}:
+            if len(targets) == 1:
+                name = self._truncate(self._title(targets[0]), max(1, width - 24))
+                question = f'Delete "{name}" permanently?'
+            else:
+                question = f"Delete {len(targets)} sessions permanently?"
+            return [fitted(Text(question, style="bold red"), width)]
+        if self.flash is None and not self.undo_actions:
+            return []
+        message, style = self.flash or ("", "dim")
+        undo = ""
+        if self.undo_actions:
+            verb = {"did_archive": "archive", "did_unarchive": "restore", "did_delete": "delete"}[self.undo_actions[-1]["kind"]]
+            undo = f"u Undo {verb}"
+            if len(undo) + 16 > width:
+                undo = "u Undo"
+        if style == "red" and width < 60:
+            undo = ""  # Give the failure reason priority on small terminals.
+        line = fitted(Text(message, style=style), max(0, width - len(undo) - 2) if undo else width)
+        if undo:
+            line.append(" " * max(2, width - line.cell_len - len(undo)) + undo, style="bold cyan")
+        return [fitted(line, width)]
+
+    def _list_lines(self, visible: list[dict], width: int, height: int) -> list[Text]:
+        if not visible:
+            pending = self.background and self.search_query and any(sid not in self.indexed_paths for sid in self.sessions)
+            message = ("Searching conversations…" if pending else
+                       "No conversations match your search." if self.search_query else
+                       "No archived conversations." if self.view_mode == "archived" else
+                       "No active conversations." if self.view_mode == "active" and self.rows else
+                       "No conversations yet.")
+            hint = "Esc Clear search · Tab Change view" if self.search_query else "Tab Change view" if self.rows else "Start chatting to create a session."
+            return [fitted(Text(message, style="dim"), width), fitted(Text(hint, style="dim"), width)][:height]
+        # Offsets count physical lines, including group labels and search excerpts.
+        entries: list[tuple[str, object]] = []
+        cursor_line = 0
+        previous_group = None
+        group_dates = height >= 8 and not self.search_query
+        excerpts = bool(self.search_query) and height >= 5
+        selected = self._selected_pos(visible)
+        for index, row in enumerate(visible):
+            group = row.get("date_group", "Recent")
+            if group_dates and group != previous_group:
+                entries.append(("group", group))
+                previous_group = group
+            if index == selected:
+                cursor_line = len(entries)
+            entries.append(("row", row))
+            if excerpts:
+                entries.append(("excerpt", row))
+        self.offset = clamp_selection_scroll(self.offset, cursor_line, len(entries), max(1, height))
+        window = entries[self.offset:self.offset + height]
+        if window and window[-1][0] == "group":
+            window.pop()  # Keep a date heading with at least one conversation.
+        self._last_list_capacity = max(1, sum(kind == "row" for kind, _ in window))
+        lines = []
+        for kind, value in window:
+            if kind == "group":
+                lines.append(fitted(Text("  " + str(value), style="dim"), width))
+                continue
+            row = value
+            if kind == "excerpt":
+                key = (row["sid"], self.search_query, width, self.indexed_paths.get(row["sid"]))
+                excerpt = self.excerpt_cache.get(key)
+                if excerpt is None:
+                    excerpt = match_excerpt(self._search_text(row["sid"]), self.search_query, max(1, width - 4))
+                    self._bounded_put(self.excerpt_cache, key, excerpt, limit=128)
+                lines.append(fitted(highlighted("    " + (excerpt or "Matched session details"), self.search_query, "dim"), width))
+                continue
+            lines.append(session_row(row, self._title(row), width,
+                                     selected=row["sid"] == self.selected_sid,
+                                     focused=row["sid"] == self.selected_sid and self.pane_focus == "sessions" and not self.search_active and self.rename_sid is None,
+                                     marked=row["sid"] in self.marked_sids, selecting=bool(self.marked_sids),
+                                     query=self.search_query, armed=bool(self.arm_delete_sids and row["sid"] in self.arm_delete_sids)))
+        return lines
+
+    def _preview_messages(self, row: dict) -> tuple[list[tuple[str, str]], str]:
+        meta = self.sessions.get(row["sid"], {})
+        history = []
+        unavailable = ""
+        try:
+            path = Path(meta["history_file"]) if meta.get("history_file") else None
+            if path is None or not path.exists():
+                unavailable = "History file is unavailable."
+            else:
+                stat = path.stat()
+                key = (row["sid"], str(path), stat.st_mtime_ns, stat.st_size)
+                if self.detail_cache is not None and self.detail_cache[0] == key:
+                    return self.detail_cache[1], ""
+                history = load_history(path)
+        except Exception:
+            unavailable = "Couldn't read this conversation."
+        messages = [(item.get("role"), flatten_content_text(item.get("content", "")))
+                    for item in history if isinstance(item, dict) and item.get("role") in ("user", "assistant")]
+        messages = [(role, text) for role, text in messages if text.strip()]
+        if not unavailable:
+            self.detail_cache = (key, messages)
+        return messages, unavailable
+
+    def _detail_header(self, row: dict | None, width: int) -> list[Text]:
+        if row is None:
+            return []
+        if self.background:
+            exchanges = self.exchange_counts.get(row["sid"])
+        else:
+            messages, _ = self._preview_messages(row)
+            exchanges = sum(role == "user" for role, _ in messages)
+        title = fitted(Text(self._title(row), style="bold"), width)
+        state = " · Archived" if row.get("archived") else " · Current" if row.get("is_current") else ""
+        count = f" · {exchanges} exchange{'s' if exchanges != 1 else ''}" if exchanges is not None else ""
+        metadata = f"{row.get('time_str', '—')}{count}{state}"
+        return [title, fitted(Text(metadata, style="dim"), width), Text("")]
+
+    def _detail_body_height(self, row: dict | None, width: int, height: int) -> int:
+        return max(1, height - len(self._detail_header(row, width)) - 2)
+
+    def _detail_lines(self, row: dict | None, width: int, height: int) -> list[Text]:
+        if row is None:
+            return [Text("No conversation selected.", style="dim")]
+        header = self._detail_header(row, width)
+        body_height = self._detail_body_height(row, width, height)
+        if self._preview_paused():
+            self._request_preview(row["sid"], width)
+            lines, start, total = [Text("Loading preview…", style="dim")], 0, 0
+        else:
+            lines, start, total = self._preview_window(row["sid"], width, body_height)
+        parts = header + lines
+        parts.extend(Text("") for _ in range(max(0, height - 2 - len(parts))))
+        position = scroll_position_hint(start, min(total, start + body_height), total) if total else ""
+        hint = "↑↓ Scroll · ← Sessions" if self.pane_focus == "preview" else "→ Preview"
+        footer = Text(hint, style="cyan" if self.pane_focus == "preview" else "dim")
+        if footer.cell_len + len(position) + 2 <= width:
+            footer.append(" " * (width - footer.cell_len - len(position)) + position, style="dim")
+        parts.extend([footer, fitted(Text("ID " + row["sid"], style="dim"), width)])
+        return parts[:height]
+
+    def _render_help(self, width: int, height: int) -> Panel:
+        inner = menu_inner_width(width)
+        shortcuts = [
+            "Navigate", "↑↓ / mouse wheel    Navigate or scroll the active pane",
+            "← / →    Switch between sessions and preview",
+            "PgUp/PgDn · Home/End    Jump through the active pane",
+            "Enter    Resume the cursor row (restore it first if archived)",
+            "Ctrl+F    Search titles, IDs and conversation text",
+            "Tab    Cycle Active → Archived → All (left to right)",
+            "Esc / q    Return to sessions, clear selection/search, then close",
+            "", "Manage (sessions pane)", "r    Rename · an empty title restores the prompt-based title",
+            "Space    Toggle a row; selections stay as you move",
+            "Shift+↑↓    Select a range; a plain arrow ends a range",
+            "a    Archive / restore selected rows (cursor sets direction)",
+            "d, then d    Delete the named conversation or selection",
+            "u    Undo actions, most recent first, until this browser closes",
+            "", "Preview", "→    Read the preview · ← returns to sessions",
+            "p    Expand to full screen · p/←/Esc returns",
+            "↑↓ / wheel / PgUp/PgDn / Home/End    Scroll the transcript",
+            "On a narrow terminal, → opens the full-screen preview",
+            "Enter    Resume the conversation being previewed",
+        ]
+        lines = []
+        for value in shortcuts:
+            lines.extend(Text(value, style="bold cyan" if value in ("Navigate", "Manage (sessions pane)", "Preview") else "").wrap(self.console, inner))
+        self.help_total = len(lines)
+        capacity = max(1, height - menu_frame_rows() - 2)
+        self.help_offset = clamp_scroll_offset(self.help_offset, len(lines), capacity)
+        parts = lines[self.help_offset:self.help_offset + capacity]
+        append_bottom_footer(parts, height, fitted(Text("↑↓ Scroll   ? / Esc Back", style="dim"), inner), crop=True)
+        return self._panel(parts, width, height, "sessions · shortcuts")
+
+    def _panel(self, parts, width: int, height: int, title: str = "sessions") -> Panel:
+        return MenuPanel(Group(*parts), title=f"[bold bright_white]jarv ▸ {title}[/bold bright_white]",
+                         title_align="left", subtitle=self._subtitle(), subtitle_align="right",
+                         border_style="cyan", box=box.ROUNDED, padding=(0, 1), width=width, height=height)
+
+    def _list_layout(self, visible: list[dict]) -> dict:
         term_w, term_h = terminal_size(console=console)
         width = panel_width(term_w)
-        inner_width = menu_inner_width(width)
-        body_rows, show_footer = body_content_rows(term_h)
-        body_rows = max(1, body_rows - 1)
+        inner = menu_inner_width(width)
+        cur = visible[self._selected_pos(visible)] if visible else None
+        available = max(1, term_h - menu_frame_rows())
+        # Keep one status row even when idle. Reuse the old header spacer so
+        # notifications, confirmations and undo never move the list/preview.
+        status = self._status_lines(inner, visible) or [Text("")]
+        header = [self._tabs(inner), self._search_bar(inner)]
+        footer = self._footer_lines(inner, cur)
+        if term_h < 12:
+            footer = footer[-1:]
+        if available < len(header) + len(status) + len(footer) + 1:
+            header = header[:max(0, available - len(status) - len(footer) - 1)]
+        body_height = max(1, available - len(header) - len(status) - len(footer))
+        split = term_w >= 100 and body_height >= 9
+        if self.pane_focus == "preview" and (not split or cur is None):
+            self.pane_focus = "sessions"
+            footer = self._footer_lines(inner, cur)
+            if term_h < 12:
+                footer = footer[-1:]
+        # Titles need less space than a transcript. Give the preview the extra
+        # width, while keeping very wide terminals from stretching the list.
+        left_width = min(56, (inner - 3) * 2 // 5) if split else inner
+        return dict(width=width, height=term_h, inner=inner, header=header, status=status, footer=footer,
+                    body_height=body_height, split=split, left_width=left_width,
+                    right_width=inner - left_width - 3 if split else 0, current=cur)
 
-        sid = self.preview_sid or ""
-        all_lines = self._preview_lines(sid, inner_width)
-        total = len(all_lines)
-        self.preview_offset = clamp_scroll_offset(self.preview_offset, total, body_rows)
-        start = self.preview_offset
-        end = min(total, start + body_rows)
-
-        meta = self.sessions.get(sid, {})
-        short_id = _short_session_id(sid) if sid else ""
-        label = meta.get("label", "")
-
-        parts: list = []
-        parts.append(
-            Text(
-                self._truncate(f"  {short_id}  {label}", inner_width),
-                style="dim",
-                no_wrap=True,
-                overflow="crop",
-            )
-        )
-        for index in range(start, end):
-            parts.append(all_lines[index])
-        if total == 0:
-            parts.append(Text(self._truncate("  (empty)", inner_width), style="dim"))
-
-        if show_footer:
-            position = scroll_position_hint(start, end, total)
-            append_bottom_footer(
-                parts,
-                term_h,
-                Text(
-                    self._truncate(
-                        f"↑↓ scroll   ←→ session   Enter load   p/Esc back   ·   {position}",
-                        inner_width,
-                    ),
-                    style="dim italic",
-                    no_wrap=True,
-                    overflow="crop",
-                ),
-            )
-
-        return jarv_panel(
-            Group(*parts),
-            "preview",
-            subtitle=short_id or None,
-            padding=(0, 1),
-            width=width,
-            height=term_h,
-        )
-
-    def _search_bar(self, inner_width: int) -> Text:
-        cursor = "▌" if self.search_active else ""
-        shown = self.search_query + cursor
-        prefix = " › " if self.search_active else "   "
-        label_style = "bold cyan" if self.search_active else "cyan"
-        value_style = "bold cyan" if self.search_active else "bold"
-        placeholder_style = "bold cyan" if self.search_active else "dim italic"
-        line = Text(no_wrap=True, overflow="crop")
-        line.append(prefix, style="bold cyan" if self.search_active else "")
-        line.append("find: ", style=label_style)
-        avail = max(0, inner_width - len(prefix) - 6)
-        if shown:
-            line.append(self._truncate(shown, avail), style=value_style)
-        else:
-            line.append(self._truncate("(type to filter transcripts)", avail), style=placeholder_style)
-        return line
+    def on_resize(self, size: tuple[int, int]) -> None:
+        if self.preview_sid is None:
+            self._list_layout(self._visible_rows_list())
 
     def render(self) -> Panel:
+        term_w, term_h = terminal_size(console=console)
+        if self.help_open:
+            return self._render_help(panel_width(term_w), term_h)
         if self.preview_sid is not None:
             return self._render_preview()
-        term_w, term_h = terminal_size(console=console)
-        width = panel_width(term_w)
-        inner_width = menu_inner_width(width)
-        show_footer = term_h >= 6
-
         visible = self._visible_rows_list()
-        n = len(visible)
-        sel = self._selected_pos(visible)
-
-        status: Text | None = None
-        armed = self.arm_delete_sids
-        # Only prompt while the armed set is still what ``d`` would act on, so a
-        # selection change between the two presses can't leave a stale prompt.
-        if armed and armed == {r["sid"] for r in self._target_rows(visible)}:
-            what = (
-                f"{len(armed)} sessions"
-                if len(armed) > 1
-                else next(
-                    (r["short_id"] for r in visible if r["sid"] in armed),
-                    _short_session_id(next(iter(armed))),
-                )
-            )
-            prompt = (
-                f"Delete {what} permanently? "
-                "Press d again to confirm · any other key cancels"
-            )
-            status = Text(self._truncate(prompt, inner_width), style="bold red", no_wrap=True, overflow="crop")
-        elif self.flash is not None:
-            msg, style = self.flash
-            status = Text(self._truncate(msg, inner_width), style=style, no_wrap=True, overflow="crop")
-
-        has_search = bool(self.search_active or self.search_query)
-        mv = self._content_rows(
-            term_h,
-            has_status=status is not None,
-            show_footer=show_footer,
-            has_search=has_search,
-        )
-        self.offset = clamp_selection_scroll(self.offset, sel, n, mv)
-        start = self.offset
-        end = min(n, self.offset + mv)
-
-        parts: list = []
-        if n == 0:
-            if has_search:
-                parts.append(self._search_bar(inner_width))
-            empty_msg = (
-                f"  (no sessions match \"{self.search_query}\")"
-                if self.search_query
-                else "  (no sessions in this view)"
-            )
-            parts.append(Text(self._truncate(empty_msg, inner_width), style="dim"))
-            if status is not None:
-                parts.append(status)
-            if show_footer:
-                append_bottom_footer(
-                    parts,
-                    term_h,
-                    Text(
-                        self._truncate(self._footer_text(), inner_width),
-                        style="dim italic",
-                        no_wrap=True,
-                        overflow="crop",
-                    ),
-                )
-            return MenuPanel(
-                Group(*parts),
-                title="[bold bright_white]jarv ▸ sessions[/bold bright_white]",
-                title_align="left",
-                subtitle=self._subtitle(),
-                subtitle_align="right",
-                border_style="cyan",
-                box=box.ROUNDED,
-                padding=(0, 1),
-                width=width,
-                height=term_h,
-            )
-
-        parts.append(
-            Text(
-                self._truncate(f"  showing {start + 1}–{end} of {n}", inner_width),
-                style="dim",
-                no_wrap=True,
-                overflow="crop",
-            )
-        )
-        if has_search:
-            parts.append(self._search_bar(inner_width))
-
-        for i in range(start, end):
-            r = visible[i]
-            self._ensure_row_metadata(r)
-            is_sel = (i == sel) and not self.search_active
-            is_marked = r["sid"] in self.marked_sids and not self.search_active
-            # Marked rows paint like the cursor row -- the "›" prefix is what
-            # still distinguishes the cursor within the span.
-            highlight = is_sel or is_marked
-            is_armed = self.arm_delete_sids is not None and r["sid"] in self.arm_delete_sids
-            t = Text(no_wrap=True, overflow="ellipsis")
-            prefix = " › " if is_sel else "   "
-            if r["is_current"]:
-                marker = "●  "
-            elif r["archived"]:
-                marker = "⌫  "
-            else:
-                marker = "   "
-            remaining = max(0, inner_width - len(prefix) - len(marker))
-            id_width, time_width, snippet_width = _session_row_widths(remaining)
-
-            if is_armed:
-                prefix_style = "bold red"
-            elif is_sel:
-                prefix_style = "bold cyan"
-            else:
-                prefix_style = ""
-            t.append(self._truncate(prefix, inner_width), style=prefix_style)
-
-            if inner_width > len(prefix):
-                if is_armed:
-                    marker_style = "bold red"
-                elif r["is_current"]:
-                    marker_style = "green"
-                elif r["archived"]:
-                    marker_style = "dim"
-                else:
-                    marker_style = ""
-                t.append(self._truncate(marker, inner_width - len(prefix)), style=marker_style)
-
-            if id_width:
-                short_id = self._truncate(r["short_id"], id_width)
-                if is_armed:
-                    id_style = "bold red"
-                elif highlight:
-                    id_style = "bold cyan"
-                elif r["archived"]:
-                    id_style = "dim cyan"
-                else:
-                    id_style = "cyan"
-                t.append(f"{short_id:<{id_width}}", style=id_style)
-                t.append("  ")
-
-            if time_width:
-                time_str = self._truncate(r["time_str"], time_width)
-                if is_armed:
-                    time_style = "bold red"
-                elif highlight:
-                    time_style = "bold"
-                else:
-                    time_style = "dim"
-                t.append(f"{time_str:<{time_width}}", style=time_style)
-                t.append("  ")
-
-            snip = r["snippet"] or "no messages"
-            if snippet_width:
-                if is_armed:
-                    snip_style = "bold red"
-                elif highlight:
-                    snip_style = "bold" if not r["archived"] else "dim strike"
-                elif r["archived"]:
-                    snip_style = "dim strike"
-                else:
-                    snip_style = "dim"
-                t.append(self._truncate(snip, snippet_width), style=snip_style)
-            parts.append(t)
-
-        if status is not None:
-            parts.append(status)
-
-        if show_footer:
-            append_bottom_footer(
-                parts,
-                term_h,
-                Text(
-                    self._truncate(self._footer_text(), inner_width),
-                    style="dim italic",
-                    no_wrap=True,
-                    overflow="crop",
-                ),
-            )
-
-        return MenuPanel(
-            Group(*parts),
-            title="[bold bright_white]jarv ▸ sessions[/bold bright_white]",
-            title_align="left",
-            subtitle=self._subtitle(),
-            subtitle_align="right",
-            border_style="cyan",
-            box=box.ROUNDED,
-            padding=(0, 1),
-            width=width,
-            height=term_h,
-        )
+        layout = self._list_layout(visible)
+        cur = layout["current"]
+        if cur is not None:
+            self.selected_sid = cur["sid"]
+        body_height, list_width = layout["body_height"], layout["left_width"]
+        show_heading = body_height >= 8
+        count = (f"{len(visible)} result{'s' if len(visible) != 1 else ''}" if self.search_query else
+                 f"{self._selected_pos(visible) + 1 if visible else 0} of {len(visible)}")
+        list_active = self.pane_focus == "sessions" and not self.search_active and self.rename_sid is None
+        heading = pane_heading("SESSIONS", list_width, active=list_active, count=count)
+        left = ([heading] if show_heading else []) + self._list_lines(visible, list_width, body_height - int(show_heading))
+        if layout["split"]:
+            right_width = layout["right_width"]
+            preview_active = self.pane_focus == "preview" and not self.search_active
+            preview_heading = pane_heading("PREVIEW", right_width, active=preview_active)
+            right = [preview_heading] + self._detail_lines(cur, right_width, body_height - 1)
+            body = beside(left, right, list_width, right_width, body_height)
+        else:
+            body = left[:body_height]
+            body.extend(Text("") for _ in range(body_height - len(body)))
+        parts = layout["header"] + body + layout["status"] + layout["footer"]
+        return self._panel([fitted(line, layout["inner"]) for line in parts], layout["width"], term_h)
 
     # ------------------------------------------------------------------ #
-    # Undo window (backed by a daemon Timer that finalizes on expiry)
+    # Undo lasts until the browser closes. Delete files only when leaving.
     # ------------------------------------------------------------------ #
     def _finalize_action(self, action: dict) -> None:
-        """Apply the irreversible part of an action that's leaving its window."""
         if action["kind"] == "did_delete":
             for entry in action["entries"]:
                 hp_str = entry.get("history_path")
                 if hp_str:
-                    delete_session_files(Path(hp_str))
-
-    def _expire_action(self, action: dict) -> None:
-        with self.undo_lock:
-            if self.last_action is not action:
-                return
-            self.last_action = None
-        self._finalize_action(action)
-        # Drop the stale "u undo" footer hint now the window has lapsed.
-        self.invalidate()
+                    # A terminal can create a fresh session with this identity
+                    # while the browser is open. Never remove its new files.
+                    with session_metadata_transaction(Path(hp_str), self.data):
+                        current = load_sessions()["sessions"]
+                        reused = entry["sid"] in current or any(
+                            meta.get("history_file") == hp_str for meta in current.values()
+                        )
+                        if not reused:
+                            delete_session_files(Path(hp_str))
 
     def _commit_pending(self) -> None:
-        with self.undo_lock:
-            action = self.last_action
-            self.last_action = None
-        if action is None:
-            return
-        t = action.get("timer")
-        if t is not None:
-            t.cancel()
-        self._finalize_action(action)
+        for action in self.undo_actions:
+            self._finalize_action(action)
+        self.undo_actions.clear()
 
     def _start_undo(self, action: dict) -> None:
-        self._commit_pending()
-        action["deadline"] = time.time() + self.UNDO_WINDOW
-        timer = threading.Timer(self.UNDO_WINDOW, self._expire_action, args=(action,))
-        timer.daemon = True
-        action["timer"] = timer
-        with self.undo_lock:
-            self.last_action = action
-        timer.start()
+        self.undo_actions.append(action)
 
     def _take_last_action(self) -> dict | None:
-        """Atomically grab and clear the current undoable action if still valid."""
-        with self.undo_lock:
-            action = self.last_action
-            if action is None:
-                return None
-            if time.time() >= action["deadline"]:
-                # Already expired — let the timer handle finalization.
-                return None
-            self.last_action = None
-        t = action.get("timer")
-        if t is not None:
-            t.cancel()
-        return action
+        return self.undo_actions.pop() if self.undo_actions else None
 
     def _do_undo(self) -> tuple[tuple[str, str], list[str]] | None:
         """Returns ((flash_msg, flash_style), restored_sids) or None."""
@@ -943,15 +1249,32 @@ class SessionBrowserScreen(AltScreenApp):
         kind = action["kind"]
         if kind in ("did_archive", "did_unarchive"):
             restored: list[str] = []
+            failed: list[str] = []
+            reason = ""
             for sid in action["sids"]:
                 row = next((r for r in self.rows if r["sid"] == sid), None)
                 if row is None:
                     continue
-                if kind == "did_archive":
-                    self._unarchive_row(row)
+                try:
+                    moved = (self._unarchive_row(
+                        row, terminal_bindings=action.get("terminal_bindings", {}),
+                        is_current=sid in action.get("current_sids", ()),
+                    ) if kind == "did_archive" else self._archive_row(row))
+                    if not moved:
+                        reason = "history files are missing or empty"
+                except (OSError, StorageError) as exc:
+                    moved, reason = False, str(exc.__cause__ or exc)
+                if moved:
                     restored.append(sid)
-                elif self._archive_row(row):
-                    restored.append(sid)
+                else:
+                    failed.append(sid)
+            if failed:
+                # Retain only unfinished work so another u can retry it.
+                action["sids"] = failed
+                self.undo_actions.append(action)
+                message = (f"Undid {len(restored)}; couldn't undo {len(failed)}: {reason}" if restored else
+                           f"Couldn't undo: {reason}")
+                return ((message, "yellow" if restored else "red"), restored)
             if not restored:
                 return (("○ nothing left to undo", "dim"), [])
             label = self._batch_label(restored)
@@ -971,6 +1294,8 @@ class SessionBrowserScreen(AltScreenApp):
                     self.rows.insert(row_index, entry["row"])
                 else:
                     self.rows.append(entry["row"])
+                if self.background:
+                    self._request_index(entry["row"])
             save_sessions(self.data)
             sids = [e["sid"] for e in entries]
             return ((f"↺ restored {self._batch_label(sids)}", "green"), sids)
@@ -981,31 +1306,24 @@ class SessionBrowserScreen(AltScreenApp):
     # ------------------------------------------------------------------ #
     def _activate_row(self, row: dict) -> None:
         if row["archived"]:
-            meta = self.sessions.get(row["sid"], {})
-            hp_str = meta.get("history_file")
-            if not hp_str:
-                self.flash = ("Archived session files are missing; session was not loaded.", "red")
-                return
-            with session_metadata_transaction(Path(hp_str), self.data):
-                restored = unarchive_session_files(Path(hp_str), row["sid"])
-                if restored is None:
-                    self.flash = ("Archived session files are missing; session was not loaded.", "red")
+            try:
+                if not self._unarchive_row(row):
+                    self._notify("Archived session files are missing; session was not loaded.", "red")
                     return
-                meta["history_file"] = str(restored)
-                meta.pop("archived", None)
-                meta.pop("archived_at", None)
-                save_sessions(self.data)
-            row["archived"] = False
+            except (OSError, StorageError) as exc:
+                self._notify(f"Couldn't restore session: {exc.__cause__ or exc}", "red")
+                return
             self.auto_restored = True
         set_terminal_session(row["sid"])
         self.loaded_row = row
         self.stop()
 
     def _batch_label(self, sids) -> str:
-        """Flash/prompt wording: a short id for one row, a count for a batch."""
+        """Flash wording: a conversation title for one row, a count for a batch."""
         sids = list(sids)
         if len(sids) == 1:
-            return _short_session_id(sids[0])
+            row = next((r for r in self.rows if r["sid"] == sids[0]), None)
+            return self._title(row) if row else _short_session_id(sids[0])
         return f"{len(sids)} sessions"
 
     def _archive_row(self, row: dict) -> bool:
@@ -1025,31 +1343,48 @@ class SessionBrowserScreen(AltScreenApp):
         row["is_current"] = False
         return True
 
-    def _unarchive_row(self, row: dict) -> bool:
-        """Mark one session active again, moving its files back if they're there.
-
-        The row flips to active either way -- metadata claiming an archive that
-        no longer exists shouldn't strand the session in the archived view --
-        but False says nothing moved, so the caller can skip the undo entry.
-        """
+    def _unarchive_row(self, row: dict, *, terminal_bindings=None, is_current=False) -> bool:
+        """Restore files and metadata together; leave missing archives unchanged."""
         sid = row["sid"]
         meta = self.sessions.get(sid, {})
         hp_str = meta.get("history_file")
-        if hp_str:
-            with session_metadata_transaction(Path(hp_str), self.data):
-                restored = unarchive_session_files(Path(hp_str), sid)
-                if restored is not None:
-                    meta["history_file"] = str(restored)
-                meta.pop("archived", None)
-                meta.pop("archived_at", None)
-                save_sessions(self.data)
-        else:
-            restored = None
+        if not hp_str:
+            return False
+        with session_metadata_transaction(Path(hp_str), self.data):
+            restored = unarchive_session_files(Path(hp_str), sid)
+            if restored is None:
+                return False
+            meta["history_file"] = str(restored)
             meta.pop("archived", None)
             meta.pop("archived_at", None)
+            if terminal_bindings:
+                latest_terminals = load_sessions()["terminals"]
+                for terminal, mapped_sid in terminal_bindings.items():
+                    if mapped_sid == sid and terminal not in latest_terminals:
+                        self.terminals.setdefault(terminal, sid)
             save_sessions(self.data)
         row["archived"] = False
-        return restored is not None
+        if is_current and sid in self.terminals.values():
+            row["is_current"] = True
+        return True
+
+    def _reconcile_action_selection(self, previous: list[dict], changed: list[str]) -> None:
+        """Keep the nearest surviving row selected after changing a filter."""
+        self.ghost_sids.clear()
+        visible = self._visible_rows_list()
+        visible_sids = {row["sid"] for row in visible}
+        if self.selected_sid not in visible_sids:
+            old_pos = self._selected_pos(previous)
+            # Prefer the next surviving row; at the end use the preceding one.
+            after = [r for r in previous[old_pos:] if r["sid"] in visible_sids]
+            before = [r for r in previous[:old_pos] if r["sid"] in visible_sids]
+            row = after[0] if after else before[-1] if before else visible[0] if visible else None
+            self.selected_sid = row["sid"] if row else None
+        self.marked_sids.difference_update(changed)
+        self.marked_sids.intersection_update(visible_sids)
+        self.anchor_sid = None
+        if not self.marked_sids:
+            self._clear_selection()
 
     def _archive_selection(self, rows: list[dict], cur: dict | None) -> None:
         """Archive or unarchive every targeted row as one undoable action.
@@ -1060,38 +1395,40 @@ class SessionBrowserScreen(AltScreenApp):
         if cur is None or not rows:
             return
         unarchiving = cur["archived"]
-        changed: list[str] = []
+        previous = self._visible_rows_list()
+        target_sids = {row["sid"] for row in rows}
+        terminal_bindings = {terminal: sid for terminal, sid in self.terminals.items() if sid in target_sids}
+        current_sids = {row["sid"] for row in rows if row.get("is_current")}
         moved: list[str] = []
+        failed: list[str] = []
+        reason = ""
         for row in rows:
             if row["archived"] != unarchiving:
                 continue
-            if unarchiving:
-                changed.append(row["sid"])
-                if self._unarchive_row(row):
-                    moved.append(row["sid"])
-            elif self._archive_row(row):
-                changed.append(row["sid"])
+            try:
+                success = self._unarchive_row(row) if unarchiving else self._archive_row(row)
+                if not success:
+                    reason = "files are missing" if unarchiving else "history is missing or empty"
+            except (OSError, StorageError) as exc:
+                success, reason = False, str(exc.__cause__ or exc)
+            if success:
                 moved.append(row["sid"])
+            else:
+                failed.append(row["sid"])
 
-        if not changed:
-            label = self._batch_label([r["sid"] for r in rows])
-            self.flash = (f"○ nothing to archive for {label}", "dim")
-            return
-
-        # Rows that just left this view stay painted in place until the cursor
-        # moves, so a batch doesn't vanish out from under the user.
-        ghost_view = "archived" if unarchiving else "active"
-        self.ghost_sids = set(changed) if self.view_mode == ghost_view else set()
-        label = self._batch_label(changed)
-        if not moved:
-            self.flash = (f"○ archive missing for {label} — marked active", "dim")
-            return
-        if unarchiving:
-            self.flash = (f"✓ restored {label}", "green")
-            self._start_undo({"kind": "did_unarchive", "sids": moved})
+        verb = "restore" if unarchiving else "archive"
+        if moved:
+            self._start_undo({"kind": "did_unarchive" if unarchiving else "did_archive", "sids": moved,
+                              "terminal_bindings": terminal_bindings, "current_sids": current_sids})
+            self._reconcile_action_selection(previous, moved)
+        if failed:
+            message = (f"{verb.title()}d {len(moved)}; couldn't {verb} {len(failed)}: {reason}" if moved else
+                       f"Couldn't {verb}: {reason} · {self._batch_label(failed)}")
+            self._notify(message, "yellow" if moved else "red")
+        elif moved:
+            self._notify(f"✓ {verb}d {self._batch_label(moved)}", "green" if unarchiving else "cyan")
         else:
-            self.flash = (f"✓ archived {label}", "cyan")
-            self._start_undo({"kind": "did_archive", "sids": moved})
+            self._notify(f"Selected sessions are already {'active' if unarchiving else 'archived'}.", "dim")
 
     def _handle_delete_key(self, rows: list[dict], visible: list[dict]) -> None:
         if not rows:
@@ -1103,6 +1440,7 @@ class SessionBrowserScreen(AltScreenApp):
             self.arm_delete_sids = target_sids
             return
 
+        label = self._batch_label(target_sids)
         entries: list[dict] = []
         for row in rows:
             sid = row["sid"]
@@ -1138,19 +1476,131 @@ class SessionBrowserScreen(AltScreenApp):
             self.selected_sid = new_visible[min(first_pos, len(new_visible) - 1)]["sid"]
         else:
             self.selected_sid = None
-        self.flash = (f"✓ deleted {self._batch_label(target_sids)}", "red")
+        self._notify(f"✓ deleted {label}", "green")
         self.arm_delete_sids = None
         self._start_undo({"kind": "did_delete", "entries": entries})
 
     # ------------------------------------------------------------------ #
     # Key handling
     # ------------------------------------------------------------------ #
+    def _open_preview(self, row: dict) -> None:
+        self.preview_return_focus = self.pane_focus
+        layout = self._list_layout(self._visible_rows_list())
+        if layout["split"]:
+            _, _, width, _ = self._full_preview_geometry()
+            self._transfer_preview_position(row["sid"], layout["right_width"], width)
+        self.preview_sid = row["sid"]
+
+    def _close_preview(self) -> None:
+        sid = self.preview_sid
+        _, _, width, _ = self._full_preview_geometry()
+        self.preview_sid = None
+        self.pane_focus = self.preview_return_focus
+        layout = self._list_layout(self._visible_rows_list())
+        if sid is not None and layout["split"]:
+            self._transfer_preview_position(sid, width, layout["right_width"])
+
+    def _transfer_preview_position(self, sid: str, source_width: int, target_width: int) -> None:
+        source_key = self._preview_key(sid, source_width)
+        if source_key not in self.preview_positions or source_width == target_width:
+            return
+        offset = self.preview_positions[source_key]
+        previous = self.preview_roundtrip
+        if previous is not None and previous[:3] == (sid, target_width, source_width) and previous[4] == offset:
+            self.preview_positions[self._preview_key(sid, target_width)] = previous[3]
+            self.preview_roundtrip = None
+            return
+        if self.background:
+            source = self.preview_documents.get(source_key)
+            if source is None:
+                return
+            target_key = self._preview_key(sid, target_width)
+            target = self.preview_documents.get(target_key)
+            if target is None:
+                self.preview_transfers[target_key] = (source[0], offset, source_width)
+                self._request_preview(sid, target_width)
+            else:
+                mapped = reflow_position(source[0], offset, target[0])
+                self.preview_positions[target_key] = mapped
+                self.preview_roundtrip = (sid, source_width, target_width, offset, mapped)
+            return
+        source, _ = self._preview_document(sid, source_width)
+        target, _ = self._preview_document(sid, target_width)
+        mapped = reflow_position(source, offset, target)
+        self.preview_positions[self._preview_key(sid, target_width)] = mapped
+        self.preview_roundtrip = (sid, source_width, target_width, offset, mapped)
+
+    def _cycle_view(self) -> None:
+        index = self.VIEW_MODES.index(self.view_mode)
+        self.view_mode = self.VIEW_MODES[(index + 1) % len(self.VIEW_MODES)]
+        self.offset = 0
+        self.pane_focus = "sessions"
+        self.ghost_sids.clear()
+        self._clear_selection()
+        visible = self._visible_rows_list()
+        if visible and not any(row["sid"] == self.selected_sid for row in visible):
+            self.selected_sid = visible[0]["sid"]
+
+    def _on_key_rename(self, key: str, repeat: int) -> None:
+        if key == "ESC":
+            self.rename_sid = None
+            return
+        if key == "ENTER":
+            meta = self.sessions.get(self.rename_sid)
+            if meta is not None:
+                previous = dict(meta)
+                title = one_line(self.rename_editor["buffer"])[:240]
+                if title:
+                    meta["title"] = title
+                else:
+                    meta.pop("title", None)
+                try:
+                    save_sessions(self.data)
+                except Exception as exc:
+                    meta.clear()
+                    meta.update(previous)
+                    self._notify(f"Couldn't rename session: {exc}", "red")
+                    self.rename_sid = None
+                    return
+                self._notify("✓ Session renamed" if title else "✓ Title reset to the first prompt", "green")
+                # A title-only search must not make the renamed row disappear
+                # before the user sees the result.
+                self.ghost_sids.add(self.rename_sid)
+            self.rename_sid = None
+            return
+        apply_text_editor_key(self.rename_editor, key, repeat)
+        if len(self.rename_editor["buffer"]) > 240:
+            self.rename_editor["buffer"] = self.rename_editor["buffer"][:240]
+            self.rename_editor["cursor"] = min(self.rename_editor["cursor"], 240)
+
     def on_key(self, key: str, repeat: int) -> None:
         repeat_count = repeat
 
+        navigating = (key in SELECTION_KEYS or key in SHIFT_SELECTION_KEYS or key.startswith("MOUSE_WHEEL_"))
+        if (navigating and not self.search_active and self.rename_sid is None
+                and not self.help_open and self.preview_sid is None and self.pane_focus == "sessions"):
+            # Defer formatting through a held-key burst and show a placeholder.
+            # A short pause loads the final selection; entering the preview or
+            # taking any other action bypasses this delay immediately.
+            self.preview_resume_at = time.monotonic() + 0.08
+        else:
+            self.preview_resume_at = 0.0
+            self.pending_preview = None
+
+        if self.rename_sid is not None:
+            self._on_key_rename(key, repeat)
+            return
+        if self.help_open:
+            if key in ("?", "ESC"):
+                self.help_open = False
+            else:
+                _, height = terminal_size(console=console)
+                self.help_offset = apply_scroll_keys(key, repeat, offset=self.help_offset,
+                                                    total=self.help_total, body_rows=max(1, height - menu_frame_rows() - 2))
+            return
         # Search-input mode intercepts most keys (only outside preview).
         if self.search_active and self.preview_sid is None:
-            self._on_key_search(key)
+            self._on_key_search(key, repeat)
             return
 
         # Preview mode intercepts most keys.
@@ -1160,25 +1610,46 @@ class SessionBrowserScreen(AltScreenApp):
 
         if key == "ESC" and self.arm_delete_sids is not None:
             self.arm_delete_sids = None
-            self.flash = None
             return
 
         if key != "d":
             self.arm_delete_sids = None
-        self.flash = None
 
         visible = self._visible_rows_list()
         n_vis = len(visible)
         sel = self._selected_pos(visible) if visible else 0
         cur = visible[sel] if visible else None
+        layout = self._list_layout(visible)
+
+        if self.pane_focus == "preview":
+            if key in ("LEFT", "ESC"):
+                self.pane_focus = "sessions"
+                return
+            if key in SELECTION_KEYS or key.startswith("MOUSE_WHEEL_"):
+                if cur is not None:
+                    width = layout["right_width"]
+                    height = self._detail_body_height(cur, width, layout["body_height"] - 1)
+                    self._scroll_preview(cur["sid"], width, height, key, repeat_count)
+                return
+            # Row-management shortcuts belong to the sessions pane. Global
+            # search, view, help, resume, expand, and undo remain available.
+            if key not in ("ENTER", "p", "?", "CTRL_F", "TAB", "u"):
+                return
+        elif key == "RIGHT":
+            if cur is not None:
+                if layout["split"]:
+                    self.pane_focus = "preview"
+                else:
+                    self._open_preview(cur)
+            return
+        elif key == "LEFT":
+            return
 
         if key in SHIFT_SELECTION_KEYS:
             self._extend_selection(key, repeat_count, visible)
             return
 
         nav_key = {
-            "LEFT": "UP",
-            "RIGHT": "DOWN",
             "MOUSE_WHEEL_UP": "UP",
             "MOUSE_WHEEL_DOWN": "DOWN",
             "MOUSE_WHEEL_PAGEUP": "PAGEUP",
@@ -1192,7 +1663,8 @@ class SessionBrowserScreen(AltScreenApp):
                 self.selected_sid = visible[nav]["sid"]
             self.ghost_sids = set()
             # An unmodified move ends the range -- Shift is what holds it open.
-            self._clear_selection()
+            if not self.persistent_selection:
+                self._clear_selection()
         elif key == "ENTER":
             if cur is not None:
                 # Loading is inherently single-session, so the span goes away.
@@ -1201,22 +1673,38 @@ class SessionBrowserScreen(AltScreenApp):
         elif key == "ESC":
             if self.marked_sids:
                 self._clear_selection()
+            elif self.search_query:
+                self.search_query = ""
+                self.offset = 0
+                self.ghost_sids.clear()
             else:
                 self.stop()
         elif key == "CTRL_F":
             self._start_prefetch()
+            self._clear_selection()
+            self.ghost_sids.clear()
+            self.pane_focus = "sessions"
+            initialize_text_editor(self.search_editor, self.search_query)
             self.search_active = True
         elif key == "TAB":
-            self.view_mode = {"active": "all", "all": "archived", "archived": "active"}[self.view_mode]
-            self.offset = 0
-            self.ghost_sids = set()
-            # The span was built against the old view's rows; don't carry a
-            # selection over rows the user can no longer see.
-            self._clear_selection()
+            self._cycle_view()
         elif key == "p":
             if cur is not None:
-                self.preview_sid = cur["sid"]
-                self.preview_offset = 0
+                self._open_preview(cur)
+        elif key == "?":
+            self.help_open = True
+            self.help_offset = 0
+        elif key == "r" and cur is not None:
+            self.rename_sid = cur["sid"]
+            initialize_text_editor(self.rename_editor, self._title(cur))
+            self.rename_editor["selection_anchor"] = 0
+        elif key == " " and cur is not None:
+            self.anchor_sid = None
+            self.persistent_selection = True
+            if cur["sid"] in self.marked_sids:
+                self.marked_sids.remove(cur["sid"])
+            else:
+                self.marked_sids.add(cur["sid"])
         elif key == "a":
             self._archive_selection(self._target_rows(visible), cur)
         elif key == "d":
@@ -1224,93 +1712,57 @@ class SessionBrowserScreen(AltScreenApp):
         elif key == "u":
             result = self._do_undo()
             if result is not None:
-                self.flash, restored_sids = result
+                notification, restored_sids = result
+                self._notify(*notification)
                 if restored_sids:
+                    self.ghost_sids.clear()
+                    first = next(r for r in self.rows if r["sid"] == restored_sids[0])
+                    if self.view_mode != "all":
+                        self.view_mode = "archived" if first["archived"] else "active"
                     self.selected_sid = restored_sids[0]
-                    self.ghost_sids = set(restored_sids)
+                    if not any(r["sid"] == self.selected_sid for r in self._visible_rows_list()):
+                        self.search_query = ""
                     # Re-mark a restored batch so a follow-up action can retarget it.
                     if len(restored_sids) > 1:
                         self.anchor_sid = restored_sids[0]
                         self.marked_sids = set(restored_sids)
                     else:
                         self._clear_selection()
+            else:
+                self._notify("Nothing to undo.", "dim")
 
-    def _on_key_search(self, key: str) -> None:
+    def _on_key_search(self, key: str, repeat: int = 1) -> None:
         if key == "ESC":
             self.search_active = False
             self.search_query = ""
             self.offset = 0
+            self.ghost_sids.clear()
             self._clear_selection()
-        elif key in ("ENTER", "DOWN"):
-            # Exit search mode, drop focus into the filtered list.
+        elif key == "TAB":
             self.search_active = False
-            visible_now = self._visible_rows_list()
-            if visible_now and not any(r["sid"] == self.selected_sid for r in visible_now):
-                self.selected_sid = visible_now[0]["sid"]
+            self._cycle_view()
+        elif key in ("ENTER", "DOWN", "CTRL_F"):
+            self.search_active = False
+            visible = self._visible_rows_list()
+            if visible and not any(r["sid"] == self.selected_sid for r in visible):
+                self.selected_sid = visible[0]["sid"]
             self.offset = 0
-        elif key == "BACKSPACE":
-            if self.search_query:
-                self.search_query = self.search_query[:-1]
+        else:
+            if apply_text_editor_key(self.search_editor, key, repeat):
+                self.search_query = self.search_editor["buffer"]
                 self.offset = 0
                 self._clear_selection()
-        elif key == "CTRL_F":
-            self._start_prefetch()
-            self.search_active = False
-        elif isinstance(key, str) and len(key) == 1 and key.isprintable():
-            self.search_query += key
-            self.offset = 0
-            # Re-filtering changes which rows exist; a stale span could target
-            # sessions that are no longer on screen.
-            self._clear_selection()
-            visible_now = self._visible_rows_list()
-            if visible_now and not any(r["sid"] == self.selected_sid for r in visible_now):
-                self.selected_sid = visible_now[0]["sid"]
-        # All other keys (UP, PAGEUP/DOWN, HOME/END, TAB, a, d, p, …) are
-        # swallowed while typing the query.
+                visible = self._visible_rows_list()
+                if visible and not any(r["sid"] == self.selected_sid for r in visible):
+                    self.selected_sid = visible[0]["sid"]
 
     def _on_key_preview(self, key: str, repeat_count: int) -> None:
-        if key in ("p", "ESC"):
-            self.preview_sid = None
-            self.preview_offset = 0
-        elif key in ("LEFT", "RIGHT"):
-            visible_now = self._visible_rows_list()
-            if visible_now:
-                pos = next(
-                    (i for i, r in enumerate(visible_now) if r["sid"] == self.preview_sid),
-                    self._selected_pos(visible_now),
-                )
-                delta = -repeat_count if key == "LEFT" else repeat_count
-                pos = max(0, min(len(visible_now) - 1, pos + delta))
-                self.preview_sid = visible_now[pos]["sid"]
-                self.selected_sid = self.preview_sid
-                self.preview_offset = 0
-                # Same rule as the list: an unmodified move ends the range.
-                self._clear_selection()
-        elif key in (
-            "UP",
-            "DOWN",
-            "PAGEUP",
-            "PAGEDOWN",
-            "HOME",
-            "END",
-            "MOUSE_WHEEL_UP",
-            "MOUSE_WHEEL_DOWN",
-            "MOUSE_WHEEL_PAGEUP",
-            "MOUSE_WHEEL_PAGEDOWN",
-        ):
-            term_w, term_h = terminal_size(console=console)
-            inner_width = menu_inner_width(term_w)
-            total = len(self._preview_lines(self.preview_sid, inner_width))
-            body_rows, _ = body_content_rows(term_h)
-            body_rows = max(1, body_rows - 1)
-            self.preview_offset = apply_scroll_keys(
-                key,
-                repeat_count,
-                offset=self.preview_offset,
-                total=total,
-                body_rows=body_rows,
-            )
+        if key in ("p", "ESC", "LEFT"):
+            self._close_preview()
         elif key == "ENTER":
             row = next((r for r in self.rows if r["sid"] == self.preview_sid), None)
             if row is not None:
                 self._activate_row(row)
+        else:
+            _, _, width, height = self._full_preview_geometry()
+            self._scroll_preview(self.preview_sid or "", width, height, key, repeat_count)

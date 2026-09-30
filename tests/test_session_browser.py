@@ -55,7 +55,7 @@ def test_missing_archive_does_not_activate_a_different_session(monkeypatch):
     assert "missing" in screen.flash[0]
 
 
-def _run_sessions_with_keys(monkeypatch, keys, extra_sessions=None):
+def _run_sessions_with_keys(monkeypatch, keys, extra_sessions=None, *, size=(100, 24)):
     SnapshotLive.instances = []
     queued = deque(keys)
     loaded_sessions = []
@@ -97,15 +97,15 @@ def _run_sessions_with_keys(monkeypatch, keys, extra_sessions=None):
         file=output,
         force_terminal=True,
         color_system=None,
-        width=100,
-        height=24,
+        width=size[0],
+        height=size[1],
     )
 
     neutralize_tui_modes(monkeypatch)
     monkeypatch.setattr(session_browser.sys, "stdin", TtyStdin())
     monkeypatch.setattr(session_browser, "console", test_console)
-    monkeypatch.setattr(session_browser, "terminal_size", lambda *, console: (100, 24))
-    monkeypatch.setattr(session_browser, "Live", SnapshotLive)
+    monkeypatch.setattr(session_browser, "terminal_size", lambda *, console: size)
+    monkeypatch.setattr(session_browser, "Live", lambda *args, **kwargs: SnapshotLive(*args, snapshot_width=size[0], **kwargs))
     monkeypatch.setattr(session_browser, "detect_terminal", lambda: ("term-1", "Terminal 1"))
     monkeypatch.setattr(session_browser, "load_sessions", lambda: data)
     monkeypatch.setattr(session_browser, "save_sessions", lambda _data: None)
@@ -167,7 +167,7 @@ def test_sessions_delete_confirmation_esc_cancels_without_closing(monkeypatch):
 
     assert run.loaded == ["parent-123456789abc"]
     assert "Loaded" in run.output
-    assert any("Delete parent-123456" in snapshot for snapshot in run.live.snapshots)
+    assert any('Delete "hello" permanently?' in snapshot for snapshot in run.live.snapshots)
 
 
 def test_sessions_shift_arrow_selects_range_and_archives_as_one_action(monkeypatch):
@@ -175,7 +175,7 @@ def test_sessions_shift_arrow_selects_range_and_archives_as_one_action(monkeypat
     # and the batch reports as a single action rather than three.
     run = _run_sessions_with_keys(
         monkeypatch,
-        ["SHIFT_DOWN", "SHIFT_DOWN", "a", "ESC", "ESC"],
+        ["SHIFT_DOWN", "SHIFT_DOWN", "a", "ESC"],
         extra_sessions=_extra_sessions(4),
     )
 
@@ -185,6 +185,7 @@ def test_sessions_shift_arrow_selects_range_and_archives_as_one_action(monkeypat
         "third-3456789abcde",
     ]
     assert len(run.archived) == 3
+    assert "Sessions closed." in run.output and "Cancelled" not in run.output
     assert any("3 selected" in snapshot for snapshot in run.live.snapshots)
     assert any("archived 3 sessions" in snapshot for snapshot in run.live.snapshots)
 
@@ -228,7 +229,7 @@ def test_sessions_view_switch_ends_the_shift_range(monkeypatch):
     # over onto rows the user can no longer see.
     run = _run_sessions_with_keys(
         monkeypatch,
-        ["SHIFT_DOWN", "TAB", "a", "ESC"],
+        ["SHIFT_DOWN", "TAB", "TAB", "a", "ESC"],
         extra_sessions=_extra_sessions(4),
     )
 
@@ -247,3 +248,46 @@ def test_sessions_enter_loads_only_the_cursor_row(monkeypatch):
     assert run.loaded == ["third-3456789abcde"]
     assert _archived_ids(run) == []
     assert run.deleted == []
+
+
+def test_space_selection_survives_navigation_and_archives_only_marked_rows(monkeypatch):
+    run = _run_sessions_with_keys(
+        monkeypatch,
+        [" ", "DOWN", "DOWN", " ", "a", "ESC"],
+        extra_sessions=_extra_sessions(4),
+    )
+    assert _archived_ids(run) == ["parent-123456789abc", "third-3456789abcde"]
+    assert any("[x]" in snapshot and "2 selected" in snapshot for snapshot in run.live.snapshots)
+
+
+def test_multiple_deletes_can_be_undone_before_leaving_browser(monkeypatch):
+    run = _run_sessions_with_keys(
+        monkeypatch,
+        ["d", "d", "d", "d", "DOWN", "u", "u", "ESC"],
+        extra_sessions=_extra_sessions(4),
+    )
+    assert len(run.sessions) == 4
+    assert run.deleted == []
+
+
+def test_pending_deletes_commit_on_close(monkeypatch):
+    run = _run_sessions_with_keys(monkeypatch, ["d", "d", "ESC"])
+    assert not run.sessions
+    assert run.deleted == ["history-parent-123456789abc.json"]
+
+
+def test_undo_archive_restores_current_terminal_binding(monkeypatch):
+    run = _run_sessions_with_keys(monkeypatch, ["a", "u", "ESC"])
+    assert run.terminals == {"term-1": "parent-123456789abc"}
+    assert not _archived_ids(run)
+    assert "[current]" in run.live.snapshots[-1]
+
+
+def test_real_menu_loop_routes_arrows_and_wheel_to_focused_pane(monkeypatch):
+    run = _run_sessions_with_keys(
+        monkeypatch,
+        ["RIGHT", "MOUSE_WHEEL_DOWN", "LEFT", "DOWN", "ENTER"],
+        extra_sessions=_extra_sessions(4), size=(132, 30),
+    )
+    assert run.loaded == ["second-23456789abcd"]
+    assert any("› PREVIEW" in snapshot and "← Sessions" in snapshot for snapshot in run.live.snapshots)

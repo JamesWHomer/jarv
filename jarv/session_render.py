@@ -429,11 +429,13 @@ def tool_call_card_from_args(
     )
 
 
-def _history_visual_lines_and_anchors(history: list, width: int) -> tuple[list[Text], list[int]]:
+def _history_visual_lines_and_anchors(history: list, width: int, *, cancelled=None) -> tuple[list[Text], list[int]]:
     lines: list[Text] = []
     anchors: list[int] = []
     jarv_turn_open = False
     for item_index, item in enumerate(history):
+        if cancelled is not None and cancelled():
+            return [], []
         if not isinstance(item, dict):
             continue
         if item.get("type") == "status":
@@ -508,8 +510,8 @@ def _history_visual_lines_and_anchors(history: list, width: int) -> tuple[list[T
     return lines, anchors
 
 
-def _history_visual_lines(history: list, width: int) -> list[Text]:
-    lines, _ = _history_visual_lines_and_anchors(history, width)
+def _history_visual_lines(history: list, width: int, *, cancelled=None) -> list[Text]:
+    lines, _ = _history_visual_lines_and_anchors(history, width, cancelled=cancelled)
     return lines
 
 

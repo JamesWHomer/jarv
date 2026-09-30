@@ -841,6 +841,7 @@ class AgentInputTests(unittest.TestCase):
             "```"
         )
         with (
+            patch("jarv.display._ENV_NO_COLOR", False),
             patch("jarv.agent.sys.stdin") as stdin,
             patch("jarv.agent_ui.read_editable_line", return_value="yes") as read_line,
             patch(

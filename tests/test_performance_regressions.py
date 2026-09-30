@@ -96,7 +96,8 @@ def test_streaming_markdown_preview_skips_clean_flush():
     assert live.update_count == 1
 
 
-def test_streaming_live_overwrites_rows_without_clearing_entire_block_first():
+def test_streaming_live_overwrites_rows_without_clearing_entire_block_first(monkeypatch):
+    monkeypatch.setenv("TERM", "xterm-256color")
     output = io.StringIO()
     console = Console(
         file=output,

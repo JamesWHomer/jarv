@@ -367,7 +367,10 @@ def test_print_tool_cards_can_be_separated_by_one_blank_line():
     assert "DuckDuckGo homepage\n\n\u258e \u2261 Read" in rendered
 
 
-def test_configure_monochrome_toggles_the_shared_console():
+def test_configure_monochrome_toggles_the_shared_console(monkeypatch):
+    # NO_COLOR is latched at import, so changing the environment is too late.
+    monkeypatch.setattr(display, "_ENV_NO_COLOR", False)
+    display.configure_monochrome(False)
     assert display.console.no_color is False
 
     display.configure_monochrome(True)
@@ -398,6 +401,7 @@ def test_monochrome_strips_colour_but_keeps_emphasis():
         file=stream,
         force_terminal=True,
         color_system="truecolor",
+        no_color=False,
         width=80,
     )
     text = Text("jarv", style="bold red")
@@ -418,9 +422,10 @@ def test_monochrome_strips_colour_but_keeps_emphasis():
     assert "jarv" in monochrome
 
 
-def test_ask_user_prompt_drops_ansi_colour_when_monochrome():
+def test_ask_user_prompt_drops_ansi_colour_when_monochrome(monkeypatch):
     from jarv.agent_ui import _ask_user_prompt
 
+    monkeypatch.setattr(display, "_ENV_NO_COLOR", False)
     display.configure_monochrome(False)
     assert _ask_user_prompt("print") == (
         "\x1b[34m\u258e\x1b[0m \x1b[1;36m>\x1b[0m ",

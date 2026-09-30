@@ -103,6 +103,26 @@ def test_single_line_renderer_masks_value_and_keeps_cursor_visible():
     assert "secret" not in rendered.plain
 
 
+def test_single_line_selection_stays_visible_when_clipped_or_cursor_blinks():
+    state = {}
+    initialize_text_editor(state, "hello world")
+    state["selection_anchor"] = 6
+
+    for cursor_visible in (True, False):
+        rendered = render_single_line(state, 8, cursor_visible=cursor_visible)
+        selected = "".join(
+            rendered.plain[span.start : span.end]
+            for span in rendered.spans
+            if str(span.style) == "reverse"
+        )
+        assert selected.rstrip() == "world"
+        assert rendered.cell_len <= 8
+
+    apply_text_editor_key(state, TextInput("session"))
+    assert state["buffer"] == "hello session"
+    assert selection_bounds(state) is None
+
+
 def test_visual_lines_highlight_spans_get_distinct_style():
     state = {}
     initialize_text_editor(state, "ab[chip]cd", multiline=True)

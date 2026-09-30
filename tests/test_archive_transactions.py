@@ -81,15 +81,19 @@ def test_browser_lifecycle_rolls_back_moves_and_metadata(tmp_path, monkeypatch, 
     original_row = dict(row)
     monkeypatch.setattr(session_browser, "save_sessions", _failed_save)
 
-    with pytest.raises(StorageError, match="injected"):
-        if operation == "archive":
-            screen._archive_row(row)
-        elif operation == "unarchive":
-            screen._unarchive_row(row)
-        elif operation == "activate":
-            screen._activate_row(row)
-        else:
-            session_browser._cmd_sessions_load("test")
+    if operation == "activate":
+        # Interactive failures stay in the picker and explain the problem.
+        screen._activate_row(row)
+        assert "Couldn't restore session" in screen.flash[0]
+        assert "injected" in screen.flash[0]
+    else:
+        with pytest.raises(StorageError, match="injected"):
+            if operation == "archive":
+                screen._archive_row(row)
+            elif operation == "unarchive":
+                screen._unarchive_row(row)
+            else:
+                session_browser._cmd_sessions_load("test")
 
     assert all(path.read_bytes() == contents for path, contents in original.items())
     assert row == original_row

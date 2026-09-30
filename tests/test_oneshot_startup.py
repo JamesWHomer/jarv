@@ -28,7 +28,9 @@ def test_agent_import_defers_rendering_and_network_libraries():
     assert result.returncode == 0, result.stderr
 
 
-def test_wait_indicator_paints_synchronously_and_restores_console():
+def test_wait_indicator_paints_synchronously_and_restores_console(monkeypatch):
+    # Rich suppresses live rendering for TERM=dumb even with force_terminal.
+    monkeypatch.setenv("TERM", "xterm-256color")
     output = io.StringIO()
     console = Console(file=output, force_terminal=True, legacy_windows=False)
     indicator, live = start_response_wait(True, 0, console=console)
@@ -89,6 +91,8 @@ def test_context_failure_closes_new_client(monkeypatch):
 
 @pytest.mark.parametrize("interrupted", [False, True])
 def test_cli_paints_before_agent_import_and_cleans_up(monkeypatch, interrupted):
+    monkeypatch.setenv("TERM", "xterm-256color")
+
     class Terminal(io.StringIO):
         def isatty(self):
             return True

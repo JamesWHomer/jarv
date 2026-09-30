@@ -26,7 +26,7 @@ def test_all_menu_frames_are_borderless_and_use_full_width(monkeypatch, width, h
     settings = settings_interactive.SettingsApp(config)
     setup = setup_interactive.SetupApp(config)
     sessions = session_browser.SessionBrowserScreen(
-        data={}, sessions={}, terminals={}, rows=[], current_session_id=None,
+        data={}, sessions={}, terminals={}, rows=[], current_session_id=None, background=False,
     )
     tree = tree_browser.TreeBrowserScreen(model=SimpleNamespace(nodes=[], roots=[], active_path=[]))
     usage = usage_command.UsageScreen(initial_scope="week")
@@ -59,7 +59,7 @@ def test_borderless_menus_end_with_controls(monkeypatch, width, height):
     setup = setup_interactive.SetupApp(config)
     setup.phase = "ready"
     sessions = session_browser.SessionBrowserScreen(
-        data={}, sessions={}, terminals={}, rows=[], current_session_id=None,
+        data={}, sessions={}, terminals={}, rows=[], current_session_id=None, background=False,
     )
     tree = tree_browser.TreeBrowserScreen(model=SimpleNamespace(nodes=[], roots=[], active_path=[]))
     usage = usage_command.UsageScreen(initial_scope="week")
@@ -72,7 +72,7 @@ def test_borderless_menus_end_with_controls(monkeypatch, width, height):
         assert any(hint in lines[-1].lower() for hint in ("enter", "esc", "scroll", "↑↓")), lines[-1]
     sessions.preview_sid = "test-session"
     monkeypatch.setattr(sessions, "_preview_lines", lambda sid, width: [Text("preview row")] * 40)
-    assert "↑↓ scroll" in _render(sessions.render(), width)[-1]
+    assert "↑↓ scroll" in _render(sessions.render(), width)[-1].lower()
 
 
 def test_borderless_panel_omits_empty_bottom_row_and_clips_header():

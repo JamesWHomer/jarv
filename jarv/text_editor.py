@@ -223,18 +223,13 @@ def render_single_line(
         used += get_character_cell_size(display[end])
         end += 1
     segment = display[start:end]
-    local_cursor = cursor - start
-
     line = Text()
-    if not cursor_visible:
-        line.append(segment, style=text_style)
-        return line
-    line.append(segment[:local_cursor], style=text_style)
-    if local_cursor < len(segment):
-        line.append(segment[local_cursor], style=cursor_style)
-        line.append(segment[local_cursor + 1 :], style=text_style)
-    else:
-        line.append(" ", style=cursor_style)
+    _append_segment(
+        line, segment, start, cursor - start if cursor_visible else None,
+        spans=(), base_style=text_style, highlight_style=text_style,
+        cursor_style=cursor_style, selection=selection_bounds(state),
+        selection_style="reverse",
+    )
     return line
 
 
