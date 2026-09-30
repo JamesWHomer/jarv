@@ -77,6 +77,9 @@ def cmd_set(args: list) -> int:
     value = parse_config_value(key, raw)
     trial = copy.deepcopy(config)
     trial[key] = value
+    from .provider_catalog import reconcile_service_tier
+
+    reset_tier = reconcile_service_tier(trial) if key in ("model", "provider", "base_url") else None
     if key in ("model", "provider"):
         from .reasoning import reconcile_reasoning_effort
 
@@ -84,6 +87,8 @@ def cmd_set(args: list) -> int:
     if not validate_config(trial):
         return 2
     save_config(trial)
+    if reset_tier is not None:
+        console.print("[yellow]Processing tier reset to standard for this model/endpoint.[/yellow]")
     display = _mask_config_value(key, trial[key])
     console.print(f"[bold cyan]✓[/bold cyan] [bold cyan]{key}[/bold cyan] [dim]=[/dim] {display}")
     return 0
@@ -103,6 +108,9 @@ def cmd_unset(args: list) -> int:
     if key in DEFAULT_CONFIG:
         trial = copy.deepcopy(config)
         trial[key] = DEFAULT_CONFIG[key]
+        from .provider_catalog import reconcile_service_tier
+
+        reset_tier = reconcile_service_tier(trial) if key in ("model", "provider", "base_url") else None
         if key in ("model", "provider"):
             from .reasoning import reconcile_reasoning_effort
 
@@ -110,6 +118,8 @@ def cmd_unset(args: list) -> int:
         if not validate_config(trial):
             return 2
         save_config(trial)
+        if reset_tier is not None:
+            console.print("[yellow]Processing tier reset to standard for this model/endpoint.[/yellow]")
         console.print(f"[bold cyan]↺[/bold cyan] [bold cyan]{key}[/bold cyan] [dim]reset to default →[/dim] [green]{repr(DEFAULT_CONFIG[key])}[/green]")
     else:
         trial = copy.deepcopy(config)
@@ -165,7 +175,7 @@ def _help_body() -> Group:
             ("-c, --config <key=value>", "Override a setting without saving; repeatable", "bold yellow"),
             ("-C, --cwd <path>", "Choose the working directory", "bold yellow"),
             ("--base-url <url>", "Override the provider API endpoint", "bold yellow"),
-            ("--service-tier <tier>", "standard, flex, or priority (provider-dependent)", "bold yellow"),
+            ("--service-tier <tier>", "standard, flex, priority, or ultrafast (model-dependent)", "bold yellow"),
             ("--command-safety <level>", "all, risky, or none", "bold yellow"),
             ("--tools <list> / --no-tools", "Allow listed tools, or disable all tools", "bold yellow"),
             ("--max-turns <n>", "Limit agent turns across root and subagents", "bold yellow"),

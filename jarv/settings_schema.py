@@ -9,7 +9,9 @@ def settings_service_tier_choices(config: dict) -> tuple[tuple[str, str], ...]:
     from .provider_catalog import service_tier_choices
 
     provider = str(config.get("provider", "openai"))
-    return tuple((tier, tier) for tier in service_tier_choices(provider))
+    return tuple((tier, tier) for tier in service_tier_choices(
+        provider, config.get("model"), base_url=config.get("base_url"),
+    ))
 
 
 def settings_service_tier_description(config: dict) -> str:
@@ -18,6 +20,8 @@ def settings_service_tier_description(config: dict) -> str:
         return "priority uses committed capacity, then falls back to standard"
     if len(settings_service_tier_choices(config)) == 1:
         return "this provider uses standard processing"
+    if any(tier == "ultrafast" for tier, _ in settings_service_tier_choices(config)):
+        return "ultrafast: fastest processing, 6x standard token rates; auditor uses standard"
     return "standard cost, flex savings, or priority latency"
 
 

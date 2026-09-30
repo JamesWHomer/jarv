@@ -135,9 +135,20 @@ def _apply_cli_overrides(config: dict, args: argparse.Namespace) -> dict:
     if tier is not None:
         from .provider_catalog import service_tier_choices
         provider = config.get("provider", "openai")
-        if tier not in service_tier_choices(provider):
-            raise ValueError(f"Service tier {tier!r} is not supported by {provider}.")
+        if tier not in service_tier_choices(provider, config.get("model"), base_url=config.get("base_url")):
+            raise ValueError(
+                f"Service tier {tier!r} is not supported by {provider}/{config.get('model')} "
+                "at this endpoint. Ultrafast requires gpt-6-astra through OpenAI's direct Responses API."
+            )
         config.setdefault("service_tiers", {})[provider] = tier
+    elif "service_tiers" not in overrides and (
+        args.provider or args.model or getattr(args, "base_url", None) is not None
+        or {"provider", "model", "base_url"}.intersection(overrides)
+    ):
+        from .provider_catalog import reconcile_service_tier
+
+        if reconcile_service_tier(config) is not None:
+            print("Processing tier reset to standard for this model/endpoint.", file=sys.stderr)
     allowed = getattr(args, "tools", None)
     if allowed is not None or getattr(args, "no_tools", False):
         from .config_schema import TOOL_NAMES
@@ -341,7 +352,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-c", "--config", type=_config_override, action="append", metavar="KEY=VALUE", help="Override a setting for this run (repeatable; lists/maps use JSON)")
     parser.add_argument("-C", "--cwd", metavar="PATH", help="Working directory for this invocation")
     parser.add_argument("--base-url", metavar="URL", help="Override the provider API endpoint")
-    parser.add_argument("--service-tier", choices=("standard", "flex", "priority"), help="Override the active provider's processing tier")
+    parser.add_argument("--service-tier", choices=("standard", "flex", "priority", "ultrafast"), help="Override processing tier (ultrafast: direct OpenAI Astra, 6x standard token rates)")
     parser.add_argument("--command-safety", choices=("all", "risky", "none"), help="Override command/edit approval policy")
     tool_group = parser.add_mutually_exclusive_group()
     tool_group.add_argument("--tools", type=_tool_allowlist, metavar="LIST", help="Allow only these comma-separated tools (including for subagents)")

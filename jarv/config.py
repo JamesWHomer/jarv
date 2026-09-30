@@ -135,7 +135,7 @@ def save_config(config: dict) -> None:
 
 
 def validate_config(config: dict) -> bool:
-    from .provider_catalog import SERVICE_TIERS, service_tier_choices
+    from .provider_catalog import SERVICE_TIERS, PROVIDER_SERVICE_TIERS, service_tier_error
 
     console = _console()
     ok = validate_config_fields(config, report=console.print)
@@ -171,11 +171,15 @@ def validate_config(config: dict) -> bool:
                     f"[red]Config service tier for '{provider}' must be one of: {choices}.[/red]"
                 )
                 ok = False
-            elif tier not in service_tier_choices(str(provider)):
-                choices = ", ".join(service_tier_choices(str(provider)))
+            elif tier not in PROVIDER_SERVICE_TIERS.get(str(provider), ("standard",)):
+                choices = ", ".join(PROVIDER_SERVICE_TIERS.get(str(provider), ("standard",)))
                 console.print(
                     f"[red]Provider '{provider}' supports service tiers: {choices}.[/red]"
                 )
                 ok = False
 
+    tier_error = service_tier_error(config)
+    if tier_error:
+        console.print(f"[red]{tier_error}[/red]")
+        ok = False
     return ok

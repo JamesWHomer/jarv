@@ -568,7 +568,7 @@ def _normalized_tier(value: Any) -> str | None:
     tier = str(value or "").strip().lower()
     if tier in ("default", "standard", "standard_only"):
         return "standard"
-    if tier in ("flex", "priority"):
+    if tier in ("flex", "priority", "ultrafast"):
         return tier
     return None
 
@@ -589,6 +589,9 @@ def _tier_price_multiplier(provider: str, model: str | None, tier: str) -> float
     if tier == "standard":
         return 1.0
     if provider == "openai":
+        if tier == "ultrafast" and model == "gpt-6-astra":
+            # https://developers.openai.com/api/docs/pricing?latest-pricing=ultrafast
+            return 6.0
         if tier == "flex":
             return 0.5
         if tier == "priority":
@@ -609,7 +612,7 @@ def estimate_token_cost_usd(
     provider = str(provider or record.get("provider") or "")
     tier = _effective_cost_tier(record)
     if tier is None:
-        if _normalized_tier(record.get("requested_service_tier")) in ("flex", "priority"):
+        if _normalized_tier(record.get("requested_service_tier")) in ("flex", "priority", "ultrafast"):
             return None
         tier = "standard"
     if provider == "anthropic" and tier == "priority":

@@ -246,6 +246,10 @@ def _call_openai_compat(
 ) -> tuple[bool, str]:
     from .openai_http import build_chat_payload, create_chat
 
+    # The auditor uses Chat Completions, outside Jarv's Ultrafast Responses
+    # support. Use the same effective config for both the call and its ledger.
+    if configured_service_tier(config) == "ultrafast":
+        config = {**config, "service_tiers": {**config.get("service_tiers", {}), "openai": "standard"}}
     client = _get_auditor_client("openai_compat", config, info)
 
     try:
@@ -389,7 +393,7 @@ def _openai_compat_kwargs(
     }
     from .provider_catalog import provider_service_tier
 
-    service_tier = provider_service_tier(config)
+    service_tier = provider_service_tier(config, model=model, backend="openai_compat")
     if service_tier:
         kwargs["service_tier"] = service_tier
     if _uses_max_completion_tokens(config, model, info):
@@ -406,7 +410,7 @@ def _uses_max_completion_tokens(config: dict, model: str, info: dict) -> bool:
     if not _is_direct_openai(config, info):
         return False
     model = model.lower()
-    return model.startswith(("gpt-5", "o1", "o3", "o4"))
+    return model.startswith(("gpt-5", "gpt-6", "o1", "o3", "o4"))
 
 
 def _is_direct_openai(config: dict, info: dict) -> bool:

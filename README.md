@@ -129,7 +129,7 @@ Flags override settings for one invocation without changing saved config. Dedica
 | `--config KEY=VALUE` | `-c` | Repeatable, validated setting override; lists/maps use JSON |
 | `--cwd PATH` | `-C` | Working directory for commands, files, and project context |
 | `--base-url URL` | | Override the provider API endpoint |
-| `--service-tier TIER` | | `standard`, `flex`, or `priority`, where supported by the active provider |
+| `--service-tier TIER` | | `standard`, `flex`, `priority`, or `ultrafast`, where supported by the active provider/model |
 | `--command-safety LEVEL` | | Override command/edit approval policy: `all`, `risky`, or `none` |
 | `--tools LIST` | | Allow only these comma-separated tools, including for subagents |
 | `--no-tools` | | Disable all agent tools |
@@ -158,6 +158,12 @@ jarv -C ./my-project --session nightly --max-turns 20 --run-timeout 300 "check t
 jarv --prompt-file review.txt --system-file reviewer.txt --tools read,web_search
 jarv -c audit=false -c max_tool_output_chars=40000 --command-safety all "investigate"
 ```
+
+For Astra Ultrafast, run `jarv --provider openai --model gpt-6-astra --service-tier ultrafast "your task"`, or select **Processing tier → ultrafast** in `/settings` after selecting Astra. Standard remains the default. Ultrafast uses the existing HTTP streaming transport and keeps your reasoning effort unchanged.
+
+Jarv currently offers Ultrafast only for `gpt-6-astra` at the direct OpenAI Responses endpoint (`https://api.openai.com/v1`). It uses API billing, with token rates at 6x Standard, including the applicable cache and long-context rates. See [OpenAI's Ultrafast guide](https://developers.openai.com/api/docs/guides/ultrafast-mode) and [API pricing](https://developers.openai.com/api/docs/pricing?latest-pricing=ultrafast). Custom gateways and regional endpoints are not enabled for this tier.
+
+Subagents inherit the selected tier. The command auditor uses Standard because it calls Chat Completions. Changing to an incompatible model or endpoint resets a saved Ultrafast preference to Standard with a notice; explicitly requesting an incompatible combination fails validation. Provider errors are surfaced without changing tiers. Usage records retain requested and served tiers; when the served tier is missing, Ultrafast cost remains unknown unless the provider reports a cost.
 
 `--new`, `--incognito`, and `--session` are mutually exclusive. So are `--tools`/`--no-tools`, `--quiet`/`--verbose`, and `--system`/`--system-file`. File arguments are resolved relative to the directory where Jarv was launched, before `--cwd` is applied. Prompt-file contents are always treated as a prompt, even when they begin with a slash command name.
 
@@ -302,7 +308,7 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 | `api_keys` | `{}` | Per-provider API keys. Falls back to provider env vars when empty. |
 | `base_url` | `""` | Custom API base URL. Overrides the provider default. |
 | `model` | `"gpt-5.4-mini"` | Model name passed to the API. |
-| `service_tiers` | `{}` | Per-provider processing tier: `standard`, `flex`, or `priority`. Missing providers use `standard`; unsupported tiers are not offered. |
+| `service_tiers` | `{}` | Per-provider processing tier: `standard`, `flex`, `priority`, or `ultrafast`. Missing providers use `standard`; unsupported tiers are not offered. Ultrafast requires direct OpenAI Astra. |
 | `reasoning_effort` | `""` | Model-supported reasoning effort. Empty uses the provider/model default; `none` explicitly disables reasoning only where supported. |
 | `context_budget_ratio` | `0.75` | Share of the context window used for input. |
 | `context_compaction_threshold` | `0.85` | Fill ratio that triggers history compaction. |

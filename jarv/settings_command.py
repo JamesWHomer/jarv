@@ -294,9 +294,15 @@ def _settings_reset_row(row: dict, config: dict) -> tuple[dict, str]:
     if key not in DEFAULT_CONFIG:
         return original, f"{row['label']} has no default"
     config[key] = _settings_reset_value(row, config)
+    from .provider_catalog import reconcile_service_tier
+
+    reset_tier = reconcile_service_tier(config) if key in ("model", "provider", "base_url") else None
     if not _settings_save_validated(original, config):
         return original, "config validation failed"
-    return original, f"reset {row['label']}"
+    message = f"reset {row['label']}"
+    if reset_tier is not None:
+        message += " (processing tier reset to standard)"
+    return original, message
 
 
 def _settings_reset_action_bar(
@@ -769,6 +775,8 @@ def _settings_desired_editor_height(
 
 
 def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, bool]:
+    from .provider_catalog import reconcile_service_tier
+
     original = config
     config = copy.deepcopy(config)
     row = edit["row"]
@@ -804,6 +812,7 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
         ):
             config["model"] = _settings_default_model_for_provider(provider, config=config)
         reset_effort = reconcile_reasoning_effort(config)
+        reset_tier = reconcile_service_tier(config)
         if not _settings_save_validated(original, config):
             edit["error"] = "Provider change failed validation."
             return original, edit["error"], "red", False
@@ -812,6 +821,8 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
             message += f" (model: {config.get('model')})"
         if reset_effort is not None:
             message += " (reasoning effort reset to default)"
+        if reset_tier is not None:
+            message += " (processing tier reset to standard)"
         return original, message, "green", True
 
     if key == "api_key":
@@ -881,9 +892,11 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
 
                 config["model"] = model
                 reset_effort = reconcile_reasoning_effort(config)
+                reset_tier = reconcile_service_tier(config)
             else:
                 config["auditor_model"] = model
                 reset_effort = None
+                reset_tier = None
             if not _settings_save_validated(original, config):
                 edit["error"] = "Model change failed validation."
                 return original, edit["error"], "red", False
@@ -891,6 +904,8 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
             message = f"saved {row['label']}: {display}"
             if reset_effort is not None:
                 message += " (reasoning effort reset to default)"
+            if reset_tier is not None:
+                message += " (processing tier reset to standard)"
             return original, message, "yellow", True
 
         models = edit.get("model_choices")
@@ -961,9 +976,11 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
 
             config["model"] = model
             reset_effort = reconcile_reasoning_effort(config)
+            reset_tier = reconcile_service_tier(config)
         else:
             config["auditor_model"] = model
             reset_effort = None
+            reset_tier = None
         if not _settings_save_validated(original, config):
             edit["error"] = "Model change failed validation."
             return original, edit["error"], "red", False
@@ -971,6 +988,8 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
         message = f"saved {row['label']}: {display}"
         if reset_effort is not None:
             message += " (reasoning effort reset to default)"
+        if reset_tier is not None:
+            message += " (processing tier reset to standard)"
         return original, message, "green", True
 
     if key == "system_prompt":
@@ -994,11 +1013,15 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
 
     value = "" if raw.lower() == "clear" else raw
     config[key] = value
+    reset_tier = reconcile_service_tier(config) if key == "base_url" else None
     if not _settings_save_validated(original, config):
         edit["error"] = "Invalid value for this setting."
         return original, edit["error"], "red", False
     display = value if value else row.get("empty", "empty")
-    return original, f"saved {row['label']}: {display}", "green", True
+    message = f"saved {row['label']}: {display}"
+    if reset_tier is not None:
+        message += " (processing tier reset to standard)"
+    return original, message, "green", True
 
 
 def _settings_plain(config: dict) -> None:

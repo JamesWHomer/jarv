@@ -747,8 +747,8 @@ def _stream_response_direct(
     backend = get_backend(config)
     from .provider_catalog import provider_service_tier
 
-    service_tier = provider_service_tier(config)
     try:
+        service_tier = provider_service_tier(config, model=model, backend=backend)
         if backend == "responses":
             yield from _stream_responses_api(
                 client, model, instructions, tools, input_items, reasoning, prompt_cache_key,

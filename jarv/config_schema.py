@@ -216,7 +216,7 @@ def config_about_lines(config: dict | None = None) -> list[str]:
             line += f" Default: {default_repr}."
         lines.append(line)
     lines.append(
-        "- `service_tiers` - Per-provider processing tier. Values are `standard`, `flex`, or `priority`; missing providers use `standard`."
+        "- `service_tiers` - Per-provider processing tier. Values are `standard`, `flex`, `priority`, or `ultrafast`; missing providers use `standard`. Ultrafast requires direct OpenAI Astra and costs 6x Standard token rates."
     )
     return lines
 

@@ -106,18 +106,56 @@ def models_dev_provider_ids() -> set[str]:
     """Return every models.dev provider id Jarv vendors facts for."""
     return set(MODELS_DEV_PROVIDERS.values())
 
-SERVICE_TIERS = ("standard", "flex", "priority")
+SERVICE_TIERS = ("standard", "flex", "priority", "ultrafast")
 PROVIDER_SERVICE_TIERS = {
     "openai": SERVICE_TIERS,
-    "openrouter": SERVICE_TIERS,
-    "gemini": SERVICE_TIERS,
+    "openrouter": ("standard", "flex", "priority"),
+    "gemini": ("standard", "flex", "priority"),
     "anthropic": ("standard", "priority"),
 }
 
 
-def service_tier_choices(provider: str) -> tuple[str, ...]:
-    """Return Jarv service tiers supported by a provider."""
-    return PROVIDER_SERVICE_TIERS.get(provider, ("standard",))
+def service_tier_choices(
+    provider: str, model: str | None = None, *,
+    base_url: str | None = None, backend: str | None = None,
+) -> tuple[str, ...]:
+    """Return tiers supported by the selected model and request endpoint."""
+    choices = PROVIDER_SERVICE_TIERS.get(provider, ("standard",))
+    # Start with the documented public Astra Responses endpoint. Custom
+    # gateways and other models do not necessarily implement this tier.
+    if not (
+        provider == "openai" and model == "gpt-6-astra"
+        and (base_url or "https://api.openai.com/v1").rstrip("/") == "https://api.openai.com/v1"
+        and backend in (None, "responses")
+    ):
+        choices = tuple(tier for tier in choices if tier != "ultrafast")
+    return choices
+
+
+def service_tier_error(
+    config: dict, *, model: str | None = None, backend: str | None = None,
+) -> str | None:
+    provider = str(config.get("provider", "openai"))
+    selected_model = config.get("model") if model is None else model
+    tier = configured_service_tier(config)
+    if tier not in service_tier_choices(
+        provider, selected_model, base_url=config.get("base_url"), backend=backend,
+    ):
+        return (
+            f"Service tier {tier!r} is not supported by {provider}/{selected_model}. "
+            "Ultrafast requires gpt-6-astra through OpenAI's direct Responses API."
+        )
+    return None
+
+
+def reconcile_service_tier(config: dict) -> str | None:
+    """Reset an incompatible saved tier after a model/endpoint change."""
+    if service_tier_error(config) is None:
+        return None
+    provider = str(config.get("provider", "openai"))
+    previous = configured_service_tier(config)
+    config["service_tiers"] = {**config.get("service_tiers", {}), provider: "standard"}
+    return previous
 
 
 def configured_service_tier(config: dict, provider: str | None = None) -> str:
@@ -125,15 +163,21 @@ def configured_service_tier(config: dict, provider: str | None = None) -> str:
     provider = provider or str(config.get("provider", "openai"))
     configured = config.get("service_tiers")
     tier = configured.get(provider) if isinstance(configured, dict) else None
-    if tier in service_tier_choices(provider):
+    if tier in PROVIDER_SERVICE_TIERS.get(provider, ("standard",)):
         return str(tier)
     return "standard"
 
 
-def provider_service_tier(config: dict, provider: str | None = None) -> str | None:
+def provider_service_tier(
+    config: dict, provider: str | None = None, *,
+    model: str | None = None, backend: str | None = None,
+) -> str | None:
     """Translate Jarv's tier into the active provider's request value."""
     provider = provider or str(config.get("provider", "openai"))
     tier = configured_service_tier(config, provider)
+    error = service_tier_error({**config, "provider": provider}, model=model, backend=backend)
+    if error:
+        raise ValueError(error)
     if provider == "openai":
         return "default" if tier == "standard" else tier
     if provider == "openrouter":

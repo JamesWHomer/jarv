@@ -254,6 +254,11 @@ def _model_status(config: dict) -> str:
     reasoning_effort = str(config.get("reasoning_effort") or "").strip()
     if reasoning_effort:
         status_parts.append(reasoning_effort)
+    from .provider_catalog import configured_service_tier
+
+    tier = configured_service_tier(config)
+    if tier != "standard":
+        status_parts.append(tier)
     return " / ".join(status_parts)
 
 

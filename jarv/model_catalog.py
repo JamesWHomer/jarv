@@ -516,7 +516,18 @@ def model_prices(
     ``input_tokens`` selects the long-context tier when a model charges more
     past a context threshold, as GPT-5.5 and Gemini 3.1 Pro both do.
     """
-    return models_dev.prices(provider, model, input_tokens=input_tokens)
+    prices = models_dev.prices(provider, model, input_tokens=input_tokens)
+    if prices is None and provider == "openai" and model == "gpt-6-astra":
+        # Official launch rates, until models.dev includes Astra (2026-09-30).
+        # https://developers.openai.com/api/docs/models/gpt-6-astra
+        long_context = input_tokens is not None and input_tokens > 272_000
+        return {
+            "input": 20.0 if long_context else 10.0,
+            "cached_input": 2.0 if long_context else 1.0,
+            "cache_write": 25.0 if long_context else 12.5,
+            "output": 75.0 if long_context else 50.0,
+        }
+    return prices
 
 
 def _format_price_rate(value: float) -> str:
