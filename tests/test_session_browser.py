@@ -1,6 +1,7 @@
 import io
 from contextlib import nullcontext
 from collections import deque
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -114,6 +115,12 @@ def _run_sessions_with_keys(monkeypatch, keys, extra_sessions=None, *, size=(100
     monkeypatch.setattr(session_browser, "session_metadata_transaction", lambda *args: nullcontext())
     monkeypatch.setattr(session_browser, "unarchive_session_files", fake_unarchive)
     monkeypatch.setattr(session_browser, "delete_session_files", fake_delete)
+    # This scripted UI test uses fake history paths. Background indexing those
+    # nonexistent files can replace the seeded titles before a key is handled.
+    monkeypatch.setattr(
+        session_browser, "SessionBrowserScreen",
+        partial(session_browser.SessionBrowserScreen, background=False),
+    )
 
     def read_key_with_repeats(**_kwargs):
         if not queued:
