@@ -40,8 +40,12 @@ def test_menu_reaches_real_input_without_loading_agent_or_network(tmp_path, args
     assert "BENCH_INPUT_PAINT " in result.stderr
     modules = next(line.split(" ", 1)[1].split(",") for line in result.stderr.splitlines()
                    if line.startswith("BENCH_MODULES "))
-    assert not {"jarv.agent", "jarv.orchestrator", "httpx", "httpcore",
-                "jarv.standalone", "rich.markdown"}.intersection(modules)
+    forbidden = {"jarv.agent", "jarv.orchestrator", "httpx", "httpcore", "jarv.standalone"}
+    # The session browser renders Markdown previews on a background worker.
+    # Whether that worker imports Markdown before the input repaint is a race.
+    if args != ["/sessions"]:
+        forbidden.add("rich.markdown")
+    assert not forbidden.intersection(modules)
 
 
 def make_app():

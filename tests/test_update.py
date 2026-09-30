@@ -210,7 +210,8 @@ def test_update_does_not_report_success_after_noop(monkeypatch):
     assert "Updated successfully" not in text
 
 
-def test_update_verifies_pipx_fallback(monkeypatch):
+@pytest.mark.parametrize("installed", ["0.15.1", "0.15.0"])
+def test_update_verifies_pipx_fallback(monkeypatch, tmp_path, installed):
     output = io.StringIO()
     test_console = Console(file=output, force_terminal=False, color_system=None)
     calls = []
@@ -228,7 +229,14 @@ def test_update_verifies_pipx_fallback(monkeypatch):
         lambda: install_channel.InstallChannel("pip", Path("python")),
     )
     monkeypatch.setattr(commands, "_fallback_tool_manager", lambda: "pipx")
-    monkeypatch.setattr(commands, "_installed_version", lambda: "0.15.1")
+    monkeypatch.setattr(commands, "UPDATE_FLAG_FILE", tmp_path / "update_available.txt")
+
+    def tool_version(manager):
+        assert manager == "pipx"
+        return installed
+
+    # Verify the fallback environment, independent of tools on the host PATH.
+    monkeypatch.setattr(commands, "_tool_installed_version", tool_version)
 
     def run_install(manager, spec):
         calls.append((manager, spec))
@@ -238,10 +246,14 @@ def test_update_verifies_pipx_fallback(monkeypatch):
 
     monkeypatch.setattr(commands, "_run_update_install", run_install)
 
-    assert commands.cmd_update() == 0
+    assert commands.cmd_update() == (0 if installed == "0.15.1" else 1)
 
     assert calls == [("pip", "jarv==0.15.1"), ("pipx", "jarv==0.15.1")]
-    assert "Updated successfully" in output.getvalue()
+    if installed == "0.15.1":
+        assert "Updated successfully" in output.getvalue()
+    else:
+        assert "Update failed" in output.getvalue()
+        assert "Updated successfully" not in output.getvalue()
 
 
 def test_update_skips_editable_install(monkeypatch):

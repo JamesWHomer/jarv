@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jarv"
-version = "0.60.0"
+version = "0.60.1"
 description = "Scriptable, multi-provider AI agent for the terminal — pipe into it, script it, run it on any model, cloud or local"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -37,5 +37,9 @@ include = ["jarv*"]
 
 [tool.setuptools.package-data]
 jarv = ["data/*.json"]
+
+[tool.pytest.ini_options]
+# Tests import repository-local benchmark helpers that are not shipped in wheels.
+pythonpath = ["."]
 
 
