@@ -102,6 +102,10 @@ def stalled_server():
             try:
                 if self.connection.recv(1) == b"":
                     disconnected.set()
+            except ConnectionResetError:
+                # Closing a socket with unread response bytes can send TCP RST
+                # instead of EOF. Both prove the cancelled connection is closed.
+                disconnected.set()
             except (OSError, socket.timeout):
                 pass
             self.close_connection = True
