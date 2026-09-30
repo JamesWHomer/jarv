@@ -125,7 +125,7 @@ def test_settings_offer_and_persist_ultrafast_for_astra(astra, monkeypatch):
     monkeypatch.setattr(settings_command, "save_config", lambda config: None)
     astra["service_tiers"]["openai"] = "priority"
     row = next(row for row in settings_command._settings_rows(astra) if row["key"] == "service_tier")
-    assert "6x" in row["desc"]
+    assert row["desc"] == "balance processing speed, cost, and availability"
     updated, message = settings_command._settings_apply_quick(row, astra)
     assert updated["service_tiers"]["openai"] == "ultrafast"
     assert "ultrafast" in message

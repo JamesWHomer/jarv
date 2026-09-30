@@ -15,14 +15,7 @@ def settings_service_tier_choices(config: dict) -> tuple[tuple[str, str], ...]:
 
 
 def settings_service_tier_description(config: dict) -> str:
-    provider = str(config.get("provider", "openai"))
-    if provider == "anthropic":
-        return "priority uses committed capacity, then falls back to standard"
-    if len(settings_service_tier_choices(config)) == 1:
-        return "this provider uses standard processing"
-    if any(tier == "ultrafast" for tier, _ in settings_service_tier_choices(config)):
-        return "ultrafast: fastest processing, 6x standard token rates; auditor uses standard"
-    return "standard cost, flex savings, or priority latency"
+    return "balance processing speed, cost, and availability"
 
 
 def _field_to_row(field, config: dict) -> dict:
