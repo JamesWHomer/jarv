@@ -11,10 +11,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Callable
 
+from rich.align import Align
 from rich.cells import cell_len
 from rich.console import Console, Group, RenderableType
 from rich.live import Live
 from rich.markup import escape
+from rich.panel import Panel
 from rich.text import Text
 
 from .cancellation import CancellationToken, TurnCancelled
@@ -150,6 +152,8 @@ _HEADSUP_REPEATABLE_KEYS = frozenset({
     "CTRL_SHIFT_RIGHT",
     "PAGEUP",
     "PAGEDOWN",
+    "SHIFT_PAGEUP",
+    "SHIFT_PAGEDOWN",
     "MOUSE_WHEEL_UP",
     "MOUSE_WHEEL_DOWN",
     "MOUSE_WHEEL_PAGEUP",
@@ -192,6 +196,36 @@ def _sanitize_editor_key(key: str) -> str:
     if text == key:
         return key
     return TextInput(text)
+
+
+class _UserMessage:
+    """A right-aligned prompt bubble that reflows with the transcript width."""
+
+    def __init__(self, content: str):
+        self.content = content
+
+    def __rich_console__(self, console, options):
+        available = options.max_width
+        # Preserve reading room on small terminals, while leaving a clear
+        # left gutter on wider screens to distinguish prompts from replies.
+        maximum = max(1, available - 2 if available < 60 else available * 4 // 5)
+        content = Text(self.content, style="bright_white", overflow="fold")
+        natural = max((line.cell_len for line in content.split("\n")), default=0) + 4
+        width = min(maximum, max(9, natural))
+        if width < 5:
+            yield Align.right(content)
+            return
+        yield Align.right(
+            Panel(
+                content,
+                width=width,
+                padding=(0, 1),
+                title=Text("You", style="bold cyan") if width >= 9 else None,
+                title_align="right",
+                border_style="cyan",
+                safe_box=False,
+            )
+        )
 
 
 class _HistoryMarkdown:
@@ -397,6 +431,15 @@ class HeadsupAgentUI:
 
     def show_tool_card(self, renderable: RenderableType) -> None:
         self._flush_stream()
+        live_key = getattr(renderable, "live_key", None)
+        if live_key is not None:
+            if renderable.finished:
+                self.app.replace_live_tool(live_key, renderable)
+                self._animated_live_tool_keys.discard(live_key)
+            else:
+                self.app.upsert_live_tool(live_key, renderable)
+                self._animated_live_tool_keys.add(live_key)
+            return
         live_kind = type(renderable).__name__
         if live_kind == "InteractiveCommandCard":
             # One growing slot for the whole interactive run_command session:
@@ -916,6 +959,9 @@ class HeadsupApp(AltScreenApp):
         if key == "CTRL_O":
             self._toggle_tool_expansion()
             return
+        if key in {"SHIFT_PAGEUP", "SHIFT_PAGEDOWN"}:
+            self._jump_to_user_message(backward=key == "SHIFT_PAGEUP", repeat=repeat)
+            return
         scroll_delta = scroll_key_delta(key, repeat)
         if scroll_delta is not None:
             self._scroll_transcript(scroll_delta)
@@ -1172,16 +1218,13 @@ class HeadsupApp(AltScreenApp):
                 self._outro_started_at = time.perf_counter()
 
     def add_user_message(self, query: str) -> None:
-        line = Text()
-        line.append("\u203a ", style="dim cyan")
-        line.append(query, style="bright_white")
         with self.lock:
             # A new turn always jumps back to the bottom so the user sees their
             # message and the streamed response, even if they had scrolled up.
             self.scroll_offset = 0
         self._append(
             "user",
-            line,
+            _UserMessage(query),
             spacer_before=len(self.entries) > 0,
         )
 
@@ -2126,13 +2169,10 @@ class HeadsupApp(AltScreenApp):
             if not content:
                 continue
             if role == "user":
-                line = Text()
-                line.append("\u203a ", style="dim cyan")
-                line.append(content, style="bright_white")
                 entries.append(
                     TranscriptEntry(
                         "user",
-                        line,
+                        _UserMessage(content),
                         spacer_before=len(entries) > 1,
                     )
                 )
@@ -2467,6 +2507,42 @@ class HeadsupApp(AltScreenApp):
 
     def _scroll_transcript(self, delta: int) -> None:
         self.scroll_offset = max(0, self.scroll_offset + delta)
+
+    def _jump_to_user_message(self, *, backward: bool, repeat: int) -> None:
+        """Align the nearest sent prompt in the requested direction to the top."""
+        term_w, term_h = terminal_size(console=self.console)
+        layout = compute_layout(
+            term_w, term_h, border=get_setting(self.config, "headsup_border")
+        )
+        with self.lock:
+            menu_open = bool(self._slash_menu_box(layout.inner_width, layout))
+            prompt_lines = self._prompt_lines(
+                layout.inner_width, max_lines=layout.max_prompt_rows, menu_open=menu_open
+            )
+            rows = _transcript_rows_for(
+                layout.body_height, len(prompt_lines) + int(menu_open)
+            )
+            counts = self._entry_line_counts(layout.inner_width)
+            total = sum(counts)
+            max_scroll = max(0, total - rows)
+            current = min(max_scroll, max(0, self.scroll_offset))
+            targets = {0}
+            start = 0
+            for entry, count in zip(self.entries, counts):
+                if entry.kind == "user":
+                    # Land on the bubble itself, excluding its preceding spacer.
+                    top = start + int(entry.spacer_before)
+                    targets.add(max(0, min(max_scroll, total - rows - top)))
+                start += count
+            candidates = sorted(
+                (offset for offset in targets
+                 if (offset > current if backward else offset < current)),
+                reverse=not backward,
+            )
+            self.scroll_offset = (
+                candidates[min(max(1, repeat), len(candidates)) - 1]
+                if candidates else current
+            )
 
     def _entry_line_counts(self, width: int) -> list[int]:
         """Per-entry visual line counts, mirroring ``_transcript_lines`` exactly

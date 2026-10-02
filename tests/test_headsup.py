@@ -74,7 +74,7 @@ class HeadsupTests(unittest.TestCase):
         self.assertNotIn("jarv>", rendered)
         self.assertIn("\u256d", rendered)
         self.assertIn("\u256f", rendered)
-        self.assertIn("\u203a ", rendered)
+        self.assertNotIn("\u203a ", rendered)
         self.assertIn("hello from a narrow terminal", rendered)
         self.assertIn("Enter send", rendered)
         self.assertIn("reply body", rendered)
@@ -1730,7 +1730,7 @@ class HeadsupTests(unittest.TestCase):
         # or closed; the freed row carries the popup's own key hints instead.
         app, test_console, output = self._app(width=80)
         anchor = "anchor " * 10  # long enough to peek out past the popup
-        app.add_user_message(anchor.strip())
+        app.upsert_assistant_message(None, anchor.strip())
 
         closed = self._rendered_text(app, test_console, output, width=80, height=20).splitlines()
         initialize_text_editor(app.editor, "/se")
@@ -2141,6 +2141,58 @@ class HeadsupTests(unittest.TestCase):
         self.assertEqual(disable_mouse_capture.call_count, 1)
         self.assertEqual(app.scroll_offset, 6)
         self.assertIsNone(app._prompt_history_index)
+
+    def test_shift_page_keys_jump_between_sent_messages(self):
+        for width, border, draft in [(80, True, "draft"), (38, False, "line 1\nline 2"), (80, True, "/se")]:
+            with self.subTest(width=width, border=border, draft=draft):
+                app, _, _ = self._app(width=width, config={
+                    "provider": "openai", "model": "test-model", "headsup_border": border,
+                })
+                prompts = []
+                for label in ("first", "second", "third"):
+                    app.add_user_message((label + " message ") * 8)
+                    prompts.append(app.entries[-1])
+                    app.add_tool(Text("tool output\n" * 24))
+                    app.upsert_assistant_message(None, "assistant response")
+                initialize_text_editor(app.editor, draft)
+
+                def assert_at(entry):
+                    # Observe the actual render viewport, including draft/menu geometry.
+                    with patch.object(app, "_transcript_window", wraps=app._transcript_window) as window:
+                        app.render()
+                    inner_width, rows, offset = window.call_args.args
+                    visible, _ = app._transcript_window(inner_width, rows, offset)
+                    self.assertEqual(visible[0].plain, entry.rendered_lines(inner_width)[0].plain)
+                    self.assertEqual(visible[1].plain, entry.rendered_lines(inner_width)[1].plain)
+
+                with patch("jarv.headsup.terminal_size", return_value=(width, 24)):
+                    for entry in reversed(prompts):
+                        app.on_key("SHIFT_PAGEUP", 1)
+                        assert_at(entry)
+                    earliest = app.scroll_offset
+                    app.on_key("SHIFT_PAGEUP", 10)
+                    self.assertEqual(app.scroll_offset, earliest)
+                    app.on_key("SHIFT_PAGEDOWN", 2)
+                    assert_at(prompts[-1])
+                    app.on_key("SHIFT_PAGEDOWN", 1)
+                    self.assertEqual(app.scroll_offset, 0)
+                    # Ordinary scrolling still works, and jumping resumes from it.
+                    app.on_key("PAGEUP", 1)
+                    self.assertEqual(app.scroll_offset, 5)
+                    app.on_key("SHIFT_PAGEUP", 1)
+                    assert_at(prompts[-1])
+                self.assertEqual(app.editor["buffer"], draft)
+                self.assertIsNone(app._prompt_history_index)
+
+    def test_shift_page_keys_handle_empty_and_short_transcripts(self):
+        app, _, _ = self._app()
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)):
+            for content in (None, "short prompt"):
+                if content:
+                    app.add_user_message(content)
+                for key in ("SHIFT_PAGEUP", "SHIFT_PAGEDOWN"):
+                    app.on_key(key, 3)
+                    self.assertEqual(app.scroll_offset, 0)
 
     def test_streamed_content_preserves_scroll_offset_when_scrolled_up(self):
         app, _test_console, _output = self._app()

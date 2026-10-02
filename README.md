@@ -283,6 +283,8 @@ Turn off **Menu borders** in the Display section of `/settings`, or run `/set he
 
 ## Sessions
 
+In heads-up mode, **Shift + PgUp/PgDn** jumps to the previous or next sent message, aligning its bubble with the top of the transcript where possible. Jumping forward past the last message returns to the latest output. PgUp/PgDn without Shift continues to scroll normally.
+
 Each terminal is automatically bound to its own session. Jarv identifies terminals using environment variables (`WT_SESSION`, `TERM_SESSION_ID`, `TMUX`, `STY`) with a parent-process fallback, so history persists across runs in the same terminal.
 
 Session JSON is saved through a shared storage layer with interprocess locks, atomic file replacement, and a recovery journal. History, artifacts, retained outputs, and redo changes commit together; interrupted commits recover on the next access. Independent metadata edits from different terminals merge. Conflicting edits to the same history or metadata field report an error instead of overwriting another terminal's work. Corrupt files also report an error and are preserved for recovery. These protections require all concurrent Jarv processes to use this storage version.

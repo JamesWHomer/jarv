@@ -544,6 +544,8 @@ def test_windows_console_records_decode_shift_arrows(monkeypatch):
     records = [
         {"type": 0x0001, "vk": 0x26, "ctrl_state": shift},
         {"type": 0x0001, "vk": 0x28, "ctrl_state": shift},
+        {"type": 0x0001, "vk": 0x21, "ctrl_state": shift},
+        {"type": 0x0001, "vk": 0x22, "ctrl_state": shift},
         {"type": 0x0001, "vk": 0x26},
         {"type": 0x0001, "vk": 0x28},
         # Shift on a key with no range meaning keeps its plain token.
@@ -563,7 +565,7 @@ def test_windows_console_records_decode_shift_arrows(monkeypatch):
             )
             for _ in records
         ]
-        assert read == ["SHIFT_UP", "SHIFT_DOWN", "UP", "DOWN", "HOME"]
+        assert read == ["SHIFT_UP", "SHIFT_DOWN", "SHIFT_PAGEUP", "SHIFT_PAGEDOWN", "UP", "DOWN", "HOME"]
         assert not pending
     finally:
         command_input._WINDOWS_MOUSE_CAPTURE_DEPTH = 0
@@ -901,6 +903,10 @@ def test_read_key_maps_posix_modified_arrows(monkeypatch):
         "\x1b[1;2A": "SHIFT_UP",
         "\x1b[1;2B": "SHIFT_DOWN",
         "\x1b[1;6A": "SHIFT_UP",
+        "\x1b[5;2~": "SHIFT_PAGEUP",
+        "\x1b[6;2~": "SHIFT_PAGEDOWN",
+        "\x1b[5~": "PAGEUP",
+        "\x1b[6~": "PAGEDOWN",
     }
     for sequence, expected in cases.items():
         stdin = _install_posix_input(monkeypatch, sequence)
@@ -1032,6 +1038,8 @@ def test_read_key_maps_windows_modified_arrows(monkeypatch):
         "\x1b[1;2A": "SHIFT_UP",
         "\x1b[1;2B": "SHIFT_DOWN",
         "\x1b[1;5A": "UP",
+        "\x1b[5;2~": "SHIFT_PAGEUP",
+        "\x1b[6;2~": "SHIFT_PAGEDOWN",
     }
     for sequence, expected in cases.items():
         chars = deque(sequence)

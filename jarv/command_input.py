@@ -687,10 +687,11 @@ def _windows_key_from_virtual_key(
         raise KeyboardInterrupt
 
     if control_key_state & _WINDOWS_SHIFT_PRESSED:
-        # Shift+Up/Down is the /sessions range-select chord. Only these two keys
-        # care about the modifier; everything else keeps its plain token so no
-        # other view sees a token it doesn't handle.
-        shifted = {0x26: "SHIFT_UP", 0x28: "SHIFT_DOWN"}.get(virtual_key)
+        # Preserve Shift for list selection and heads-up message navigation.
+        shifted = {
+            0x26: "SHIFT_UP", 0x28: "SHIFT_DOWN",
+            0x21: "SHIFT_PAGEUP", 0x22: "SHIFT_PAGEDOWN",
+        }.get(virtual_key)
         if shifted is not None:
             return shifted
 
@@ -949,7 +950,8 @@ def _csi_token(params: str, final: str) -> str:
     ``Shift``/``Alt``/``Ctrl`` as ``(mod - 1)`` bit flags. For Left/Right we fold
     Ctrl and Shift into ``CTRL_``/``SHIFT_`` prefixes so the editable input can
     map them to word-wise motion and text selection. Up/Down fold Shift alone
-    into ``SHIFT_UP``/``SHIFT_DOWN`` (the /sessions range-select chord); every
+    into ``SHIFT_UP``/``SHIFT_DOWN`` (the /sessions range-select chord), and
+    PageUp/PageDown preserve Shift for heads-up message navigation; every
     other key ignores the modifier and returns its plain token (so e.g.
     Ctrl+Home is still HOME).
     """
@@ -967,7 +969,7 @@ def _csi_token(params: str, final: str) -> str:
         prefix = ("CTRL_" if bits & 4 else "") + ("SHIFT_" if bits & 1 else "")
         if prefix:
             return prefix + base
-    if base in ("UP", "DOWN") and modifier >= 2 and (modifier - 1) & 1:
+    if base in ("UP", "DOWN", "PAGEUP", "PAGEDOWN") and modifier >= 2 and (modifier - 1) & 1:
         # Shift only, deliberately. Folding Ctrl here too would mint CTRL_UP/
         # CTRL_DOWN tokens that every alt-screen view would silently stop
         # treating as plain UP/DOWN, so Ctrl+Up stays UP and Ctrl+Shift+Up
@@ -1242,7 +1244,8 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
     ENTER, ESC, TAB, CTRL_F, CTRL_N, CTRL_O, CTRL_S, CTRL_V, ALT_V, BACKSPACE, DELETE,
     the modified arrows CTRL_LEFT/CTRL_RIGHT (word-wise), SHIFT_LEFT/
     SHIFT_RIGHT/CTRL_SHIFT_LEFT/CTRL_SHIFT_RIGHT (text selection) and
-    SHIFT_UP/SHIFT_DOWN (list range selection), or the raw character. Raises
+    SHIFT_UP/SHIFT_DOWN (list range selection), SHIFT_PAGEUP/SHIFT_PAGEDOWN
+    (message navigation), or the raw character. Raises
     KeyboardInterrupt on Ctrl-C. When ``text_mode`` is True, the convenience
     q/Q → ESC mapping is disabled so a search query can include those letters. When
     ``translate_mouse_wheel`` is False, SGR wheel input returns MOUSE_WHEEL_*
@@ -1307,17 +1310,13 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
                                 )
                             )
                         return "OTHER"
-                    if ch3 == "1":
-                        # Modified navigation key: ESC [ 1 ; <mod> <final>
-                        # (Ctrl/Shift + arrow). Read the rest of the sequence so
-                        # the modifier byte and final letter aren't left to leak
-                        # back as literal characters.
+                    if ch3 in ("1", "3", "5", "6"):
+                        # Consume the full navigation sequence, including any
+                        # modifier on arrows or tilde-terminated page keys.
                         params, final = _read_windows_csi_tail(
                             msvcrt, ch3, sequence_timeout
                         )
                         return _csi_token(params, final)
-                    if ch3 in ("5", "6", "3") and _windows_key_available():
-                        msvcrt.getwch()  # consume trailing ~
                     return {
                         "A": "UP", "B": "DOWN", "D": "LEFT", "C": "RIGHT",
                         "H": "HOME", "F": "END",
