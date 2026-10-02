@@ -23,6 +23,9 @@ class DiagnosticStream:
 
 
 class CliOutput:
+    # Protocol diagnostics are append-only; print each final card once.
+    supports_live_tool_cards = False
+
     def __init__(self, output_format: str, *, quiet=False, verbose=False):
         self.format = output_format
         self.quiet = quiet

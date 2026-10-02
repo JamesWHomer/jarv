@@ -1648,7 +1648,7 @@ class AgentInputTests(unittest.TestCase):
                     "jarv.agent.stream_response",
                     side_effect=fake_stream_response,
                 ),
-                patch("jarv.agent_ui.console", new=card_console),
+                patch("jarv.tool_progress.console", new=card_console),
                 patch("jarv.agent.sys.stdout", new=io.StringIO()),
             ):
                 result = run_agent(
@@ -1773,7 +1773,7 @@ class AgentInputTests(unittest.TestCase):
                 patch("jarv.agent.prepare_session_context", return_value=context),
                 patch("jarv.agent.stream_response", side_effect=fake_stream_response),
                 patch("jarv.orchestrator.dispatch_web_tool", side_effect=fake_web),
-                patch("jarv.agent_ui.console", new=card_console),
+                patch("jarv.tool_progress.console", new=card_console),
                 patch("jarv.agent.sys.stdout", new=io.StringIO()),
             ):
                 result = run_agent(

@@ -6,6 +6,36 @@ from jarv.config import DEFAULT_CONFIG
 from jarv.orchestrator import AgentNode
 
 
+def test_running_command_previews_output_before_replacing_with_final_card(monkeypatch):
+    from io import StringIO
+    from rich.console import Console
+    from jarv import agent
+    from jarv.agent_ui import RunningCommandCard
+    from jarv.shell import CommandResult
+
+    frames = []
+    class UI:
+        def show_tool_card(self, card):
+            output = StringIO()
+            Console(file=output, width=90, force_terminal=False).print(card)
+            frames.append(output.getvalue())
+
+    def execute(prepared, config, **kwargs):
+        kwargs['on_output']('early output', 'early error')
+        assert 'early output' in frames[-1] and 'early error' in frames[-1]
+        assert 'running' in frames[-1]
+        return 'final output', CommandResult(prepared.cmd, 'final output', '', 0), None
+
+    monkeypatch.setattr(agent, 'execute_run_command', execute)
+    monkeypatch.setattr(agent, '_agent_check_run_command', lambda *a, **k: (True, ''))
+    result = agent._dispatch_run_command_with_ui({'command': 'echo hi'}, dict(DEFAULT_CONFIG), ui=UI())
+    assert result == 'final output'
+    assert 'final output' in frames[-1] and 'early output' not in frames[-1]
+    card = RunningCommandCard('cmd', '', 'print', 0)
+    card.update_output('x' * 100_000, '')
+    assert len(card._output) < 4500
+
+
 class _FakeLive:
     def __init__(self, renderable, **_kwargs):
         self.renderable = renderable

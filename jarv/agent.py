@@ -325,6 +325,11 @@ def _dispatch_run_command_oneshot(
             vertical_overflow="crop",
         )
         live.start()
+
+    def on_output(stdout, stderr):
+        if card.update_output(stdout, stderr) and ui is not None:
+            _ui_call(ui, "show_tool_card", card)
+
     try:
         output, _result, _output_id = execute_run_command(
             prepared,
@@ -332,6 +337,7 @@ def _dispatch_run_command_oneshot(
             cancellation_token=cancellation_token,
             retained_store=retained_store,
             shell_state=shell_state,
+            on_output=on_output,
         )
     except BaseException:
         _stop_interactive_card_live(live, live_depth_cm)
@@ -1192,7 +1198,8 @@ def _build_tool_hooks(
     """
     import json
 
-    from .session_render import tool_call_card, tool_call_card_from_args
+    from .session_render import tool_call_card
+    from .tool_progress import ParallelToolDisplay
     from .tool_outputs import summarize_tool_output
 
     def _on_tool_error(message: str) -> None:
@@ -1201,29 +1208,7 @@ def _build_tool_hooks(
         else:
             console.print(f"[red]{message}[/red]")
 
-    def _on_parallel_read(_item, read_args: dict, output: str) -> None:
-        _print_tool_card(
-            tool_call_card_from_args(
-                "read",
-                read_args,
-                output=output,
-                display_mode=get_setting(config, "tool_call_display"),
-            ),
-            config,
-            ui=ui,
-        )
-
-    def _on_parallel_web_search(_item, search_args: dict, output: str) -> None:
-        _print_tool_card(
-            tool_call_card_from_args(
-                "web_search",
-                search_args,
-                output=output,
-                display_mode=get_setting(config, "tool_call_display"),
-            ),
-            config,
-            ui=ui,
-        )
+    parallel_display = ParallelToolDisplay(config, ui)
 
     def _run_edit(edit_args: dict) -> str:
         output = dispatch_edit_tool(
@@ -1246,8 +1231,8 @@ def _build_tool_hooks(
         return output
 
     return ToolExecutionHooks(
-        on_parallel_read=_on_parallel_read,
-        on_parallel_web_search=_on_parallel_web_search,
+        on_parallel_tool_update=parallel_display.update,
+        on_parallel_batch_end=parallel_display.finish,
         run_edit=_run_edit,
         run_command=lambda args: _dispatch_run_command_with_ui(
             args,

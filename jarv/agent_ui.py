@@ -139,12 +139,29 @@ class RunningCommandCard:
         self._metadata = metadata
         self._display_mode = display_mode
         self._start = start_time
+        self._output = ""
+
+    def update_output(self, stdout: str, stderr: str) -> bool:
+        from .shell import truncate_command_output
+
+        # The full bounded capture remains available to the model. Keep the
+        # animated preview small enough to repaint without slowing the reader.
+        output = truncate_command_output(stdout, 1000, 3000)
+        if stderr:
+            output += "\n[stderr] " + truncate_command_output(stderr, 500, 1500)
+        if output == self._output:
+            return False
+        self._output = output
+        return True
 
     def __rich_console__(self, console, options):
         elapsed = int(max(0.0, time.perf_counter() - self._start))
+        body = command_line_renderable(self._command)
+        if self._output:
+            body = Group(body, Text(""), output_renderable(self._output, display_mode=self._display_mode))
         yield tool_card(
             "run_command",
-            command_line_renderable(self._command),
+            body,
             metadata=self._metadata,
             display_mode=self._display_mode,
             status=f"running {elapsed}s",

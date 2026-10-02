@@ -8,6 +8,7 @@ tool; only the artifact persists, transcripts are discarded.
 
 import concurrent.futures
 import json
+import queue
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -280,8 +281,8 @@ class ToolBatchResult:
 class ToolExecutionHooks:
     """Optional root-agent UI hooks; subagents leave these unset and use dispatch_tool."""
 
-    on_parallel_read: Callable[[object, dict, str], None] | None = None
-    on_parallel_web_search: Callable[[object, dict, str], None] | None = None
+    on_parallel_tool_update: Callable[[object, dict | None, str, ToolOutput], None] | None = None
+    on_parallel_batch_end: Callable[[BaseException | None], None] | None = None
     run_command: Callable[[dict], str] | None = None
     run_edit: Callable[[dict], str] | None = None
     run_spawn: Callable[[dict], str] | None = None
@@ -405,13 +406,20 @@ def execute_run_command(
     cancellation_token: CancellationToken | None = None,
     retained_store: RetainedOutputStore | None = None,
     shell_state: ShellState | None = None,
+    on_output=None,
 ) -> tuple[str, object, str | None]:
     """Execute a prepared shell command and return model output plus shell metadata."""
+    options = {}
+    if on_output is not None:
+        options["on_output"] = on_output
+    if not get_setting(config, "persistent_shell"):
+        options["persistent_shell"] = False
     result = execute_command(
         prepared.cmd,
         config.get("command_timeout", 60),
         cancellation_token=cancellation_token,
         shell_state=shell_state,
+        **options,
     )
     output, output_id = format_run_command_output(
         result,
@@ -570,6 +578,7 @@ def dispatch_parallel_safe_tool_batch(
     cancellation_token: CancellationToken | None = None,
     retained_store: RetainedOutputStore | None = None,
     on_tool_start: Callable[[object], None] | None = None,
+    on_tool_update: Callable[[object, dict | None, str, ToolOutput], None] | None = None,
 ) -> list[ToolBatchResult]:
     results = [ToolBatchResult(None, "") for _ in tool_calls]
     valid: list[tuple[int, object, dict]] = []
@@ -594,12 +603,29 @@ def dispatch_parallel_safe_tool_batch(
         assert args is not None
         valid.append((index, item, args))
 
+    # Reserve every card in call order before workers can complete out of order.
+    if on_tool_update is not None:
+        valid_args = {index: args for index, _item, args in valid}
+        for index, item in enumerate(tool_calls):
+            args = valid_args.get(index)
+            on_tool_update(item, args, "queued" if args is not None else "finished",
+                           results[index].output)
+
     if not valid:
         return results
 
+    started = queue.SimpleQueue()
+
     def run_one(item, args: dict) -> ToolOutput:
+        if cancellation_token is not None:
+            cancellation_token.throw_if_cancelled()
         if on_tool_start is not None:
             on_tool_start(item)
+        if on_tool_update is not None:
+            if len(valid) == 1:
+                on_tool_update(item, args, "running", "")
+            else:
+                started.put((item, args))
         return dispatch_tool(
             item.name,
             args,
@@ -615,6 +641,8 @@ def dispatch_parallel_safe_tool_batch(
     if len(valid) == 1:
         index, item, args = valid[0]
         results[index] = ToolBatchResult(args, run_one(item, args))
+        if on_tool_update is not None:
+            on_tool_update(item, args, "finished", results[index].output)
         return results
 
     executor = concurrent.futures.ThreadPoolExecutor(
@@ -625,9 +653,23 @@ def dispatch_parallel_safe_tool_batch(
         for index, item, args in valid
     }
     try:
-        for future in concurrent.futures.as_completed(futures):
-            index, args = futures[future]
-            results[index] = ToolBatchResult(args, future.result())
+        pending = set(futures)
+        while pending:
+            if cancellation_token is not None:
+                cancellation_token.throw_if_cancelled()
+            done, pending = concurrent.futures.wait(
+                pending, timeout=0.05, return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+            # Only this coordinator touches the UI. Workers may still unwind
+            # after cancellation; their queued notifications cannot revive cards.
+            while not started.empty():
+                item, args = started.get_nowait()
+                on_tool_update(item, args, "running", "")
+            for future in done:
+                index, args = futures[future]
+                results[index] = ToolBatchResult(args, future.result())
+                if on_tool_update is not None:
+                    on_tool_update(tool_calls[index], args, "finished", results[index].output)
     except (KeyboardInterrupt, TurnCancelled):
         if cancellation_token is not None:
             cancellation_token.cancel()
@@ -806,35 +848,31 @@ def execute_tool_calls(
             for safe_item in group:
                 emit_event(config, "tool_call", agent=agent_label, call_id=safe_item.call_id,
                            name=safe_item.name, arguments=safe_item.arguments)
-            batch_results = dispatch_parallel_safe_tool_batch(
-                group,
-                node=node,
-                store=store,
-                client=client,
-                config=config,
-                spawn_observer=spawn_observer,
-                cancellation_token=cancellation_token,
-                retained_store=retained_store,
-                on_tool_start=hooks.on_tool_start,
-            )
+            batch_error = None
+            try:
+                batch_results = dispatch_parallel_safe_tool_batch(
+                    group,
+                    node=node,
+                    store=store,
+                    client=client,
+                    config=config,
+                    spawn_observer=spawn_observer,
+                    cancellation_token=cancellation_token,
+                    retained_store=retained_store,
+                    on_tool_start=hooks.on_tool_start,
+                    on_tool_update=hooks.on_parallel_tool_update,
+                )
+            except BaseException as exc:
+                batch_error = exc
+                raise
+            finally:
+                if hooks.on_parallel_batch_end is not None:
+                    hooks.on_parallel_batch_end(batch_error)
             for safe_item, batch_result in zip(group, batch_results):
                 output = batch_result.output
-                # Hooks get the pre-nudge output: the web_search read nudge
-                # appended below is model-facing and must not reach the card.
-                if safe_item.name == "read" and batch_result.args is not None:
-                    if hooks.on_parallel_read is not None:
-                        hooks.on_parallel_read(
-                            safe_item,
-                            batch_result.args,
-                            summarize_tool_output(output),
-                        )
-                elif safe_item.name == "web_search" and batch_result.args is not None:
-                    if hooks.on_parallel_web_search is not None:
-                        hooks.on_parallel_web_search(
-                            safe_item,
-                            batch_result.args,
-                            summarize_tool_output(output),
-                        )
+                # Progress receives pre-nudge output; this instruction is only
+                # for the model. Results still enter its input in call order.
+                if safe_item.name == "web_search" and batch_result.args is not None:
                     if not result.web_search_read_nudge_sent:
                         output = append_web_search_read_nudge(output)
                         result.web_search_read_nudge_sent = True
@@ -949,6 +987,24 @@ def _subagent_max_tokens(config: dict) -> int | None:
 
 
 def run_subagent_loop(
+    node: AgentNode,
+    store: ArtifactStore,
+    client,
+    config: dict,
+    spawn_observer: "SpawnObserver | None" = None,
+    cancellation_token: CancellationToken | None = None,
+    retained_store: RetainedOutputStore | None = None,
+) -> tuple[str | None, str]:
+    try:
+        return _run_subagent_loop(
+            node, store, client, config, spawn_observer,
+            cancellation_token, retained_store,
+        )
+    finally:
+        node.shell_state.close()
+
+
+def _run_subagent_loop(
     node: AgentNode,
     store: ArtifactStore,
     client,

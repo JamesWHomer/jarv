@@ -228,6 +228,7 @@ def _tool_call_renderable(
     *,
     display_mode: str = "fullscreen",
     expanded: bool = False,
+    status_override: tuple[str, str] | None = None,
 ):
     """Render a tool call as one card: header (icon \u00b7 metadata \u00b7 status pill),
     an input summary, and an optional result preview. Every tool goes through
@@ -244,6 +245,8 @@ def _tool_call_renderable(
     if not failed and outcome is not None and outcome.status in {"running", "unknown"}:
         status = outcome.status
         status_style = "yellow"
+    if status_override is not None:
+        status, status_style = status_override
     metadata = ""
 
     if name == "run_command" and args is not None:
