@@ -1,0 +1,62 @@
+[project]
+site_name = "Jarv"
+site_description = "A scriptable, multi-provider AI agent for the terminal."
+site_url = "https://jameshomer.dev/jarv/"
+repo_url = "https://github.com/JamesWHomer/jarv"
+repo_name = "JamesWHomer/jarv"
+edit_uri = "edit/main/docs/"
+docs_dir = "docs"
+site_dir = "site"
+copyright = "Jarv · MIT License"
+nav = [
+  { "Home" = "index.md" },
+  { "Getting started" = "getting-started.md" },
+  { "Guides" = [
+    { "Usage" = "usage.md" },
+    { "Tools and safety" = "tools.md" },
+    { "Sessions" = "sessions.md" },
+    { "Models and providers" = "models.md" },
+  ] },
+  { "Reference" = [
+    { "CLI flags" = "cli.md" },
+    { "Slash commands" = "commands.md" },
+    { "Configuration" = "configuration.md" },
+    { "Local files and usage" = "storage.md" },
+  ] },
+  { "Contributing" = [
+    { "Development" = "development.md" },
+    { "Documentation" = "documentation.md" },
+  ] },
+]
+
+[project.theme]
+variant = "modern"
+language = "en"
+features = [
+  "content.action.edit",
+  "content.code.copy",
+  "navigation.footer",
+  "navigation.sections",
+  "navigation.top",
+  "search.highlight",
+]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+primary = "indigo"
+accent = "indigo"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+primary = "indigo"
+accent = "indigo"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to light mode"
+
+[project.validation]
+invalid_links = true
+invalid_link_anchors = true

@@ -1,5 +1,7 @@
 # jarv
 
+[Documentation](https://jameshomer.dev/jarv/) · [Documentation source and preview guide](docs/documentation.md)
+
 **An AI agent that behaves like a shell tool.** Pipe into it, script it, and point it at any model — cloud or local. Jarv runs commands, edits files, searches the web, and fans work out to parallel subagents, from a single binary with three dependencies.
 
 ```bash

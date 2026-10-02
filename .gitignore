@@ -151,7 +151,7 @@ venv.bak/
 # Rope project settings
 .ropeproject
 
-# mkdocs documentation
+# Zensical documentation output (Markdown source in docs/ is tracked)
 /site
 
 # mypy
