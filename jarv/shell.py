@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .cancellation import CancellationToken, TurnCancelled
 from rich.console import Group
@@ -105,6 +105,10 @@ class ShellState:
 
     cwd: str
     env: dict[str, str] | None = None
+    _worker: object = field(default=None, init=False, repr=False, compare=False)
+    _worker_finalizer: object = field(default=None, init=False, repr=False, compare=False)
+    _command_lock: object = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
+    _worker_disabled: bool = field(default=False, init=False, repr=False, compare=False)
 
     @classmethod
     def initial(cls) -> "ShellState":
@@ -112,6 +116,15 @@ class ShellState:
 
     def copy(self) -> "ShellState":
         return ShellState(self.cwd, dict(self.env) if self.env is not None else None)
+
+    def close(self) -> None:
+        """Release this agent's idle shell; keep its last committed cwd/env."""
+        worker, self._worker = self._worker, None
+        if self._worker_finalizer is not None:
+            self._worker_finalizer.detach()
+            self._worker_finalizer = None
+        if worker is not None:
+            worker.close()
 
 
 _session_shell_state: ShellState | None = None
@@ -387,6 +400,8 @@ class InteractiveCommandProcess:
         command: str,
         shell_state: ShellState | None = None,
     ) -> "InteractiveCommandProcess":
+        if shell_state is not None:
+            shell_state.close()
         invocation = build_shell_invocation(command, shell_state)
         # Unbuffered binary pipes: the reader threads decode incrementally and
         # a single read returns whatever bytes are available, so output can be
@@ -767,6 +782,9 @@ def execute_command(
     timeout: int | float = 60,
     cancellation_token: CancellationToken | None = None,
     shell_state: ShellState | None = None,
+    *,
+    persistent_shell: bool = True,
+    on_output=None,
 ) -> CommandResult:
     try:
         timeout = float(timeout)
@@ -774,6 +792,51 @@ def execute_command(
             timeout = 60
     except (TypeError, ValueError):
         timeout = 60
+
+    if cancellation_token is not None:
+        cancellation_token.throw_if_cancelled()
+    if shell_state is None:
+        return _execute_command_fresh(command, timeout, cancellation_token, None, on_output)
+
+    # One shell per ShellState, not per process or thread. Sibling agents have
+    # independent states, while concurrent callers of one state are serialized.
+    deadline = time.monotonic() + timeout
+    while not shell_state._command_lock.acquire(timeout=0.02):
+        if cancellation_token is not None:
+            cancellation_token.throw_if_cancelled()
+        if time.monotonic() >= deadline:
+            return CommandResult(command, "", "", None, timed_out=True, timeout=timeout)
+    try:
+        if not os.path.isdir(shell_state.cwd):
+            shell_state.close()
+            shell_state.cwd = os.getcwd()
+        if platform.system() == "Windows" and persistent_shell and not shell_state._worker_disabled:
+            import weakref
+            from .powershell_worker import PowerShellWorker, WorkerUnavailable
+
+            worker = shell_state._worker
+            if worker is None or worker.closed or (worker.proc is not None and worker.proc.poll() is not None):
+                shell_state.close()
+                worker = PowerShellWorker()
+                shell_state._worker = worker
+                shell_state._worker_finalizer = weakref.finalize(shell_state, worker.close)
+            try:
+                return worker.run(command, shell_state, timeout, cancellation_token, on_output)
+            except WorkerUnavailable as exc:
+                import logging
+                logging.getLogger(__name__).debug("Using fresh PowerShell: %s", exc)
+                # Startup incompatibility disables repeated attempts for this
+                # state. An explicitly unsupported command can try again next
+                # time. Both cases guarantee that no user code ran yet.
+                if exc.disable:
+                    shell_state._worker_disabled = True
+                shell_state.close()
+        return _execute_command_fresh(command, timeout, cancellation_token, shell_state, on_output)
+    finally:
+        shell_state._command_lock.release()
+
+
+def _execute_command_fresh(command, timeout, cancellation_token, shell_state, on_output):
 
     process = None
     try:
@@ -790,14 +853,20 @@ def execute_command(
                 cancellation_token.throw_if_cancelled()
             # Noninteractive commands should see EOF on stdin immediately.
             process.close_stdin()
+            next_preview = 0
             while process.proc.poll() is None:
                 if cancellation_token is not None:
                     cancellation_token.throw_if_cancelled()
                 remaining = timeout - (time.monotonic() - started)
                 if remaining <= 0:
                     raise subprocess.TimeoutExpired(command, timeout)
+                if on_output is not None and time.monotonic() >= next_preview:
+                    on_output(process.stdout, process.stderr)
+                    next_preview = time.monotonic() + 0.1
                 time.sleep(min(0.02, remaining))
             snapshot = process.wait_until_idle(cancellation_token=cancellation_token)
+            if on_output is not None:
+                on_output(snapshot.stdout, snapshot.stderr)
             return CommandResult(command, snapshot.stdout, snapshot.stderr,
                                  snapshot.exit_code, timeout=timeout)
         except (KeyboardInterrupt, TurnCancelled):

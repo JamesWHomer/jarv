@@ -190,6 +190,10 @@ Jarv uses a multi-provider tool-calling agent loop (OpenAI Responses API, Anthro
 
 Each tool can be enabled or disabled from `jarv /settings`. Disabled tools are not sent to the model and are also unavailable to spawned subagents. The subagent-only `finish` tool remains enabled so child agents can always return their result.
 
+On Windows, noninteractive commands reuse a PowerShell process per agent to avoid repeated startup. Each command gets a fresh execution context: working directory and environment carry forward, while ordinary variables, functions, and preferences reset. Output appears while commands run. The first command pays the startup cost; subsequent commands reuse the process. Cancellation, timeouts, or a crashed worker cause the next command to start a new one from the last saved directory and environment.
+
+Interactive commands, explicit shell flow control (`exit`, `return`, `break`, `continue`), `Add-Type`, and explicit background launches such as `Start-Process` use the fresh-process runner. Jarv also falls back if the worker cannot start. Unexpected child processes left in a reusable worker are terminated before it is replaced; use `-c persistent_shell=false` for scripts that intentionally leave background processes running. A command already sent to a worker is never automatically retried after a failure. Turn **Reuse PowerShell** off in `/settings` to always use fresh processes.
+
 On Windows, commands run through PowerShell. On other platforms, they run through the system shell.
 
 `run_command` returns a head and tail of the output, sized by its `head_chars`/`tail_chars` arguments (omitted values split `max_tool_output_chars` between the two sides). When output is truncated, Jarv retains the full result under a session-scoped `cmd_<id>` so the model can fetch the rest with `read`.
@@ -323,6 +327,7 @@ Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` f
 | `interactive_commands` | `false` | Experimental. Hold a command that is waiting on stdin open and let the model type into it. |
 | `command_timeout` | `60` | Seconds before non-interactive shell commands are killed, or before interactive commands check in again. |
 | `interactive_max_rounds` | `40` | Model interaction rounds allowed for one interactive command before Jarv kills the process. Only used when `interactive_commands` is on. |
+| `persistent_shell` | `true` | Reuse PowerShell for noninteractive Windows commands with an isolated execution context per command. Disable to always start a fresh process. |
 | `web_timeout` | `15` | Seconds before a web search or URL read is killed. |
 | `command_safety` | `"risky"` | Command confirmation level: `all` (confirm every command), `risky` (confirm dangerous commands only), `none` (no confirmation). |
 | `audit` | `true` | LLM auditor for flagged commands. |
