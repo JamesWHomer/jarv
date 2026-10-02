@@ -1,8 +1,10 @@
 # Working on the documentation
 
 Jarv's documentation is written in Markdown under `docs/` and built with
-[Zensical](https://zensical.org/). The published site is
-[jameshomer.dev/jarv](https://jameshomer.dev/jarv/).
+[Zensical](https://zensical.org/). Hosting is configured for Read the Docs;
+the project must be connected there before a hosted address is available.
+The [documentation source](https://github.com/JamesWHomer/jarv/tree/main/docs)
+can always be read on GitHub.
 
 ## Preview locally
 
@@ -42,43 +44,56 @@ uv run --no-project --with-requirements requirements-docs.txt zensical serve
 2. Add new pages to `project.nav` in `zensical.toml`.
 3. Link to other pages with relative Markdown paths, such as
    `[Usage](usage.md)`. Zensical turns these into site URLs.
-4. Keep overlapping examples in the repository README consistent with the guides.
+4. Keep the README focused on installation and first use; put detailed guides
+   and reference material in `docs/`.
 5. Run a clean, strict build before opening a pull request.
 
 With uv:
 
 ```bash
-uv run --no-project --with-requirements requirements-docs.txt zensical build --clean --strict
+uv run --no-project --with-requirements requirements-docs.txt python scripts/build_docs.py
 ```
 
-With the virtual environment above, replace `serve` with `build --clean --strict`.
+With the virtual environment above, run its Python executable with
+`scripts/build_docs.py` (for example,
+`.venv/docs/bin/python scripts/build_docs.py` on macOS/Linux).
 The build checks internal links and heading anchors and fails on warnings.
 Generated HTML goes into `site/`; that directory and Zensical's `.cache/`
 are ignored by Git. Commit the Markdown, configuration, and dependency file.
 
-## GitHub Pages
+## Read the Docs
+
+The repository's `.readthedocs.yaml` installs `requirements-docs.txt`, runs a
+clean, strict Zensical build, and copies the generated site into Read the Docs'
+HTML output directory. Both Read the Docs and GitHub Actions use Python 3.12.
+
+### Connect the repository
+
+1. Sign in to [Read the Docs Community](https://app.readthedocs.org/).
+2. Add `JamesWHomer/jarv` using its GitHub integration, granting the integration
+   access to this repository. Confirm the available project slug in the form.
+3. Use `main` as the default branch and `.readthedocs.yaml` as the configuration file.
+4. Complete the import and check the first `latest` build.
+5. Enable pull-request builds in the project's settings if preview builds are wanted.
+6. Replace the GitHub documentation links in `README.md` and `pyproject.toml`
+   with the assigned public documentation URL after that build succeeds.
+
+See the [Read the Docs import guide](https://docs.readthedocs.com/platform/stable/intro/add-project.html).
+The GitHub integration triggers builds when changes are pushed. Release versions
+can be activated in Read the Docs once their tags include `.readthedocs.yaml`.
+
+### Site addresses and validation
+
+`scripts/build_docs.py` uses Read the Docs' `READTHEDOCS_CANONICAL_URL` in a
+temporary Zensical configuration. This gives each build its assigned domain,
+language, and version path, including pull-request previews. Local builds use
+`http://localhost:8000/`. The tracked `zensical.toml` is not rewritten by builds.
 
 The [Documentation workflow](https://github.com/JamesWHomer/jarv/actions/workflows/docs.yml)
-builds documentation changes in pull requests. Pushes to `main` that change
-`docs/`, `zensical.toml`, `requirements-docs.txt`, or the workflow also publish
-the resulting site. A manual **Run workflow** on `main` can redeploy it.
-Pull requests and manual runs on other branches only build the site.
-
-In the repository's **Settings → Pages → Build and deployment**, the source
-must be **GitHub Actions**. The deployment uses the `github-pages` environment
-and GitHub's built-in token with `pages: write` and `id-token: write` permissions.
-No personal access token or `gh-pages` branch is needed.
-
-The project inherits `jameshomer.dev` from the account's existing GitHub Pages
-site, with HTTPS enforced. It does not need its own `CNAME` file. See GitHub's
-[custom domain documentation](https://docs.github.com/en/pages/configuring-a-custom-domain-for-your-github-pages-site/about-custom-domains-and-github-pages)
-for how project sites inherit that domain.
-
-The site URL in `zensical.toml` includes the `/jarv/` repository path. If the
-repository moves or its domain changes, update that URL and the documentation
-links in `README.md` and `pyproject.toml` together.
+only validates builds on GitHub. It has no deployment job or Pages permissions.
+GitHub Pages should remain disabled for this repository.
 
 To update Zensical, change its pinned version in `requirements-docs.txt`, reinstall
 the documentation dependencies, and check a clean build and local preview.
-See [Zensical's publishing guide](https://zensical.org/docs/publish-your-site/)
-for the upstream deployment instructions.
+See [Deploying Zensical on Read the Docs](https://docs.readthedocs.com/platform/latest/intro/zensical.html)
+for the upstream build instructions.

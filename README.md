@@ -1,404 +1,73 @@
 # jarv
 
-[Documentation](https://jameshomer.dev/jarv/) · [Documentation source and preview guide](docs/documentation.md)
+**An AI agent that behaves like a shell tool.** Pipe into it, script it, and point it at a supported provider — cloud or local. Jarv runs commands, edits files, searches the web, and delegates work to parallel subagents.
 
-**An AI agent that behaves like a shell tool.** Pipe into it, script it, and point it at any model — cloud or local. Jarv runs commands, edits files, searches the web, and fans work out to parallel subagents, from a single binary with three dependencies.
+[Documentation](https://github.com/JamesWHomer/jarv/blob/main/docs/index.md) · [CLI reference](https://github.com/JamesWHomer/jarv/blob/main/docs/cli.md) · [Releases](https://github.com/JamesWHomer/jarv/releases)
 
 ```bash
-git diff | jarv review this patch       # pipe anything in, like any other unix tool
-jarv what process is using port 8080?   # one-shot: answers (running commands if needed), then exits
-jarv commit all these files             # let it run commands to do the job
-jarv                                    # start an interactive session
+git diff | jarv review this patch
+jarv what process is using port 8080?
+jarv --no-tools "Explain this error"
+jarv
 ```
 
 ![jarv interactive session](https://github.com/JamesWHomer/jarv/releases/download/readme-assets/hero.webp)
 
-## Why jarv?
+## Why Jarv?
 
-The official vendor CLIs (Claude Code, Codex CLI, Gemini CLI) are strong interactive coding agents for their own models. Jarv makes different trade-offs:
-
-- **Scriptable first.** One-shot mode and piped stdin are core, not an afterthought: `rg TODO . | jarv group these by subsystem` works the way you'd expect a Unix tool to. Use it in scripts, aliases, and pipelines.
-- **Any model, including local.** OpenAI, Anthropic, Gemini, OpenRouter, Groq, DeepSeek, Together, and Fireworks — or fully local with Ollama, LM Studio, and vLLM. Switch per run with `--provider`/`-m`. No lock-in, no subscription.
-- **Lightweight.** A standalone binary, or a small Python package with three runtime dependencies. No Node runtime.
-- **A terminal agent, not just a coding agent.** Each terminal window is bound to its own persistent session, so jarv doubles as a general assistant that remembers context per window — with undo/redo, a forkable history tree, and usage tracking built in.
+- **Scriptable:** use one-shot prompts, piped input, and JSON output in scripts and pipelines.
+- **Multi-provider:** choose OpenAI, Anthropic, Gemini, OpenRouter, Groq, DeepSeek, Together, or Fireworks, or run local models with Ollama, LM Studio, or vLLM.
+- **Lightweight:** install a standalone binary with its Python runtime bundled, or a Python package with four direct runtime dependencies. No Node runtime.
+- **Persistent sessions:** keep context per terminal, browse conversation history, and fork earlier prompts. Undo and redo change conversation history; they do not reverse tool actions.
 
 ## Install
 
-Jarv can be installed as a standalone binary or as a Python package. After installing, run `jarv /setup` to choose a provider, enter an API key, and pick a model.
+Choose one installation method.
+
+**Windows PowerShell:**
 
 ```powershell
 irm https://github.com/JamesWHomer/jarv/releases/latest/download/install.ps1 | iex
 ```
 
+**macOS or Linux:**
+
 ```bash
 curl -fsSL https://github.com/JamesWHomer/jarv/releases/latest/download/install.sh | sh
+```
+
+**Python 3.10+ with uv:**
+
+```bash
 uv tool install jarv
-pipx install jarv
-pip install jarv
 ```
 
-Python package installs require **Python 3.10+**. Keys can also be set via provider-specific environment variables or `jarv /set`.
+`pipx install jarv` and `pip install jarv` are also supported. See the [installation guide](https://github.com/JamesWHomer/jarv/blob/main/docs/getting-started.md) for API keys, updates, and uninstalling.
 
-To upgrade:
+## First run
 
 ```bash
-jarv /update
+jarv /setup
+jarv --no-tools "Say hello"
+jarv
 ```
 
-Scoop, WinGet, and Homebrew installs show the owning package manager's update command to run after exiting Jarv. Direct standalone and Python installs update automatically; editable source installs are left untouched.
+The setup wizard selects a provider, API key when needed, and model. The one-shot example checks the connection without enabling tools; `jarv` by itself opens an interactive session. Local providers need a running model server and do not require an API key.
 
-![jarv update demo](https://github.com/JamesWHomer/jarv/releases/download/readme-assets/update.webp)
+## Documentation
 
-### Uninstall
+The Markdown guides in [`docs/`](https://github.com/JamesWHomer/jarv/tree/main/docs) are the main source of detailed documentation:
 
-Jarv can detect how it was installed and either uninstall the standalone binary or show the exact package-manager command to run:
+- [Getting started](https://github.com/JamesWHomer/jarv/blob/main/docs/getting-started.md) — installation, provider setup, and first use.
+- [Usage](https://github.com/JamesWHomer/jarv/blob/main/docs/usage.md) — one-shot prompts, pipelines, and interactive mode.
+- [Tools and safety](https://github.com/JamesWHomer/jarv/blob/main/docs/tools.md) — command approval, file access, and subagents.
+- [Sessions](https://github.com/JamesWHomer/jarv/blob/main/docs/sessions.md) — conversation history, branches, and undo/redo.
+- [Reference](https://github.com/JamesWHomer/jarv/blob/main/docs/cli.md) — CLI flags, [slash commands](https://github.com/JamesWHomer/jarv/blob/main/docs/commands.md), and [configuration](https://github.com/JamesWHomer/jarv/blob/main/docs/configuration.md).
 
-```bash
-jarv /uninstall
-```
+## Development
 
-The standalone uninstall scripts also work when the binary is unavailable:
-
-```powershell
-irm https://github.com/JamesWHomer/jarv/releases/latest/download/uninstall.ps1 | iex
-```
-
-```bash
-curl -fsSL https://github.com/JamesWHomer/jarv/releases/latest/download/uninstall.sh | sh
-```
-
-Package-manager commands are `winget uninstall JamesWHomer.Jarv`, `brew uninstall jarv`, `scoop uninstall jarv`, `uv tool uninstall jarv`, `pipx uninstall jarv`, or `python -m pip uninstall jarv`.
-
-Your data stays in `~/.jarv`; add `--purge` to remove it and cached clipboard images too, and `--yes` to skip the confirmation prompt (required in non-interactive shells). For `uninstall.ps1`, parameters can't pass through `| iex` — use:
-
-```powershell
-& ([ScriptBlock]::Create((irm https://github.com/JamesWHomer/jarv/releases/latest/download/uninstall.ps1))) -Purge
-```
-
-## Usage
-
-### One-shot mode
-
-Pass a prompt as arguments. Jarv answers (running commands if needed) and exits.
-
-```bash
-jarv what process is using port 8080?
-jarv find all TODO comments in src/
-```
-
-Jarv also accepts piped stdin as one-shot input. If you pass both stdin and prompt arguments, the arguments are treated as the instruction and stdin is attached as context.
-
-```bash
-git diff | jarv review this patch
-cat README.md | jarv summarize this
-rg TODO . | jarv group these by subsystem
-```
-
-![jarv one-shot and piped stdin](https://github.com/JamesWHomer/jarv/releases/download/readme-assets/oneshot.webp)
-
-### Heads-up mode
-
-Run `jarv` with no arguments to enter an interactive prompt loop.
-
-```
-jarv> what files changed today?
-jarv> now run the tests
-jarv> /history
-jarv> /new
-```
-
-- Type a prompt and press Enter.
-- Slash commands start with `/` — type `/help` to list them.
-- Ctrl+V (or Alt+V if your terminal owns Ctrl+V, e.g. Windows Terminal) attaches a copied image or image file as an `[Image #N]` chip for image-capable models.
-- During a response, Esc or Ctrl+C stops further work, checkpoints the turn in history/context, and restores the prompt for editing. Use `/undo` to remove the turn.
-- At the prompt, Esc or Ctrl+C clears existing text; press either again on an empty prompt to exit.
-- You can also exit with `exit`, `quit`, or `/exit`.
-
-### Flags
-
-Flags override settings for one invocation without changing saved config. Dedicated flags take precedence over `--config`; repeated `--config` keys use the last value. Most flags work in both one-shot and heads-up mode. `--output-format`, `--quiet`, `--verbose`, and `--non-interactive` require a prompt or non-empty stdin and never open heads-up mode. Runtime flags cannot be combined with slash commands.
-
-| Flag | Short | Description |
-| --- | --- | --- |
-| `--provider PROVIDER` | | Override the provider (`openai`, `anthropic`, `gemini`, etc.) |
-| `--model MODEL` | `-m` | Override the model (e.g. `gpt-5.4-mini`) |
-| `--effort EFFORT` | `-e` | Override reasoning effort with a value supported by the selected model |
-| `--timeout SECONDS` | | Override shell command timeout/check-in seconds |
-| `--system PROMPT` | `-s` | Override the system prompt |
-| `--new` | | Start a fresh session (ignore prior history, but still save) |
-| `--incognito` | | Don't load or save session history |
-| `--session ID` | | Use or create a named session without rebinding the terminal; archived sessions must be restored first |
-| `--config KEY=VALUE` | `-c` | Repeatable, validated setting override; lists/maps use JSON |
-| `--cwd PATH` | `-C` | Working directory for commands, files, and project context |
-| `--base-url URL` | | Override the provider API endpoint |
-| `--service-tier TIER` | | `standard`, `flex`, `priority`, or `ultrafast`, where supported by the active provider/model |
-| `--command-safety LEVEL` | | Override command/edit approval policy: `all`, `risky`, or `none` |
-| `--tools LIST` | | Allow only these comma-separated tools, including for subagents |
-| `--no-tools` | | Disable all agent tools |
-| `--max-turns N` | | Maximum agent model turns shared by the root and all subagents |
-| `--run-timeout SECONDS` | | Cancel the entire agent run at a deadline, including active commands and subagents |
-| `--non-interactive` | | Never prompt for setup, clarification, or approval; fail if user input is required |
-| `--output-format FORMAT` | | Clean final `text`, one `json` result, or streaming `jsonl` events on stdout; diagnostics go to stderr |
-| `--prompt-file PATH` | | Read a UTF-8 prompt file instead of a positional prompt; piped stdin can still be attached |
-| `--system-file PATH` | | Read a UTF-8 system prompt file instead of `--system` |
-| `--no-project-context` | | Skip project instructions and git context |
-| `--no-update-check` | | Skip background update checks |
-| `--no-color` | | Disable colour (also supported through `NO_COLOR`) |
-| `--quiet` | `-q` | Clean one-shot answer with progress suppressed; errors remain on stderr |
-| `--verbose` | | Clean one-shot answer with runtime details and progress on stderr |
-| `--version` | | Print the version and exit |
-
-```bash
-jarv --provider anthropic -m claude-sonnet-4-6 "summarise this repo"
-jarv -m gpt-5.4-mini "summarise this repo"
-jarv --effort high "refactor the auth module"
-jarv --new "start fresh without prior context"
-jarv --incognito "one-off task, leave no trace"
-jarv --timeout 120 --system "You are a poet" "write me a haiku"
-git diff | jarv --non-interactive --output-format json --no-tools "review this patch"
-jarv -C ./my-project --session nightly --max-turns 20 --run-timeout 300 "check the project"
-jarv --prompt-file review.txt --system-file reviewer.txt --tools read,web_search
-jarv -c audit=false -c max_tool_output_chars=40000 --command-safety all "investigate"
-```
-
-For Astra Ultrafast, run `jarv --provider openai --model gpt-6-astra --service-tier ultrafast "your task"`, or select **Processing tier → ultrafast** in `/settings` after selecting Astra. Standard remains the default. Ultrafast uses the existing HTTP streaming transport and keeps your reasoning effort unchanged.
-
-Jarv currently offers Ultrafast only for `gpt-6-astra` at the direct OpenAI Responses endpoint (`https://api.openai.com/v1`). It uses API billing, with token rates at 6x Standard, including the applicable cache and long-context rates. See [OpenAI's Ultrafast guide](https://developers.openai.com/api/docs/guides/ultrafast-mode) and [API pricing](https://developers.openai.com/api/docs/pricing?latest-pricing=ultrafast). Custom gateways and regional endpoints are not enabled for this tier.
-
-Subagents inherit the selected tier. The command auditor uses Standard because it calls Chat Completions. Changing to an incompatible model or endpoint resets a saved Ultrafast preference to Standard with a notice; explicitly requesting an incompatible combination fails validation. Provider errors are surfaced without changing tiers. Usage records retain requested and served tiers; when the served tier is missing, Ultrafast cost remains unknown unless the provider reports a cost.
-
-`--new`, `--incognito`, and `--session` are mutually exclusive. So are `--tools`/`--no-tools`, `--quiet`/`--verbose`, and `--system`/`--system-file`. File arguments are resolved relative to the directory where Jarv was launched, before `--cwd` is applied. Prompt-file contents are always treated as a prompt, even when they begin with a slash command name.
-
-`--tools` replaces the saved disabled-tool selection for this invocation. Available names are `run_command`, `web_search`, `read`, `edit`, `spawn`, and `ask_user`; subagents keep their internal `finish` tool. To restrict a run to reading, omit both `run_command` and `edit` from the allowlist.
-
-`--non-interactive` preserves the selected safety policy. Commands that need human approval fail with exit code 3; it never implicitly grants approval. Under `risky`, the auditor can still approve a command if auditor auto-approval is enabled. `ask_user` also ends an unattended run with code 3. `--max-turns` counts agent response rounds, including subagent rounds and interactive-command continuations; transport retries, audits, and history compaction do not count. `--run-timeout` uses cooperative cancellation and allows resource cleanup to finish. In heads-up mode, these limits restart for each submitted prompt.
-
-Machine output uses a final result object with `type`, `status`, `text`, `error`, `session_id`, `turns`, and `exit_code`. `status` is `success`, `error`, `cancelled`, `input_required`, or `limit`. JSONL additionally emits `start`, `turn_start`, `text_delta`, `tool_call`, `tool_result`, and `retry` events. Tool events identify the agent and call ID; text deltas identify the root turn. On `retry`, discard that turn's previous deltas; the final result's `text` is authoritative. Progress and errors never enter protocol stdout. Invalid arguments rejected by the parser use normal stderr usage messages before the output protocol starts.
-
-Exit codes: **0** success, **1** agent/provider failure or run limit, **2** invalid invocation, **3** required input unavailable, **130** cancellation. Without explicit output/verbosity flags, existing terminal rendering is preserved.
-
-## How it works
-
-Jarv uses a multi-provider tool-calling agent loop (OpenAI Responses API, Anthropic Messages, Gemini, and OpenAI-compatible endpoints). The root model can call six tools:
-
-| Tool | Purpose |
-| --- | --- |
-| `run_command` | Execute a shell command (and, with interactive commands enabled, answer its stdin prompts) |
-| `web_search` | Search the web through DuckDuckGo's public HTML endpoint |
-| `read` | Page through command output, artifacts, URLs, or local files |
-| `edit` | Make an exact string replacement in an existing text file |
-| `spawn` | Fan out work to parallel subagents, each with their own tool access |
-| `ask_user` | Ask you a question and wait for a reply |
-
-Each tool can be enabled or disabled from `jarv /settings`. Disabled tools are not sent to the model and are also unavailable to spawned subagents. The subagent-only `finish` tool remains enabled so child agents can always return their result.
-
-On Windows, noninteractive commands reuse a PowerShell process per agent to avoid repeated startup. Each command gets a fresh execution context: working directory and environment carry forward, while ordinary variables, functions, and preferences reset. Output appears while commands run. The first command pays the startup cost; subsequent commands reuse the process. Cancellation, timeouts, or a crashed worker cause the next command to start a new one from the last saved directory and environment.
-
-Interactive commands, explicit shell flow control (`exit`, `return`, `break`, `continue`), `Add-Type`, and explicit background launches such as `Start-Process` use the fresh-process runner. Jarv also falls back if the worker cannot start. Unexpected child processes left in a reusable worker are terminated before it is replaced; use `-c persistent_shell=false` for scripts that intentionally leave background processes running. A command already sent to a worker is never automatically retried after a failure. Turn **Reuse PowerShell** off in `/settings` to always use fresh processes.
-
-On Windows, commands run through PowerShell. On other platforms, they run through the system shell.
-
-`run_command` returns a head and tail of the output, sized by its `head_chars`/`tail_chars` arguments (omitted values split `max_tool_output_chars` between the two sides). When output is truncated, Jarv retains the full result under a session-scoped `cmd_<id>` so the model can fetch the rest with `read`.
-
-Interactive commands are an experimental feature, disabled by default; turn them on with the **Interactive commands** toggle in `jarv /settings` (`interactive_commands`). While they are off, every command runs to completion or is killed at `command_timeout`, and nothing can be typed into a process that blocks on a prompt.
-
-With them on, a command that stays alive after its output goes idle is treated as waiting for stdin: the model's next response is sent to the process instead of printed as chat, and the loop repeats until the command exits or is cancelled. Each step shows only the new output since the previous interaction. During this loop, `command_timeout` becomes a check-in interval rather than a kill timer — Jarv asks the model what to do next instead of terminating the process.
-
-In the terminal, command output uses at most one-third of the screen height, and Jarv shows the resolved `head_chars` and `tail_chars` for each command.
-
-`read(input, offset, size)` pages through retained command output, artifacts, HTTP(S) URLs, and local files using Unicode character offsets. PDFs with embedded text are extracted with page markers (scanned/image-only PDFs are not OCR'd), and consecutive reads in one model response run concurrently.
-
-Image reads (`png`, `jpeg`, `webp`, and provider-supported `gif`) are returned as native multimodal input when the active model advertises image support; otherwise Jarv returns a short "image reads unavailable" notice instead of base64 text.
-
-Web search and URL reads need no extra API key. `web_search` pages through DuckDuckGo results; URL reads preserve links as absolute URLs, don't execute JavaScript, cap responses at 2 MiB, and mark fetched pages as untrusted content.
-
-### Project context
-
-At the start of each request, jarv looks for a project instructions file — `JARV.md`, then `AGENTS.md`, then `CLAUDE.md` — starting in the working directory and walking up to the git root (outside a repository, only the working directory is checked). The first match is injected into the system prompt, together with the current git branch, clean/dirty status, and the last five commits, so the model starts aware of the project it is in.
-
-Disable with `project_context`; cap the injected file size with `project_context_max_chars`. Git info is skipped silently when git is not installed or the directory is not a repository.
-
-### Command safety
-
-Before executing a shell command, jarv can prompt you for confirmation. The `command_safety` config key controls this:
-
-| Level | Behavior |
-| --- | --- |
-| `risky` (default) | Prompts for confirmation when a command matches dangerous patterns — recursive deletion, privilege escalation, network exfiltration, disk formatting, credential access, force pushes, and more. |
-| `all` | Every command requires your explicit approval before running, even when the auditor recommends approval. |
-| `none` | Commands run immediately with no confirmation prompt. |
-
-The same levels gate `edit` calls: risky edits (files outside the working directory, hidden files, secrets, system paths) show a diff preview for approval under `risky`, every edit does under `all`.
-
-Set the level in the settings menu (`jarv /settings`) or at any time with:
-
-```bash
-jarv /set command_safety risky    # default — confirm dangerous commands
-jarv /set command_safety all      # confirm everything
-jarv /set command_safety none     # no prompts
-```
-
-### Subagent orchestration
-
-When the model calls `spawn`, Jarv runs N child agents in parallel. Each child operates independently — running commands, reasoning through subtasks — and terminates by calling `finish` with a detailed report and a short summary. The parent agent can then read any child's full output via `read`.
-
-- **Parallel by default** — all children in a `spawn` call run concurrently in a thread pool.
-- **Unique artifact labels** — use a new child label across successive and nested `spawn` calls in a session. Colliding batches are rejected before any child starts, preserving earlier reports.
-- **Artifacts** — each child's output is stored as a named artifact. The parent (or siblings that declare a dependency) can fetch the full content.
-- **Recursive** — children can themselves spawn further children, up to `max_subagent_depth` levels deep (default 4). Children are sterile by default; the parent must explicitly allow further spawning.
-- **Bounded** — a `spawn` batch cancels unfinished children after `subagent_timeout` seconds (default 600) instead of waiting forever.
-- **Transcript scope** — child-agent transcripts are discarded. Root history stores the parent `spawn`/`read` tool calls and returned outputs.
-- **Session-scoped** — artifacts persist for the active session and are available on later prompts until you start a new session or archive.
-
-The terminal shows a live progress panel as children run, with a green checkmark or red cross as each finishes.
-
-## Commands
-
-![jarv slash commands](https://github.com/JamesWHomer/jarv/releases/download/readme-assets/commands.webp)
-
-| Command | Description |
-| --- | --- |
-| `/help` | Show all commands |
-| `/about` | Detailed info and examples |
-| `/set <key> <value>` | Set a config value |
-| `/unset <key>` | Reset a config key to default |
-| `/settings` | Open the interactive settings menu |
-| `/config` | Show raw config values |
-| `/setup` | Run the setup wizard |
-| `/new` | Start a fresh session on the next prompt |
-| `/archive` | Archive session history and sidecars |
-| `/sessions` | Browse sessions (interactive when in a TTY) |
-| `/sessions <id>` | Load a specific session by ID prefix |
-| `/history` | Show recent conversation history |
-| `/tree` | Browse the session as a tree — fork, edit, or resume any prompt |
-| `/undo [n]` | Remove last *n* exchanges (default 1) |
-| `/redo [n]` | Restore last *n* undone exchanges (default 1) |
-| `/btw <question>` | Ask an aside without derailing the main thread |
-| `/usage` | Interactive usage screen — spend vs the previous period, tokens, requests, context headroom, a spend-over-time chart, and share-of-spend by model. `←/→` (or `1-5` / `s t w m a`) switches scope live |
-| `/usage <session\|day\|week\|month\|all>` | Open straight to a scope (`day`/`today` = rolling 24h; `all` = full system-wide history) |
-| `/update` | Update Jarv to the latest version for the active install channel |
-| `/uninstall [--purge] [--yes]` | Uninstall Jarv or show its package-manager uninstall command |
-
-All commands work both as `jarv /command` (one-shot) and inside heads-up mode. Read-only commands (`/help`, `/about`, `/usage`, and `/config`) use a temporary display by default in interactive terminals; change `read_only_command_display` in `/settings` to print them permanently instead.
-
-Agent tool calls have a separate `tool_call_display` setting. `auto` uses `print` for one-shot runs and `fullscreen` in heads-up mode. `print` is resize-safe and left-aligned; `fullscreen` uses bordered cards with right-aligned status.
-
-**Colour** in `/settings` defaults to **on**. Set it to **off** (or set `colour` to `false`) to render everything without colour — bold, dim, and underline are kept, so the layout still reads. Setting `NO_COLOR` in the environment does the same thing without changing your config. Existing `monochrome` preferences are migrated automatically.
-
-Turn off **Menu borders** in the Display section of `/settings`, or run `/set headsup_border false`, to remove outer frames in heads-up mode and all menus (settings and editors, setup, sessions and previews, tree, usage, and read-only screens). Borderless frames have no side padding, so content uses the full width. Menu metadata shares the header, freeing the bottom row for content and keeping usage hints at the bottom. Editor controls, heads-up status, and the heads-up input box remain visible. The settings screen updates immediately; `/set headsup_border true` restores the borders and padding.
-
-## Sessions
-
-In heads-up mode, **Shift + PgUp/PgDn** jumps to the previous or next sent message, aligning its bubble with the top of the transcript where possible. Jumping forward past the last message returns to the latest output. PgUp/PgDn without Shift continues to scroll normally.
-
-Each terminal is automatically bound to its own session. Jarv identifies terminals using environment variables (`WT_SESSION`, `TERM_SESSION_ID`, `TMUX`, `STY`) with a parent-process fallback, so history persists across runs in the same terminal.
-
-Session JSON is saved through a shared storage layer with interprocess locks, atomic file replacement, and a recovery journal. History, artifacts, retained outputs, and redo changes commit together; interrupted commits recover on the next access. Independent metadata edits from different terminals merge. Conflicting edits to the same history or metadata field report an error instead of overwriting another terminal's work. Corrupt files also report an error and are preserved for recovery. These protections require all concurrent Jarv processes to use this storage version.
-
-- `/new` starts a fresh session on the next prompt without archiving the current session.
-- `/sessions` opens a conversation picker with readable titles, date groups, visible view tabs, and Ctrl+F search across titles, IDs, and transcripts. Enter resumes the highlighted conversation (restoring it first if archived). At 100 columns and above, a narrower session list leaves more room for the preview; `→` moves into it and `←` returns to sessions. `↑`/`↓`, the mouse wheel, PgUp/PgDn, and Home/End act on the active pane; the preview keeps its reading position when you switch panes. It opens at the latest exchange or search match, and can scroll through the whole transcript. `p` expands it to full screen; `p`, `←`, or Esc returns. On narrower terminals, `→` opens the full-screen preview directly.
-- Session names use a persistent cache, with visible uncached names read from a bounded history prefix before the menu opens. History indexing and preview formatting run in the background, keeping typing and navigation responsive while conversations load. Search results fill in as indexing completes; subsequent searches reuse the index. Held arrows advance row by row, with nearby previews prepared ahead of the cursor in a bounded cache. Cached previews appear immediately; an uncached conversation starts loading as soon as it is selected and shows a loading message until ready. Shortcuts share one bottom row, with secondary actions on the right when space permits and the full list under `?`.
-- In the sessions pane, `r` renames a conversation; clearing the title restores its first-prompt title. `Space` marks individual rows and keeps them selected while you navigate; `Shift`+`↑`/`↓` selects a range. Use `a` to archive/restore or `d`, then `d` to delete the selected conversations. Archived/restored rows leave the current filtered view immediately. Notifications stay visible briefly as you navigate without moving the layout; the undo hint names the action it will reverse. `u` undoes actions in reverse order until you close the picker; pending file deletions finish on exit. Failed archive/restore operations keep their original state, and failed undo operations can be retried. `Tab` cycles Active → Archived → All in the displayed order, `?` shows all shortcuts, and Esc returns to sessions, clears selection or search, then closes.
-- `/history` opens an interactive transcript where Up/Down scroll and Left/Right jump to the previous or next chat/reply.
-- `/tree` opens the session as a navigable tree — fork, edit, or resume from any earlier prompt.
-- `/undo` and `/redo` let you step through recent exchanges.
-
-![jarv session undo](https://github.com/JamesWHomer/jarv/releases/download/readme-assets/undo.webp)
-
-## Config
-
-Settings live in `~/.jarv/config.json` (created on first run). Use `/settings` for the common controls, or edit the file directly with `/set` and `/unset`.
-
-| Key | Default | Description |
-| --- | --- | --- |
-| `provider` | `"openai"` | API provider: `openai`, `anthropic`, `gemini`, `openrouter`, `groq`, `deepseek`, `together`, `fireworks`, `ollama`, `lm_studio`, `vllm`. |
-| `api_key` | `""` | Legacy single API key field (migrated to `api_keys`). |
-| `api_keys` | `{}` | Per-provider API keys. Falls back to provider env vars when empty. |
-| `base_url` | `""` | Custom API base URL. Overrides the provider default. |
-| `model` | `"gpt-5.4-mini"` | Model name passed to the API. |
-| `service_tiers` | `{}` | Per-provider processing tier: `standard`, `flex`, `priority`, or `ultrafast`. Missing providers use `standard`; unsupported tiers are not offered. Ultrafast requires direct OpenAI Astra. |
-| `reasoning_effort` | `""` | Model-supported reasoning effort. Empty uses the provider/model default; `none` explicitly disables reasoning only where supported. |
-| `context_budget_ratio` | `0.75` | Share of the context window used for input. |
-| `context_compaction_threshold` | `0.85` | Fill ratio that triggers history compaction. |
-| `context_output_reserve_ratio` | `0.15` | Context window share reserved for model output. |
-| `context_window_fallback` | `128000` | Context window when neither the provider nor the models.dev catalog knows the model. |
-| `max_stdin_chars` | `200000` | Maximum piped stdin characters attached to a one-shot prompt. |
-| `max_tool_output_chars` | `20000` | Maximum generic tool output characters returned to the model. It also supplies the default head/tail budget for `run_command`. |
-| `project_context_max_chars` | `16000` | Maximum project-context file characters injected into the system prompt (longer files are truncated head+tail). |
-| `disabled_tools` | `[]` | Tool names omitted from root agents and subagents. Configure these from the Tools section in `/settings`. |
-| `interactive_commands` | `false` | Experimental. Hold a command that is waiting on stdin open and let the model type into it. |
-| `command_timeout` | `60` | Seconds before non-interactive shell commands are killed, or before interactive commands check in again. |
-| `interactive_max_rounds` | `40` | Model interaction rounds allowed for one interactive command before Jarv kills the process. Only used when `interactive_commands` is on. |
-| `persistent_shell` | `true` | Reuse PowerShell for noninteractive Windows commands with an isolated execution context per command. Disable to always start a fresh process. |
-| `web_timeout` | `15` | Seconds before a web search or URL read is killed. |
-| `command_safety` | `"risky"` | Command confirmation level: `all` (confirm every command), `risky` (confirm dangerous commands only), `none` (no confirmation). |
-| `audit` | `true` | LLM auditor for flagged commands. |
-| `auditor_auto_approve` | `true` | Let the auditor auto-approve commands it deems safe under `command_safety=risky`. With `all`, human approval is always required. |
-| `auditor_model` | `""` | Auditor model. Empty uses the active `model`. |
-| `max_subagent_depth` | `4` | Maximum nesting depth for spawned subagents. |
-| `subagent_thread_pool_max_workers` | `8` | Max parallel subagents per `spawn` call. |
-| `subagent_timeout` | `600` | Maximum runtime in seconds for one `spawn` batch before unfinished subagents are cancelled. |
-| `check_updates` | `true` | Background update check on startup (non-blocking, throttled to once per 24h; PyPI for Python installs, GitHub Releases for direct standalone installs; Scoop, WinGet, and Homebrew manage their own update availability). |
-| `read_only_command_display` | `"fullscreen"` | Display mode for `/help`, `/about`, `/usage`, and `/config`: temporary `fullscreen` view or permanent `print` output. |
-| `tool_call_display` | `"auto"` | Tool-call layout: `auto` selects `print` for one-shot runs and `fullscreen` in heads-up mode; explicit modes override it. |
-| `print_usage_after_agent` | `false` | Print a compact token usage line after each completed agent run. |
-| `headsup_border` | `true` | Show outer frames in heads-up mode and all menus. Turn off to remove borders and side padding while keeping headers, footers, and the heads-up input box. |
-| `headsup_intro_logo` | `true` | Show the rainbow JARV logo, wave, and welcome hint in new heads-up sessions. Toggle **Rainbow JARV** in Display settings. |
-| `headsup_intro_stars` | `true` | Show twinkling stars in new heads-up sessions. Toggle **Welcome stars** in Display settings. Turn both welcome settings off for a blank area. |
-| `colour` | `true` | Render in colour. Set to `false` to keep only bold, dim, and underline. The `NO_COLOR` environment variable also disables colour. |
-| `system_prompt` | `"You are Jarv..."` | System instructions sent with each request. |
-| `project_context` | `true` | Read `JARV.md`/`AGENTS.md`/`CLAUDE.md` and git branch, status, and recent commits into the system prompt. |
-
-Processing tier choices depend on the active provider. OpenAI, OpenRouter, and Gemini offer all three choices where the selected model supports them. Anthropic offers Standard and Priority; its Priority mode uses committed Priority capacity when available and otherwise falls back to Standard. Other providers remain on Standard.
-
-## Local files
-
-All state is stored in `~/.jarv/` (on Windows, `%USERPROFILE%\.jarv\`):
-
-```
-~/.jarv/
-├── config.json                      # settings and optional API key
-├── sessions.json                    # terminal → session mappings
-├── sessions/
-│   ├── history-<hash>.json          # conversation history
-│   ├── artifacts-<hash>.json        # subagent artifacts
-│   ├── reads-<hash>.json            # retained command outputs
-│   ├── usage-<hash>.json            # session token usage totals
-│   └── redo-<hash>.json             # undo/redo stack
-├── usage.jsonl                      # append-only system-wide usage ledger
-└── archive/                         # archived sessions
-```
-
-Project context files (`JARV.md`, `AGENTS.md`, `CLAUDE.md`) live in your repositories, not in `~/.jarv/`; jarv only reads them, never writes them.
-
-System-wide usage records are appended to `~/.jarv/usage.jsonl` and retained without automatic expiry. Time-window reports filter this history without deleting records; `all` includes all available history. Legacy `usage.json` records are also read, but older session totals aren't backfilled into time-window reports. Cost is request-based and grouped by provider and tier: Jarv uses provider-reported cost when available, otherwise estimates from [models.dev](https://models.dev) pricing for the provider actually serving the model — including long-context surcharges — and shows unknown or contract-priced requests separately.
-
-## Model catalog
-
-Jarv asks each provider which models it exposes, and asks [models.dev](https://models.dev) what those models *are* — prices, context and output limits, input modalities, and reasoning controls. Two sources, two jobs: the provider is authoritative about what exists today, so a model released this morning still shows up; models.dev is authoritative about its properties, so they stop drifting as labs ship.
-
-Prices are only ever read from the entry of the provider actually serving the model. The same model resold by three providers has one set of capabilities but three different prices, so capabilities carry across entries and prices never do.
-
-A pruned snapshot of the catalog ships inside the package, covering the eight cloud providers Jarv supports, so a fresh install prices correctly offline. Refreshing the model list in `/settings` also revalidates the catalog with a conditional request; when nothing upstream has changed, that transfers no data. The newer copy lands in `~/.jarv/models-dev.json` and takes precedence over the bundled one.
-
-To regenerate the bundled snapshot:
-
-```bash
-python scripts/update_models_dev.py
-```
-
-models.dev is community-maintained and MIT licensed. Local providers — Ollama, LM Studio, vLLM — serve whatever you installed, so they are read live and have no catalog entry.
-
-## Dependencies
-
-| Package | Role |
-| --- | --- |
-| [httpx](https://pypi.org/project/httpx/) | Direct provider API transports |
-| [pypdf](https://pypi.org/project/pypdf/) | Lazy-loaded embedded-text extraction for PDF reads |
-| [rich](https://pypi.org/project/rich/) | Terminal styling, live rendering, markdown |
-
-Model metadata comes from [models.dev](https://models.dev) (MIT), vendored as a snapshot — no runtime package dependency.
+See the [development guide](https://github.com/JamesWHomer/jarv/blob/main/docs/development.md) for running tests and the [documentation guide](https://github.com/JamesWHomer/jarv/blob/main/docs/documentation.md) for local previews and Read the Docs setup.
 
 ## License
 
-[MIT License](LICENSE) — free to use, modify, and redistribute.
+[MIT License](https://github.com/JamesWHomer/jarv/blob/main/LICENSE).

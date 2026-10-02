@@ -1,2 +1,2 @@
-# Keep local previews and GitHub Pages builds on the same Zensical release.
+# Keep local previews, CI, and Read the Docs on the same Zensical release.
 zensical==0.0.67

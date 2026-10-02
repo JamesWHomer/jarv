@@ -26,7 +26,7 @@ dependencies = ["httpx>=0.27", "packaging>=24.0", "pypdf>=5.0", "rich>=13.0"]
 
 [project.urls]
 Homepage = "https://github.com/JamesWHomer/jarv"
-Documentation = "https://jameshomer.dev/jarv/"
+Documentation = "https://github.com/JamesWHomer/jarv/tree/main/docs"
 Repository = "https://github.com/JamesWHomer/jarv"
 Issues = "https://github.com/JamesWHomer/jarv/issues"
 
@@ -47,5 +47,4 @@ jarv = ["data/*.json"]
 [tool.pytest.ini_options]
 # Tests import repository-local benchmark helpers that are not shipped in wheels.
 pythonpath = ["."]
-
 

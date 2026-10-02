@@ -1,7 +1,8 @@
 [project]
 site_name = "Jarv"
 site_description = "A scriptable, multi-provider AI agent for the terminal."
-site_url = "https://jameshomer.dev/jarv/"
+# scripts/build_docs.py supplies the version-specific URL on Read the Docs.
+site_url = "http://localhost:8000/"
 repo_url = "https://github.com/JamesWHomer/jarv"
 repo_name = "JamesWHomer/jarv"
 edit_uri = "edit/main/docs/"

@@ -153,6 +153,8 @@ venv.bak/
 
 # Zensical documentation output (Markdown source in docs/ is tracked)
 /site
+# Temporary build configuration with the Read the Docs canonical URL
+/.zensical-*.toml
 
 # mypy
 .mypy_cache/
