@@ -10,7 +10,7 @@ single code path instead of the two ~80-line functions they used to be.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, tzinfo
 
 from .history import parse_timestamp, prepare_session_context, utc_now
 from .usage import (
@@ -52,11 +52,19 @@ _USAGE_ERROR = "Usage: jarv /usage [session|day|week|month|all]"
 _SINCE_ERROR = "Usage: jarv /usage --all --since 24h|7d|30d"
 
 
-@dataclass(frozen=True)
-class DayBucket:
-    """Aggregated spend/tokens for a single calendar day (UTC)."""
+# Trend buckets follow the user's wall clock, not UTC: a "day" is a local
+# calendar day. ``None`` means the system local zone; tests pin it.
+_LOCAL_TZ: tzinfo | None = None
 
-    day: date
+# Windows up to this long chart hourly; longer ones chart daily.
+_HOURLY_MAX_WINDOW = timedelta(days=2)
+
+
+@dataclass(frozen=True)
+class TrendBucket:
+    """Aggregated spend/tokens for one local hour or calendar day."""
+
+    start: datetime  # naive local wall-clock time
     spend_usd: float
     total_tokens: int
     request_count: int
@@ -76,11 +84,17 @@ class UsageView:
     tiers: dict
     sources: dict
     context: dict | None
-    daily: list[DayBucket]
+    trend: list[TrendBucket]
     request_count: int
     is_empty: bool
     last_request: dict | None
     last_root: dict | None
+    # ``"hour"`` or ``"day"``: the granularity of ``trend`` (empty for session).
+    trend_unit: str = "day"
+    # Spend over the equally long window just before this one (``None`` when the
+    # scope has no window or that window recorded nothing), and its short label.
+    previous_spend: float | None = None
+    previous_label: str = ""
 
 
 # --------------------------------------------------------------------------- #
@@ -198,46 +212,71 @@ def _session_context(last_root: dict | None) -> dict | None:
     }
 
 
-def _bucket_daily(records: list[dict], scope: Scope, now: datetime) -> list[DayBucket]:
-    """Group records into a contiguous run of calendar days (UTC) for the trend."""
-    by_day: dict[date, list[dict]] = {}
+def _trend_unit(scope: Scope) -> str:
+    if scope.window is not None and scope.window <= _HOURLY_MAX_WINDOW:
+        return "hour"
+    return "day"
+
+
+def _bucket_trend(records: list[dict], scope: Scope, now: datetime) -> list[TrendBucket]:
+    """Group records into a contiguous run of local hours or days for the trend."""
+    hourly = _trend_unit(scope) == "hour"
+
+    def bucket_start(moment: datetime) -> datetime:
+        local = moment.astimezone(_LOCAL_TZ).replace(tzinfo=None)
+        if hourly:
+            return local.replace(minute=0, second=0, microsecond=0)
+        return datetime.combine(local.date(), time())
+
+    by_bucket: dict[datetime, list[dict]] = {}
     for record in records:
         if not isinstance(record, dict):
             continue
         timestamp = parse_timestamp(str(record.get("created_at") or ""))
         if timestamp is None:
             continue
-        day = timestamp.astimezone(timezone.utc).date()
-        by_day.setdefault(day, []).append(record)
+        by_bucket.setdefault(bucket_start(timestamp), []).append(record)
 
-    if not by_day:
+    if not by_bucket:
         return []
-    today = now.astimezone(timezone.utc).date()
-    if scope.window is not None:
-        start = (now - scope.window).astimezone(timezone.utc).date()
-    else:
-        start = min(by_day)
-    start = min(start, today)
+    last = bucket_start(now)
+    start = bucket_start(now - scope.window) if scope.window is not None else min(by_bucket)
+    start = min(start, last)
 
-    out: list[DayBucket] = []
+    out: list[TrendBucket] = []
+    step = timedelta(hours=1) if hourly else timedelta(days=1)
     cursor = start
-    one_day = timedelta(days=1)
-    while cursor <= today:
-        day_records = by_day.get(cursor)
-        if day_records:
-            totals = _dict(aggregate_usage_records(day_records).get("totals"))
+    while cursor <= last:
+        bucket_records = by_bucket.get(cursor)
+        if bucket_records:
+            totals = _dict(aggregate_usage_records(bucket_records).get("totals"))
             out.append(
-                DayBucket(
-                    day=cursor,
+                TrendBucket(
+                    start=cursor,
                     spend_usd=float(usage_cost_summary(totals).get("total_usd") or 0.0),
                     total_tokens=int(totals.get("total_tokens") or 0),
                     request_count=int(totals.get("request_count") or 0),
                 )
             )
         else:
-            out.append(DayBucket(day=cursor, spend_usd=0.0, total_tokens=0, request_count=0))
-        cursor += one_day
+            out.append(TrendBucket(start=cursor, spend_usd=0.0, total_tokens=0, request_count=0))
+        cursor += step
     return out
+
+
+def _window_short_label(window: timedelta) -> str:
+    """``24h`` / ``7d`` / ``30d``: how the hero names the comparison window."""
+    hours = int(window.total_seconds() // 3600)
+    if hours > 48 and hours % 24 == 0:
+        return f"{hours // 24}d"
+    return f"{hours}h"
+
+
+def _previous_spend(records: list[dict] | None) -> float | None:
+    if not records:
+        return None
+    totals = _dict(aggregate_usage_records(records).get("totals"))
+    return float(usage_cost_summary(totals).get("total_usd") or 0.0)
 
 
 def _session_view(scope: Scope, ctx) -> UsageView:
@@ -258,7 +297,7 @@ def _session_view(scope: Scope, ctx) -> UsageView:
         tiers=_dict(usage.get("tiers")),
         sources=_dict(usage.get("sources")),
         context=_session_context(last_root),
-        daily=[],
+        trend=[],
         request_count=request_count,
         is_empty=request_count <= 0,
         last_request=_dict_or_none(usage.get("last_request")),
@@ -266,8 +305,17 @@ def _session_view(scope: Scope, ctx) -> UsageView:
     )
 
 
-def _window_view_from_records(scope: Scope, records: list[dict], now: datetime) -> UsageView:
-    """Derive a windowed :class:`UsageView` from records already filtered to ``scope``."""
+def _window_view_from_records(
+    scope: Scope,
+    records: list[dict],
+    now: datetime,
+    previous: list[dict] | None = None,
+) -> UsageView:
+    """Derive a windowed :class:`UsageView` from records already filtered to ``scope``.
+
+    ``previous`` holds the records from the equally long window just before it,
+    for the hero's period-over-period spend comparison.
+    """
     usage = aggregate_usage_records(records)
     totals = _dict(usage.get("totals"))
     request_count = int(totals.get("request_count") or 0)
@@ -282,31 +330,62 @@ def _window_view_from_records(scope: Scope, records: list[dict], now: datetime) 
         tiers=_dict(usage.get("tiers")),
         sources=_dict(usage.get("sources")),
         context=None,
-        daily=_bucket_daily(records, scope, now),
+        trend=_bucket_trend(records, scope, now),
         request_count=request_count,
         is_empty=request_count <= 0,
         last_request=_dict_or_none(usage.get("last_request")),
         last_root=_dict_or_none(usage.get("last_root_request")),
+        trend_unit=_trend_unit(scope),
+        previous_spend=_previous_spend(previous),
+        previous_label=_window_short_label(scope.window) if scope.window is not None else "",
+    )
+
+
+def _split_windows(
+    records: list[dict], window: timedelta | None, now: datetime
+) -> tuple[list[dict], list[dict] | None]:
+    """Split records into ``(current window, the equally long window before it)``."""
+    if window is None:
+        return list(records), None
+    return (
+        _filter_records(records, window, now),
+        _filter_records(records, window * 2, now, until=now - window),
     )
 
 
 def _window_view(scope: Scope, now: datetime) -> UsageView:
-    records = load_global_usage_records(since=scope.window, now=now, warn=True)
-    return _window_view_from_records(scope, records, now)
+    since = scope.window * 2 if scope.window is not None else None
+    records = load_global_usage_records(since=since, now=now, warn=True)
+    current, previous = _split_windows(records, scope.window, now)
+    return _window_view_from_records(scope, current, now, previous)
 
 
-def _filter_records(records: list[dict], since: timedelta | None, now: datetime) -> list[dict]:
-    """In-memory equivalent of the ``since`` cutoff in ``load_global_usage_records``."""
-    if since is None:
+def _filter_records(
+    records: list[dict],
+    since: timedelta | None,
+    now: datetime,
+    *,
+    until: datetime | None = None,
+) -> list[dict]:
+    """In-memory equivalent of the ``since`` cutoff in ``load_global_usage_records``.
+
+    ``until`` (exclusive) additionally drops records at or after that moment.
+    """
+    if since is None and until is None:
         return list(records)
-    cutoff = now - since
+    cutoff = now - since if since is not None else None
     out: list[dict] = []
     for record in records:
         if not isinstance(record, dict):
             continue
         created_at = parse_timestamp(str(record.get("created_at") or ""))
-        if created_at is not None and created_at >= cutoff:
-            out.append(record)
+        if created_at is None:
+            continue
+        if cutoff is not None and created_at < cutoff:
+            continue
+        if until is not None and created_at >= until:
+            continue
+        out.append(record)
     return out
 
 
@@ -325,8 +404,8 @@ def build_window_views(now: datetime | None = None, *, warn: bool = False) -> di
     for scope in SCOPES:
         if scope.key == "session":
             continue
-        windowed = _filter_records(records, scope.window, now)
-        views[scope.key] = _window_view_from_records(scope, windowed, now)
+        current, previous = _split_windows(records, scope.window, now)
+        views[scope.key] = _window_view_from_records(scope, current, now, previous)
     return views
 
 

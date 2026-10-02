@@ -272,7 +272,7 @@ The terminal shows a live progress panel as children run, with a green checkmark
 | `/undo [n]` | Remove last *n* exchanges (default 1) |
 | `/redo [n]` | Restore last *n* undone exchanges (default 1) |
 | `/btw <question>` | Ask an aside without derailing the main thread |
-| `/usage` | Interactive usage screen — spend, tokens, requests, context headroom, a daily-spend trend, and by-model bars. `←/→` (or `1-5` / `s t w m a`) switches scope live |
+| `/usage` | Interactive usage screen — spend vs the previous period, tokens, requests, context headroom, a spend-over-time chart, and share-of-spend by model. `←/→` (or `1-5` / `s t w m a`) switches scope live |
 | `/usage <session\|day\|week\|month\|all>` | Open straight to a scope (`day`/`today` = rolling 24h; `all` = full system-wide history) |
 | `/update` | Update Jarv to the latest version for the active install channel |
 | `/uninstall [--purge] [--yes]` | Uninstall Jarv or show its package-manager uninstall command |

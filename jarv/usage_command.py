@@ -4,13 +4,15 @@ The session and system-wide code paths are unified behind a single
 :class:`~jarv.usage_view.UsageView` (built in :mod:`jarv.usage_view`) and a single
 body renderer (:func:`build_usage_body`) used by both the interactive
 :class:`UsageScreen` and the static fallback. The screen leads with hero stats
-(spend, tokens, requests, context headroom), a daily-spend trend, and a by-model
-bar chart; ``←/→`` (or ``1-5`` / ``s t w m a``) cycles the scope live.
+(spend with a vs-previous-period delta, tokens, requests, context headroom), a
+spend-over-time column chart (hourly for Today, local days or weeks beyond), and
+share-of-spend bars by model; ``←/→`` (or ``1-5`` / ``s t w m a``) cycles the scope live.
 """
 
 from __future__ import annotations
 
 import threading
+from datetime import datetime, timedelta
 
 from rich.console import Group
 from rich.table import Table
@@ -44,6 +46,7 @@ from .usage import (
 from .usage_view import (
     SCOPE_KEYS,
     SCOPES,
+    TrendBucket,
     UsageView,
     build_usage_view,
     build_window_views,
@@ -70,10 +73,12 @@ _BREAKDOWN_COLORS = {
 
 
 _BAR_FILL_CHARS = " ▏▎▍▌▋▊▉█"
-# Vertical block glyphs for the daily-spend sparkline (index 0 is a blank day).
+# Vertical eighth-block glyphs for the trend chart's columns (index 0 is empty).
 _SPARK_CHARS = " ▁▂▃▄▅▆▇█"
-_WEEKDAY_INITIALS = "MTWTFSS"
-_DAILY_MAX_BARS = 30
+# Daily runs longer than this chart as weekly columns instead.
+_DAILY_MAX_BARS = 45
+_CHART_ROWS = 4
+_CHART_ROWS_WIDE = 6
 
 # Inner-content-width breakpoints. Below ``_WIDE`` the screen renders the compact
 # single-column layout (so a narrow terminal stays readable); ``_WIDE`` widens
@@ -260,6 +265,23 @@ def _cost_tag(cost: dict) -> Text:
     return Text("")
 
 
+def _spend_delta(view: UsageView) -> Text | None:
+    """``▲ 42% vs prev 7d``: spend against the equally long window before this one."""
+    previous = view.previous_spend
+    if previous is None or previous <= 0:
+        return None
+    current = float(view.cost.get("total_usd") or 0.0)
+    ratio = current / previous
+    if abs(ratio - 1) < 0.005:
+        return Text(f"= flat vs prev {view.previous_label}", style="dim")
+    up = ratio > 1
+    magnitude = f"{ratio:.0f}×" if ratio >= 10 else f"{abs(ratio - 1) * 100:.0f}%"
+    line = Text()
+    line.append(f"{'▲' if up else '▼'} {magnitude}", style="yellow" if up else "green")
+    line.append(f" vs prev {view.previous_label}", style="dim")
+    return line
+
+
 def _hero_context(context: dict) -> Group:
     percent = float(context.get("percent") or 0.0)
     window = int(context.get("window") or 0)
@@ -286,15 +308,15 @@ def _hero_band(view: UsageView, width: int = 0) -> Table:
     table = Table(box=None, show_header=True, header_style="dim", padding=(0, pad), pad_edge=False)
     cells: list = []
 
-    def stat(header: str, value: Text, sub: Text | None = None) -> None:
+    def stat(header: str, value: Text, *subs: Text | None) -> None:
         table.add_column(header, no_wrap=True)
-        cells.append(Group(value, sub if sub is not None else Text("")))
+        cells.append(Group(value, *(sub for sub in subs if sub is not None)))
 
     spend_value = Text(
         format_cost(cost.get("total_usd")) if has_cost else "—",
         style="bold green" if has_cost else "dim",
     )
-    stat("SPEND", spend_value, _cost_tag(cost))
+    stat("SPEND", spend_value, _cost_tag(cost), _spend_delta(view) if has_cost else None)
     stat("TOKENS", Text(format_tokens_compact(totals.get("total_tokens")), style="bold"))
     stat("REQUESTS", Text(format_int(view.request_count), style="bold"))
 
@@ -315,77 +337,152 @@ def _hero_band(view: UsageView, width: int = 0) -> Table:
     return table
 
 
-def _daily_chart(view: UsageView, width: int = 0) -> Group | None:
-    """A vertical sparkline of daily spend, shown for windows with >=2 days of data.
+def _group_trend(
+    buckets: list[TrendBucket], unit: str, max_columns: int
+) -> tuple[list[tuple[datetime, float, float]], str]:
+    """``(start, spend, tokens)`` columns, merging days into weeks when too many.
 
-    A wide terminal shows more history (up to 90 daily bars); a
-    narrow one keeps today's 30-bar cap so the line never overruns the panel.
+    A daily run longer than ``_DAILY_MAX_BARS`` (or than fits) collapses into
+    7-day groups aligned to end today, so the newest column is always current.
     """
-    days = view.daily
-    if len(days) < 2:
+    columns = [(b.start, b.spend_usd, float(b.total_tokens)) for b in buckets]
+    if unit != "day" or len(columns) <= min(_DAILY_MAX_BARS, max_columns):
+        return columns[-max_columns:], unit
+    size = 7 * max(1, -(-len(columns) // (7 * max_columns)))
+    grouped = []
+    for end in range(len(columns), 0, -size):
+        chunk = columns[max(0, end - size):end]
+        # Label a partial oldest chunk by its nominal start, so weeks stay evenly spaced.
+        start = chunk[-1][0] - timedelta(days=size - 1)
+        grouped.append((start, sum(c[1] for c in chunk), sum(c[2] for c in chunk)))
+    grouped.reverse()
+    return grouped, "week" if size == 7 else f"{size // 7} weeks"
+
+
+def _trend_label(start: datetime, unit: str, short: bool) -> str:
+    if unit == "hour":
+        return f"{start:%H}:00"
+    if unit == "day" and short:
+        return f"{start:%a} {start.day}"
+    return f"{start:%b} {start.day}"
+
+
+def _trend_chart(view: UsageView, width: int = 0) -> Group | None:
+    """A multi-row column chart of spend per hour/day/week, with a labelled axis.
+
+    The day scope charts hours; longer windows chart local calendar days, merged
+    into weeks when the run is too long to read. Falls back to tokens when the
+    window has no priced requests (e.g. subscription-only providers).
+    """
+    if len(view.trend) < 2:
         return None
-    max_spend = max((day.spend_usd for day in days), default=0.0)
-    if max_spend <= 0:
+    use_spend = any(b.spend_usd > 0 for b in view.trend)
+    if not use_spend and not any(b.total_tokens for b in view.trend):
         return None
 
-    cap = max(_DAILY_MAX_BARS, min(90, width // 2)) if width else _DAILY_MAX_BARS
-    shown = days[-cap:]
-    # Spaced bars (with weekday ticks) read best for a short window; a long one
-    # packs the glyphs contiguously so the line never overflows the panel.
-    spaced = len(shown) <= 14
-    gap = " " if spaced else ""
-    bars = Text("  ", no_wrap=True, overflow="crop")
-    for day in shown:
-        if day.spend_usd <= 0:
-            glyph = " "
-        else:
-            step = int(round((day.spend_usd / max_spend) * (len(_SPARK_CHARS) - 1)))
-            glyph = _SPARK_CHARS[max(1, min(len(_SPARK_CHARS) - 1, step))]
-        bars.append(glyph + gap, style="cyan")
+    def fmt(value: float) -> str:
+        return format_cost(value) if use_spend else format_tokens_compact(int(value))
 
-    spend_range = f"{format_cost(0)} – {format_cost(max_spend)}"
-    parts: list = [Text("Daily spend", style="bold")]
-    if spaced:
-        bars.append("   ")
-        bars.append(spend_range, style="dim")
-        parts.append(bars)
-        ticks = Text("  ", no_wrap=True, overflow="crop")
-        for day in shown:
-            ticks.append(_WEEKDAY_INITIALS[day.day.weekday()] + " ", style="dim")
-        parts.append(ticks)
-    else:
-        parts.append(bars)
-        date_range = f"{shown[0].day.strftime('%b %d')} – {shown[-1].day.strftime('%b %d')}"
-        parts.append(Text(f"  {date_range}   ·   {spend_range}", style="dim"))
-    return Group(*parts)
+    rows = _CHART_ROWS_WIDE if width >= _WIDE else _CHART_ROWS
+    peak_probe = max(b.spend_usd if use_spend else b.total_tokens for b in view.trend)
+    axis_width = max(len(fmt(peak_probe)), len(fmt(0))) + 2
+    plot_width = max(8, (width or 80) - axis_width - 2)
+
+    columns, unit = _group_trend(view.trend, view.trend_unit, plot_width)
+    values = [spend if use_spend else tokens for _start, spend, tokens in columns]
+    peak = max(values)
+    peak_index = values.index(peak)
+
+    slot = max(1, min(8, plot_width // len(columns)))
+    bar = slot - 1 if slot >= 2 else 1
+    gap = slot - bar
+    levels = rows * 8
+    heights = [0 if v <= 0 else max(1, round(v / peak * levels)) for v in values]
+
+    top_label, zero_label = fmt(peak), fmt(0)
+    label_width = axis_width - 2
+    lines: list[Text] = []
+    for row in range(rows):
+        floor = (rows - 1 - row) * 8
+        line = Text(no_wrap=True, overflow="crop")
+        line.append((top_label if row == 0 else "").rjust(label_width), style="dim")
+        line.append(" ┤" if row == 0 else " │", style="bright_black")
+        for height in heights:
+            level = max(0, min(8, height - floor))
+            line.append(_SPARK_CHARS[level] * bar, style="cyan")
+            line.append(" " * gap)
+        lines.append(line)
+    axis = Text(no_wrap=True, overflow="crop")
+    axis.append(zero_label.rjust(label_width), style="dim")
+    axis.append(" └" + "─" * (len(columns) * slot), style="bright_black")
+    lines.append(axis)
+
+    # X labels, laid out right-to-left from the newest column so "now" is always
+    # labelled, at a stride that keeps neighbours apart. Labels never run past the
+    # axis end (the newest is right-aligned to it), a label that would touch its
+    # right neighbour is dropped, and a label already shown is skipped: a rolling
+    # 24h window starts and ends in the same clock hour.
+    short = len(columns) <= 8
+    labels = [_trend_label(start, unit, short) for start, _s, _t in columns]
+    axis_length = len(columns) * slot
+    stride = max(1, -(-(max(len(text) for text in labels) + 1) // slot))
+    ticks = [" "] * axis_length
+    free_until = axis_length  # first column occupied by an already placed label
+    shown: set[str] = set()
+    for index in range(len(columns) - 1, -1, -stride):
+        text = labels[index]
+        position = min(index * slot, axis_length - len(text))
+        spacing = 0 if free_until == axis_length else 1
+        if text in shown or position < 0 or position + len(text) + spacing > free_until:
+            continue
+        shown.add(text)
+        ticks[position:position + len(text)] = text
+        free_until = position
+    lines.append(Text(" " * axis_width + "".join(ticks).rstrip(), style="dim", no_wrap=True, overflow="crop"))
+
+    title = Text(f"{'Spend' if use_spend else 'Tokens'} per {unit}", style="bold")
+    peak_when = _trend_label(columns[peak_index][0], unit, short=unit == "day")
+    title.append(f"    peak {fmt(peak)} · {peak_when}", style="dim")
+    title.append(f"    avg {fmt(sum(values) / len(values))} / {unit}", style="dim")
+    return Group(title, *lines)
 
 
 def _model_bars(view: UsageView, width: int = 0) -> Group:
-    """Per-model token-share bars with compact tokens and cost; top-N then '+k more'.
+    """Per-model share bars with compact tokens and cost; top-N then '+k more'.
 
-    The bar, the name column, the request column, and how many rows show all grow
-    with the available width, so a wide terminal lists more models in more detail
-    while a narrow one keeps today's tight four-column layout.
+    Models are ranked by spend, so the bar shows each model's share of spend too
+    (token share only when nothing in the window is priced). The bar, the name
+    column, the request column, and how many rows show all grow with the
+    available width, so a wide terminal lists more models in more detail.
     """
+    spends = [_bucket_spend(bucket) for _name, bucket in view.models]
+    total_spend = sum(spends)
+    by_spend = total_spend > 0
     total_tokens = int(view.totals.get("total_tokens") or 0)
     cap = 16 if width >= _VERY_WIDE else 10 if width >= _WIDE else 6
-    name_width = 32 if width >= _VERY_WIDE else 26 if width >= _WIDE else 20
+    name_cap = 40 if width >= _VERY_WIDE else 30 if width >= _WIDE else 20
+    top = view.models[:cap]
+    name_width = max(8, min(name_cap, max(len(name) for name, _bucket in top)))
     bar_width = _scaled(width, frac=0.22, lo=14, hi=40)
     show_requests = width >= _WIDE
-    top = view.models[:cap]
-    table = Table(box=None, show_header=False, padding=(0, 1), pad_edge=False)
-    table.add_column("Model", no_wrap=True, overflow="ellipsis", width=name_width)
-    table.add_column("Bar", no_wrap=True)
-    table.add_column("Tokens", justify="right", no_wrap=True)
+    table = Table(box=None, show_header=True, header_style="dim", padding=(0, 1), pad_edge=False)
+    table.add_column("", no_wrap=True, overflow="ellipsis", width=name_width)
+    table.add_column("share of spend" if by_spend else "share of tokens", no_wrap=True)
+    table.add_column("", justify="right", no_wrap=True, style="dim")
+    table.add_column("tokens", justify="right", no_wrap=True)
     if show_requests:
-        table.add_column("Requests", justify="right", no_wrap=True, style="dim")
-    table.add_column("Cost", justify="right", no_wrap=True)
-    for name, bucket in top:
+        table.add_column("requests", justify="right", no_wrap=True, style="dim")
+    table.add_column("cost", justify="right", no_wrap=True)
+    for (name, bucket), spend in zip(top, spends):
         tokens = int(bucket.get("total_tokens") or 0)
-        share = (tokens / total_tokens * 100) if total_tokens else 0.0
+        if by_spend:
+            share = spend / total_spend * 100
+        else:
+            share = (tokens / total_tokens * 100) if total_tokens else 0.0
         cells = [
             Text(name, style="bold magenta"),
             _smooth_bar(share, width=bar_width, color="cyan"),
+            Text(f"{share:.0f}%" if share >= 0.5 else "<1%"),
             Text(format_tokens_compact(tokens)),
         ]
         if show_requests:
@@ -416,7 +513,7 @@ def _secondary_facts(view: UsageView) -> Text | None:
         bucket = view.sources.get(label)
         count = int(bucket.get("request_count") or 0) if isinstance(bucket, dict) else 0
         if count:
-            source_bits.append(f"{count} {label}")
+            source_bits.append(f"{format_int(count)} {label}")
     if source_bits:
         segments.append(" / ".join(source_bits))
     if not segments:
@@ -458,7 +555,7 @@ def _providers_block(view: UsageView, limit: int = 6) -> Group | None:
         )
         for name, bucket in items[:limit]
     ]
-    block = _kv_block("Providers", rows)
+    block = _kv_block("By provider", rows)
     extra = len(items) - len(rows)
     if extra > 0:
         return Group(block, Text(f"  + {extra} more", style="dim"))
@@ -474,10 +571,14 @@ def _tiers_block(view: UsageView) -> Group | None:
     if not items:
         return None
     rows = [
-        (Text(name, style="yellow"), Text(""), _compact_cost(bucket))
+        (
+            Text(name, style="yellow"),
+            Text(format_tokens_compact(int(bucket.get("total_tokens") or 0)), style="dim"),
+            _compact_cost(bucket),
+        )
         for name, bucket in items
     ]
-    return _kv_block("Tiers", rows)
+    return _kv_block("By tier", rows)
 
 
 def _sources_block(view: UsageView) -> Group | None:
@@ -490,28 +591,38 @@ def _sources_block(view: UsageView) -> Group | None:
         rows.append((Text(label), Text(f"{format_int(count)} req", style="dim"), _compact_cost(bucket)))
     if not rows:
         return None
-    return _kv_block("Requests", rows)
+    return _kv_block("By source", rows)
 
 
 def _tokens_block(view: UsageView) -> Group | None:
-    """Input / output / cache / reasoning token split (lives in totals for every scope)."""
+    """Input / output token split, with cached and reasoning nested under them.
+
+    Each nested row is a share of its parent (cached of input, reasoning of
+    output), so the cached figure matches the hero's CACHE HIT rate.
+    """
     totals = view.totals
-    grand = int(totals.get("total_tokens") or 0) or (
-        int(totals.get("input_tokens") or 0) + int(totals.get("output_tokens") or 0)
-    )
-    candidates = [
-        ("Input", int(totals.get("input_tokens") or 0), False),
-        ("Output", int(totals.get("output_tokens") or 0), False),
-        ("Cached", int(totals.get("cached_input_tokens") or 0), True),
-        ("Reasoning", int(totals.get("reasoning_output_tokens") or 0), True),
-    ]
+    input_tokens = int(totals.get("input_tokens") or 0)
+    output_tokens = int(totals.get("output_tokens") or 0)
+    grand = int(totals.get("total_tokens") or 0) or (input_tokens + output_tokens)
+
+    def pct(count: int, whole: int) -> Text:
+        return Text(f"{round(count / whole * 100)}%" if whole > 0 else "—", style="dim")
+
     rows = []
-    for label, count, optional in candidates:
-        if optional and count <= 0:
-            continue
-        pct = f"{round(count / grand * 100)}%" if grand > 0 else "—"
-        rows.append((Text(label), Text(format_tokens_compact(count)), Text(pct, style="dim")))
-    if not rows:
+    for label, count, child_label, child in (
+        ("Input", input_tokens, "cached", int(totals.get("cached_input_tokens") or 0)),
+        ("Output", output_tokens, "reasoning", int(totals.get("reasoning_output_tokens") or 0)),
+    ):
+        rows.append((Text(label), Text(format_tokens_compact(count)), pct(count, grand)))
+        if child > 0:
+            rows.append(
+                (
+                    Text(f"  ↳ {child_label}", style="dim"),
+                    Text(format_tokens_compact(child), style="dim"),
+                    pct(child, count),
+                )
+            )
+    if grand <= 0:
         return None
     return _kv_block("Tokens", rows)
 
@@ -601,7 +712,7 @@ def _usage_body_sections(view: UsageView, width: int = 0) -> list:
     if view.is_empty:
         return [_empty_state(view)]
     parts: list = [_hero_band(view, width)]
-    chart = _daily_chart(view, width)
+    chart = _trend_chart(view, width)
     if chart is not None:
         parts += [Text(""), chart]
     if view.models:

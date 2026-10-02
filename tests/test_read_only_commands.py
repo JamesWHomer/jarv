@@ -1,6 +1,6 @@
 import io
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -375,7 +375,7 @@ def test_usage_window_body_shows_chart_models_and_facts(monkeypatch):
 
     rendered = _render_read_only_text(usage_command.build_usage_body(view, width=80))
     assert "SPEND" in rendered
-    assert "Daily spend" in rendered          # >=2 days with spend -> trend chart
+    assert "Spend per day" in rendered        # >=2 days with spend -> trend chart
     assert "gpt-5.4-mini" in rendered          # top model by spend
     assert "Week" in rendered                  # active scope tab
     assert "openai" in rendered                # provider fact
@@ -437,7 +437,7 @@ def test_usage_wide_layout_surfaces_more(monkeypatch):
     assert "+ 2 more" in narrow
     assert "m08" not in narrow
     assert "2 providers" in narrow
-    assert "Providers" not in narrow
+    assert "By provider" not in narrow
     assert "4,321" not in narrow
     assert "AVG / REQ" not in narrow
     assert "CACHE HIT" not in narrow
@@ -447,9 +447,9 @@ def test_usage_wide_layout_surfaces_more(monkeypatch):
     assert "m08" in wide
     assert "+ 2 more" not in wide
     assert "4,321" in wide                    # per-model request count column
-    assert "Providers" in wide
+    assert "By provider" in wide
     assert "anthropic" in wide                # per-provider spend, not just a count
-    assert "Tiers" in wide
+    assert "By tier" in wide
     assert "Tokens" in wide and "Input" in wide and "Output" in wide
 
     # ...and the hero band gains derived stat columns.
@@ -458,7 +458,7 @@ def test_usage_wide_layout_surfaces_more(monkeypatch):
 
     # At >= _VERY_WIDE the blocks sit two-up: a single rendered line carries both a
     # left-column and a right-column block title.
-    assert any("Providers" in line and "Requests" in line for line in wide.splitlines())
+    assert any("By provider" in line and "By source" in line for line in wide.splitlines())
 
 
 def test_usage_model_bars_scale_with_width(monkeypatch):
@@ -468,6 +468,138 @@ def test_usage_model_bars_scale_with_width(monkeypatch):
     assert max(len(line) for line in wide.splitlines()) > max(
         len(line) for line in narrow.splitlines()
     )
+
+
+def test_usage_model_bars_show_share_of_spend(monkeypatch):
+    usage_dict = {
+        "totals": {"request_count": 2, "total_tokens": 1100, "provider_cost_usd": 10.0, "cost_exact_request_count": 2},
+        "models": {
+            "pricey": {"total_tokens": 100, "request_count": 1, "provider_cost_usd": 9.0, "cost_exact_request_count": 1},
+            "cheap": {"total_tokens": 1000, "request_count": 1, "provider_cost_usd": 1.0, "cost_exact_request_count": 1},
+        },
+    }
+    view = _session_view_for_test(monkeypatch, usage_dict)
+
+    rendered = _render_read_only_text(usage_command._model_bars(view, width=80))
+
+    assert "share of spend" in rendered       # labelled columns
+    assert "tokens" in rendered and "cost" in rendered
+    pricey = next(line for line in rendered.splitlines() if line.startswith("pricey"))
+    assert "90%" in pricey                     # 9 of 10 dollars, despite 9% of tokens
+
+
+def test_usage_tokens_block_nests_cached_under_input(monkeypatch):
+    view = _session_view_for_test(monkeypatch, _multi_model_usage_dict())
+
+    rendered = _render_read_only_text(usage_command._tokens_block(view))
+
+    cached = next(line for line in rendered.splitlines() if "cached" in line)
+    reasoning = next(line for line in rendered.splitlines() if "reasoning" in line)
+    # Shares of their parent, so cached matches the hero's CACHE HIT (1500 / 6000).
+    assert cached.rstrip().endswith("25%")
+    assert reasoning.rstrip().endswith("17%")  # 500 / 3000
+
+
+def _view_with_previous(previous_spend):
+    return usage_view.UsageView(
+        scope_key="week",
+        window_label="This week",
+        source_path="usage.jsonl",
+        totals={"total_tokens": 150, "request_count": 2},
+        cost=usage.usage_cost_summary({"provider_cost_usd": 3.0, "cost_exact_request_count": 2}),
+        models=[],
+        providers={},
+        tiers={},
+        sources={},
+        context=None,
+        trend=[],
+        request_count=2,
+        is_empty=False,
+        last_request=None,
+        last_root=None,
+        previous_spend=previous_spend,
+        previous_label="7d",
+    )
+
+
+@pytest.mark.parametrize(
+    "previous,expected",
+    [(2.0, "▲ 50% vs prev 7d"), (6.0, "▼ 50% vs prev 7d"), (0.1, "▲ 30× vs prev 7d"), (3.0, "= flat vs prev 7d")],
+)
+def test_usage_hero_compares_spend_with_previous_period(previous, expected):
+    rendered = _render_read_only_text(usage_command._hero_band(_view_with_previous(previous)))
+    assert expected in rendered
+
+
+def test_usage_hero_omits_comparison_without_previous_spend():
+    rendered = _render_read_only_text(usage_command._hero_band(_view_with_previous(None)))
+    assert "vs prev" not in rendered
+
+
+def _trend_view(trend, unit):
+    return usage_view.UsageView(
+        scope_key="day",
+        window_label="Today",
+        source_path="usage.jsonl",
+        totals={},
+        cost={},
+        models=[],
+        providers={},
+        tiers={},
+        sources={},
+        context=None,
+        trend=trend,
+        request_count=1,
+        is_empty=False,
+        last_request=None,
+        last_root=None,
+        trend_unit=unit,
+    )
+
+
+@pytest.mark.parametrize("width", [60, 80, 148])
+def test_usage_hourly_chart_labels_stay_on_axis(width):
+    start = datetime(2026, 6, 29, 12)
+    trend = [
+        usage_view.TrendBucket(
+            start=start.replace(day=29 + (12 + h) // 24, hour=(12 + h) % 24),
+            spend_usd=float(h % 5),
+            total_tokens=100,
+            request_count=1,
+        )
+        for h in range(25)
+    ]
+    chart = usage_command._trend_chart(_trend_view(trend, "hour"), width=width)
+
+    lines = _render_read_only_text(chart).splitlines()
+    assert lines[0].startswith("Spend per hour")
+    assert "peak $4.00" in lines[0]
+    axis = next(line for line in lines if "└" in line)
+    ticks = lines[lines.index(axis) + 1].rstrip()
+    assert len(ticks) <= len(axis.rstrip())    # no label hangs past the axis
+    assert ticks.endswith("12:00")             # the newest hour is always labelled
+    assert ticks.count("12:00") == 1           # ...and the wrapped oldest hour isn't repeated
+
+
+def test_usage_chart_merges_long_daily_runs_into_weeks():
+    start = datetime(2026, 1, 1)
+    trend = [
+        usage_view.TrendBucket(start=start + timedelta(days=d), spend_usd=1.0, total_tokens=10, request_count=1)
+        for d in range(70)
+    ]
+    rendered = _render_read_only_text(usage_command._trend_chart(_trend_view(trend, "day"), width=148))
+    assert "Spend per week" in rendered
+    assert "peak $7.00" in rendered
+
+
+def test_usage_chart_falls_back_to_tokens_without_spend():
+    trend = [
+        usage_view.TrendBucket(start=datetime(2026, 6, 28 + d), spend_usd=0.0, total_tokens=50_000 * (d + 1), request_count=1)
+        for d in range(3)
+    ]
+    rendered = _render_read_only_text(usage_command._trend_chart(_trend_view(trend, "day"), width=100))
+    assert "Tokens per day" in rendered
+    assert "peak 150K" in rendered
 
 
 def test_usage_empty_state_keeps_tabs(monkeypatch):
@@ -549,7 +681,7 @@ def test_usage_static_fallback_prints_scoped_panel(monkeypatch):
         tiers={"standard": {}},
         sources={"root": {"request_count": 2}},
         context=None,
-        daily=[],
+        trend=[],
         request_count=2,
         is_empty=False,
         last_request=None,

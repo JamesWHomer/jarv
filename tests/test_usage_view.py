@@ -1,6 +1,6 @@
 """Unit tests for the pure /usage view-model (jarv.usage_view)."""
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -78,7 +78,7 @@ def test_build_usage_view_session(monkeypatch):
     assert view.source_path == "usage.json"
     assert view.request_count == 2
     assert view.is_empty is False
-    assert view.daily == []
+    assert view.trend == []
     # Models are ordered by spend, not token count.
     assert [name for name, _ in view.models] == ["low-tokens-high-spend", "high-tokens-low-spend"]
     # Context headroom is derived from the last root request.
@@ -136,7 +136,8 @@ def test_build_usage_view_window(monkeypatch):
 
     view = usage_view.build_usage_view("week", now=now)
 
-    assert captured["since"] == timedelta(days=7)
+    # Twice the window: the earlier half feeds the period-over-period comparison.
+    assert captured["since"] == timedelta(days=14)
     assert view.scope_key == "week"
     assert view.window_label == "This week"
     assert view.source_path == "usage.jsonl"
@@ -147,6 +148,7 @@ def test_build_usage_view_window(monkeypatch):
 
 
 def test_window_daily_bucketing_is_contiguous(monkeypatch):
+    monkeypatch.setattr(usage_view, "_LOCAL_TZ", timezone.utc)
     monkeypatch.setattr(
         usage_view, "load_global_usage_records",
         lambda *, since=None, now=None, warn=True: _records(),
@@ -157,18 +159,19 @@ def test_window_daily_bucketing_is_contiguous(monkeypatch):
     view = usage_view.build_usage_view("week", now=now)
 
     # A 7-day window spans the start date through today, inclusive (8 calendar days).
-    assert len(view.daily) == 8
-    assert view.daily[0].day == date(2026, 6, 23)
-    assert view.daily[-1].day == date(2026, 6, 30)
+    assert view.trend_unit == "day"
+    assert len(view.trend) == 8
+    assert view.trend[0].start == datetime(2026, 6, 23)
+    assert view.trend[-1].start == datetime(2026, 6, 30)
 
-    by_day = {bucket.day: bucket for bucket in view.daily}
-    assert by_day[date(2026, 6, 28)].spend_usd == pytest.approx(1.0)
-    assert by_day[date(2026, 6, 28)].total_tokens == 100
-    assert by_day[date(2026, 6, 29)].spend_usd == pytest.approx(2.0)
-    assert by_day[date(2026, 6, 29)].request_count == 1
+    by_day = {bucket.start.day: bucket for bucket in view.trend}
+    assert by_day[28].spend_usd == pytest.approx(1.0)
+    assert by_day[28].total_tokens == 100
+    assert by_day[29].spend_usd == pytest.approx(2.0)
+    assert by_day[29].request_count == 1
     # A day with no activity is still present, at zero.
-    assert by_day[date(2026, 6, 23)].spend_usd == 0.0
-    assert by_day[date(2026, 6, 23)].total_tokens == 0
+    assert by_day[23].spend_usd == 0.0
+    assert by_day[23].total_tokens == 0
 
 
 def test_build_window_views_loads_records_once(monkeypatch):
@@ -208,5 +211,69 @@ def test_window_view_empty(monkeypatch):
     view = usage_view.build_usage_view("month", now=datetime(2026, 6, 30, tzinfo=timezone.utc))
 
     assert view.is_empty is True
-    assert view.daily == []
+    assert view.trend == []
     assert view.models == []
+
+
+def test_daily_buckets_follow_local_calendar_days(monkeypatch):
+    # 2026-06-28T20:00Z is already 06-29 06:00 in UTC+10: it belongs to the 29th.
+    monkeypatch.setattr(usage_view, "_LOCAL_TZ", timezone(timedelta(hours=10)))
+    record = dict(_records()[0], created_at="2026-06-28T20:00:00Z")
+    monkeypatch.setattr(
+        usage_view, "load_global_usage_records",
+        lambda *, since=None, now=None, warn=True: [record],
+    )
+    monkeypatch.setattr(usage_view, "global_usage_jsonl_file", lambda: Path("usage.jsonl"))
+
+    view = usage_view.build_usage_view("week", now=datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc))
+
+    by_day = {bucket.start.day: bucket.spend_usd for bucket in view.trend}
+    assert by_day[29] == pytest.approx(1.0)
+    assert by_day[28] == 0.0
+    assert view.trend[-1].start == datetime(2026, 6, 30)  # 22:00 local, still the 30th
+
+
+def test_day_scope_buckets_hourly(monkeypatch):
+    monkeypatch.setattr(usage_view, "_LOCAL_TZ", timezone.utc)
+    records = [
+        dict(_records()[0], created_at="2026-06-30T09:15:00Z"),
+        dict(_records()[1], created_at="2026-06-30T09:45:00Z"),
+    ]
+    monkeypatch.setattr(
+        usage_view, "load_global_usage_records",
+        lambda *, since=None, now=None, warn=True: records,
+    )
+    monkeypatch.setattr(usage_view, "global_usage_jsonl_file", lambda: Path("usage.jsonl"))
+
+    view = usage_view.build_usage_view("day", now=datetime(2026, 6, 30, 12, 30, tzinfo=timezone.utc))
+
+    assert view.trend_unit == "hour"
+    # The rolling 24h window starts mid-hour, so both its partial end hours appear.
+    assert len(view.trend) == 25
+    assert view.trend[0].start == datetime(2026, 6, 29, 12)
+    assert view.trend[-1].start == datetime(2026, 6, 30, 12)
+    by_hour = {bucket.start: bucket for bucket in view.trend}
+    assert by_hour[datetime(2026, 6, 30, 9)].spend_usd == pytest.approx(3.0)
+    assert by_hour[datetime(2026, 6, 30, 9)].request_count == 2
+
+
+def test_window_views_carry_previous_period_spend(monkeypatch):
+    records = [
+        dict(_records()[0], created_at="2026-06-20T05:00:00Z"),  # previous 7d window
+        dict(_records()[1], created_at="2026-06-29T05:00:00Z"),  # current 7d window
+    ]
+    monkeypatch.setattr(
+        usage_view, "load_global_usage_records",
+        lambda path=None, *, since=None, now=None, warn=True: records,
+    )
+    monkeypatch.setattr(usage_view, "global_usage_jsonl_file", lambda: Path("usage.jsonl"))
+
+    views = usage_view.build_window_views(now=datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc))
+
+    assert views["week"].previous_spend == pytest.approx(1.0)
+    assert views["week"].previous_label == "7d"
+    assert views["week"].request_count == 1
+    assert views["month"].previous_label == "30d"
+    assert views["month"].previous_spend is None  # nothing recorded before the window
+    assert views["day"].previous_label == "24h"
+    assert views["all"].previous_spend is None and views["all"].previous_label == ""
