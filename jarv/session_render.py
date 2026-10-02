@@ -28,9 +28,9 @@ _history_content_to_str = flatten_content_text
 
 
 def _markdown_to_text_lines(content: str, width: int) -> list[Text]:
-    from rich.markdown import Markdown
+    from .markdown_render import markdown_renderable
 
-    return rendered_text_lines(Markdown(flatten_headings(content)), width)
+    return rendered_text_lines(markdown_renderable(flatten_headings(content)), width)
 
 
 def _status_renderable(item: dict) -> Text:

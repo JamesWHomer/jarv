@@ -1,17 +1,9 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
-import platform
-import shutil
 import stat
-import subprocess
 import sys
-import tarfile
-import tempfile
-import urllib.request
-import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -30,6 +22,16 @@ DOWNLOAD_TIMEOUT_SECONDS = 60
 WINDOWS_UPDATE_RESULT_FILE = CONFIG_DIR / "update-result.json"
 WINDOWS_UPDATE_RETRY_COUNT = 40
 WINDOWS_UPDATE_RETRY_DELAY_MS = 250
+
+def __getattr__(name):
+    # These remain available to callers, but release detection/result reporting
+    # does not need archive readers, downloads or subprocess support.
+    if name in {"hashlib", "shutil", "subprocess", "tarfile", "tempfile", "urllib", "zipfile", "platform"}:
+        import importlib
+
+        importlib.import_module("urllib.request" if name == "urllib" else name)
+        return sys.modules[name]
+    raise AttributeError(name)
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,8 @@ def manifest_url(version: str | None = None) -> str:
 
 
 def normalize_platform(value: str | None = None) -> str:
+    import platform
+
     system = (value or platform.system()).lower()
     if system.startswith("win"):
         return "windows"
@@ -66,6 +70,8 @@ def normalize_platform(value: str | None = None) -> str:
 
 
 def normalize_architecture(value: str | None = None, *, target_platform: str | None = None) -> str:
+    import platform
+
     machine = (value or platform.machine()).lower()
     normalized_platform = normalize_platform(target_platform)
     aliases = {
@@ -79,6 +85,8 @@ def normalize_architecture(value: str | None = None, *, target_platform: str | N
 
 
 def fetch_release_manifest(version: str | None = None) -> dict[str, Any] | None:
+    import urllib.request
+
     try:
         req = urllib.request.Request(
             manifest_url(version),
@@ -144,6 +152,8 @@ def latest_standalone_version() -> str | None:
 
 
 def _sha256_file(path: Path) -> str:
+    import hashlib
+
     digest = hashlib.sha256()
     with path.open("rb") as fh:
         for chunk in iter(lambda: fh.read(1024 * 1024), b""):
@@ -152,6 +162,9 @@ def _sha256_file(path: Path) -> str:
 
 
 def download_asset(asset: ReleaseAsset, destination: Path) -> Path:
+    import shutil
+    import urllib.request
+
     destination.parent.mkdir(parents=True, exist_ok=True)
     req = urllib.request.Request(
         asset.download_url,
@@ -170,6 +183,9 @@ def download_asset(asset: ReleaseAsset, destination: Path) -> Path:
 
 
 def extract_executable(archive_path: Path, destination_dir: Path, *, windows: bool | None = None) -> Path:
+    import tarfile
+    import zipfile
+
     destination_dir.mkdir(parents=True, exist_ok=True)
     executable_name = "jarv.exe" if (os.name == "nt" if windows is None else windows) else "jarv"
     if archive_path.suffix == ".zip":
@@ -190,6 +206,8 @@ def _windows_updater_creation_flags(*, allow_breakaway: bool = True) -> int:
     # Windows PowerShell can exit before processing ``-File`` when started with
     # DETACHED_PROCESS. CREATE_NO_WINDOW isolates it from the console while
     # still allowing the handoff script to run after Jarv exits.
+    import subprocess
+
     flags = (
         getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
         | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
@@ -204,6 +222,9 @@ def _stage_windows_updater(
     target: Path,
     expected_version: str,
 ) -> subprocess.Popen:
+    import shutil
+    import subprocess
+
     script = source.parent / "jarv-update.ps1"
     script.write_text(
         """
@@ -407,6 +428,9 @@ def install_standalone_asset(
     executable_path: str | Path | None = None,
     windows: bool | None = None,
 ) -> str:
+    import shutil
+    import tempfile
+
     target = Path(executable_path or sys.executable).resolve()
     is_windows = os.name == "nt" if windows is None else windows
     # os.replace / File.Replace require source and target on the same volume.

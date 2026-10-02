@@ -62,7 +62,7 @@ def cmd_history() -> None:
         console.print("[dim]\u25cb No history yet.[/dim]")
         return
     from rich.console import Group
-    from rich.markdown import Markdown
+    from .markdown_render import markdown_renderable
     from rich.panel import Panel
     from rich.text import Text
 
@@ -114,7 +114,7 @@ def cmd_history() -> None:
                     _append_jarv_heading()
                     parts.extend(pending_tool_parts)
                     pending_tool_parts.clear()
-                    parts.append(Markdown(flatten_headings(content)))
+                    parts.append(markdown_renderable(flatten_headings(content)))
                     parts.append(Text(""))
             elif m.get("type") == "status":
                 content = str(m.get("content") or "").strip()

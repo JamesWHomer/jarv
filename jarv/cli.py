@@ -1,9 +1,7 @@
-import argparse
+from __future__ import annotations
+
 import os
 import sys
-import threading
-from contextlib import ExitStack
-from pathlib import Path
 
 from . import __version__
 
@@ -60,6 +58,46 @@ def _print_previous_uninstall_result() -> None:
     message = result["message"] or "The previous uninstall did not complete."
     console.print(Text.assemble(("✗ ", "bold red"), (message, "red")))
     console.print("[dim]Run [bold]jarv /uninstall[/bold] to retry.[/dim]")
+
+
+def _print_pending_results(*, quiet: bool = False) -> None:
+    from .paths import CONFIG_DIR, UNINSTALL_RESULT_FILE
+
+    if not quiet and (CONFIG_DIR / "update-result.json").is_file():
+        _print_previous_update_result()
+    if not quiet and UNINSTALL_RESULT_FILE.is_file():
+        _print_previous_uninstall_result()
+
+
+def _dispatch_command_query(query_parts: list[str]) -> None:
+    if len(query_parts) == 1 and query_parts[0].lower() == "help":
+        from .commands import print_help
+
+        print_help(include_setup_nudge=False)
+        return
+    command = query_parts[0].lower()
+    if not _run_slash_command(command, query_parts[1:], exit_on_error=True):
+        console = _console()
+        console.print(f"[red]Unknown command:[/red] {command}")
+        _print_command_suggestions(command)
+        console.print("[dim]Run [bold]jarv /help[/bold] for a list of commands.[/dim]")
+        raise SystemExit(2)
+
+
+def _command_entry(query_parts: list[str]) -> None:
+    """The option-free command path has the same diagnostics as main()."""
+    try:
+        _console()
+        _print_pending_results()
+        _dispatch_command_query(query_parts)
+    except (OSError, ValueError) as exc:
+        print(f"jarv: {exc}", file=sys.stderr)
+        raise SystemExit(2) from None
+    except KeyboardInterrupt:
+        raise SystemExit(130) from None
+    except Exception as exc:
+        print(f"jarv: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 def _setup_nudge() -> None:
@@ -278,6 +316,7 @@ def cmd_setup(rest: list[str] | None = None) -> dict | int | None:
 
 
 def _positive_int(raw: str) -> int:
+    import argparse
     try:
         value = int(raw)
         if value > 0:
@@ -288,6 +327,7 @@ def _positive_int(raw: str) -> int:
 
 
 def _config_override(raw: str) -> tuple[str, object]:
+    import argparse
     import json
     from .config_schema import CONFIG_FIELD_BY_KEY, parse_config_value, validate_config_fields
 
@@ -310,6 +350,7 @@ def _config_override(raw: str) -> tuple[str, object]:
 
 
 def _tool_allowlist(raw: str) -> list[str]:
+    import argparse
     from .config_schema import TOOL_NAMES
     names = [name.strip() for name in raw.split(",")]
     if not names or any(name not in TOOL_NAMES for name in names):
@@ -318,6 +359,7 @@ def _tool_allowlist(raw: str) -> list[str]:
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    import argparse
     from .provider_catalog import PROVIDERS
 
     parser = argparse.ArgumentParser(
@@ -417,6 +459,23 @@ def main() -> None:
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(encoding="utf-8")
 
+    # The exact standalone invocation has no parsing or configuration work.
+    # Mixed arguments still go through argparse, preserving its ordering and
+    # validation semantics (including -- and options with missing values).
+    if sys.argv[1:] == ["--version"]:
+        print(f"jarv {__version__}")
+        raise SystemExit(0)
+
+    query_parts = sys.argv[1:]
+    if query_parts and (
+        query_parts[0].startswith("/") or
+        (len(query_parts) == 1 and query_parts[0].lower() == "help")
+    ) and not any(value.startswith("-") for value in query_parts):
+        # With no option-looking words argparse would only copy positionals.
+        # Mixed options still take its full validation/diagnostic path.
+        _command_entry(query_parts)
+        return
+
     parser = _build_parser()
     args, unknown = parser.parse_known_args()
     if unknown:
@@ -436,6 +495,9 @@ def main() -> None:
     if args.output_format or args.quiet or args.verbose:
         from .cli_output import CliOutput
         output = CliOutput(args.output_format or "text", quiet=args.quiet, verbose=args.verbose)
+    from contextlib import ExitStack
+    from pathlib import Path
+
     with ExitStack() as stack:
         if output:
             stack.enter_context(output.route_diagnostics())
@@ -497,28 +559,16 @@ def _reject_command_flags(parser, args):
 def _main(parser, args, output=None) -> None:
     query_parts: list[str] = args.query
     console = _console()
-    from .paths import CONFIG_DIR, UNINSTALL_RESULT_FILE
-
-    # Import the updater only when there is a result to report.
-    if not args.quiet and (CONFIG_DIR / "update-result.json").is_file():
-        _print_previous_update_result()
-    if not args.quiet and UNINSTALL_RESULT_FILE.is_file():
-        _print_previous_uninstall_result()
+    _print_pending_results(quiet=args.quiet)
 
     # "jarv help" permanent alias (only when help is the sole argument)
     if args.prompt_file is None and len(query_parts) == 1 and query_parts[0].lower() == "help":
-        from .commands import print_help
-        print_help(include_setup_nudge=False)
+        _dispatch_command_query(query_parts)
         return
 
     # Prompt-file content is always a prompt, even if it begins with a slash.
     if query_parts and query_parts[0].startswith("/") and args.prompt_file is None:
-        command = query_parts[0].lower()
-        if not _run_slash_command(command, query_parts[1:], exit_on_error=True):
-            console.print(f"[red]Unknown command:[/red] {command}")
-            _print_command_suggestions(command)
-            console.print("[dim]Run [bold]jarv /help[/bold] for a list of commands.[/dim]")
-            raise SystemExit(2)
+        _dispatch_command_query(query_parts)
         return
 
     # Check if user typed a command name without the slash (e.g. "jarv set" instead of "jarv /set")
@@ -600,6 +650,8 @@ def _main(parser, args, output=None) -> None:
             from .update_check import _check_update_background, maybe_print_update_available
 
             maybe_print_update_available()
+            import threading
+
             threading.Thread(target=_check_update_background, daemon=True).start()
 
         from .agent import run_agent

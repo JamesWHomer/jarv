@@ -203,9 +203,9 @@ class _HistoryMarkdown:
 
     def __rich_console__(self, console, options):
         if self._markdown is None:
-            from rich.markdown import Markdown
+            from .markdown_render import markdown_renderable
 
-            self._markdown = Markdown(flatten_headings(self.content))
+            self._markdown = markdown_renderable(flatten_headings(self.content))
         yield self._markdown
 
 

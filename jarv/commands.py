@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import copy
-import shutil
-import subprocess
 import sys
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -15,6 +13,15 @@ from .install_channel import InstallChannel, detect_install_channel
 
 UPDATE_CHECK_INTERVAL_HOURS = 24
 UPDATE_FLAG_FILE = CONFIG_DIR / "update_available.txt"
+
+def __getattr__(name):
+    # Preserve the updater's module-level patch points without importing its
+    # process/installer machinery for ordinary commands.
+    if name in {"shutil", "subprocess"}:
+        import importlib
+
+        return importlib.import_module(name)
+    raise AttributeError(name)
 
 def _fetch_latest_pypi_release() -> tuple[str, str] | None:
     from .update_check import _fetch_latest_pypi_release as fetch
@@ -356,6 +363,8 @@ UPDATE_INSTALL_TIMEOUT_SECONDS = 180
 
 
 def _run_update_command(command: list[str]) -> subprocess.CompletedProcess:
+    import subprocess
+
     try:
         return subprocess.run(
             command,
@@ -417,6 +426,8 @@ def _tool_installed_version(manager: str) -> str | None:
 
 
 def _fallback_tool_manager() -> str | None:
+    import shutil
+
     if shutil.which("uv"):
         return "uv"
     if shutil.which("pipx"):

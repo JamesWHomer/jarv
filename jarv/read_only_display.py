@@ -9,7 +9,6 @@ from rich.console import Group, RenderableType
 from rich.live import Live
 from rich.text import Text
 
-from .command_input import _key_available, _read_key_with_repeats
 from .config import (
     CONFIG_FILE,
     DEFAULT_CONFIG,
@@ -19,7 +18,24 @@ from .config import (
 )
 from .display import console, jarv_panel, rendered_text_lines, terminal_size
 from .tui_panel import configure_menu_border, menu_border_enabled
-from .tui_overlay import scroll_overlay
+
+
+def _key_available(*args, **kwargs):
+    from .command_input import _key_available as available
+
+    return available(*args, **kwargs)
+
+
+def _read_key_with_repeats(*args, **kwargs):
+    from .command_input import _read_key_with_repeats as read
+
+    return read(*args, **kwargs)
+
+
+def scroll_overlay(*args, **kwargs):
+    from .tui_overlay import scroll_overlay as show
+
+    return show(*args, **kwargs)
 
 
 def _config_display_mode(config: dict | None = None) -> str:
