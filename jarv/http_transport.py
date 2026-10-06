@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -100,7 +101,9 @@ def _retry_delay(response, attempt: int) -> float:
     retry_after = response.headers.get("retry-after")
     if retry_after:
         try:
-            return min(max(float(retry_after), 0.0), 30.0)
+            delay = float(retry_after)
+            if math.isfinite(delay):
+                return min(max(delay, 0.0), 30.0)
         except ValueError:
             pass
     return min(0.5 * (2 ** attempt), 4.0)
@@ -266,34 +269,5 @@ def open_stream_response(
         raise
 
 
-def request_json_response(
-    provider: str,
-    client,
-    method: str,
-    path: str,
-    *,
-    json_body: dict | None = None,
-    params: dict | None = None,
-    cancellation_token: CancellationToken | None = None,
-    max_retries: int = 2,
-) -> dict:
-    """Send a non-streaming JSON request and return the parsed body."""
-    response = send_with_retries(
-        client,
-        method,
-        path,
-        json_body=json_body,
-        params=params,
-        stream=False,
-        cancellation_token=cancellation_token,
-        max_retries=max_retries,
-    )
-    try:
-        if response.status_code >= 400:
-            raise response_error(provider, response)
-        data = response.json()
-        if not isinstance(data, dict):
-            raise ProviderHTTPError(provider, "response was not a JSON object")
-        return data
-    finally:
-        response.close()
+# Retain the older transport entry point without duplicating retry/cleanup logic.
+request_json_response = request_json

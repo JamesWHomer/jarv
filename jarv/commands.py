@@ -5,6 +5,12 @@ import sys
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import subprocess
+    from rich.console import Group
+    from rich.markdown import Markdown
 
 from . import __version__
 from .config import CONFIG_DIR, CONFIG_FILE
@@ -198,7 +204,7 @@ def _help_body() -> Group:
             ("--verbose", "One-shot runtime details and progress on stderr", "bold yellow"),
             ("--version", "Print the version and exit", "bold yellow"),
         ],
-        _command_help_rows(["new", "history", "tree", "btw", "undo", "redo", "sessions", "archive"]),
+        _command_help_rows(["new", "resume", "history", "tree", "btw", "undo", "redo", "sessions", "archive"]),
         _command_help_rows(["settings", "config", "set", "unset", "setup"]),
         _command_help_rows(["usage", "update", "uninstall", "help", "about"])
         + [("exit, quit, /exit, /quit", "Leave heads-up mode", "bold cyan")],
@@ -249,28 +255,31 @@ def _about_body() -> Markdown:
 - `command | jarv <instruction>` - Attach piped stdin as input for a one-shot prompt.
 - `jarv /help` - Show the short command overview. (`jarv help` also works as a permanent alias.)
 - `jarv /about` - Show this detailed overview.
-- `jarv /setup` - Run the setup wizard to choose a provider, enter an API key, and pick a model.
+- `jarv /setup [provider|key|model|base_url]` - Run the setup wizard, or jump to one step.
 - `jarv /config` - Show raw config values. The API key is masked.
-- `jarv /set <key> <value>` - Set a config value. Boolean and numeric settings parse their expected types; text settings preserve the supplied text.
+- `jarv /set <key> <value>` - Set a config value. Boolean and numeric settings parse their expected types; text settings preserve the supplied text. Use `/settings` or edit config JSON for maps/lists; `/set` does not parse JSON containers. The one-run `--config KEY=VALUE` flag does.
 - `jarv /unset <key>` - Reset a default config key, or remove a custom key.
 - `jarv /history` - Show recent user and assistant messages.
 - `jarv /tree` - Browse the session as a tree; fork, edit, or resume from any earlier prompt.
 - `jarv /usage` - Open the interactive usage screen. `←/→` (or `1-5` / `s t w m a`) switches scope live between Session, Today, Week, Month, and All.
-- `jarv /usage <session|day|week|month|all>` - Open straight to a scope. `day`/`today` is a rolling 24h window; `all` reads the full system-wide history.
+- `jarv /usage <session|day|week|month|all>` - Open straight to a scope. `day`/`today`, `week`, and `month` are rolling 24h, 7d, and 30d windows; `all` reads the full system-wide history. Without an interactive terminal, usage prints a static view.
 - `jarv /undo [n]` - Unsend the last n exchanges (default 1). The removed exchange is pushed onto a redo stack.
 - `jarv /redo [n]` - Restore the last n undone exchanges (default 1). Sending a new message clears the redo stack.
-- `jarv /btw <question>` - Ask an aside without derailing the main thread.
+- `/btw <question>` (heads-up only) - Ask an aside, then save the successful exchange as a branch and return to the preceding exchange. First exchanges, cancelled turns, and failed turns remain on the active path. `jarv /btw` only prints instructions.
 - `jarv /settings` - Open an interactive settings menu for provider/model, command review, audit, runtime, updates, and how read-only commands display (`fullscreen` or `print`).
 - `jarv /new` - Start a fresh session on the next message.
+- `jarv /resume` - Resume the most recent unarchived session used in the current directory.
 - `jarv /archive` - Archive this terminal's session history and start a fresh one on the next message.
 - `jarv /sessions` / `jarv /session` - List sessions by recency. In an interactive terminal you can scroll through all of them; when stdout is not a TTY (e.g. piped), only the 5 most recent are listed.
 - `jarv /sessions <id>` - Bind this terminal to a specific session id (prefix match).
-- `jarv /update` - Update Jarv through the active install channel. Standalone builds update from GitHub Releases; Python installs update through pip, pipx, or uv.
+- `jarv /update` - Update direct standalone installs from GitHub Releases or non-editable Python installs through pip, pipx, or uv. Scoop, WinGet, and Homebrew installs print their manager's update command; editable installs are left untouched.
 - `jarv /uninstall [--purge] [--yes]` - Uninstall Jarv or show the command for its package manager. User data is kept unless `--purge` is supplied; `--yes` skips the confirmation prompt (required when stdin is not a terminal).
 
 ## Heads-up mode
 
-Run `jarv` with no prompt to start an interactive session. Type a prompt and press Enter to send it. Commands start with `/` (e.g. `/new`, `/history`). During a response, Esc or Ctrl+C stops further work, checkpoints the turn in history/context, and restores its prompt. Use `/undo` to remove that turn. At the prompt, Esc or Ctrl+C clears text and exits when the prompt is already empty. Type `exit`, `quit`, or `/exit` to leave directly.
+Run `jarv` with no prompt to start an interactive session. Type a prompt and press Enter to send it. Commands start with `/` (e.g. `/new`, `/history`). During a response, Esc or Ctrl+C stops further work, checkpoints the turn in history/context, and restores its prompt. Use `/undo` to remove that turn. At the prompt, Esc or Ctrl+C clears text and exits when the prompt is already empty. Type `exit`, `quit`, `/exit`, or `/quit` to leave directly.
+
+`--incognito` skips loading and saving history, artifacts, retained outputs, and usage records. Each incognito heads-up prompt also starts without earlier conversation context. History/session commands and `/usage` are unavailable, and `/btw` runs as an ordinary prompt. Config, catalog/update caches, clipboard files, provider requests, and tool actions are outside this history setting.
 
 ## How jarv works
 
@@ -286,21 +295,25 @@ Run `jarv` with no prompt to start an interactive session. Type a prompt and pre
 
 - The root model can see six tools: `run_command`, `web_search`, `read`, `edit`, `spawn`, and `ask_user`. The enabled subset is controlled from `/settings`.
 - `edit(path, old_text, new_text, replace_all)` makes an exact string replacement in an existing UTF-8 text file; `old_text` must match exactly once unless `replace_all` is true. Edits are gated by `command_safety` with a diff preview.
-- `read(input, offset, size)` pages through retained command output, visible artifacts, HTTP(S) URLs, local text files, and embedded-text PDFs using Unicode character offsets. Consecutive reads run concurrently.
+- `read(input, offset, size)` pages through retained command output, visible artifacts, HTTP(S) URLs, local text files, and embedded-text PDFs using Unicode character offsets, up to 200,000 characters per page. Local PDFs are limited to 20 MiB; extraction stops at 1,000 pages or 2,000,000 text characters and does not OCR scanned pages. Consecutive `read` and `web_search` calls, including mixed batches, run concurrently and return results in call order. Commands and edits run sequentially within each agent.
 - Direct local and HTTP(S) image reads (`png`, `jpeg`, `webp`, plus provider-supported `gif`) are returned as native image input when the active model advertises image capability in Jarv's cached provider catalog or the models.dev catalog. Image reads ignore `offset` and `size`, are capped at 10 MiB, and fall back to a text "no image capability" result when the selected model route is text-only or unknown.
-- `web_search` supports any positive result count and a non-negative result offset. URL reads preserve HTTP(S) links as absolute URLs.
+- Local providers and OpenRouter's `auto`/`free` routes are excluded from image reads. Gemini image tool results require a Gemini 3 model and do not accept GIF; Jarv assumes Gemini 3 image support when metadata is absent unless the catalog says otherwise.
+- `web_search` supports 1–20 results per call and a non-negative result offset. URL reads preserve HTTP(S) links as absolute URLs, do not execute JavaScript, and mark fetched content as untrusted.
 - Spawned subagents also get a mandatory `finish` tool (to return output) and may get `spawn` when the parent sets `sterile: false`.
+- Each `spawn` batch accepts up to 16 children, running at most `subagent_thread_pool_max_workers` at once (default 8). Labels must be unique across the session. `deps` can expose artifacts already visible to the parent, not outputs of siblings in the same batch.
 - A `spawn` batch cancels unfinished children after `subagent_timeout` seconds instead of waiting forever; completed sibling artifacts remain available.
 - Subagent internal transcripts are discarded. Root history stores the parent `spawn`/`read` tool calls and their returned outputs. Artifact longform content persists per session in `artifacts-<hash>.json`.
 - Shell commands run only when the model calls `run_command`.
 - On Windows, `run_command` uses PowerShell.
+- Noninteractive Windows commands reuse a PowerShell worker by default (`persistent_shell`). Each command has a fresh execution context; only directory and environment carry forward. Interactive commands, unsupported commands, and worker startup failures use a fresh process. Ordinary variables, functions, and preferences do not persist.
 - On other platforms, `run_command` uses the system shell.
 - Shell state (current directory, environment variables, activated venv) persists across `run_command` calls. Subagents inherit a snapshot of the parent's state at spawn; their changes do not propagate back. State is kept in memory only and resets when jarv exits. If a command is killed (timeout/interrupt) or ends with `exit` on Windows, the state from before that command is kept.
 - Interactive commands are experimental and off by default (`interactive_commands`, toggled in `/settings`). While off, every command runs to completion or is killed at `command_timeout`, and nothing can be typed into a process waiting on stdin.
 - With `interactive_commands` on: if a command is still running and appears to be waiting for input, jarv asks the model for terminal input instead of printing the assistant response as chat. Plain text is sent with Enter; the interactive prompt also exposes temporary controls such as wait, interrupt, EOF, Enter, Tab, Escape, and arrow keys only while they are relevant.
 - During the interactive loop, `command_timeout` is a check-in interval. If the command keeps running past it, jarv asks the model what to do next and includes elapsed/idle time instead of killing the process.
 - Interactive command output is delta-only. Each terminal input/output step is displayed separately, and jarv sends only the new stdout/stderr since the previous interaction back to the model.
-- Command output shown in the terminal uses at most one-third of the screen height, biased roughly 2:1 toward the first lines, with the omitted middle count displayed. The UI also shows the resolved `head_chars` and `tail_chars` returned to the model. Truncated model output is retained under a session-scoped ID for later `read` calls.
+- With `tool_output_display_lines=auto`, output uses a line budget of one-third of terminal height in `print` layout and one-half in `fullscreen`, with a minimum of three lines. An integer of at least 3 fixes the display budget in both layouts. Output is biased roughly 2:1 toward the first lines, with the omitted middle count displayed. The UI also shows the resolved `head_chars` and `tail_chars` returned to the model.
+- Command head/tail arguments have a combined ceiling of 200,000 characters. Truncated model output is retained under a session-scoped ID for later `read` calls, but capture itself keeps at most 2,000,000 characters per stream. Dropped middle text cannot be recovered. Retention evicts the oldest entries above 128 outputs or 8,000,000 total characters.
 - Non-interactive command execution is killed after `command_timeout` seconds.
 - Web requests are killed after `web_timeout` seconds. Text and PDF responses are limited to 2 MiB.
 - Interrupted commands/process trees are terminated when possible.
@@ -312,10 +325,10 @@ Config file: `{CONFIG_FILE}`
 Keys:
 
 {chr(10).join(config_about_lines(DEFAULT_CONFIG))}
-- `/usage` stores request-level provider and processing-tier cost provenance. Provider-reported cost is preferred; otherwise models.dev pricing for that provider is marked estimated, while unknown and contract-priced requests remain explicit. System-wide views read future usage from `{CONFIG_DIR / "usage.json"}`.
+- `/usage` stores request-level provider and processing-tier cost provenance. Provider-reported cost is preferred; otherwise provider-specific price estimates are used, while unknown and contract-priced requests remain explicit. New system-wide records are appended to `{CONFIG_DIR / "usage.jsonl"}` without automatic expiry; legacy `usage.json` records are also read. Old session totals are not backfilled into time-window reports.
 
-If the config file does not exist, jarv creates it and exits so you can add an API key.
-If the config file is invalid JSON, jarv backs it up and creates a fresh default config.
+Loading config creates missing defaults. A normal prompt run opens setup when credentials are missing unless `--provider` is explicit; `--non-interactive` fails instead of prompting. With credentials already available (including environment variables), or a local provider, a new config does not force an exit.
+Invalid JSON or invalid config values produce an error; the existing file is preserved rather than replaced with defaults.
 
 ## History and sessions
 
@@ -327,19 +340,21 @@ Each terminal is bound to exactly one session at a time. By default a fresh term
 - `jarv /archive` archives the current session's history and sidecars and removes the terminal's mapping. The next prompt starts a fresh session.
 - `jarv /sessions` / `jarv /session` lists sessions by recency (all in a TTY; 5 most recent when stdout is not a TTY).
 - `jarv /sessions <id>` binds a specific session id (prefix match) to this terminal.
+- `jarv /resume` binds the most recent unarchived session with saved history in the current directory. Directory associations are recorded when messages are sent; older sessions become eligible after their next message.
 - `jarv /tree` opens an interactive tree of the session's prompts; from any node you can fork, edit, or resume.
+- `/undo`, `/redo`, and tree checkout change conversation history, not files edited or commands already executed. Usage records are not rolled back. Archiving preserves history, artifacts, retained outputs, usage, and branches, but discards the redo stack; restoring brings the archived sidecars back.
 
 ## Updates
 
 - `jarv /update` uses GitHub Releases for direct standalone installs and PyPI for Python installs. Scoop, WinGet, and Homebrew installs show their owning manager's update command to run after exiting Jarv. Editable source installs are left untouched.
-- A one-shot `jarv <question>` (arguments on the command line, not heads-up mode) fires a fully non-blocking background check when `check_updates` is true. Direct standalone installs check GitHub Releases; Python installs check PyPI. Scoop, WinGet, and Homebrew manage their own update availability. If an update is found it is saved locally; the next invocation shows the notification instantly with no network wait.
-- The background check is throttled to at most once every {UPDATE_CHECK_INTERVAL_HOURS} hours.
+- A one-shot prompt run (including piped input, not heads-up mode) fires a non-blocking background check when `check_updates` is true and `--quiet` is off. Direct standalone installs check GitHub Releases; Python installs check PyPI. Scoop, WinGet, and Homebrew manage their own update availability. A found update is saved locally; the next eligible one-shot run shows the notification without waiting for a network request. Background checks do not install updates.
+- Successful background checks are throttled to at most once every {UPDATE_CHECK_INTERVAL_HOURS} hours; failed checks can be retried on later runs.
 - Set `check_updates` to `false` (`jarv /set check_updates false`) to disable the background check entirely.
 - After updating, run `jarv` again to use the new version.
 
 ## Files
 
-Everything lives under `{CONFIG_DIR}`: `config.json`, `sessions.json`, and a `sessions/` directory of per-session history, artifact, and retained-output files.
+Persistent state lives under `{CONFIG_DIR}`: `config.json`, `sessions.json`, `usage.jsonl`, `sessions/` (history, artifacts, reads, usage, redo, and branches), and `archive/`. Disposable caches include `session-titles.json`, `models-dev.json`, and `model-catalog/`. The directory also holds update-check notices, Windows update/uninstall results, and storage lock/recovery files as needed. Pasted clipboard bitmaps live separately in the operating system's temporary `jarv-clipboard/` directory; copied image files are referenced in place.
 
 ## Version
 

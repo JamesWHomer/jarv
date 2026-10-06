@@ -217,7 +217,7 @@ def test_headsup_incognito_new_and_session_commands_do_not_touch_saved_sessions(
         old_id = app.session_context.session_id
         app._run_slash("/new", [])
         assert app.session_context.session_id != old_id
-        for command in ("/archive", "/undo", "/redo", "/history", "/session", "/sessions", "/usage", "/tree"):
+        for command in ("/archive", "/resume", "/undo", "/redo", "/history", "/session", "/sessions", "/usage", "/tree"):
             app._run_slash(command, [])
         app._usage_status(80)
         assert app._load_prompt_history() == []

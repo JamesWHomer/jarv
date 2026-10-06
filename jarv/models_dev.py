@@ -18,6 +18,7 @@ prices never do.
 from __future__ import annotations
 
 import json
+import math
 import re
 import threading
 from dataclasses import dataclass, field, replace
@@ -477,7 +478,7 @@ def _rates(cost: Any, input_tokens: int | None = None) -> dict[str, float] | Non
             rates[target] = float(value)
         except (TypeError, ValueError):
             continue
-    if any(rate < 0 for rate in rates.values()):
+    if any(not math.isfinite(rate) or rate < 0 for rate in rates.values()):
         return None
     return rates
 
@@ -507,6 +508,7 @@ def _cached_etag() -> str:
 
 
 def _write_cache(providers: dict[str, Any], etag: str, source: str) -> bool:
+    import tempfile
     from datetime import datetime, timezone
 
     payload = {
@@ -515,13 +517,24 @@ def _write_cache(providers: dict[str, Any], etag: str, source: str) -> bool:
         "etag": etag,
         "providers": providers,
     }
+    temporary = None
     try:
         CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        temporary = CACHE_PATH.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(payload), encoding="utf-8")
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=CACHE_PATH.parent,
+            prefix=".jarv-models-", delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            json.dump(payload, stream)
         temporary.replace(CACHE_PATH)
     except OSError:
         return False
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
     clear_cache()
     return True
 

@@ -285,7 +285,10 @@ def _resolve_source(
             return f"[read error: artifact '{value}' not found]"
         return ReadSource("artifact", value, content=artifact.longform)
 
-    parsed = urlsplit(value)
+    try:
+        parsed = urlsplit(value)
+    except ValueError as exc:
+        return f"[read error: invalid URL or path: {exc}]"
     if parsed.scheme.lower() in {"http", "https"}:
         try:
             timeout = float(get_setting(config, "web_timeout"))
@@ -365,15 +368,14 @@ def _resolve_source(
             untrusted=True,
         )
 
-    path = Path(value).expanduser()
-    if parsed.scheme and not path.drive:
-        return f"[read error: unsupported URL scheme '{parsed.scheme}']"
-
-    if not path.is_absolute():
-        path = (Path(cwd) if cwd is not None else Path.cwd()) / path
     try:
+        path = Path(value).expanduser()
+        if parsed.scheme and not path.drive:
+            return f"[read error: unsupported URL scheme '{parsed.scheme}']"
+        if not path.is_absolute():
+            path = (Path(cwd) if cwd is not None else Path.cwd()) / path
         resolved = path.resolve(strict=True)
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
         return f"[read error: local file not found: {value}]"
     if not resolved.is_file():
         return f"[read error: local path is not a file: {value}]"
@@ -542,7 +544,11 @@ def dispatch_read_tool(
     if source.image is not None:
         output = _render_image_read_result(source, config)
         return with_tool_outcome(output, "failed" if isinstance(output, str) else "success")
-    return with_tool_outcome(_render_text_read_result(source, offset, size), "success")
+    total_size = len(source.content or "") if source.total_size is None else source.total_size
+    return with_tool_outcome(
+        _render_text_read_result(source, offset, size),
+        "failed" if offset > total_size else "success",
+    )
 
 
 def dispatch_read_batch(

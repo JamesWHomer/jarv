@@ -1,8 +1,11 @@
 """Cancellation must stop socket I/O, including before a response exists."""
 
 import socket
+import socketserver
+import ssl
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from unittest.mock import Mock
 from urllib.parse import urlsplit
 
@@ -10,6 +13,7 @@ import httpx
 import pytest
 
 from jarv.cancellation import CancellationToken, TurnCancelled
+from jarv.http_cancellation import CancellableClient
 from jarv.http_transport import (
     create_client, open_stream_response, request_json, send_with_retries,
 )
@@ -204,3 +208,154 @@ def test_read_polling_preserves_configured_timeout(stalled_server):
             )
     assert disconnected.wait(1)
     assert paths == ["/headers"]
+
+
+@pytest.fixture
+def stalled_tls_server():
+    received = threading.Event()
+    disconnected = threading.Event()
+    handshakes = []
+
+    class Handler(socketserver.BaseRequestHandler):
+        def handle(self):
+            self.request.settimeout(3)
+            try:
+                data = self.request.recv(4096)
+                if data.startswith(b"CONNECT "):
+                    while b"\r\n\r\n" not in data:
+                        data += self.request.recv(4096)
+                    self.request.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                    data = self.request.recv(4096)
+                if data:
+                    handshakes.append(data)
+                    received.set()
+                # Receive the ClientHello but never send a ServerHello.
+                while self.request.recv(4096):
+                    pass
+                disconnected.set()
+            except ConnectionResetError:
+                disconnected.set()
+            except (OSError, socket.timeout):
+                pass
+
+    with socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler) as server:
+        server.daemon_threads = True
+        worker = threading.Thread(
+            target=lambda: server.serve_forever(poll_interval=0.01), daemon=True,
+        )
+        worker.start()
+        try:
+            yield server.server_address[1], received, disconnected, handshakes
+        finally:
+            server.shutdown()
+            worker.join(timeout=1)
+
+
+@pytest.mark.parametrize("proxy", [False, True])
+def test_cancel_interrupts_tls_handshake(stalled_tls_server, stalled_server, monkeypatch, proxy):
+    port, received, disconnected, handshakes = stalled_tls_server
+    normal_url, _, _, _, _ = stalled_server
+    url = f"https://127.0.0.1:{port}"
+    if proxy:
+        monkeypatch.setenv("HTTPS_PROXY", f"http://127.0.0.1:{port}")
+        monkeypatch.setenv("https_proxy", f"http://127.0.0.1:{port}")
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+        monkeypatch.setenv("no_proxy", "127.0.0.1")
+        url = "https://provider.invalid"
+
+    token = CancellationToken()
+    outcomes = []
+    with create_client(url, {}, connect_timeout=3) as client:
+        def request():
+            try:
+                request_json("test", client, "GET", "/", cancellation_token=token)
+            except BaseException as exc:
+                outcomes.append(exc)
+
+        worker = threading.Thread(target=request, daemon=True)
+        worker.start()
+        try:
+            assert received.wait(2), "server did not receive TLS ClientHello"
+            token.cancel()
+            worker.join(timeout=1)
+            assert not worker.is_alive(), "cancelled request remained in TLS handshake"
+            assert len(outcomes) == 1
+            assert isinstance(outcomes[0], TurnCancelled)
+            assert disconnected.wait(1), "cancelled TLS handshake left its socket open"
+            assert len(handshakes) == 1, "cancelled handshake was retried"
+            assert not client.is_closed
+            assert request_json("test", client, "GET", normal_url + "/ok") == {}
+        finally:
+            token.cancel()
+            worker.join(timeout=4)
+
+
+def test_tls_handshake_preserves_connect_timeout(stalled_tls_server):
+    port, _, disconnected, handshakes = stalled_tls_server
+    with create_client(f"https://127.0.0.1:{port}", {}, connect_timeout=0.15) as client:
+        with pytest.raises(httpx.ConnectTimeout):
+            request_json(
+                "test", client, "GET", "/",
+                cancellation_token=CancellationToken(), max_retries=0,
+            )
+    assert disconnected.wait(1)
+    assert len(handshakes) == 1
+
+
+@pytest.fixture
+def local_tls_server():
+    # A self-signed certificate and public test key, never production credentials.
+    certificate = Path(__file__).parent / "fixtures" / "http-cancellation-test.pem"
+    server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_context.load_cert_chain(certificate)
+    connections = []
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            connections.append(self.connection)
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *args):
+            pass
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+        server.socket = server_context.wrap_socket(server.socket, server_side=True)
+        worker = threading.Thread(
+            target=lambda: server.serve_forever(poll_interval=0.01), daemon=True,
+        )
+        worker.start()
+        try:
+            yield f"https://127.0.0.1:{server.server_port}", certificate, connections
+        finally:
+            server.shutdown()
+            worker.join(timeout=1)
+
+
+def test_completed_tls_handshake_releases_previous_cancellation_token(local_tls_server):
+    url, certificate, connections = local_tls_server
+    context = ssl.create_default_context(cafile=str(certificate))
+    first_token = CancellationToken()
+    with CancellableClient(base_url=url, verify=context, trust_env=False, timeout=2) as client:
+        assert request_json("test", client, "GET", "/", cancellation_token=first_token) == {}
+        first_token.cancel()
+        assert request_json(
+            "test", client, "GET", "/", cancellation_token=CancellationToken(),
+        ) == {}
+    assert len(connections) == 2
+    assert connections[0] is connections[1], "completed turn closed a reusable TLS connection"
+
+
+def test_cancellable_tls_keeps_certificate_verification(local_tls_server):
+    url, _, connections = local_tls_server
+    with CancellableClient(base_url=url, trust_env=False, timeout=2) as client:
+        with pytest.raises(httpx.ConnectError, match="CERTIFICATE_VERIFY_FAILED"):
+            request_json(
+                "test", client, "GET", "/",
+                cancellation_token=CancellationToken(), max_retries=0,
+            )
+    assert connections == []

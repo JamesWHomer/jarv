@@ -6,7 +6,10 @@ import stat
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import subprocess
 
 from packaging.version import Version
 

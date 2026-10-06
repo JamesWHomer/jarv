@@ -175,8 +175,8 @@ def build_tree(history: list, branches: list[dict]) -> TreeModel:
     if active_nodes:
         active_nodes[-1].is_active_leaf = True
 
-    # Off-spine frames: attach by parent id. Iterate to a fixpoint so a branch
-    # whose parent is itself a (later-listed) stored frame still attaches.
+    # Index every off-spine frame before attaching it, so parents can appear
+    # after their children in the stored list.
     pending: list[tuple[str, TreeNode]] = []
     for i, record in enumerate(branches):
         items = record.get("items") or []
@@ -193,26 +193,17 @@ def build_tree(history: list, branches: list[dict]) -> TreeModel:
         pending.append((parent_id if isinstance(parent_id, str) else ROOT, node))
 
     roots: list[TreeNode] = list(active_nodes[:1])
-    progressed = True
-    while pending and progressed:
-        progressed = False
-        still: list[tuple[str, TreeNode]] = []
-        for parent_id, node in pending:
-            if parent_id == ROOT:
-                roots.append(node)
-                progressed = True
-            elif parent_id in by_id:
-                parent = by_id[parent_id]
-                node.parent = parent
-                parent.children.append(node)
-                progressed = True
-            else:
-                still.append((parent_id, node))
-        pending = still
-    # Anything still dangling (corrupt parent ref) becomes a root so it is never
-    # lost from the tree or from a later checkout's frame set.
-    for _parent_id, node in pending:
-        roots.append(node)
+    dangling: list[TreeNode] = []
+    for parent_id, node in pending:
+        if parent_id == ROOT:
+            roots.append(node)
+        elif (parent := by_id.get(parent_id)) is not None:
+            node.parent = parent
+            parent.children.append(node)
+        else:
+            dangling.append(node)
+    # Preserve dangling frames after the explicit roots, as in stored history.
+    roots.extend(dangling)
 
     # Break corrupt parent cycles, preserving their frames as a rooted tree.
     checked: set[int] = set()
@@ -244,8 +235,7 @@ def build_tree(history: list, branches: list[dict]) -> TreeModel:
         _order(node)
         stack.extend((child, depth + 1) for child in reversed(node.children))
 
-    active_path = [n for n in active_nodes]
-    return TreeModel(roots=roots, nodes=nodes_in_order, by_id=by_id, active_path=active_path)
+    return TreeModel(roots=roots, nodes=nodes_in_order, by_id=by_id, active_path=active_nodes)
 
 
 # --------------------------------------------------------------------------- #

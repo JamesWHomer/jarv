@@ -160,3 +160,132 @@ def test_corruption_is_explicit_and_preserved(tmp_path, content):
     with pytest.raises(storage.StorageError):
         load_history(path)
     assert path.read_text() == content
+
+
+def test_transaction_reads_and_updates_staged_history(tmp_path):
+    path = tmp_path / "history.json"
+    save_history(["original"], path)
+    with storage.transaction(path):
+        history = load_history(path)
+        history.append("first")
+        save_history(history, path)
+        history = load_history(path)
+        history.append("second")
+        save_history(history, path)
+    assert load_history(path) == ["original", "first", "second"]
+
+
+def test_transaction_merges_independent_staged_updates(tmp_path):
+    path = tmp_path / "metadata.json"
+    storage.write_json(path, {"original": True})
+    first = storage.read_json(path, {}, dict)
+    second = storage.read_json(path, {}, dict)
+    first["first"] = True
+    second["second"] = True
+    with storage.transaction(path):
+        storage.write_json(path, first, merge=True, snapshot=first)
+        storage.write_json(path, second, merge=True, snapshot=second)
+    assert storage.read_json(path, {}, dict) == {
+        "original": True, "first": True, "second": True,
+    }
+
+
+def test_transaction_repeatedly_saves_same_snapshot(tmp_path):
+    path = tmp_path / "history.json"
+    save_history(["original"], path)
+    history = load_history(path)
+    with storage.transaction(path):
+        history.append("first")
+        save_history(history, path)
+        history.append("second")
+        save_history(history, path)
+    history.append("third")
+    save_history(history, path)
+    assert load_history(path) == ["original", "first", "second", "third"]
+
+
+def test_aborted_transaction_does_not_retain_staged_baseline(tmp_path):
+    path = tmp_path / "history.json"
+    save_history(["original"], path)
+    with pytest.raises(RuntimeError, match="abort"):
+        with storage.transaction(path):
+            save_history(["staged"], path)
+            assert load_history(path) == ["staged"]
+            raise RuntimeError("abort")
+    save_history(["replacement"], path)
+    assert load_history(path) == ["replacement"]
+
+
+def test_transaction_delete_then_recreate(tmp_path):
+    path = tmp_path / "history.json"
+    save_history(["original"], path)
+    with storage.transaction(path):
+        storage.delete_json(path)
+        history = load_history(path)
+        assert history == []
+        history.append("replacement")
+        save_history(history, path)
+    assert load_history(path) == ["replacement"]
+
+
+def test_discarded_histories_leave_only_compact_observations(tmp_path):
+    import gc
+    import pickle
+    import weakref
+
+    paths = []
+    snapshots = []
+    for index in range(20):
+        path = tmp_path / f"history-{index}.json"
+        path.write_text(json.dumps([{"content": str(index) + "x" * 50_000}]), encoding="utf-8")
+        loaded = load_history(path)
+        paths.append(str(path.resolve()))
+        snapshots.append(weakref.ref(loaded))
+    del loaded
+    gc.collect()
+
+    assert all(snapshot() is None for snapshot in snapshots)
+    observations = {path: storage._state().seen[path] for path in paths}
+    # Reading and discarding a megabyte of transcripts must not leave a
+    # megabyte in the storage thread's fallback conflict-detection state.
+    assert len(pickle.dumps(observations)) < 20_000
+
+
+def test_detached_history_still_detects_concurrent_changes(tmp_path):
+    path = tmp_path / "history.json"
+    path.write_text('["original"]', encoding="utf-8")
+    detached = list(load_history(path))
+    detached.append("my change")
+    path.write_text('["original","other process"]', encoding="utf-8")
+
+    with pytest.raises(storage.StorageConflict):
+        save_history(detached, path)
+    assert json.loads(path.read_text(encoding="utf-8")) == ["original", "other process"]
+
+
+def test_detached_metadata_merges_independent_nested_changes(tmp_path):
+    path = tmp_path / "metadata.json"
+    initial = {"settings": {"model": "old", "colour": True}, "remove": "old"}
+    path.write_text(json.dumps(initial), encoding="utf-8")
+    detached = dict(storage.read_json(path, {}, dict))
+    detached["settings"]["colour"] = False
+    del detached["remove"]
+    path.write_text(json.dumps({"settings": {"model": "new", "colour": True},
+                                "remove": "old", "concurrent": "kept"}), encoding="utf-8")
+
+    storage.write_json(path, detached, merge=True)
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "settings": {"model": "new", "colour": False}, "concurrent": "kept",
+    }
+
+
+def test_detached_metadata_rejects_conflicting_nested_changes(tmp_path):
+    path = tmp_path / "metadata.json"
+    path.write_text('{"settings":{"model":"old"}}', encoding="utf-8")
+    detached = dict(storage.read_json(path, {}, dict))
+    detached["settings"]["model"] = "mine"
+    path.write_text('{"settings":{"model":"theirs"}}', encoding="utf-8")
+
+    with pytest.raises(storage.StorageConflict):
+        storage.write_json(path, detached, merge=True)
+    assert json.loads(path.read_text(encoding="utf-8")) == {"settings": {"model": "theirs"}}

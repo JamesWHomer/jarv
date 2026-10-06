@@ -444,36 +444,38 @@ def load_global_usage_records(
     now: datetime | None = None,
     warn: bool = True,
 ) -> list[dict]:
+    cutoff = (now or utc_now()) - since if since is not None else None
+
+    def in_window(record):
+        if not isinstance(record, dict):
+            return False
+        if cutoff is None:
+            return True
+        created_at = parse_timestamp(record.get("created_at"))
+        return created_at is not None and created_at >= cutoff
+
     legacy_records = load_global_usage(path, warn=warn).get("records", [])
-    valid_records = [record for record in legacy_records if isinstance(record, dict)] if isinstance(legacy_records, list) else []
+    valid_records = [record for record in legacy_records if in_window(record)] if isinstance(legacy_records, list) else []
 
     jsonl_path = global_usage_jsonl_file(path)
     if jsonl_path.exists():
         try:
-            for line in jsonl_path.read_text(encoding="utf-8").splitlines():
-                if not line.strip():
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(record, dict):
-                    _normalize_token_bucket(record, include_request_count=False)
-                    _normalize_cost_bucket(record, record=True)
-                    valid_records.append(record)
+            with jsonl_path.open(encoding="utf-8") as stream:
+                for line in stream:
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if in_window(record):
+                        _normalize_token_bucket(record, include_request_count=False)
+                        _normalize_cost_bucket(record, record=True)
+                        valid_records.append(record)
         except (OSError, UnicodeDecodeError) as e:
             if warn:
                 console.print(f"[yellow]Could not read usage data:[/yellow] {e}")
-    if since is None:
-        return valid_records
-
-    cutoff = (now or utc_now()) - since
-    filtered: list[dict] = []
-    for record in valid_records:
-        created_at = parse_timestamp(str(record.get("created_at") or ""))
-        if created_at is not None and created_at >= cutoff:
-            filtered.append(record)
-    return filtered
+    return valid_records
 
 
 def aggregate_usage_records(records: list[dict]) -> dict:

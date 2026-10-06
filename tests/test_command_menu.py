@@ -9,6 +9,7 @@ def test_menu_entries_follow_registry_order_and_hide_session_alias():
     assert names == expected
     assert "session" not in names
     assert "sessions" in names
+    assert "resume" in names
 
 
 def test_menu_entries_lead_with_everyday_commands():

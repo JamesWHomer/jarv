@@ -34,13 +34,23 @@ def _p(pattern: str, description: str) -> None:
     _RISKY_PATTERNS.append((re.compile(pattern, re.IGNORECASE), description))
 
 
+# These bounded argument fragments handle common command spellings, not shell
+# syntax in general. Do not let an option in a later command (or after --) make
+# an earlier command look destructive.
+_ARGUMENT = r'''(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s;&|"']+)'''
+_BEFORE_OPTION = rf"(?:(?!--(?:[ \t]|$)){_ARGUMENT}[ \t]+)*?"
+_OPTION_END = r"(?=$|[\s;&|])"
+# PowerShell switches can carry explicit values. Only the literal $false
+# disables a switch here; dynamic values still require review.
+_SWITCH_VALUE = rf"(?::(?!\$false{_OPTION_END}){_ARGUMENT})?"
+
+
 # ── Destructive filesystem operations ─────────────────────────────────────
-_p(r"\brm\s+(-[^\s]*[rf]|--recursive|--force)", "recursive/forced file deletion (rm)")
+_p(rf"\brm[ \t]+{_BEFORE_OPTION}-(?:[dfiPrRvW]*[rf][dfiPrRvW]*|-(?:recursive|force)){_OPTION_END}", "recursive/forced file deletion (rm)")
 _p(r"\brmdir\s+/s\b", "recursive directory deletion (rmdir /s)")
 _p(r"\bdel\s+.*/[sqf]", "forced file deletion (del)")
-_p(r"\bRemove-Item\b.*-(Recurse|Force)", "recursive/forced file deletion (Remove-Item)")
-_p(r"\bRemove-Item\b.*\s-[rfRF]\b", "recursive/forced file deletion (Remove-Item -r/-f)")
-_p(r"\b(ri|rm)\s+.*\s-[rfRF]\b", "recursive/forced file deletion (PowerShell alias)")
+_p(rf"\bRemove-Item[ \t]+{_BEFORE_OPTION}-(?:Recurse|Force|r|f){_SWITCH_VALUE}{_OPTION_END}", "recursive/forced file deletion (Remove-Item)")
+_p(rf"\b(?:ri|rm)[ \t]+{_BEFORE_OPTION}-(?:Recurse|Force|r|f){_SWITCH_VALUE}{_OPTION_END}", "recursive/forced file deletion (PowerShell alias)")
 _p(r"\b(python|python3|py)\s+(-c|--command)\b", "inline Python execution")
 _p(r"\bshred\b", "secure file destruction (shred)")
 _p(r"\bwipe\b", "disk/file wiping")
@@ -114,11 +124,16 @@ _p(r"\bssh-keygen\b", "SSH key generation")
 _p(r"\b(cat|type|Get-Content)\b.*[/\\]\.gnupg[/\\]", "reading GPG keys")
 
 # ── Git destructive operations ───────────────────────────────────────────
-_p(r"\bgit\s+push\s+.*(-f\b|--force\b)(?!.*--force-with-lease)", "force push (git push --force)")
-_p(r"\bgit\s+reset\s+--hard\b", "hard reset (git reset --hard)")
-_p(r"\bgit\s+clean\s+-[^\s]*f", "forced clean (git clean -f)")
-_p(r"\bgit\s+checkout\s+--\s+\.", "discard all changes (git checkout -- .)")
-_p(r"\bgit\s+branch\s+-D\b", "force delete branch (git branch -D)")
+_GIT = (
+    rf"\bgit(?:[ \t]+(?:-[Cc][ \t]*{_ARGUMENT}"
+    rf"|--(?:git-dir|work-tree|namespace)(?:[ \t]+|=){_ARGUMENT}"
+    r"|--(?:no-pager|paginate|bare|literal-pathspecs|no-optional-locks)))*[ \t]+"
+)
+_p(rf"{_GIT}push[ \t]+{_BEFORE_OPTION}(?:-f|--force){_OPTION_END}", "force push (git push --force)")
+_p(rf"{_GIT}reset[ \t]+{_BEFORE_OPTION}--hard{_OPTION_END}", "hard reset (git reset --hard)")
+_p(rf"{_GIT}clean[ \t]+{_BEFORE_OPTION}-[dfinqx]*f[dfinqx]*{_OPTION_END}", "forced clean (git clean -f)")
+_p(rf"{_GIT}checkout[ \t]+--[ \t]+\.{_OPTION_END}", "discard all changes (git checkout -- .)")
+_p(rf"{_GIT}branch[ \t]+{_BEFORE_OPTION}(?-i:-D){_OPTION_END}", "force delete branch (git branch -D)")
 
 # ── Environment / shell manipulation ─────────────────────────────────────
 _p(r"\bexport\s+(PATH|LD_PRELOAD|LD_LIBRARY_PATH)=", "environment variable modification")
@@ -413,14 +428,29 @@ def check_command(
     enabled. Under `all`, the auditor is advisory and human approval is
     always required.
     """
+    control = (config or {}).get("_run_control")
+    if cancellation_token is None and control is not None:
+        cancellation_token = control.token
+    if cancellation_token is not None:
+        cancellation_token.throw_if_cancelled()
     if safety_level == "none":
         return True, ""
 
-    with _APPROVAL_LOCK:
-        return _check_command_locked(
+    while not _APPROVAL_LOCK.acquire(timeout=0.05):
+        if cancellation_token is not None:
+            cancellation_token.throw_if_cancelled()
+    try:
+        if cancellation_token is not None:
+            cancellation_token.throw_if_cancelled()
+        decision = _check_command_locked(
             command, safety_level, audit, config, history,
             usage_path, session_id, cancellation_token,
         )
+        if cancellation_token is not None:
+            cancellation_token.throw_if_cancelled()
+        return decision
+    finally:
+        _APPROVAL_LOCK.release()
 
 
 def _check_command_locked(
@@ -434,8 +464,7 @@ def _check_command_locked(
     cancellation_token: CancellationToken | None,
 ) -> tuple[bool, str]:
     from .run_control import require_user_input
-    control = (config or {}).get("_run_control")
-    cancel_kwargs = {"cancellation_token": control.token} if control and control.deadline else {}
+    cancel_kwargs = {"cancellation_token": cancellation_token} if cancellation_token is not None else {}
     if safety_level == "all":
         reason = "all commands require approval"
         require_user_input(config, "Manual approval required: command safety is set to 'all'.")

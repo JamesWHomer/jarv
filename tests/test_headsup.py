@@ -2290,14 +2290,13 @@ class HeadsupTests(unittest.TestCase):
 
         app.agent_import["module"] = SimpleNamespace(run_agent=run_agent)
         commands = (
-            ("/new", []), ("/undo", ["2"]), ("/redo", []),
+            ("/new", []), ("/resume", []), ("/undo", ["2"]), ("/redo", []),
             ("/archive", []), ("/session", []), ("/sessions", []),
             ("/session", ["other"]), ("/sessions", ["other"]),
             ("/tree", []), ("/uninstall", ["--purge"]),
         )
         with (
             patch.object(app, "handle_slash", return_value=(app.config, app.client)) as handler,
-            patch.object(app, "_run_interactive_slash") as interactive,
             patch.object(app, "_run_tree") as tree,
             patch.object(app, "_run_uninstall") as uninstall,
             patch.object(app, "_sync_after_slash"),
@@ -2315,7 +2314,6 @@ class HeadsupTests(unittest.TestCase):
                         with self.subTest(stage=stage, command=command, rest=rest):
                             app._handle_query(" ".join([command] + rest))
                             handler.assert_not_called()
-                            interactive.assert_not_called()
                             tree.assert_not_called()
                             uninstall.assert_not_called()
                 self.assertIn("Wait for completion", self._entry_text(app))
@@ -2327,8 +2325,7 @@ class HeadsupTests(unittest.TestCase):
             self.assertFalse(app._agent_busy)
             for command, rest in commands:
                 app._run_slash(command, rest)
-            self.assertEqual(handler.call_count, 6)
-            self.assertEqual(interactive.call_count, 2)
+            self.assertEqual(handler.call_count, 9)
             tree.assert_called_once_with()
             uninstall.assert_called_once_with(["--purge"])
 
@@ -2436,6 +2433,7 @@ class HeadsupTests(unittest.TestCase):
             ("/help", [], True),
             ("/about", [], True),
             ("/new", [], False),
+            ("/resume", [], False),
             ("/archive", [], False),
             ("/session", ["abc123"], False),
             ("/session", [], True),
@@ -2491,31 +2489,11 @@ class HeadsupTests(unittest.TestCase):
                 if fullscreen:
                     self.assertEqual(calls[0], "stop")
                     self.assertEqual(calls[-1], ("start", True))
-                    self.assertFalse(
-                        any(
-                            getattr(entry.renderable, "plain", "") == f"handled {command}"
-                            for entry in app.entries
-                        )
-                    )
                 else:
                     self.assertNotIn("stop", calls)
                     self.assertNotIn(("start", True), calls)
-                    if command == "/new":
-                        self.assertFalse(
-                            any(
-                                getattr(entry.renderable, "plain", "").strip()
-                                == f"handled {command}"
-                                for entry in app.entries
-                            )
-                        )
-                    else:
-                        self.assertTrue(
-                            any(
-                                getattr(entry.renderable, "plain", "").strip()
-                                == f"handled {command}"
-                                for entry in app.entries
-                            )
-                        )
+                self.assertIn(f"handled {command}", self._entry_text(app))
+                self.assertIsNone(app._prompt_notice)
 
     def test_update_runs_on_worker_thread_with_live_status(self):
         from jarv.commands import UpdateOutcome
@@ -2676,7 +2654,7 @@ class HeadsupTests(unittest.TestCase):
 
         self.assertEqual(app.console._render_hooks[-1], app.live)
         self.assertIn("command output", self._entry_text(app))
-        self.assertIn("refresh", calls)
+        self.assertTrue(app._dirty)
 
     def test_new_refreshes_session_context_and_clears_visible_transcript(self):
         app, test_console, output = self._app(width=80)
@@ -2709,15 +2687,13 @@ class HeadsupTests(unittest.TestCase):
         screen = self._rendered_text(app, test_console, output, height=24)
         self.assertEqual(app.session_context.session_id, "new-session")
         self.assertEqual(app.usage_path, Path("usage-new.json"))
-        self.assertNotIn("new session ready", rendered)
-        self.assertNotIn("new session ready", screen)
-        self.assertNotIn("Heads-up mode. Type /help for commands.", screen)
-        self.assertIn("\u2588", screen)
+        self.assertIn("new session ready", rendered)
+        self.assertIn("new session ready", screen)
         self.assertNotIn("old visible message", rendered)
         self.assertNotIn("old visible reply", rendered)
         self.assertFalse(app._idle_anim_stop.is_set())
 
-    def test_new_restarts_idle_animation_in_active_headsup(self):
+    def test_new_shows_feedback_immediately_in_active_headsup(self):
         app, _test_console, _output = self._app()
         old_context = SimpleNamespace(
             session_id="old-session",
@@ -2746,16 +2722,14 @@ class HeadsupTests(unittest.TestCase):
         ):
             try:
                 app._run_slash("/new", [])
-                # No background thread now: the loop's on_tick drives the intro.
-                # /new should re-arm the animation (stop cleared, timer reset).
                 self.assertFalse(app._idle_anim_stop.is_set())
-                self.assertGreater(app._idle_anim_started_at, 0.0)
                 self.assertTrue(app._idle_animation_active())
+                self.assertIn("new session ready", self._entry_text(app))
             finally:
                 app._idle_anim_stop.set()
                 app._foreground_input_active = False
 
-    def test_new_on_already_empty_session_still_shows_intro(self):
+    def test_new_on_already_empty_session_shows_feedback(self):
         app, test_console, output = self._app(width=80)
         context = SimpleNamespace(
             session_id="current-session",
@@ -2777,9 +2751,7 @@ class HeadsupTests(unittest.TestCase):
             app._run_slash("/new", [])
 
         screen = self._rendered_text(app, test_console, output, height=24)
-        self.assertNotIn("Already on a new session.", screen)
-        self.assertNotIn("Heads-up mode. Type /help for commands.", screen)
-        self.assertIn("\u2588", screen)
+        self.assertIn("Already on a new session.", screen)
         self.assertFalse(app._idle_anim_stop.is_set())
 
     def test_undo_syncs_visible_transcript_from_updated_history(self):

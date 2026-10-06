@@ -1,7 +1,7 @@
 import subprocess
 import sys
 import textwrap
-import time
+import threading
 from pathlib import Path
 
 import httpx
@@ -101,6 +101,33 @@ def _read(args, *, artifacts=None, retained=None, visible=None, config=None):
         retained_store=retained or RetainedOutputStore(),
         config=config or DEFAULT_CONFIG,
     )
+
+
+@pytest.mark.parametrize("value", ["https://[invalid", "bad\x00path"])
+def test_invalid_read_input_is_a_failed_tool_result(value):
+    from jarv.tool_outputs import tool_outcome
+
+    output = _read({"input": value})
+    assert output.startswith("[read error:")
+    assert tool_outcome(output).status == "failed"
+
+
+def test_out_of_range_read_has_failed_outcome(tmp_path):
+    from jarv.tool_outputs import tool_outcome
+
+    path = tmp_path / "short.txt"
+    path.write_text("abc", encoding="utf-8")
+    output = _read({"input": str(path), "offset": 4})
+    assert "beyond end of input" in output
+    assert tool_outcome(output).status == "failed"
+
+
+def test_read_unresolvable_home_returns_tool_error(monkeypatch):
+    def missing_home(path):
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(Path, "expanduser", missing_home)
+    assert _read({"input": "~/file.txt"}).startswith("[read error:")
 
 
 def test_read_schema_exposes_input_offset_and_size():
@@ -667,12 +694,21 @@ def test_retained_output_store_round_trips(tmp_path):
 
 
 def test_read_batch_runs_concurrently_and_preserves_order(monkeypatch):
+    both_running = threading.Barrier(2, timeout=5)
+    second_finished = threading.Event()
+    completion_order = []
+
     def fake_dispatch(args, **kwargs):
-        time.sleep(0.1)
-        return args["input"]
+        label = args["input"]
+        both_running.wait()
+        if label == "first":
+            assert second_finished.wait(5)
+        completion_order.append(label)
+        if label == "second":
+            second_finished.set()
+        return label
 
     monkeypatch.setattr("jarv.read_tool.dispatch_read_tool", fake_dispatch)
-    started = time.perf_counter()
     outputs = dispatch_read_batch(
         [{"input": "first"}, {"input": "second"}],
         visible_labels=set(),
@@ -680,10 +716,8 @@ def test_read_batch_runs_concurrently_and_preserves_order(monkeypatch):
         retained_store=RetainedOutputStore(),
         config=DEFAULT_CONFIG,
     )
-    elapsed = time.perf_counter() - started
-
+    assert completion_order == ["second", "first"]
     assert outputs == ["first", "second"]
-    assert elapsed < 0.18
 
 
 def test_read_batch_propagates_cancellation():

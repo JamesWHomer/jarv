@@ -47,8 +47,8 @@ def load_config() -> dict:
     """Load a settings snapshot whose baseline survives other reads and saves."""
     from .history import migrate_flat_session_files
 
-    migrate_flat_session_files()
     try:
+        migrate_flat_session_files()
         # Recover interrupted commits before reading; keep first-run creation
         # and migrations under the same lock as ordinary settings saves.
         with transaction(CONFIG_FILE):
@@ -111,17 +111,23 @@ def is_setup_complete(config: dict | None = None) -> bool:
         if CONFIG_FILE.exists():
             try:
                 config = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
+            except (ValueError, OSError):
                 config = {}
         else:
             config = {}
 
+    if not isinstance(config, dict):
+        return False
     provider = config.get("provider", "openai")
+    if not isinstance(provider, str):
+        return False
     if provider in LOCAL_PROVIDERS:
         return True
-    if resolve_api_key(config):
-        return True
-    return False
+    keys = config.get("api_keys", {})
+    if not isinstance(keys, dict):
+        return False
+    key = resolve_api_key(config)
+    return isinstance(key, str) and bool(key.strip())
 
 
 def save_config(config: dict) -> None:

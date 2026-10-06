@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import os
 import sys
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import argparse
+    import threading
 
 from . import __version__
 
@@ -210,7 +215,10 @@ def _reload_heads_up_runtime(
     client,
     args: argparse.Namespace,
 ) -> tuple[dict, object]:
-    """Reload config from disk and recreate the API client when needed."""
+    """Reload config and return a transport owned by the heads-up app.
+
+    The app retires replaced clients after the turn using them has finished.
+    """
     refreshed = _apply_cli_overrides(load_config(), args)
     if not validate_config(refreshed):
         return config, client

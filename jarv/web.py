@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import zlib
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import TYPE_CHECKING, Any
@@ -26,6 +27,7 @@ MAX_REDIRECTS = 5
 FRAGMENT_MIN_CHARS = 200
 DEFAULT_SEARCH_RESULTS = 5
 MAX_SEARCH_RESULTS = 20
+_DECODE_CHUNK_BYTES = 64 * 1024
 
 WEB_SEARCH_TOOL = {
     "type": "function",
@@ -429,6 +431,8 @@ def _validated_url(value: object) -> str:
     if not isinstance(value, str) or not value.strip():
         raise WebToolError("url must be a non-empty string")
     url = value.strip()
+    if any(ord(char) < 32 or ord(char) == 127 for char in url):
+        raise WebToolError("invalid URL: control characters are not allowed")
     try:
         parsed = urlsplit(url)
         port = parsed.port
@@ -441,6 +445,10 @@ def _validated_url(value: object) -> str:
     if parsed.username is not None or parsed.password is not None:
         raise WebToolError("embedded URL credentials are not allowed")
     host = parsed.hostname
+    try:
+        host.encode("idna")
+    except UnicodeError as exc:
+        raise WebToolError(f"invalid URL hostname: {exc}") from exc
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
     netloc = host
@@ -457,12 +465,76 @@ def _create_client(timeout: float) -> httpx.Client:
         follow_redirects=False,
         headers={
             "user-agent": f"jarv/{__version__}",
+            # Decode these ourselves with an output budget; httpx's automatic
+            # decoders allocate their entire expanded chunk before yielding.
+            "accept-encoding": "gzip, deflate",
             "accept": (
                 "text/html,application/xhtml+xml,application/json,text/plain,"
                 "application/xml;q=0.9,*/*;q=0.1"
             ),
         },
     )
+
+
+def _limited_response_bytes(response, max_bytes: int, cancellation_token):
+    """Yield bounded decoded chunks without allocating a decompression bomb."""
+    encoding = response.headers.get("content-encoding", "").strip().lower()
+    if encoding not in {"", "identity", "gzip", "deflate"}:
+        raise WebToolError(f"unsupported Content-Encoding: {encoding}")
+    if response.is_stream_consumed:
+        # A transport may supply an already-buffered response. Its content is
+        # already decoded; iter_bytes slices it without invoking a decoder.
+        chunks = response.iter_bytes(chunk_size=_DECODE_CHUNK_BYTES)
+        encoding = ""
+    else:
+        chunks = response.iter_raw(chunk_size=_DECODE_CHUNK_BYTES)
+    compressed = encoding in {"gzip", "deflate"}
+    decoder = zlib.decompressobj(16 + zlib.MAX_WBITS) if encoding == "gzip" else None
+    prefix = b""
+    wire_size = decoded_size = 0
+    try:
+        for raw in chunks:
+            if cancellation_token is not None:
+                cancellation_token.throw_if_cancelled()
+            wire_size += len(raw)
+            if wire_size > max_bytes:
+                raise WebToolError(f"response exceeds {max_bytes} byte limit")
+            if not compressed:
+                yield raw
+                continue
+            data = prefix + raw
+            prefix = b""
+            if decoder is None:
+                # HTTP deflate is normally zlib-wrapped; some servers send
+                # raw DEFLATE. Wait for two bytes to recognize the wrapper.
+                if len(data) < 2:
+                    prefix = data
+                    continue
+                wrapped = data[0] & 15 == 8 and int.from_bytes(data[:2], "big") % 31 == 0
+                decoder = zlib.decompressobj(zlib.MAX_WBITS if wrapped else -zlib.MAX_WBITS)
+            drain = False
+            while data or drain:
+                if cancellation_token is not None:
+                    cancellation_token.throw_if_cancelled()
+                if decoder.eof:
+                    if encoding != "gzip":
+                        raise WebToolError("invalid compressed response: trailing data")
+                    # Gzip permits concatenated members. The cumulative
+                    # decoded budget applies across every member.
+                    decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                limit = min(_DECODE_CHUNK_BYTES, max_bytes - decoded_size + 1)
+                decoded = decoder.decompress(data, limit)
+                decoded_size += len(decoded)
+                if decoded_size > max_bytes:
+                    raise WebToolError(f"response exceeds {max_bytes} byte limit")
+                data = decoder.unused_data if decoder.eof else decoder.unconsumed_tail
+                drain = len(decoded) == limit and not decoder.eof
+                if decoded:
+                    yield decoded
+        if compressed and (decoder is None or not decoder.eof):
+            raise WebToolError("invalid compressed response: incomplete stream")
+    except zlib.error as exc:
+        raise WebToolError(f"invalid compressed response: {exc}") from exc
 
 
 def _request_bytes(
@@ -543,7 +615,7 @@ def _request_bytes(
                 chunks: list[bytes] = []
                 size = 0
                 prefix = b""
-                for chunk in response.iter_bytes():
+                for chunk in _limited_response_bytes(response, effective_max_bytes, cancellation_token):
                     if cancellation_token is not None:
                         cancellation_token.throw_if_cancelled()
                     size += len(chunk)
@@ -573,6 +645,10 @@ def _request_bytes(
         if cancellation_token is not None:
             cancellation_token.throw_if_cancelled()
         raise WebToolError(f"request failed: {exc}") from exc
+    except (httpx.InvalidURL, UnicodeError) as exc:
+        if cancellation_token is not None:
+            cancellation_token.throw_if_cancelled()
+        raise WebToolError(f"invalid URL: {exc}") from exc
     finally:
         unregister()
         client.close()

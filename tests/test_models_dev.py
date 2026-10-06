@@ -292,6 +292,60 @@ def test_refresh_rejects_a_payload_with_no_usable_providers(monkeypatch, models_
     assert models_dev.prices("openai", "gpt-5.5")["input"] == 5
 
 
+def test_simultaneous_cache_writes_use_independent_staging_files(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from pathlib import Path
+    from threading import Barrier, Lock
+
+    cache = tmp_path / "models-dev.json"
+    monkeypatch.setattr(models_dev, "CACHE_PATH", cache)
+    ready = Barrier(2, timeout=5)
+    replacing = Lock()
+    replace = Path.replace
+
+    def synchronized_replace(path, destination):
+        if destination == cache:
+            ready.wait()
+        # Make the write/write collision deterministic without depending on
+        # Windows accepting overlapping rename system calls.
+        with replacing:
+            return replace(path, destination)
+
+    monkeypatch.setattr(Path, "replace", synchronized_replace)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(
+            lambda version: models_dev._write_cache({version: {}}, version, version),
+            ["first", "second"],
+        ))
+    assert results == [True, True]
+    saved = json.loads(cache.read_text(encoding="utf-8"))
+    assert saved["providers"] == {saved["etag"]: {}}
+    assert saved["source"] == saved["etag"]
+    assert list(tmp_path.iterdir()) == [cache]
+
+
+def test_failed_cache_replace_preserves_catalog_and_cleans_staging(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    cache = tmp_path / "models-dev.json"
+    cache.write_text("original", encoding="utf-8")
+    monkeypatch.setattr(models_dev, "CACHE_PATH", cache)
+
+    def fail_replace(*args):
+        raise OSError("read-only cache")
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+    assert not models_dev._write_cache({"new": {}}, "new", "test")
+    assert cache.read_text(encoding="utf-8") == "original"
+    assert list(tmp_path.iterdir()) == [cache]
+
+
+@pytest.mark.parametrize("field", ["input", "output", "cache_read", "cache_write"])
+@pytest.mark.parametrize("value", ["NaN", "Infinity", "-Infinity"])
+def test_nonfinite_prices_are_unknown(field, value):
+    assert models_dev._rates({"input": 1, "output": 2, field: value}) is None
+
+
 def test_bundled_snapshot_covers_every_cloud_provider(bundled_catalog_only):
     catalog = models_dev.catalog()
 

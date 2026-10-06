@@ -1,11 +1,13 @@
 """Atomic JSON storage with OS locks, optimistic conflicts and redo recovery."""
 import copy
+import hashlib
 import json
 import os
 import tempfile
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -19,6 +21,43 @@ class StorageConflict(StorageError):
 
 _local = threading.local()
 _mutex = threading.RLock()
+
+
+@dataclass
+class _Transaction:
+    root: Path
+    changes: dict = field(default_factory=dict)
+    seen: dict = field(default_factory=dict)
+    snapshots: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _Observation:
+    """Compact fallback baseline for callers that detach a loaded snapshot."""
+
+    digest: bytes
+    fields: dict | None
+    empty: bool
+
+    def __bool__(self):
+        return not self.empty
+
+
+def _digest(value):
+    digest = hashlib.sha256()
+    encoder = json.JSONEncoder(ensure_ascii=True, sort_keys=True,
+                               separators=(",", ":"))
+    for chunk in encoder.iterencode(value):
+        digest.update(chunk.encode("ascii"))
+    return digest.digest()
+
+
+def _observe(value):
+    # Lists (including complete transcripts) and strings retain one digest,
+    # regardless of their size. Dict field signatures retain three-way merge
+    # support for detached metadata without retaining its document payloads.
+    fields = {key: _observe(item) for key, item in value.items()} if isinstance(value, dict) else None
+    return _Observation(_digest(value), fields, not value)
 
 
 def _state():
@@ -86,7 +125,7 @@ def transaction(path):
     root = storage_root(path)
     state = _state()
     if state.active is not None:
-        if state.active[0] != root:
+        if state.active.root != root:
             raise StorageError("A transaction cannot span storage directories")
         yield
         return
@@ -121,17 +160,20 @@ def transaction(path):
                 _replay(root, _read(journal, {}))
                 journal.unlink()
                 _sync_dir(root)
-            changes = {}
-            state.active = (root, changes, [])
+            active = state.active = _Transaction(root)
             yield
-            if changes:
-                _atomic(journal, changes)
-                _replay(root, changes)
+            observations = {
+                key: _observe(value)
+                for key, value in (active.seen | active.changes).items()
+            }
+            if active.changes:
+                _atomic(journal, active.changes)
+                _replay(root, active.changes)
                 journal.unlink()
                 _sync_dir(root)
-                state.seen.update(copy.deepcopy(changes))
-                for snapshot, value in state.active[2]:
-                    snapshot.baseline = copy.deepcopy(value)
+            state.seen.update(observations)
+            for snapshot, value in active.snapshots.values():
+                snapshot.baseline = copy.deepcopy(value)
         except (OSError, TypeError, ValueError) as exc:
             raise StorageError(f"Storage transaction failed in {root}: {exc}") from exc
         finally:
@@ -156,17 +198,25 @@ class JsonList(list):
     pass
 
 
+def _current(path, active):
+    key = str(path)
+    if key in active.changes:
+        return active.changes[key]
+    value = _read(path, None)
+    if value is None and path.exists():
+        raise StorageError(f"Invalid JSON structure in {path}")
+    return value
+
+
 def read_json(path, default, expected_type):
     path = Path(path).resolve()
     with transaction(path):
         state = _state()
-        raw = state.active[1][str(path)] if str(path) in state.active[1] else _read(path, None)
-        if raw is None and path.exists() and str(path) not in state.active[1]:
-            raise StorageError(f"Invalid JSON structure in {path}")
+        raw = _current(path, state.active)
         value = copy.deepcopy(default if raw is None else raw)
         if not isinstance(value, expected_type):
             raise StorageError(f"Invalid JSON structure in {path}")
-        state.seen[str(path)] = copy.deepcopy(raw)
+        state.active.seen[str(path)] = copy.deepcopy(raw)
         result = JsonDict(value) if isinstance(value, dict) else JsonList(value)
         result.baseline = copy.deepcopy(raw)
         return result
@@ -176,13 +226,21 @@ def read_json(path, default, expected_type):
 _MISSING = object()
 
 
+def _matches(base, value):
+    if isinstance(base, _Observation):
+        return value is not _MISSING and base.digest == _digest(value)
+    return base == value
+
+
 def _merge(base, wanted, current, path):
-    if wanted == base:
+    if _matches(base, wanted):
         return current
-    if current == base or current == wanted:
+    if _matches(base, current) or current == wanted:
         return wanted
     if base is _MISSING and isinstance(wanted, dict) and isinstance(current, dict):
         base = {}
+    if isinstance(base, _Observation) and base.fields is not None:
+        base = base.fields
     if all(isinstance(v, dict) for v in (base, wanted, current)):
         result = {}
         for key in base.keys() | wanted.keys() | current.keys():
@@ -197,24 +255,30 @@ def write_json(path, value, *, merge=False, baseline=_MISSING, snapshot=None):
     path = Path(path).resolve()
     with transaction(path):
         state = _state()
+        active = state.active
         key = str(path)
         wanted = copy.deepcopy(value)
-        current = _read(path, None)
-        if current is None and path.exists():
-            raise StorageError(f"Invalid JSON structure in {path}")
+        current = _current(path, active)
         if snapshot is not None and hasattr(snapshot, "baseline"):
-            baseline = snapshot.baseline
-        base = state.seen.get(key, current) if baseline is _MISSING else baseline
+            previous = active.snapshots.get((key, id(snapshot)))
+            baseline = previous[1] if previous is not None else snapshot.baseline
+        base = (
+            active.seen.get(key, state.seen.get(key, current))
+            if baseline is _MISSING else baseline
+        )
         if merge:
             value = _merge(base or {}, value, current or {}, path)
-        elif current != base:
+        elif not _matches(base, current):
             raise StorageConflict(f"Concurrent changes to {path}; reload before saving")
-        state.active[1][key] = copy.deepcopy(value)
+        active.changes[key] = copy.deepcopy(value)
+        active.seen[key] = active.changes[key]
         if snapshot is not None:
-            state.active[2].append((snapshot, wanted))
+            active.snapshots[(key, id(snapshot))] = (snapshot, wanted)
 
 
 def delete_json(path):
     path = Path(path).resolve()
     with transaction(path):
-        _state().active[1][str(path)] = None
+        active = _state().active
+        active.changes[str(path)] = None
+        active.seen[str(path)] = None

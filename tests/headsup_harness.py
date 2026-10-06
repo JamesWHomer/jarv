@@ -152,6 +152,7 @@ class CapturingLive:
         recorder = Console(
             file=buffer,
             force_terminal=True,
+            legacy_windows=False,
             color_system="truecolor",
             width=width,
             height=height,
@@ -189,6 +190,8 @@ class HeadsupHarness:
         self._sync_history = sync_history
         self._stack: contextlib.ExitStack | None = None
         self._thread: threading.Thread | None = None
+        self._loop_error: BaseException | None = None
+        self._loop_finished = threading.Event()
         self._created: list[CapturingLive] = []
         self.app: HeadsupApp | None = None
         self.live: CapturingLive | None = None
@@ -227,38 +230,54 @@ class HeadsupHarness:
             return live
 
         stack = contextlib.ExitStack()
-        stack.enter_context(mock.patch("jarv.headsup.Live", _live_factory))
-        stack.enter_context(
-            mock.patch("jarv.headsup._read_key_with_repeats", self._read_scripted)
-        )
-        stack.enter_context(mock.patch("jarv.headsup._key_available", self._scripted.available))
-        stack.enter_context(mock.patch("jarv.headsup.terminal_size", self._holder))
-        stack.enter_context(mock.patch("jarv.headsup.disable_mouse_capture", _noop))
-        stack.enter_context(neutral_terminal_modes())
         self._stack = stack
+        try:
+            stack.enter_context(mock.patch("jarv.headsup.Live", _live_factory))
+            stack.enter_context(
+                mock.patch("jarv.headsup._read_key_with_repeats", self._read_scripted)
+            )
+            stack.enter_context(mock.patch("jarv.headsup._key_available", self._scripted.available))
+            stack.enter_context(mock.patch("jarv.headsup.terminal_size", self._holder))
+            stack.enter_context(mock.patch("jarv.headsup.disable_mouse_capture", _noop))
+            stack.enter_context(neutral_terminal_modes())
 
-        self._thread = threading.Thread(target=app.run, name="headsup-harness", daemon=True)
-        self._thread.start()
-        # Wait for the first paint so callers see a frame immediately.
-        self._wait(lambda: bool(self._created) and self._created[0].refresh_count >= 1, timeout=2.0)
-        if self._created:
+            thread = threading.Thread(target=self._run, name="headsup-harness", daemon=True)
+            thread.start()
+            self._thread = thread
+            if not self._wait(
+                lambda: bool(self._created) and self._created[0].refresh_count >= 1,
+                timeout=2.0,
+            ):
+                raise AssertionError("heads-up loop did not paint its initial frame")
             self.live = self._created[0]
+        except BaseException:
+            self.stop()
+            raise
         return self
 
     def __exit__(self, *exc) -> None:
         self.stop()
 
     def stop(self) -> None:
+        """Stop the loop before restoring patches; retain ownership on timeout.
+
+        A caller that releases a stalled loop can retry ``stop()``. Restoring
+        terminal/input functions while that loop is alive would let it use the
+        real terminal or interfere with the next harness.
+        """
         app = self.app
         if app is not None:
             app.stop()
         thread = self._thread
         if thread is not None:
             thread.join(timeout=6.0)
+            if thread.is_alive():
+                raise AssertionError("heads-up loop did not stop; harness patches remain active")
             self._thread = None
         if self._stack is not None:
             self._stack.close()
             self._stack = None
+        self._raise_loop_error()
 
     # -- input --------------------------------------------------------- #
     def feed_text(self, text: str) -> None:
@@ -339,6 +358,18 @@ class HeadsupHarness:
         return self._wait(self._is_idle, timeout=timeout)
 
     # -- internals ----------------------------------------------------- #
+    def _run(self) -> None:
+        try:
+            self.app.run()
+        except BaseException as error:
+            self._loop_error = error
+        finally:
+            self._loop_finished.set()
+
+    def _raise_loop_error(self) -> None:
+        if self._loop_error is not None:
+            raise self._loop_error
+
     def _read_scripted(self, **_kwargs) -> tuple[Any, int]:
         key, repeat = self._scripted.read()
         if key is _INTERRUPT:
@@ -365,7 +396,10 @@ class HeadsupHarness:
     def _wait(self, predicate: Callable[[], bool], *, timeout: float) -> bool:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            self._raise_loop_error()
             if predicate():
                 return True
-            time.sleep(0.005)
+            if self._loop_finished.wait(0.005):
+                break
+        self._raise_loop_error()
         return predicate()

@@ -16,7 +16,7 @@ from .tool_schemas import strict_openai_tools
 from .tool_outputs import to_chat_tool_content
 from .unicode_safety import sanitize_json_value
 from .cancellation import CancellationToken, TurnCancelled
-from .http_transport import ProviderHTTPError
+from .http_transport import ProviderHTTPError, RETRYABLE_STATUS_CODES
 from .http_transport import _sleep as _sleep_for_openai_recovery
 
 
@@ -361,6 +361,7 @@ def _recover_openai_stream(
 
     last_recovery_status: str | None = None
     last_retrieval_error: Exception | None = None
+    permanent_failure = False
     if response_id:
         recovered_response = None
         for attempt in range(_OPENAI_RECOVERY_ATTEMPTS):
@@ -372,15 +373,28 @@ def _recover_openai_stream(
                     response_id,
                     cancellation_token=cancellation_token,
                 )
+            except TurnCancelled:
+                raise
             except Exception as retrieval_error:
                 last_retrieval_error = retrieval_error
                 candidate = None
+                if (
+                    isinstance(retrieval_error, ProviderHTTPError)
+                    and retrieval_error.status_code is not None
+                    and 400 <= retrieval_error.status_code < 500
+                    and retrieval_error.status_code not in RETRYABLE_STATUS_CODES
+                ):
+                    permanent_failure = True
+                    break
             else:
                 last_retrieval_error = None
                 status = _value(candidate, "status")
                 last_recovery_status = str(status) if status is not None else None
             if candidate is not None and _is_response_complete(candidate):
                 recovered_response = candidate
+                break
+            if last_recovery_status in {"failed", "incomplete", "cancelled", "completed"}:
+                permanent_failure = True
                 break
             if attempt < _OPENAI_RECOVERY_ATTEMPTS - 1:
                 _sleep_for_openai_recovery(
@@ -411,7 +425,7 @@ def _recover_openai_stream(
     message = (
         f"{stream_error}; recovery failed ({'; '.join(recovery_details)})"
     )
-    if isinstance(stream_error, ProviderHTTPError):
+    if permanent_failure or isinstance(stream_error, ProviderHTTPError):
         raise ProviderError(message) from stream_error
     raise RetryableStreamError(message) from stream_error
 

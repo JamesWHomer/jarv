@@ -12,6 +12,7 @@
 | `/config` | Show raw config values |
 | `/setup [provider\|key\|model\|base_url]` | Run the setup wizard or jump to one step |
 | `/new` | Start a fresh session on the next prompt |
+| `/resume` | Resume the most recent unarchived session used in this directory |
 | `/archive` | Archive session history and sidecars |
 | `/sessions` | Browse sessions (interactive when in a TTY) |
 | `/sessions <id>` | Load a specific session by ID prefix |
@@ -30,6 +31,8 @@ Except for `/btw` and the heads-up exit commands, commands work both as `jarv /c
 `/btw` returns to the preceding exchange after a successful aside. If it is the first exchange, is cancelled, or fails, it stays on the active path. In incognito mode it runs as an ordinary prompt.
 
 Agent tool calls have a separate `tool_call_display` setting. `auto` uses `print` for one-shot runs and `fullscreen` in heads-up mode. `print` is resize-safe and left-aligned; `fullscreen` uses bordered cards with right-aligned status.
+
+In heads-up mode, command results and errors share one feedback area: each notice replaces the previous one, and sending a message clears it. Feedback stays visible while you type, reflows when you resize the terminal, and can be scrolled when long. In an empty session it overlays the space below the Jarv logo without moving or restarting the welcome animation. Session changes load the conversation before showing the result; messages printed around full-screen views also appear when you return. This feedback is only for display and is not saved as conversation history or sent to the model. The footer is reserved for keyboard hints and feedback about editing the prompt.
 
 **Colour** in `/settings` defaults to **on**. Set it to **off** (or set `colour` to `false`) to render everything without colour — bold, dim, and underline are kept, so the layout still reads. Setting `NO_COLOR` in the environment does the same thing without changing your config. Existing `monochrome` preferences are migrated automatically.
 

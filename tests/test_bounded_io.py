@@ -146,3 +146,28 @@ def test_posix_start_uses_thread_safe_session_creation():
         shell.InteractiveCommandProcess.start("echo hi")
     assert popen.call_args.kwargs["start_new_session"] is True
     assert "preexec_fn" not in popen.call_args.kwargs
+def test_usage_ledger_streams_and_filters_legacy_timestamps(tmp_path, monkeypatch):
+    import json
+    from datetime import datetime, timedelta, timezone
+    from pathlib import Path
+    from jarv.usage import load_global_usage_records
+
+    path = tmp_path / "usage.json"
+    ledger = path.with_suffix(".jsonl")
+    records = [
+        {"created_at": "2000-01-01T00:00:00Z", "session_id": "old"},
+        {"created_at": "2026-01-02T01:00:00", "session_id": "legacy"},
+        {"created_at": "2026-01-02T02:00:00Z", "session_id": "current"},
+    ]
+    ledger.write_text("\n".join(map(json.dumps, records)) + "\n{partial", encoding="utf-8")
+    read_text = Path.read_text
+
+    def bounded_read(path, *args, **kwargs):
+        assert path != ledger, "the append-only ledger must not be read into one string"
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", bounded_read)
+    result = load_global_usage_records(
+        path, since=timedelta(days=1), now=datetime(2026, 1, 2, 12, tzinfo=timezone.utc),
+    )
+    assert [record["session_id"] for record in result] == ["legacy", "current"]

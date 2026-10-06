@@ -17,6 +17,7 @@ from rich.text import Text
 from .config import DEFAULT_CONFIG, get_setting
 from .context_budget import build_input, trim_turn_input
 from .cancellation import CancellationToken, TurnCancelled, cancel_token_on_sigint
+from .client_lifecycle import close_client
 from .display import (
     configure_monochrome,
     configure_output_display_lines,
@@ -443,6 +444,8 @@ def _dispatch_run_command_with_ui(
                 vertical_overflow="crop",
             )
             live.start()
+        if cancellation_token is not None:
+            cancellation_token.throw_if_cancelled()
         process = InteractiveCommandProcess.start(prepared.cmd, shell_state=shell_state)
         unregister_cancel = (
             cancellation_token.register(process.kill_tree)
@@ -1288,7 +1291,7 @@ def _prepare_client_and_instructions(config: dict, client, *, cwd: str):
         try:
             return client, pending.result()
         except BaseException:
-            client.close()
+            close_client(client)
             raise
 
 
@@ -1303,6 +1306,7 @@ def run_agent(
     ui=None,
     startup_wait=None,
 ) -> AgentRunResult:
+    owns_client = client is None
     config = dict(config)
     config["tool_call_display"] = resolve_tool_call_display(
         config,
@@ -1665,10 +1669,14 @@ def run_agent(
                               session_id=session_context.session_id if session_context else None,
                               turns=control.turns)
     finally:
-        control.close()
-        sigint_cancel_scope.__exit__(None, None, None)
-        _ui_call(ui, "unbind_cancel_token")
-        renderer.stop_live()
-        cleanup_pending_command()
+        try:
+            control.close()
+            sigint_cancel_scope.__exit__(None, None, None)
+            _ui_call(ui, "unbind_cancel_token")
+            renderer.stop_live()
+            cleanup_pending_command()
+        finally:
+            if owns_client:
+                close_client(client)
 
 

@@ -7,7 +7,7 @@ import pytest
 from rich.text import Text
 
 from jarv import context_budget, text_editor
-from jarv.headsup import HeadsupApp, TranscriptEntry
+from jarv.headsup import TranscriptEntry
 from jarv.tui_frame import window_transcript
 
 
@@ -79,16 +79,20 @@ def test_compaction_token_work_is_linear(monkeypatch):
 
 
 @pytest.mark.parametrize("width", [1, 4, 17, 96])
-def test_transcript_viewport_matches_full_render_through_scroll_and_changes(width):
-    app = HeadsupApp.__new__(HeadsupApp)
+def test_transcript_viewport_matches_full_render_through_scroll_and_changes(width, headsup_app_factory):
+    app = headsup_app_factory()
     app.entries = [TranscriptEntry("assistant", Text("界 é words\n" * (i % 4), style="bold"),
                                    spacer_before=bool(i % 2)) for i in range(30)]
-    for change in range(3):
+    for change in range(5):
         if change == 1:
             app.entries[-1].renderable.append("appended response")
             app.entries[-1].invalidate()
         elif change == 2:
             app.entries.append(TranscriptEntry("user", Text("new prompt")))
+        elif change == 3:
+            app.add_notice(Text("feedback\n" * 3))
+        elif change == 4:
+            app.add_notice(Text("replacement feedback"))
         for rows in (1, 6, 28, 200):
             full = app._transcript_lines(width)
             for offset in (-10, 0, 1, 15, len(full) - rows, len(full) + 100):
@@ -97,16 +101,17 @@ def test_transcript_viewport_matches_full_render_through_scroll_and_changes(widt
                 assert actual == expected
                 assert actual_offset == expected_offset
     app.entries = []
+    app._notice = None
     assert app._transcript_window(width, 6, 100) == ([Text("")], 0)
 
 
-def test_transcript_does_not_render_entries_outside_viewport():
+def test_transcript_does_not_render_entries_outside_viewport(headsup_app_factory):
     class Hidden:
         def __rich_console__(self, console, options):
             raise AssertionError("offscreen entry rendered")
             yield  # pragma: no cover
 
-    app = HeadsupApp.__new__(HeadsupApp)
+    app = headsup_app_factory()
     app.entries = [TranscriptEntry("assistant", Hidden()), TranscriptEntry("user", Text("visible\n" * 30))]
     lines, offset = app._transcript_window(96, 6, 0)
     assert len(lines) == 6

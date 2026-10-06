@@ -9,10 +9,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from conftest import FakeLive, make_console
 from jarv import cli
 from jarv.command_input import TextInput
-from jarv.headsup import HeadsupApp
 from scripts.benchmark.benchmark_coldstart import CHILD, ROOT, SEED
 
 
@@ -48,25 +46,15 @@ def test_menu_reaches_real_input_without_loading_agent_or_network(tmp_path, args
     assert not forbidden.intersection(modules)
 
 
-def make_app():
-    ready = threading.Event()
-    ready.set()
+@pytest.fixture
+def app_and_agent(headsup_app_factory):
     run = Mock(return_value=SimpleNamespace(cancelled=False))
-    console, output = make_console()
-    app = HeadsupApp(
-        {"provider": "ollama", "model": "llama3.2", "check_updates": False}, None,
-        args=SimpleNamespace(incognito=True, new=False),
-        agent_loader=({"module": SimpleNamespace(run_agent=run)}, ready),
-        handle_slash=lambda command, rest, config, client, args, hint: (config, client),
-        maybe_command=lambda first, rest: None, render_console=console,
-    )
-    app.live = FakeLive()
-    return app, run
+    return headsup_app_factory(run_agent=run), run
 
 
 @pytest.mark.parametrize("cancel", [False, True])
-def test_slow_client_setup_keeps_input_live_and_honors_cancel(monkeypatch, cancel):
-    app, run = make_app()
+def test_slow_client_setup_keeps_input_live_and_honors_cancel(monkeypatch, cancel, app_and_agent):
+    app, run = app_and_agent
     started, release = threading.Event(), threading.Event()
     client = Mock()
 
@@ -103,8 +91,8 @@ def test_slow_client_setup_keeps_input_live_and_honors_cancel(monkeypatch, cance
         client.close.assert_not_called()
 
 
-def test_client_failure_is_visible_and_retryable(monkeypatch):
-    app, run = make_app()
+def test_client_failure_is_visible_and_retryable(monkeypatch, app_and_agent):
+    app, run = app_and_agent
     client = Mock()
     create = Mock(side_effect=[RuntimeError("connection setup failed"), client])
     monkeypatch.setattr("jarv.provider.create_client", create)
@@ -112,7 +100,9 @@ def test_client_failure_is_visible_and_retryable(monkeypatch):
     app._wait_for_agent_idle(timeout=5)
     assert not app._agent_busy
     assert app._cancel_token is None
-    assert any("connection setup failed" in str(entry.renderable) for entry in app.entries)
+    with app.console.capture() as capture:
+        app.console.print(app.render())
+    assert "connection setup failed" in capture.get()
     run.assert_not_called()
     app._run_agent_query("retry")
     app._wait_for_agent_idle(timeout=5)

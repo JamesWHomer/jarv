@@ -7,19 +7,21 @@ import os
 import threading
 import time
 from collections import deque
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from typing import Callable
 
 from rich.align import Align
 from rich.cells import cell_len
-from rich.console import Console, Group, RenderableType
+from rich.console import Console, Group, NewLine, RenderableType
+from rich.control import Control
 from rich.live import Live
 from rich.markup import escape
 from rich.panel import Panel
 from rich.text import Text
 
 from .cancellation import CancellationToken, TurnCancelled
+from .client_lifecycle import close_client
 from .clipboard import copy_to_clipboard, read_clipboard_image, read_clipboard_text
 from .command_input import (
     PasteRegistry,
@@ -55,7 +57,7 @@ from .display import (
 from .history import (
     ephemeral_session_context, forget_current_session, load_history, prepare_session_context,
 )
-from .intro_animation import render_intro
+from .intro_animation import intro_footer_rows, render_intro
 from .model_catalog import get_image_output_capability
 from .safety import ConfirmRequest, clear_confirm_handler, set_confirm_handler
 from .session_render import (
@@ -98,10 +100,45 @@ SlashHandler = Callable[
 ]
 MaybeCommand = Callable[[str, list[str]], tuple[bool, str, list[str]] | None]
 
+
+class _CommandOutput:
+    """Collect command prints before layout, leaving nested Live screens alone."""
+
+    def __init__(self, *, passthrough: bool):
+        self.passthrough = passthrough
+        self.renderables: list[RenderableType] = []
+        self.thread = threading.current_thread()
+
+    def process_renderables(self, renderables):
+        if threading.current_thread() is not self.thread:
+            return renderables
+        # Live refreshes print Control objects; its render hook runs after ours.
+        # Keeping the original content also lets results reflow after a resize.
+        self.renderables.extend(
+            item.copy() if isinstance(item, Text) else item
+            for item in renderables if not isinstance(item, Control)
+        )
+        return renderables if self.passthrough else []
+
+    def get(self) -> RenderableType | None:
+        content = self.renderables[:]
+
+        def blank(item: RenderableType) -> bool:
+            return isinstance(item, NewLine) or (
+                isinstance(item, Text) and not item.plain.strip()
+            )
+
+        while content and blank(content[0]):
+            content.pop(0)
+        while content and blank(content[-1]):
+            content.pop()
+        return Group(*content) if content else None
+
+
 # These commands can replace/delete the history or change the active checkout.
 # Session browsers and /tree must be guarded before opening their action menus.
 _SESSION_CHANGING_SLASH_COMMANDS = frozenset({
-    "/new", "/undo", "/redo", "/archive", "/session", "/sessions", "/tree",
+    "/new", "/resume", "/undo", "/redo", "/archive", "/session", "/sessions", "/tree",
     "/uninstall",
 })
 
@@ -132,6 +169,7 @@ _COMMAND_CONFIRM_YES = frozenset({"1", "c", "cmd", "command", "run", "y", "yes"}
 _SESSION_SWITCHING_SLASH_COMMANDS = frozenset({
     "/archive",
     "/new",
+    "/resume",
     "/session",
     "/sessions",
 })
@@ -729,8 +767,8 @@ class _UpdateTask:
         with self.app.lock:
             self.done = True
             self._status_index = self.app.upsert_status(self._status_index, summary)
-        for line in details:
-            self.app.add_notice(line)
+        if details:
+            self.app.add_notice(Group(*details))
         self.app._update_finished(self)
 
 
@@ -769,12 +807,16 @@ class HeadsupApp(AltScreenApp):
         configure_monochrome(not get_setting(self.config, "colour"))
         configure_menu_border(get_setting(self.config, "headsup_border"))
         self.client = client
+        self._turn_client = None
+        self._retired_clients: list = []
+        self._closing = False
         self.args = args
         self._load_agent_on_query = agent_loader is None
         self.agent_import, self.agent_ready = agent_loader or ({}, threading.Event())
         self.handle_slash = handle_slash
         self.maybe_command = maybe_command
         self.entries: list[TranscriptEntry] = [self._initial_notice_entry()]
+        self._notice: TranscriptEntry | None = None
         # Ctrl+O view mode: when True, every expandable tool card (including
         # ones added later in the session) renders its full command and output.
         self.tool_cards_expanded = False
@@ -879,6 +921,8 @@ class HeadsupApp(AltScreenApp):
         set_confirm_handler(self._confirm_safety_request)
 
     def on_stop(self) -> None:
+        with self.lock:
+            self._closing = True
         self._idle_anim_stop.set()
         if self._answer_request is not None:
             self._cancel_answer()
@@ -886,6 +930,7 @@ class HeadsupApp(AltScreenApp):
         self._foreground_input_thread = None
         self._cancel_active_turn(clear_queue=True)
         self._wait_for_agent_idle(timeout=5.0)
+        self._close_unused_clients()
         # Cleared after the agent drains: a confirm arriving mid-teardown sees
         # the cancelled token and raises instead of falling back to a console
         # prompt on the dying alt screen.
@@ -1072,13 +1117,25 @@ class HeadsupApp(AltScreenApp):
             rows = _transcript_rows_for(
                 layout.body_height, len(prompt_lines) + (1 if menu_open else 0)
             )
-            visible, self.scroll_offset = self._transcript_window(inner_width, rows, self.scroll_offset)
-            show_intro = (
-                not self._idle_anim_stop.is_set()
-                and self.scroll_offset == 0
-                and self._answer_request is None
-                and all(entry.kind == "notice" for entry in self.entries)
-            )
+            show_intro = self._idle_animation_active()
+            notice_lines = []
+            if show_intro and self._notice is not None:
+                # Overlay only the space below the fixed welcome content.
+                # Resizing the animation would move the logo and reseed stars.
+                lines = self._notice.rendered_lines(inner_width)
+                footer_rows = intro_footer_rows(
+                    inner_width, rows,
+                    show_logo=get_setting(self.config, "headsup_intro_logo"),
+                )
+                notice_rows = min(len(lines), max(1, footer_rows - 1))
+                notice_lines, self.scroll_offset = window_transcript(
+                    lines, notice_rows, self.scroll_offset,
+                )
+                if len(notice_lines) < footer_rows:
+                    notice_lines.insert(0, Text(""))
+                visible = [Text("")] * (rows - len(notice_lines)) + notice_lines
+            else:
+                visible, self.scroll_offset = self._transcript_window(inner_width, rows, self.scroll_offset)
             outro_started_at = self._outro_started_at
 
         # The transcript height is the same whether the popup is open or closed,
@@ -1106,6 +1163,8 @@ class HeadsupApp(AltScreenApp):
                 )
         if intro is not None:
             visible = intro + [Text("")] * max(0, rows - len(intro))
+            if notice_lines:
+                visible[-len(notice_lines):] = notice_lines
 
         body_rows = rows
         if menu_open:
@@ -1173,12 +1232,10 @@ class HeadsupApp(AltScreenApp):
             return False
         if self._idle_anim_stop.is_set():
             return False
-        if self.scroll_offset:
-            return False
         with self.lock:
             if self._answer_request is not None:
                 return False
-            return all(entry.kind == "notice" for entry in self.entries)
+            return len(self.entries) == 1
 
     def _begin_idle_animation(self) -> None:
         # The intro is now driven by the loop's on_tick rather than a dedicated
@@ -1187,13 +1244,6 @@ class HeadsupApp(AltScreenApp):
             return
         self._idle_anim_started_at = time.perf_counter()
         self._idle_anim_stop.clear()
-
-    def _restart_idle_animation(self) -> None:
-        self._idle_anim_stop.set()
-        self._outro_started_at = 0.0
-        self._idle_anim_started_at = time.perf_counter()
-        self._idle_anim_stop.clear()
-        self.invalidate()
 
     def _dismiss_intro(self) -> None:
         """Tear down the idle intro, playing a quick outro if it's on screen.
@@ -1222,6 +1272,7 @@ class HeadsupApp(AltScreenApp):
             # A new turn always jumps back to the bottom so the user sees their
             # message and the streamed response, even if they had scrolled up.
             self.scroll_offset = 0
+            self._notice = None
         self._append(
             "user",
             _UserMessage(query),
@@ -1267,7 +1318,11 @@ class HeadsupApp(AltScreenApp):
                 self.entries[index].invalidate()
 
     def add_notice(self, renderable: RenderableType) -> None:
-        self._append("notice", renderable)
+        """Replace the current feedback without adding conversation entries."""
+        with self.lock:
+            self.scroll_offset = 0
+            self._notice = TranscriptEntry("notice", renderable, spacer_before=True)
+        self.refresh()
 
     def set_prompt_notice(
         self,
@@ -1643,20 +1698,24 @@ class HeadsupApp(AltScreenApp):
         message.append("Did you mean ", style="yellow")
         message.append(command_text, style="bold cyan")
         message.append(" or a message?", style="yellow")
-        self.add_notice(message)
-        self.add_notice(
+        self.add_notice(Group(
+            message,
             Text(
                 f"1 run command   2 send message: {full_input}",
                 style="dim",
                 no_wrap=True,
                 overflow="ellipsis",
-            )
-        )
+            ),
+        ))
         answer = self.read_answer("choice> ").strip().lower()
         return answer in _COMMAND_CONFIRM_YES
 
     def _run_slash(self, command: str, rest: list[str]) -> str | None:
         """Run one slash command; returns "exit" when heads-up must stop."""
+        meta = COMMANDS.get(command.lstrip("/"))
+        if meta is not None and rest and not meta.takes_rest:
+            self.add_notice(Text(f"{command} does not accept arguments.", style="red"))
+            return None
         if command in _SESSION_CHANGING_SLASH_COMMANDS:
             with self.lock:
                 busy = self._agent_busy
@@ -1676,11 +1735,10 @@ class HeadsupApp(AltScreenApp):
             if command == "/new":
                 self.session_context = ephemeral_session_context()
                 self._sync_transcript_from_history()
-                self._restart_idle_animation()
-                self.set_prompt_notice(None)
+                self.add_notice(Text("New session started.", style="green"))
                 return None
             if command in {
-                "/undo", "/redo", "/archive", "/session", "/sessions",
+                "/undo", "/redo", "/archive", "/resume", "/session", "/sessions",
                 "/tree", "/history", "/usage",
             }:
                 self.add_notice(Text(
@@ -1702,29 +1760,39 @@ class HeadsupApp(AltScreenApp):
             return None
         if command == "/uninstall":
             return self._run_uninstall(rest)
-        if command in _FULLSCREEN_SLASH_COMMANDS or (
+        interactive = command in _FULLSCREEN_SLASH_COMMANDS or (
             command in {"/session", "/sessions"} and not rest
-        ):
-            self._run_interactive_slash(command, rest)
-            return None
-        with self._captured_console_output() as capture:
-            self.config, self.client = self.handle_slash(
-                command,
-                rest,
-                self.config,
-                self.client,
-                self.args,
-                True,
-            )
-        configure_output_display_lines(
-            get_setting(self.config, "tool_output_display_lines")
         )
-        configure_monochrome(not get_setting(self.config, "colour"))
-        configure_menu_border(get_setting(self.config, "headsup_border"))
-        output = capture.get().strip()
-        notice = Text.from_ansi(output) if output else None
-        if not self._sync_after_slash(command, notice):
-            if notice:
+        with self.suspended() if interactive else nullcontext():
+            with self._command_output(passthrough=interactive) as output:
+                try:
+                    with self.lock:
+                        previous_config, previous_client = self.config, self.client
+                    config, client = self.handle_slash(
+                        command, rest, previous_config, previous_client, self.args, True,
+                    )
+                    # A client may finish initializing while the command runs.
+                    # Leave it alone when the handler did not change runtime.
+                    if config is not previous_config or client is not previous_client:
+                        with self.lock:
+                            old_client = self.client
+                            self.config, self.client = config, client
+                            if old_client is not None and old_client is not client:
+                                self._retired_clients.append(old_client)
+                        self._close_unused_clients()
+                    self._sync_after_slash(command)
+                except (KeyboardInterrupt, EOFError):
+                    self.console.print(Text(f"{command} cancelled.", style="yellow"))
+                except Exception as exc:
+                    self.console.print(Text(f"{command} failed: {exc}", style="red"))
+            configure_output_display_lines(
+                get_setting(self.config, "tool_output_display_lines")
+            )
+            configure_monochrome(not get_setting(self.config, "colour"))
+            configure_menu_border(get_setting(self.config, "headsup_border"))
+            self.invalidate_usage_status()
+            notice = output.get()
+            if notice is not None:
                 self.add_notice(notice)
         return None
 
@@ -1737,28 +1805,14 @@ class HeadsupApp(AltScreenApp):
         from .uninstall import run_uninstall
 
         with self.suspended():
-            outcome = run_uninstall(rest)
-        if outcome.destructive:
-            return "exit"
-        self._sync_after_slash("/uninstall", None)
+            with self._command_output(passthrough=True) as output:
+                outcome = run_uninstall(rest)
+            if outcome.destructive:
+                return "exit"
+            notice = output.get()
+            if notice is not None:
+                self.add_notice(notice)
         return None
-
-    def _run_interactive_slash(self, command: str, rest: list[str]) -> None:
-        with self.suspended():
-            self.config, self.client = self.handle_slash(
-                command,
-                rest,
-                self.config,
-                self.client,
-                self.args,
-                True,
-            )
-        configure_output_display_lines(
-            get_setting(self.config, "tool_output_display_lines")
-        )
-        configure_monochrome(not get_setting(self.config, "colour"))
-        configure_menu_border(get_setting(self.config, "headsup_border"))
-        self._sync_after_slash(command, None)
 
     def _run_tree(self) -> None:
         """Open the prompt-tree view and apply the chosen fork/edit/resume.
@@ -1777,15 +1831,18 @@ class HeadsupApp(AltScreenApp):
         from .tree_browser import run_tree_screen
 
         with self.suspended():
-            outcome = run_tree_screen(self.session_context, self.config)
+            with self._command_output(passthrough=True) as output:
+                outcome = run_tree_screen(self.session_context, self.config)
 
-        if outcome.action not in ("open", "fork", "edit"):
-            return
-        session_tree.checkout(self.session_context.history_file, leaf_id=outcome.leaf_id)
-        self._sync_transcript_from_history()
-        if outcome.action == "edit" and outcome.prefill is not None:
-            with self.lock:
-                initialize_text_editor(self.editor, outcome.prefill)
+        if outcome.action in ("open", "fork", "edit"):
+            session_tree.checkout(self.session_context.history_file, leaf_id=outcome.leaf_id)
+            self._sync_transcript_from_history()
+            if outcome.action == "edit" and outcome.prefill is not None:
+                with self.lock:
+                    initialize_text_editor(self.editor, outcome.prefill)
+        notice = output.get()
+        if notice is not None:
+            self.add_notice(notice)
 
     def _run_btw(self, rest: list[str]) -> None:
         """Ask an aside that doesn't derail the main thread.
@@ -1852,16 +1909,24 @@ class HeadsupApp(AltScreenApp):
             startup.throw_if_cancelled()
             if "error" in self.agent_import:
                 raise self.agent_import["error"]
-            config = self.config
-            if self.client is None:
+            with self.lock:
+                if self._closing:
+                    startup.cancel()
+                startup.throw_if_cancelled()
+                config, client = self.config, self.client
+                self._turn_client = client
+            if client is None:
                 from .provider import create_client
 
                 client = create_client(config)
-                if startup.cancelled or self.config is not config:
-                    client.close()
+                with self.lock:
+                    stale = startup.cancelled or self._closing or self.config is not config
+                    if not stale:
+                        self.client = self._turn_client = client
+                if stale:
+                    close_client(client)
                     startup.cancel()
                     startup.throw_if_cancelled()
-                self.client = client
             startup.throw_if_cancelled()
             ui = HeadsupAgentUI(self)
             # The loop's on_tick polls the active UI to animate spinners and live
@@ -1871,7 +1936,7 @@ class HeadsupApp(AltScreenApp):
                 result = self.agent_import["module"].run_agent(
                     query,
                     config,
-                    self.client,
+                    client,
                     heads_up=True,
                     incognito=self.incognito,
                     ui=ui,
@@ -1889,7 +1954,7 @@ class HeadsupApp(AltScreenApp):
                         initialize_text_editor(self.editor, prompt)
                 self.add_notice(Text("Cancelled.", style="yellow"))
             elif isinstance(getattr(result, "error", None), str):
-                self.add_notice(Text("Turn failed.", style="red"))
+                self.add_notice(Text(f"Turn failed. {result.error}", style="red"))
             return result
         except (KeyboardInterrupt, TurnCancelled):
             with self.lock:
@@ -1904,13 +1969,30 @@ class HeadsupApp(AltScreenApp):
             return None
         finally:
             with self.lock:
+                self._turn_client = None
                 if self._cancel_token is startup:
                     self._cancel_token = None
                 if self._startup_cancel_token is startup:
                     self._startup_cancel_token = None
+            self._close_unused_clients()
+
+    def _close_unused_clients(self) -> None:
+        """Retire transports only after the current turn releases its client."""
+        with self.lock:
+            if self._closing and self.client is not None:
+                self._retired_clients.append(self.client)
+                self.client = None
+            ready = [client for client in self._retired_clients
+                     if client is not self._turn_client]
+            self._retired_clients = [client for client in self._retired_clients
+                                     if client is self._turn_client]
+        for client in ready:
+            close_client(client)
 
     def _queue_or_start_agent_query(self, query: str, on_complete: Callable | None = None) -> None:
         with self.lock:
+            if self._closing:
+                return
             if self._agent_busy:
                 self._queued_queries.append((query, on_complete))
                 queued_position = len(self._queued_queries)
@@ -2059,26 +2141,29 @@ class HeadsupApp(AltScreenApp):
         self.refresh()
 
     @contextmanager
-    def _captured_console_output(self):
+    def _command_output(self, *, passthrough: bool = False):
+        """One output path for quick commands and messages around nested views."""
         live = self.live
         self._refresh_suspended += 1
         render_hook_suspended = False
+        output = _CommandOutput(passthrough=passthrough)
         try:
             render_hooks = getattr(self.console, "_render_hooks", None)
             if live is not None and render_hooks and render_hooks[-1] is live:
                 self.console.pop_render_hook()
                 render_hook_suspended = True
             try:
-                with self.console.capture() as capture:
-                    yield capture
+                self.console.push_render_hook(output)
+                try:
+                    yield output
+                finally:
+                    self.console.pop_render_hook()
             finally:
                 if render_hook_suspended and live is not None:
                     self.console.push_render_hook(live)
         finally:
             self._refresh_suspended = max(0, self._refresh_suspended - 1)
-            if not self._refresh_suspended:
-                # Slash output runs on the loop thread; repaint in place now.
-                self.paint_now()
+            self.refresh()
 
     def _initial_notice_entry(self) -> TranscriptEntry:
         return TranscriptEntry(
@@ -2102,33 +2187,15 @@ class HeadsupApp(AltScreenApp):
             return
         self._sync_transcript_from_history()
 
-    def _sync_after_slash(
-        self,
-        command: str,
-        notice: RenderableType | None,
-    ) -> bool:
-        if command in _HISTORY_SYNC_SLASH_COMMANDS:
-            self._refresh_session_context()
-            self._sync_transcript_from_history(notice)
-            return True
-        if command == "/new":
-            self._refresh_session_context()
-            self._sync_transcript_from_history()
-            self._restart_idle_animation()
-            self.set_prompt_notice(None)
-            return True
-        if command in _SESSION_SWITCHING_SLASH_COMMANDS:
+    def _sync_after_slash(self, command: str) -> None:
+        # Session changes happen before feedback is appended, so neither a
+        # history reload nor an empty session can swallow the command's result.
+        if command in _HISTORY_SYNC_SLASH_COMMANDS | _SESSION_SWITCHING_SLASH_COMMANDS:
             changed = self._refresh_session_context()
-            if changed:
+            if changed or command in _HISTORY_SYNC_SLASH_COMMANDS or command == "/new":
                 self._sync_transcript_from_history()
-                self.set_prompt_notice(notice)
-                return True
-        return False
 
-    def _sync_transcript_from_history(
-        self,
-        trailing_notice: RenderableType | None = None,
-    ) -> None:
+    def _sync_transcript_from_history(self) -> None:
         history = [] if self.incognito else load_history(self.session_context.history_file)
         entries: list[TranscriptEntry] = [self._initial_notice_entry()]
         for item_index, item in enumerate(history):
@@ -2183,20 +2250,19 @@ class HeadsupApp(AltScreenApp):
                         _HistoryMarkdown(content),
                     )
                 )
-        if trailing_notice is not None:
-            entries.append(
-                TranscriptEntry(
-                    "notice",
-                    trailing_notice,
-                    spacer_before=len(entries) > 1,
-                )
-            )
         with self.lock:
             self.entries = entries
+            self._notice = None
             self._live_tool_index.clear()
             self.scroll_offset = 0
             self._prompt_history = self._history_user_messages(history)
             self._reset_prompt_history_navigation()
+            self._outro_started_at = 0.0
+            if len(entries) > 1:
+                self._idle_anim_stop.set()
+            elif self._idle_anim_stop.is_set():
+                self._idle_anim_stop.clear()
+                self._begin_idle_animation()
         self.refresh()
 
     def _load_prompt_history(self) -> list[str]:
@@ -2548,7 +2614,7 @@ class HeadsupApp(AltScreenApp):
         """Per-entry visual line counts, mirroring ``_transcript_lines`` exactly
         (spacer row included, empty renders still occupy one line)."""
         counts: list[int] = []
-        for entry in self.entries:
+        for entry in self._transcript_entries():
             count = max(1, len(entry.rendered_lines(width)))
             if entry.spacer_before:
                 count += 1
@@ -2663,9 +2729,18 @@ class HeadsupApp(AltScreenApp):
         self.refresh()
         return result
 
+    def _transcript_entries(self, *, reverse: bool = False):
+        # Feedback is one display-only slot, so replacing it never shifts the
+        # indices used by streaming responses and live tool cards.
+        if reverse and self._notice is not None:
+            yield self._notice
+        yield from reversed(self.entries) if reverse else self.entries
+        if not reverse and self._notice is not None:
+            yield self._notice
+
     def _transcript_lines(self, width: int) -> list[Text]:
         lines: list[Text] = []
-        for entry in self.entries:
+        for entry in self._transcript_entries():
             if entry.spacer_before:
                 lines.append(Text(""))
             rendered = entry.rendered_lines(width)
@@ -2678,7 +2753,7 @@ class HeadsupApp(AltScreenApp):
         needed = rows + max(0, scroll_offset)
         chunks = []
         count = 0
-        for entry in reversed(self.entries):
+        for entry in self._transcript_entries(reverse=True):
             lines = entry.rendered_lines(width) or [Text("")]
             if entry.spacer_before:
                 lines = [Text(""), *lines]

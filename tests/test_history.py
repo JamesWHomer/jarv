@@ -193,3 +193,141 @@ def test_archived_default_session_is_never_reopened_as_empty_history(monkeypatch
     data = history.load_sessions()
     assert context.session_id != "terminal"
     assert data["sessions"]["terminal"]["history_file"] == "archived-history.json"
+def test_parse_timestamp_normalizes_legacy_utc_and_ignores_bad_types():
+    from datetime import datetime, timezone
+    from jarv.history import parse_timestamp
+
+    expected = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+    assert parse_timestamp("2026-01-02T03:04:05") == expected
+    assert parse_timestamp("2026-01-02T03:04:05Z") == expected
+    assert parse_timestamp("2026-01-02T13:04:05+10:00") == expected
+    for value in (None, "", "invalid", 123, [], {}):
+        assert parse_timestamp(value) is None
+
+
+@pytest.fixture
+def legacy_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(history, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(history, "SESSIONS_DIR", tmp_path / "sessions")
+    monkeypatch.setattr(history, "SESSIONS_FILE", tmp_path / "sessions.json")
+    path = tmp_path / f"history-{history.short_hash('legacy')}.json"
+    transcript = [{"role": "user", "content": "Find this older conversation"}]
+    path.write_text(json.dumps(transcript), encoding="utf-8")
+    metadata = {"terminals": {"terminal": "legacy"}, "sessions": {"legacy": {
+        "history_file": str(path), "label": "Original label",
+        "directories": {history.session_directory(): "2026-10-06T00:00:00Z"},
+    }}}
+    history.SESSIONS_FILE.write_text(json.dumps(metadata), encoding="utf-8")
+    return path, transcript, metadata
+
+
+def test_migration_moves_sidecars_and_updates_session_metadata(legacy_session):
+    path, transcript, metadata = legacy_session
+    sidecars = [history.artifact_file_for(path), history.reads_file_for(path)]
+    for sidecar in sidecars:
+        sidecar.write_text('{"saved":"sidecar"}', encoding="utf-8")
+
+    history.migrate_flat_session_files()
+
+    destination = history.SESSIONS_DIR / path.name
+    expected = metadata["sessions"]["legacy"] | {"history_file": str(destination)}
+    assert history.load_sessions() == {"terminals": metadata["terminals"],
+                                       "sessions": {"legacy": expected}}
+    assert history.load_history(destination) == transcript
+    assert history.latest_session_for_directory() == "legacy"
+    for source in [path, *sidecars]:
+        assert not source.exists()
+        assert (history.SESSIONS_DIR / source.name).is_file()
+
+
+def test_migration_repairs_previously_moved_history_metadata(legacy_session):
+    path, transcript, metadata = legacy_session
+    history.SESSIONS_DIR.mkdir()
+    path.rename(history.SESSIONS_DIR / path.name)
+    sessions = metadata["sessions"]
+    archive = path.parent / "archive" / path.name
+    unrelated = path.parent / "another-directory" / path.name
+    missing = path.parent / "history-missing.json"
+    sessions.update(archived={"history_file": str(archive), "archived": True},
+                    unrelated={"history_file": str(unrelated)},
+                    missing={"history_file": str(missing)})
+    history.SESSIONS_FILE.write_text(json.dumps(metadata), encoding="utf-8")
+
+    history.migrate_flat_session_files()
+
+    saved = history.load_sessions()["sessions"]
+    assert saved["legacy"]["history_file"] == str(history.SESSIONS_DIR / path.name)
+    assert history.latest_session_for_directory() == "legacy"
+    for key in ("archived", "unrelated", "missing"):
+        assert saved[key] == sessions[key]
+
+
+def test_simultaneous_migrations_recheck_files_under_lock(legacy_session, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+    from threading import Barrier
+    from jarv import storage
+
+    path, transcript, _ = legacy_session
+    entering = Barrier(2)
+
+    @contextmanager
+    def synchronized_transaction(target):
+        entering.wait(timeout=5)
+        with storage.transaction(target):
+            yield
+
+    monkeypatch.setattr(history, "transaction", synchronized_transaction)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(history.migrate_flat_session_files) for _ in range(2)]
+        for future in futures:
+            future.result(timeout=10)
+
+    assert not path.exists()
+    assert history.load_history(history.SESSIONS_DIR / path.name) == transcript
+    assert history.load_sessions()["sessions"]["legacy"]["history_file"] == str(history.SESSIONS_DIR / path.name)
+
+
+def test_migration_failure_before_commit_preserves_files_and_metadata(legacy_session, monkeypatch):
+    from jarv import storage
+
+    path, transcript, metadata = legacy_session
+    replace = storage.os.replace
+
+    def fail_journal(source, destination):
+        if Path(destination).name == ".jarv-transaction.json":
+            raise OSError("disk full")
+        return replace(source, destination)
+
+    monkeypatch.setattr(storage.os, "replace", fail_journal)
+    with pytest.raises(StorageError, match="disk full"):
+        history.migrate_flat_session_files()
+
+    assert json.loads(path.read_text(encoding="utf-8")) == transcript
+    assert json.loads(history.SESSIONS_FILE.read_text(encoding="utf-8")) == metadata
+    assert not (history.SESSIONS_DIR / path.name).exists()
+
+
+def test_interrupted_migration_recovers_files_and_metadata_together(legacy_session, monkeypatch):
+    from jarv import storage
+
+    path, transcript, _ = legacy_session
+    atomic = storage._atomic
+
+    def fail_metadata(target, value):
+        if target == history.SESSIONS_FILE:
+            raise OSError("interrupted metadata replacement")
+        return atomic(target, value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(storage, "_atomic", fail_metadata)
+        with pytest.raises(StorageError, match="interrupted metadata replacement"):
+            history.migrate_flat_session_files()
+
+    assert not path.exists()
+    assert (path.parent / ".jarv-transaction.json").exists()
+    saved = history.load_sessions()
+    destination = history.SESSIONS_DIR / path.name
+    assert saved["sessions"]["legacy"]["history_file"] == str(destination)
+    assert history.load_history(destination) == transcript
+    assert not (path.parent / ".jarv-transaction.json").exists()

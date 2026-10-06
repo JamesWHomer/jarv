@@ -11,6 +11,7 @@ import threading
 import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass
+from itertools import chain
 from pathlib import Path
 
 from rich.console import Group
@@ -26,6 +27,8 @@ from .tool_outputs import ToolOutput, with_tool_outcome
 MAX_EDIT_FILE_BYTES = 5_000_000
 _DIFF_CONTEXT_LINES = 3
 _MAX_DIFF_PREVIEW_LINES = 60
+_MAX_DIFF_PREVIEW_CHARS = 12_000
+_MAX_RESULT_PREVIEW_CHARS = 4_000
 _RESULT_CONTEXT_LINES = 3
 _FILE_LOCKS = weakref.WeakValueDictionary()
 _FILE_LOCKS_GUARD = threading.Lock()
@@ -144,12 +147,12 @@ def _validate_args(args: dict) -> tuple[str, str, str, bool] | str:
 
 
 def _resolve_edit_path(value: str, *, cwd: str | Path | None = None) -> Path | str:
-    path = Path(value).expanduser()
-    if not path.is_absolute():
-        path = (Path(cwd) if cwd is not None else Path.cwd()) / path
     try:
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = (Path(cwd) if cwd is not None else Path.cwd()) / path
         resolved = path.resolve(strict=True)
-    except OSError:
+    except (OSError, RuntimeError, ValueError):
         return (
             f"[edit error: file not found: {value} — this tool edits existing "
             "files only; use run_command to create files]"
@@ -233,6 +236,7 @@ def _apply_replacement(
     replace_all: bool,
     *,
     path: Path,
+    source_bytes: int | None = None,
 ) -> tuple[str, int] | str:
     count = text.count(old_text)
     if count == 0 and "\r\n" in text and "\n" in old_text and "\r" not in old_text:
@@ -242,7 +246,7 @@ def _apply_replacement(
         crlf_count = text.count(crlf_old)
         if crlf_count:
             old_text = crlf_old
-            new_text = new_text.replace("\n", "\r\n")
+            new_text = new_text.replace("\r\n", "\n").replace("\n", "\r\n")
             count = crlf_count
     if count == 0:
         return (
@@ -257,27 +261,59 @@ def _apply_replacement(
             "include more surrounding lines to make it unique, or set "
             "replace_all=true]"
         )
+    # Check the encoded result before str.replace can multiply a short
+    # replacement across millions of matches. source_bytes includes any BOM;
+    # the strings here already reflect the CRLF fallback above.
+    try:
+        original_size = _utf8_size(text) if source_bytes is None else source_bytes
+        result_size = original_size + (count if replace_all else 1) * (
+            _utf8_size(new_text) - _utf8_size(old_text)
+        )
+    except UnicodeEncodeError:
+        return "[tool argument error: replacement text must be valid UTF-8 text]"
+    if result_size > MAX_EDIT_FILE_BYTES:
+        return (
+            f"[edit error: replacement would produce {result_size} bytes, exceeding "
+            f"the {MAX_EDIT_FILE_BYTES} byte edit limit; use run_command for bulk edits]"
+        )
     if replace_all:
         return text.replace(old_text, new_text), count
     return text.replace(old_text, new_text, 1), 1
 
 
+def _utf8_size(text: str) -> int:
+    return sum(len(text[start:start + 64 * 1024].encode("utf-8"))
+               for start in range(0, len(text), 64 * 1024))
+
+
+def _bounded_preview(lines, *, max_chars: int, max_lines: int | None = None) -> str:
+    """Bound previews by characters as well as lines, including minified files."""
+    marker = "\n... preview truncated ..."
+    parts = []
+    used = 0
+    for index, line in enumerate(lines):
+        if max_lines is not None and index >= max_lines:
+            return "\n".join(parts) + marker
+        remaining = max_chars - len(marker) - used - bool(parts)
+        if len(line) > remaining:
+            parts.append(line[:max(0, remaining)])
+            return "\n".join(parts) + marker
+        used += len(line) + bool(parts)
+        parts.append(line)
+    return "\n".join(parts)
+
+
 def build_edit_diff(before: str, after: str, path: str) -> str:
-    diff_lines = list(
-        difflib.unified_diff(
-            before.splitlines(),
-            after.splitlines(),
-            fromfile=path,
-            tofile=path,
-            lineterm="",
-            n=_DIFF_CONTEXT_LINES,
-        )
+    diff_lines = difflib.unified_diff(
+        before.splitlines(),
+        after.splitlines(),
+        fromfile=path,
+        tofile=path,
+        lineterm="",
+        n=_DIFF_CONTEXT_LINES,
     )
-    if len(diff_lines) > _MAX_DIFF_PREVIEW_LINES:
-        hidden = len(diff_lines) - _MAX_DIFF_PREVIEW_LINES
-        diff_lines = diff_lines[:_MAX_DIFF_PREVIEW_LINES]
-        diff_lines.append(f"... {hidden} more diff lines ...")
-    return "\n".join(diff_lines)
+    return _bounded_preview(diff_lines, max_chars=_MAX_DIFF_PREVIEW_CHARS,
+                            max_lines=_MAX_DIFF_PREVIEW_LINES)
 
 
 def _diff_renderable(diff_text: str) -> Group:
@@ -419,10 +455,10 @@ def _format_result(path: Path, count: int, before: str, after: str) -> str:
     start = max(0, change_line - 1 - _RESULT_CONTEXT_LINES)
     end = min(len(after_lines), change_line + _RESULT_CONTEXT_LINES)
     width = len(str(end)) if end else 1
-    context = [
-        f"  {number:>{width}} | {after_lines[number - 1]}"
+    context = (
+        f"  {number:>{width}} | {after_lines[number - 1][:_MAX_RESULT_PREVIEW_CHARS + 1]}"
         for number in range(start + 1, end + 1)
-    ]
+    )
 
     lines = [
         "[EDIT RESULT]",
@@ -431,8 +467,7 @@ def _format_result(path: Path, count: int, before: str, after: str) -> str:
         f"Lines: {before_count} -> {after_count} ({delta:+d})",
         "Context (new file content around first change):",
     ]
-    lines.extend(context)
-    return "\n".join(lines)
+    return _bounded_preview(chain(lines, context), max_chars=_MAX_RESULT_PREVIEW_CHARS)
 
 
 def dispatch_edit_tool(
@@ -468,7 +503,8 @@ def _edit_locked(resolved: Path, old_text: str, new_text: str, replace_all: bool
         return with_tool_outcome(loaded, "failed")
 
     replaced = _apply_replacement(
-        loaded.text, old_text, new_text, replace_all, path=resolved
+        loaded.text, old_text, new_text, replace_all, path=resolved,
+        source_bytes=len(loaded.data),
     )
     if isinstance(replaced, str):
         return with_tool_outcome(replaced, "failed")

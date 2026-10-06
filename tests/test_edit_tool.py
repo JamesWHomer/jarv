@@ -19,6 +19,77 @@ from jarv.safety import prompt_confirmation
 NO_PROMPT_CONFIG = {**DEFAULT_CONFIG, "command_safety": "none"}
 
 
+def test_replace_all_rejects_growth_before_allocating_replacement():
+    class UnallocatedReplacement(str):
+        def replace(self, *args, **kwargs):
+            raise AssertionError("oversized replacement must not be allocated")
+
+    result = edit_tool._apply_replacement(
+        UnallocatedReplacement("a" * 100_000), "a", "b" * 100, True,
+        path=Path("file.txt"),
+    )
+    assert "would produce 10000000 bytes" in result
+
+
+def test_edit_growth_rejection_keeps_file_and_skips_diff(workdir, monkeypatch):
+    target = workdir / "file.txt"
+    original = b"a" * 100_000
+    target.write_bytes(original)
+
+    def unexpected_diff(*args, **kwargs):
+        raise AssertionError("rejected edit must not build a diff or request approval")
+
+    monkeypatch.setattr(edit_tool, "build_edit_diff", unexpected_diff)
+    result = _edit(_args(target, old="a", new="b" * 100, replace_all=True))
+    assert "would produce 10000000 bytes" in result
+    assert target.read_bytes() == original
+    assert not list(workdir.glob(".jarv-edit-*"))
+
+
+@pytest.mark.parametrize("original,old,new,replace_all,expected", [
+    (b"a", "a", "é", False, "é".encode()),
+    (codecs.BOM_UTF8 + b"a", "a", "é", False, codecs.BOM_UTF8 + "é".encode()),
+    (b"a\r\nb", "a\nb", "é\n中", False, "é\r\n中".encode()),
+    (b"aaaa", "a", "é", True, "éééé".encode()),
+])
+@pytest.mark.parametrize("below_limit", [False, True])
+def test_edit_growth_counts_encoded_unicode_bom_and_crlf(
+    workdir, monkeypatch, original, old, new, replace_all, expected, below_limit,
+):
+    target = workdir / "file.txt"
+    target.write_bytes(original)
+    monkeypatch.setattr(edit_tool, "MAX_EDIT_FILE_BYTES", len(expected) - below_limit)
+    result = _edit(_args(target, old=old, new=new, replace_all=replace_all))
+    if below_limit:
+        assert f"would produce {len(expected)} bytes" in result
+        assert target.read_bytes() == original
+    else:
+        assert result.startswith("[EDIT RESULT]")
+        assert target.read_bytes() == expected
+
+
+def test_edit_invalid_unicode_replacement_is_a_failed_result(workdir):
+    target = workdir / "file.txt"
+    target.write_bytes(b"alpha")
+    result = _edit(_args(target, new="\ud800"))
+    assert "must be valid UTF-8" in result
+    assert target.read_bytes() == b"alpha"
+
+
+def test_edit_minified_file_previews_have_independent_character_limits(workdir):
+    target = workdir / "file.txt"
+    original = "alpha" + "x" * 100_000
+    expected = "beta" + "x" * 100_000
+    target.write_text(original, encoding="utf-8")
+    diff = edit_tool.build_edit_diff(original, expected, str(target))
+    result = _edit(_args(target))
+    assert len(diff) <= edit_tool._MAX_DIFF_PREVIEW_CHARS
+    assert len(result) <= edit_tool._MAX_RESULT_PREVIEW_CHARS
+    assert "preview truncated" in diff
+    assert "preview truncated" in result
+    assert target.read_text(encoding="utf-8") == expected
+
+
 def _edit(args, config=None):
     return dispatch_edit_tool(args, config=config or NO_PROMPT_CONFIG)
 
@@ -78,6 +149,30 @@ def test_edit_replace_all_null_defaults_to_false(workdir):
 
     assert output.startswith("[EDIT RESULT]")
     assert target.read_text(encoding="utf-8") == "beta\n"
+
+
+def test_edit_crlf_fallback_accepts_crlf_replacement(workdir):
+    target = workdir / "file.txt"
+    target.write_bytes(b"alpha\r\nbeta\r\n")
+    output = _edit(_args(target, old="alpha\nbeta", new="gamma\r\ndelta"))
+    assert output.startswith("[EDIT RESULT]")
+    assert target.read_bytes() == b"gamma\r\ndelta\r\n"
+
+
+def test_edit_invalid_path_is_a_failed_tool_result():
+    from jarv.tool_outputs import tool_outcome
+
+    output = _edit(_args("bad\x00path"))
+    assert output.startswith("[edit error:")
+    assert tool_outcome(output).status == "failed"
+
+
+def test_edit_unresolvable_home_returns_tool_error(monkeypatch):
+    def missing_home(path):
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(Path, "expanduser", missing_home)
+    assert _edit(_args("~/file.txt")).startswith("[edit error:")
 
 
 # ── Path resolution ───────────────────────────────────────────────────────

@@ -62,3 +62,15 @@ def test_load_rejects_non_string_system_prompt(tmp_path, monkeypatch):
 
     assert error.value.code == 1
     assert path.read_text(encoding="utf-8") == original
+@pytest.mark.parametrize("content", [
+    b"null", b"[]", b"1", b'"text"', b"\xff", b'{"provider": []}',
+    b'{"api_keys": null}', b'{"api_keys": {"openai": 123}}',
+])
+def test_setup_probe_handles_malformed_config(tmp_path, monkeypatch, content):
+    from jarv import config
+
+    path = tmp_path / "config.json"
+    path.write_bytes(content)
+    monkeypatch.setattr(config, "CONFIG_FILE", path)
+    assert config.is_setup_complete() is False
+    assert path.read_bytes() == content

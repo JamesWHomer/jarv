@@ -192,7 +192,6 @@ class AgentInputTests(unittest.TestCase):
                 pass
 
             def wait_until_idle(self, **_kwargs):
-                time.sleep(0.3)
                 return InteractiveCommandSnapshot(
                     command,
                     "",
@@ -201,13 +200,19 @@ class AgentInputTests(unittest.TestCase):
                     exited=False,
                 )
 
+        def start_process(*_args, **_kwargs):
+            rendered_before_start = stream.getvalue() + "".join(captured_frames)
+            self.assertIn(command, rendered_before_start)
+            self.assertIn("Running", rendered_before_start)
+            return FakeInteractiveProcess()
+
         with (
             patch("jarv.agent.console", test_console),
             patch("jarv.agent.Live", CaptureLive),
             patch("jarv.agent.check_command", return_value=(True, "")),
             patch(
                 "jarv.agent.InteractiveCommandProcess.start",
-                return_value=FakeInteractiveProcess(),
+                side_effect=start_process,
             ),
         ):
             result = _dispatch_run_command_with_ui(

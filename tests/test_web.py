@@ -1,4 +1,7 @@
-import time
+import gzip
+import threading
+import tracemalloc
+import zlib
 from types import SimpleNamespace
 from urllib.parse import parse_qs
 
@@ -24,6 +27,7 @@ from jarv.web import (
     _DuckDuckGoHTMLParser,
     _ReadableHTMLParser,
     _decode_search_url,
+    _request_bytes,
     dispatch_web_tool,
     fetch_web,
     fragment_note,
@@ -47,6 +51,102 @@ def _mock_client(handler):
         transport=httpx.MockTransport(handler),
         follow_redirects=False,
     )
+
+
+@pytest.mark.parametrize("encoding", ["gzip", "deflate", "raw-deflate", "identity"])
+def test_fetch_decodes_supported_compression_with_bounded_chunks(monkeypatch, encoding):
+    body = bytes(range(256)) * 500
+    if encoding == "gzip":
+        wire = gzip.compress(body, compresslevel=0)
+    elif encoding == "deflate":
+        wire = zlib.compress(body, level=0)
+    elif encoding == "raw-deflate":
+        compressor = zlib.compressobj(level=0, wbits=-zlib.MAX_WBITS)
+        wire = compressor.compress(body) + compressor.flush()
+    else:
+        wire = body
+    header = "deflate" if encoding == "raw-deflate" else encoding
+    monkeypatch.setattr("jarv.web._create_client", lambda timeout: _mock_client(
+        lambda request: httpx.Response(200, headers={"content-encoding": header},
+                                      stream=httpx.ByteStream(wire)),
+    ))
+    assert _request_bytes("https://example.test/", timeout=5)[2] == body
+
+
+def test_fetch_decodes_concatenated_gzip_members(monkeypatch):
+    wire = gzip.compress(b"first") + gzip.compress(b"second")
+    monkeypatch.setattr("jarv.web._create_client", lambda timeout: _mock_client(
+        lambda request: httpx.Response(200, headers={"content-encoding": "gzip"},
+                                      stream=httpx.ByteStream(wire)),
+    ))
+    assert _request_bytes("https://example.test/", timeout=5)[2] == b"firstsecond"
+
+
+@pytest.mark.parametrize("encoding", ["gzip", "deflate"])
+def test_compressed_response_limit_applies_before_large_allocation(monkeypatch, encoding):
+    compress = gzip.compress if encoding == "gzip" else zlib.compress
+    wire = compress(b"x" * (32 * 1024 * 1024))
+    monkeypatch.setattr("jarv.web._create_client", lambda timeout: _mock_client(
+        lambda request: httpx.Response(
+            200, headers={"content-type": "text/plain", "content-encoding": encoding,
+                          "content-length": str(len(wire))},
+            stream=httpx.ByteStream(wire),
+        ),
+    ))
+    tracemalloc.start()
+    try:
+        with pytest.raises(WebToolError, match="exceeds .* byte limit"):
+            _request_bytes("https://example.test/", timeout=5)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 8 * 1024 * 1024
+
+
+def test_gzip_limit_is_cumulative_across_members(monkeypatch):
+    wire = gzip.compress(b"x" * MAX_RESPONSE_BYTES) + gzip.compress(b"y")
+    monkeypatch.setattr("jarv.web._create_client", lambda timeout: _mock_client(
+        lambda request: httpx.Response(200, headers={"content-encoding": "gzip"},
+                                      stream=httpx.ByteStream(wire)),
+    ))
+    with pytest.raises(WebToolError, match="exceeds .* byte limit"):
+        _request_bytes("https://example.test/", timeout=5)
+
+
+@pytest.mark.parametrize("wire", [b"not gzip", gzip.compress(b"hello")[:-1]])
+def test_invalid_compression_is_a_web_error(monkeypatch, wire):
+    monkeypatch.setattr("jarv.web._create_client", lambda timeout: _mock_client(
+        lambda request: httpx.Response(200, headers={"content-encoding": "gzip"},
+                                      stream=httpx.ByteStream(wire)),
+    ))
+    with pytest.raises(WebToolError, match="invalid compressed response"):
+        _request_bytes("https://example.test/", timeout=5)
+
+
+@pytest.mark.parametrize("encoding", ["br", "zstd", "gzip, deflate"])
+def test_unsupported_encoding_is_rejected_before_reading_body(monkeypatch, encoding):
+    class UnreadBody(httpx.SyncByteStream):
+        def __iter__(self):
+            raise AssertionError("unsupported compressed data must not be decoded")
+
+    monkeypatch.setattr("jarv.web._create_client", lambda timeout: _mock_client(
+        lambda request: httpx.Response(200, headers={"content-encoding": encoding},
+                                      stream=UnreadBody()),
+    ))
+    with pytest.raises(WebToolError, match="unsupported Content-Encoding"):
+        _request_bytes("https://example.test/", timeout=5)
+
+
+@pytest.mark.parametrize("url", ["http://.", "http://\ud800.test", "http://example.test/\x00"])
+def test_read_malformed_url_returns_tool_error_without_request(monkeypatch, url):
+    def unexpected_request(request):
+        raise AssertionError("invalid URL must be rejected before requesting it")
+
+    monkeypatch.setattr("jarv.web._create_client", lambda timeout: _mock_client(unexpected_request))
+    result = dispatch_read_tool({"input": url}, visible_labels=set(),
+                                artifact_store=ArtifactStore(), retained_store=RetainedOutputStore(),
+                                config=DEFAULT_CONFIG)
+    assert result.startswith("[read error: invalid URL")
 
 
 def test_duckduckgo_parser_decodes_results_snippets_and_ignores_ads():
@@ -492,12 +592,20 @@ def test_subagents_receive_and_dispatch_web_tools(monkeypatch):
 def test_parallel_safe_batch_runs_mixed_tools_concurrently_and_preserves_order(
     monkeypatch,
 ):
+    both_running = threading.Barrier(2, timeout=5)
+    read_finished = threading.Event()
+    completion_order = []
+
     def fake_web(_name, args, *_pos, **_kwargs):
-        time.sleep(0.1)
+        both_running.wait()
+        assert read_finished.wait(5)
+        completion_order.append("web")
         return "web:" + args["query"]
 
     def fake_read(args, **_kwargs):
-        time.sleep(0.1)
+        both_running.wait()
+        completion_order.append("read")
+        read_finished.set()
         return "read:" + args["input"]
 
     monkeypatch.setattr("jarv.orchestrator.dispatch_web_tool", fake_web)
@@ -513,7 +621,6 @@ def test_parallel_safe_batch_runs_mixed_tools_concurrently_and_preserves_order(
             arguments='{"input": "second"}',
         ),
     ]
-    started = time.perf_counter()
     results = dispatch_parallel_safe_tool_batch(
         calls,
         node=AgentNode("root", 0, None, "task", False),
@@ -522,7 +629,5 @@ def test_parallel_safe_batch_runs_mixed_tools_concurrently_and_preserves_order(
         config=DEFAULT_CONFIG,
         retained_store=RetainedOutputStore(),
     )
-    elapsed = time.perf_counter() - started
-
+    assert completion_order == ["read", "web"]
     assert [result.output for result in results] == ["web:first", "read:second"]
-    assert elapsed < 0.18

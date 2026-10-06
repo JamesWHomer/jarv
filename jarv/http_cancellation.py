@@ -1,4 +1,4 @@
-"""Cancellation-aware reads for the synchronous HTTPX connection pool.
+"""Cancellation-aware socket I/O for the synchronous HTTPX connection pool.
 
 Polling at the network read boundary preserves partially received headers and
 bodies. Retrying an entire request after a short read timeout would not.
@@ -6,6 +6,8 @@ bodies. Retrying an entire request after a short read timeout would not.
 
 from __future__ import annotations
 
+import socket
+import ssl
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -72,11 +74,41 @@ class _NetworkStream(httpcore.NetworkStream):
 
     def start_tls(self, ssl_context, server_hostname=None, timeout=None):
         token = _active_token.get()
-        if token is not None:
-            token.throw_if_cancelled()
-        return _NetworkStream(
-            self._stream.start_tls(ssl_context, server_hostname, timeout),
+        if token is None:
+            return _NetworkStream(
+                self._stream.start_tls(ssl_context, server_hostname, timeout),
+            )
+        token.throw_if_cancelled()
+        sock = self._stream.get_extra_info("socket")
+        # wrap_socket detaches a plain socket before its blocking handshake.
+        # Keep another handle to the same connection so cancellation can still
+        # interrupt it. TLS-in-TLS keeps the existing SSLSocket instead.
+        abort_socket = (
+            sock.dup() if isinstance(sock, socket.socket)
+            and not isinstance(sock, ssl.SSLSocket) else sock
         )
+
+        def abort_handshake():
+            if isinstance(abort_socket, socket.socket):
+                abort_socket.shutdown(socket.SHUT_RDWR)
+            else:
+                self._stream.close()
+
+        unregister = token.register(abort_handshake)
+        upgraded = None
+        try:
+            token.throw_if_cancelled()
+            upgraded = self._stream.start_tls(ssl_context, server_hostname, timeout)
+            token.throw_if_cancelled()
+            return _NetworkStream(upgraded)
+        except BaseException:
+            (upgraded if upgraded is not None else self._stream).close()
+            token.throw_if_cancelled()
+            raise
+        finally:
+            unregister()
+            if abort_socket is not sock:
+                abort_socket.close()
 
     def get_extra_info(self, info):
         return self._stream.get_extra_info(info)

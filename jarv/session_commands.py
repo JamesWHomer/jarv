@@ -10,9 +10,11 @@ from .tui_panel import menu_inner_width
 from .history import (
     forget_current_session,
     load_history,
+    latest_session_for_directory,
     prepare_session_context,
     load_sessions,
     save_sessions,
+    set_terminal_session,
 )
 from . import session_store as _session_store
 from .storage import transaction
@@ -33,6 +35,21 @@ def __getattr__(name: str):
     value = getattr(importlib.import_module("jarv.session_render"), name)
     globals()[name] = value
     return value
+
+
+def cmd_resume() -> int:
+    session_id = latest_session_for_directory()
+    if session_id is None:
+        console.print("[dim]○ No previous session found in this directory.[/dim]")
+        console.print("[dim]Use /sessions to browse all saved sessions.[/dim]")
+        return 1
+    set_terminal_session(session_id)
+    from rich.text import Text
+
+    notice = Text("✓ Resumed session ", style="green")
+    notice.append(session_id, style="bold")
+    console.print(notice)
+    return 0
 
 
 def cmd_archive() -> None:

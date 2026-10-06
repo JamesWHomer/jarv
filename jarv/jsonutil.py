@@ -27,7 +27,7 @@ def iter_json_objects(text: str) -> Iterator[object]:
     decoder = json.JSONDecoder()
     for match in re.finditer(r"{", text):
         try:
-            value, _end = decoder.raw_decode(text[match.start():])
+            value, _end = decoder.raw_decode(text, match.start())
         except json.JSONDecodeError:
             continue
         yield value
@@ -60,19 +60,18 @@ def salvage_json_object(text: str) -> dict | None:
     start = text.find("{")
     while start != -1:
         try:
-            value, end = decoder.raw_decode(text[start:])
+            value, end = decoder.raw_decode(text, start)
         except json.JSONDecodeError:
             start = text.find("{", start + 1)
             continue
         if not isinstance(value, dict):
             return None
-        remainder = text[start + end:]
-        position = remainder.find("{")
+        position = text.find("{", end)
         while position != -1:
             try:
-                decoder.raw_decode(remainder[position:])
+                decoder.raw_decode(text, position)
             except json.JSONDecodeError:
-                position = remainder.find("{", position + 1)
+                position = text.find("{", position + 1)
                 continue
             return None
         return value

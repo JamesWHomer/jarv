@@ -35,6 +35,18 @@ def test_independent_config_changes_survive_repeated_saves(config_path):
     assert saved["headsup_border"] is False
 
 
+def test_session_migration_error_uses_config_error_handling(config_path, monkeypatch):
+    def fail_migration():
+        raise storage.StorageError("Conflicting legacy session files")
+
+    monkeypatch.setattr("jarv.history.migrate_flat_session_files", fail_migration)
+    with pytest.raises(SystemExit) as error:
+        config_module.load_config()
+    assert error.value.code == 1
+    assert isinstance(error.value.__context__, storage.StorageError)
+    assert not config_path.exists()
+
+
 def test_nested_config_changes_merge(config_path):
     first = config_module.load_config()
     second = config_module.load_config()

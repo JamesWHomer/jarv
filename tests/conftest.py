@@ -196,6 +196,60 @@ def write_models_dev_catalog(monkeypatch, directory, providers):
 
 if pytest is not None:
 
+    def pytest_configure(config):
+        # Normalize before collection: shared Rich consoles inspect the
+        # environment when imported, and storage paths resolve the user home.
+        import tempfile
+
+        user_directory = tempfile.TemporaryDirectory(prefix="jarv-tests-")
+        config.add_cleanup(user_directory.cleanup)
+        environment = pytest.MonkeyPatch()
+        config.add_cleanup(environment.undo)
+        environment.setenv("HOME", user_directory.name)
+        environment.setenv("USERPROFILE", user_directory.name)
+        environment.setenv("TERM", "xterm-256color")
+        environment.setenv("WT_SESSION", "jarv-tests")
+        environment.delenv("NO_COLOR", raising=False)
+        environment.delenv("JARV_NO_ERASE_EOL", raising=False)
+
+    @pytest.fixture
+    def headsup_app_factory(monkeypatch):
+        """Construct real, incognito apps without starting the terminal loop."""
+        import threading
+        from types import SimpleNamespace
+        from jarv import headsup
+
+        apps = []
+        monkeypatch.setattr(
+            headsup, "terminal_size", lambda *, console: (console.width, console.height)
+        )
+
+        def create(*, run_agent=None, width=100, height=30):
+            ready = threading.Event()
+            ready.set()
+            console, _ = make_console(width=width, height=height)
+            app = headsup.HeadsupApp(
+                {"provider": "ollama", "model": "llama3.2", "check_updates": False},
+                None,
+                args=SimpleNamespace(incognito=True, new=False),
+                agent_loader=({"module": SimpleNamespace(run_agent=run_agent)}, ready),
+                handle_slash=lambda command, rest, config, client, args, hint: (config, client),
+                maybe_command=lambda first, rest: None,
+                render_console=console,
+            )
+            app.live = FakeLive()
+            apps.append(app)
+            return app
+
+        yield create
+        for app in apps:
+            if app._cancel_token is not None:
+                app._cancel_token.cancel()
+            app._wait_for_agent_idle(timeout=5)
+            assert not app._agent_busy, "test left an agent worker running"
+            if app.client is not None:
+                app.client.close()
+
     @pytest.fixture(autouse=True)
     def _reset_menu_border():
         from jarv.tui_panel import configure_menu_border

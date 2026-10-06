@@ -374,6 +374,21 @@ def _rows_to_text(chars, colors, width: int, height: int) -> list[Text]:
     return lines
 
 
+def _logo_layout(width: int, height: int) -> tuple[bool, int, int]:
+    big = width >= _LOGO_W + 2 and height >= 11
+    block_h = _LOGO_H + 4 if big else 3  # logo, gap, wave, gap, hint
+    top = max(0, (height - block_h) // 2)
+    return big, top, block_h
+
+
+def intro_footer_rows(width: int, height: int, *, show_logo: bool = True) -> int:
+    """Rows below the fixed logo, wave and hint available for a text overlay."""
+    if not show_logo or width < 18 or height < 5:
+        return height
+    _, top, block_h = _logo_layout(width, height)
+    return height - top - block_h
+
+
 def render_intro(
     width: int,
     height: int,
@@ -418,13 +433,11 @@ def render_intro(
             _apply_exit(chars, colors, exit, width, height)
         return _rows_to_text(chars, colors, width, height)
 
-    big = width >= _LOGO_W + 2 and height >= 11
+    big, top, _ = _logo_layout(width, height)
     if hint is _DEFAULT_HINT:
         hint = _HINT_WIDE if width >= len(_HINT_WIDE) else _HINT_NARROW
 
     if big:
-        block_h = _LOGO_H + 1 + 1 + 1 + 1  # logo, gap, wave, gap, hint
-        top = max(0, (height - block_h) // 2)
         col_start = (width - _LOGO_W) // 2
         wave_y = top + _LOGO_H + 1
 
@@ -443,8 +456,6 @@ def render_intro(
             )
     else:
         title = "J A R V"
-        block_h = 3
-        top = max(0, (height - block_h) // 2)
         tx = (width - len(title)) // 2
         _clear_box(chars, colors, top, top + 1, tx - 1, tx + len(title) + 1)
 

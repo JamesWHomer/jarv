@@ -51,12 +51,14 @@ def isoformat_utc(dt: datetime) -> str:
 
 
 def parse_timestamp(value: str | None) -> datetime | None:
-    if not value:
+    if not isinstance(value, str) or not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+    # Session timestamps are UTC, including older records without an offset.
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
 def get_shell_name() -> str:
@@ -127,16 +129,43 @@ def history_file_for_session(session_id: str) -> Path:
     return SESSIONS_DIR / f"history-{short_hash(session_id)}.json"
 
 
+def session_directory(path: str | Path | None = None) -> str:
+    """Canonical directory key, including Windows case and symlink handling."""
+    return os.path.normcase(os.path.realpath(path if path is not None else os.getcwd()))
+
+
+def latest_session_for_directory() -> str | None:
+    """Find the latest saved conversation used in the invocation's directory."""
+    directory = session_directory()
+    candidates = []
+    for session_id, meta in load_sessions()["sessions"].items():
+        if meta.get("archived"):
+            continue
+        timestamp = parse_timestamp(meta.get("directories", {}).get(directory))
+        if timestamp is not None:
+            candidates.append((timestamp, session_id, meta))
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    for _, session_id, meta in candidates:
+        history_path = meta.get("history_file")
+        if history_path and Path(history_path).is_file() and load_history(Path(history_path)):
+            return session_id
+    return None
+
+
 def migrate_flat_session_files() -> None:
     """Move flat per-session sidecars from ~/.jarv/ into ~/.jarv/sessions/."""
-    flat_history = list(CONFIG_DIR.glob("history-*.json"))
-    flat_artifacts = list(CONFIG_DIR.glob("artifacts-*.json"))
-    flat_reads = list(CONFIG_DIR.glob("reads-*.json"))
-    files_to_move = flat_history + flat_artifacts + flat_reads
-    if not files_to_move:
-        return
-    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     with transaction(CONFIG_DIR / "sessions.json"):
+        # Discover after recovery and while holding the lock: another startup
+        # may already have moved these files while this process was waiting.
+        flat_history = list(CONFIG_DIR.glob("history-*.json"))
+        flat_artifacts = list(CONFIG_DIR.glob("artifacts-*.json"))
+        flat_reads = list(CONFIG_DIR.glob("reads-*.json"))
+        files_to_move = flat_history + flat_artifacts + flat_reads
+        if not files_to_move and not SESSIONS_FILE.exists():
+            return
+        if files_to_move:
+            SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+        moved_histories = {}
         for src in files_to_move:
             dest = SESSIONS_DIR / src.name
             value = read_json(src, {}, (dict, list))
@@ -144,6 +173,30 @@ def migrate_flat_session_files() -> None:
                 raise StorageError(f"Conflicting legacy session files: {src} and {dest}")
             write_json(dest, value)
             delete_json(src)
+            if src in flat_history:
+                moved_histories[src.resolve()] = dest
+
+        data = load_sessions()
+        changed = False
+        legacy_root = CONFIG_DIR.resolve()
+        for meta in data["sessions"].values():
+            old_path = meta.get("history_file") if isinstance(meta, dict) else None
+            if isinstance(old_path, str) and old_path:
+                old_path = Path(old_path).resolve()
+                if old_path.parent != legacy_root or not old_path.match("history-*.json"):
+                    continue
+                dest = moved_histories.get(old_path)
+                if dest is None and not old_path.exists():
+                    # Older versions moved files without updating metadata.
+                    # Repair only a known legacy location with a saved target.
+                    candidate = SESSIONS_DIR / old_path.name
+                    if candidate.is_file():
+                        dest = candidate
+                if dest is not None:
+                    meta["history_file"] = str(dest)
+                    changed = True
+        if changed:
+            save_sessions(data)
 
 
 def artifact_file_for(history_path: Path) -> Path:
@@ -236,6 +289,9 @@ def prepare_session_context(
     meta["history_file"] = str(history_path)
     if mark_message:
         meta["last_message_at"] = isoformat_utc(now)
+        # A terminal can chat in several projects. Retain each directory's
+        # message time; opening a menu must not change which session resumes.
+        meta.setdefault("directories", {})[session_directory()] = now.isoformat()
 
     if persist_metadata and (mark_message or session_existed):
         save_sessions(sessions_data)

@@ -1,10 +1,11 @@
 """Command auditor — uses an LLM to decide whether a flagged command is safe.
 
-When `audited` mode is enabled, flagged commands are sent to an LLM auditor
-instead of immediately prompting the user. The auditor sees the command, the
-risk classification, and a brief context summary. It either approves (command
-runs automatically with a printed reason) or defers to the user (showing why
-it recommends caution).
+When `audit` is enabled, commands requiring review are sent to an LLM auditor.
+The auditor sees the command, risk classification, and a brief context summary.
+Under `command_safety=risky`, its approval can run the command automatically
+when `auditor_auto_approve` is enabled. Under `all`, or with auto-approval off,
+it only recommends a decision and human approval is still required. The auditor
+does not review `edit` calls.
 """
 
 import json

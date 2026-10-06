@@ -1,10 +1,11 @@
 import threading
-import time
 import unittest
 from unittest.mock import patch
 
 from jarv.cancellation import CancellationToken, TurnCancelled
+from jarv.http_transport import ProviderHTTPError
 from jarv.provider import (
+    ProviderError,
     ReasoningDone,
     ReasoningStarted,
     RetryableStreamError,
@@ -253,6 +254,77 @@ class ProviderUsageTests(unittest.TestCase):
 
         retrieve.assert_not_called()
 
+    def test_responses_recovery_stops_on_terminal_status(self):
+        def truncated(_client, _payload, **_kwargs):
+            yield {"type": "response.created", "response": {"id": "resp_1"}}
+
+        for status in ("failed", "incomplete", "cancelled", "completed"):
+            with (
+                self.subTest(status=status),
+                patch("jarv.openai_http.stream_response", side_effect=truncated),
+                patch("jarv.openai_http.retrieve_response", return_value={
+                    "id": "resp_1", "status": status, "output": [],
+                }) as retrieve,
+                patch("jarv.provider._sleep_for_openai_recovery") as recovery_sleep,
+            ):
+                with self.assertRaisesRegex(ProviderError, f"last recovery status: {status}") as caught:
+                    list(_stream_responses_api(object(), "model", "system", [], []))
+                self.assertNotIsInstance(caught.exception, RetryableStreamError)
+                retrieve.assert_called_once()
+                recovery_sleep.assert_not_called()
+
+    def test_responses_recovery_stops_on_permanent_http_error(self):
+        def truncated(_client, _payload, **_kwargs):
+            yield {"type": "response.created", "response": {"id": "resp_1"}}
+
+        for status in (400, 401, 403, 404, 410, 422):
+            with (
+                self.subTest(status=status),
+                patch("jarv.openai_http.stream_response", side_effect=truncated),
+                patch("jarv.openai_http.retrieve_response", side_effect=ProviderHTTPError(
+                    "OpenAI", "lookup failed", status_code=status,
+                )) as retrieve,
+                patch("jarv.provider._sleep_for_openai_recovery") as recovery_sleep,
+            ):
+                with self.assertRaisesRegex(ProviderError, "last retrieval error:.*lookup failed") as caught:
+                    list(_stream_responses_api(object(), "model", "system", [], []))
+                self.assertNotIsInstance(caught.exception, RetryableStreamError)
+                retrieve.assert_called_once()
+                recovery_sleep.assert_not_called()
+
+    def test_responses_recovery_retries_transient_http_error(self):
+        def truncated(_client, _payload, **_kwargs):
+            yield {"type": "response.created", "response": {"id": "resp_1"}}
+
+        recovered = {"id": "resp_1", "status": "completed", "output_text": "done"}
+        for status in (408, 409, 429, 500, 503):
+            with (
+                self.subTest(status=status),
+                patch("jarv.openai_http.stream_response", side_effect=truncated),
+                patch("jarv.openai_http.retrieve_response", side_effect=[
+                    ProviderHTTPError("OpenAI", "try again", status_code=status), recovered,
+                ]) as retrieve,
+                patch("jarv.provider._sleep_for_openai_recovery") as recovery_sleep,
+            ):
+                events = list(_stream_responses_api(object(), "model", "system", [], []))
+                self.assertEqual(response_output_text(events[-1].response), "done")
+                self.assertEqual(retrieve.call_count, 2)
+                recovery_sleep.assert_called_once()
+
+    def test_responses_recovery_propagates_cancellation_immediately(self):
+        def truncated(_client, _payload, **_kwargs):
+            yield {"type": "response.created", "response": {"id": "resp_1"}}
+
+        with (
+            patch("jarv.openai_http.stream_response", side_effect=truncated),
+            patch("jarv.openai_http.retrieve_response", side_effect=TurnCancelled) as retrieve,
+            patch("jarv.provider._sleep_for_openai_recovery") as recovery_sleep,
+        ):
+            with self.assertRaises(TurnCancelled):
+                list(_stream_responses_api(object(), "model", "system", [], []))
+            retrieve.assert_called_once()
+            recovery_sleep.assert_not_called()
+
     def test_chat_stream_maps_reasoning_tools_and_usage(self):
         chunks = [
             {
@@ -320,30 +392,56 @@ class ProviderUsageTests(unittest.TestCase):
 
     def test_windows_stream_bridge_observes_cancellation_promptly(self):
         token = CancellationToken()
+        entered = threading.Event()
+        release = threading.Event()
+        producer_finished = threading.Event()
+        consumer_finished = threading.Event()
+        producer_threads = []
+        errors = []
 
         def blocking_direct(*_args, **_kwargs):
-            while True:
-                token.throw_if_cancelled()
-                time.sleep(0.005)
-                if False:
-                    yield None
+            producer_threads.append(threading.current_thread())
+            entered.set()
+            try:
+                # The producer deliberately cannot cooperate with cancellation.
+                # Only the Windows queue bridge can unblock the consumer.
+                if not release.wait(5):
+                    raise AssertionError("producer was not released during cleanup")
+            finally:
+                producer_finished.set()
+            yield TextDelta("late response")
 
-        timer = threading.Timer(0.02, token.cancel)
-        timer.start()
-        started = time.perf_counter()
-        try:
-            with (
-                patch("jarv.provider.sys.platform", "win32"),
-                patch("jarv.provider._stream_response_direct", side_effect=blocking_direct),
-            ):
-                with self.assertRaises(TurnCancelled):
-                    list(stream_response(
-                        object(), {}, "model", "system", [], [],
-                        cancellation_token=token,
-                    ))
-        finally:
-            timer.cancel()
-        self.assertLess(time.perf_counter() - started, 0.25)
+        def consume():
+            try:
+                list(stream_response(
+                    object(), {}, "model", "system", [], [],
+                    cancellation_token=token,
+                ))
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                consumer_finished.set()
+
+        with (
+            patch("jarv.provider.sys.platform", "win32"),
+            patch("jarv.provider._stream_response_direct", side_effect=blocking_direct),
+        ):
+            consumer = threading.Thread(target=consume, daemon=True)
+            consumer.start()
+            try:
+                self.assertTrue(entered.wait(2), "producer did not start")
+                token.cancel()
+                self.assertTrue(consumer_finished.wait(2), "consumer remained blocked")
+                self.assertFalse(producer_finished.is_set())
+                self.assertEqual(len(errors), 1)
+                self.assertIsInstance(errors[0], TurnCancelled)
+            finally:
+                release.set()
+                consumer.join(timeout=5)
+                for producer in producer_threads:
+                    producer.join(timeout=5)
+            self.assertFalse(consumer.is_alive())
+            self.assertTrue(all(not producer.is_alive() for producer in producer_threads))
 
     def test_posix_streaming_stays_on_calling_thread(self):
         caller_thread = threading.get_ident()

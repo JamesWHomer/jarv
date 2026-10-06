@@ -36,6 +36,8 @@ def _run_git(args: list[str], cwd: Path) -> str | None:
             cwd=str(cwd),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=GIT_TIMEOUT_SECONDS,
             check=False,
         )

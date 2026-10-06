@@ -388,3 +388,9 @@ def test_openrouter_uses_standard_reasoning_object_and_strict_routing():
     assert payload["reasoning"] == {"effort": "high"}
     assert payload["provider"] == {"require_parameters": True}
     assert "reasoning_effort" not in payload
+@pytest.mark.parametrize("header", ["NaN", "Infinity", "-Infinity", "invalid"])
+def test_invalid_retry_after_falls_back_to_finite_backoff(header):
+    from jarv.http_transport import _retry_delay
+
+    response = httpx.Response(429, headers={"retry-after": header})
+    assert _retry_delay(response, 1) == 1.0

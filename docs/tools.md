@@ -31,7 +31,9 @@ By default, tool output uses a line budget of one-third of the terminal height i
 
 Image reads (`png`, `jpeg`, `webp`, and provider-supported `gif`) are returned as native multimodal input when Jarv recognizes image support for the selected model and route. Images are limited to 10 MiB and ignore `offset`/`size`. Local providers and OpenRouter's `auto`/`free` routes are currently excluded; Gemini image tool results require a Gemini 3 model and do not accept GIF. Unsupported routes return a text notice.
 
-Web search and URL reads need no extra API key. `web_search` accepts 1–20 results per call and a non-negative result offset. URL reads preserve links as absolute URLs, don't execute JavaScript, and mark fetched pages as untrusted content. Text and PDF web responses are capped at 2 MiB; images use the 10 MiB limit above.
+Web search and URL reads need no extra API key. `web_search` accepts 1–20 results per call and a non-negative result offset. URL reads preserve links as absolute URLs, don't execute JavaScript, and mark fetched pages as untrusted content. Text and PDF web responses are capped at 2 MiB; images use the 10 MiB limit above. These limits apply to both transferred and decompressed data. Gzip and deflate compression are supported; other content encodings return a tool error.
+
+`edit` accepts existing UTF-8 files up to 5,000,000 bytes and checks that the replacement will stay within the same limit before preparing or writing it. Oversized replacements leave the file unchanged. Diff previews are capped at 60 lines and 12,000 characters; result previews are capped at 4,000 characters. Use `read` to inspect more of the edited file.
 
 ## Project context
 
