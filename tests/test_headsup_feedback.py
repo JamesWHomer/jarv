@@ -124,9 +124,16 @@ def test_archive_shows_both_result_lines_after_clearing_history(command_app):
     app._run_slash("/archive", [])
 
     rendered = screen_text(app, console)
-    assert "Session archived to" in rendered
     assert "New session starts on your next message." in rendered
     assert "conversation to archive" not in rendered
+    # Long temporary paths can wrap beyond the welcome screen's feedback area.
+    # Notices start at the bottom; scrolling must reveal the archive heading.
+    app.on_key("PAGEUP", 100)
+    rendered = screen_text(app, console)
+    assert "Session archived to" in rendered
+    assert "conversation to archive" not in rendered
+    app.on_key("PAGEDOWN", 100)
+    assert "New session starts on your next message." in screen_text(app, console)
     assert app.session_context.session_id != context.session_id
     assert history.load_history(app.session_context.history_file) == []
 
