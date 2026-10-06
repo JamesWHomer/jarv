@@ -119,7 +119,8 @@ Opening the saved heads-up session is 44% faster (383 → 215 ms). The full-hist
 
 **Reproduce**
 
-From the repository root in PowerShell:
+From the repository root in PowerShell, after creating the
+[development environment](../../README.md#development):
 
 ```powershell
 .\.venv\dev\Scripts\python.exe scripts/benchmark/benchmark_runtime.py --reps 7 --single-core --output build/benchmarks/runtime.json
@@ -135,9 +136,9 @@ Omit `--single-core` for normal CPU scheduling. Use repeated `--case` options to
 
 **Raw local artifacts**
 
-- Runtime: [before](../../build/benchmarks/goal-baseline-runtime-single.json), [after](../../build/benchmarks/goal-final-runtime-single.json).
-- Startup: [before](../../build/benchmarks/goal-baseline-coldstart-single.json), [after](../../build/benchmarks/goal-final-coldstart-single.json).
-- Large saved sessions: [before](../../build/benchmarks/goal-baseline-large-coldstart.json), [after](../../build/benchmarks/goal-final-large-coldstart.json).
-- [Final test results](../../build/benchmarks/goal-tests.xml).
+- Runtime: `goal-baseline-runtime-single.json`, `goal-final-runtime-single.json`.
+- Startup: `goal-baseline-coldstart-single.json`, `goal-final-coldstart-single.json`.
+- Large saved sessions: `goal-baseline-large-coldstart.json`, `goal-final-large-coldstart.json`.
+- Final test results: `goal-tests.xml`.
 
-Generated JSON/XML and the exported baseline source live under the ignored `build/benchmarks` directory. This report and the reusable benchmark scripts are part of the source changes.
+All filenames above are relative to `build/benchmarks/`. Generated JSON/XML and the exported baseline source are ignored local captures and are not included in a clone. The commands above generate new measurements under their specified filenames; the table and validation counts remain a record of the dated audit. This report and the reusable benchmark scripts are tracked source files.

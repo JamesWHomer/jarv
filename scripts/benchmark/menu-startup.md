@@ -71,7 +71,8 @@ assistant responses, and About needs it for its reference content.
 
 ## Reproduce
 
-Run from the repository root in PowerShell:
+Run from the repository root in PowerShell, after creating the
+[development environment](../../README.md#development):
 
 ```powershell
 .\.venv\dev\Scripts\python.exe scripts/benchmark/benchmark_coldstart.py --menu-input --reps 9 --case headsup --case "headsup saved" --case settings --case setup --case sessions --case tree --case history --case usage --case help --case about --case config --output build/benchmarks/menu-after.json
@@ -81,9 +82,9 @@ Use `--profile build/benchmarks/menu.prof --case headsup --reps 1 --menu-input`
 for a diagnostic profile. Do not compare profiled timings with the table.
 
 Raw local samples, ranges, timestamps, and imported-module inventories:
-[before](../../build/benchmarks/menu-before.json) and
-[after](../../build/benchmarks/menu-after.json). Generated samples are in the
-ignored `build` directory. The input probe is benchmark-only and is never
+`build/benchmarks/menu-before.json` and `build/benchmarks/menu-after.json`
+(paths relative to the repository root). These ignored captures are not included
+in a clone; rerunning the command above generates a new after sample. The input probe is benchmark-only and is never
 imported by the installed CLI.
 
 ## Validation

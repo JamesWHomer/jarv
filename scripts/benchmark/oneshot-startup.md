@@ -56,15 +56,17 @@ and 393.1–466.2 → 259.6–289.6 ms for saved terminal output.
 
 ## Reproduce
 
-From the repository root in PowerShell:
+From the repository root in PowerShell, after creating the
+[development environment](../../README.md#development):
 
 ```powershell
 .\.venv\dev\Scripts\python.exe scripts/benchmark/benchmark_coldstart.py --case one-shot --case "one-shot terminal" --case "one-shot saved" --reps 15 --output build/benchmarks/oneshot-after.json
 ```
 
-Raw local samples: [before](../../build/benchmarks/oneshot-before.json) and
-[after](../../build/benchmarks/oneshot-after.json). These generated artifacts
-are under the ignored `build` directory.
+Raw local samples: `build/benchmarks/oneshot-before.json` and
+`build/benchmarks/oneshot-after.json` (paths relative to the repository root).
+These ignored captures are not included in a clone; rerunning the command above
+generates a new after sample rather than recreating the historical measurements.
 
 ## Validation
 
