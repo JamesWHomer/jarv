@@ -81,7 +81,7 @@ def normalize_architecture(value: str | None = None, *, target_platform: str | N
         "amd64": "x86_64",
         "x64": "x86_64",
         "x86-64": "x86_64",
-        "arm64": "arm64",
+        "arm64": "aarch64" if normalized_platform == "linux" else "arm64",
         "aarch64": "aarch64" if normalized_platform == "linux" else "arm64",
     }
     return aliases.get(machine, machine)
@@ -186,6 +186,7 @@ def download_asset(asset: ReleaseAsset, destination: Path) -> Path:
 
 
 def extract_executable(archive_path: Path, destination_dir: Path, *, windows: bool | None = None) -> Path:
+    import shutil
     import tarfile
     import zipfile
 
@@ -197,7 +198,13 @@ def extract_executable(archive_path: Path, destination_dir: Path, *, windows: bo
     else:
         with tarfile.open(archive_path) as archive:
             member = archive.getmember(executable_name)
-            archive.extract(member, destination_dir)
+            # Only copy the executable's bytes. Archive links and special files
+            # must never redirect extraction or the chmod below to another path.
+            if not member.isfile():
+                raise ValueError(f"{executable_name} must be a regular file")
+            with archive.extractfile(member) as source:
+                with (destination_dir / executable_name).open("wb") as target:
+                    shutil.copyfileobj(source, target)
     executable = destination_dir / executable_name
     if not executable.exists():
         raise FileNotFoundError(f"{executable_name} was not found in {archive_path.name}")
