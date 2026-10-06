@@ -28,6 +28,34 @@ def _state_temp_files() -> set:
 
 
 class InteractiveSnapshotConsistencyTests(unittest.TestCase):
+    def test_stdin_retries_partial_binary_writes(self):
+        received = bytearray()
+
+        def short_write(data):
+            count = min(3, len(data))
+            received.extend(data[:count])
+            return count
+
+        proc = Mock(stdout=None, stderr=None)
+        proc.stdin.write.side_effect = short_write
+        process = InteractiveCommandProcess("cmd", proc)
+
+        process.write_stdin("hello \u4e16\u754c\n")
+
+        expected = "hello \u4e16\u754c\r\n" if platform.system() == "Windows" else "hello \u4e16\u754c\n"
+        self.assertEqual(bytes(received), expected.encode("utf-8"))
+        proc.stdin.flush.assert_called_once()
+
+    def test_stdin_stops_when_pipe_makes_no_progress(self):
+        proc = Mock(stdout=None, stderr=None)
+        proc.stdin.write.return_value = 0
+        process = InteractiveCommandProcess("cmd", proc)
+
+        process.write_stdin("input")
+
+        self.assertTrue(process.snapshot().stdin_closed)
+        proc.stdin.flush.assert_not_called()
+
     def test_snapshot_polls_once_for_consistent_exit_state(self):
         # The process can exit between two poll() calls; a snapshot must never
         # report exited=True with exit_code=None.

@@ -18,8 +18,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from .display import console, terminal_size
-from .history import branches_file_for, load_branches, load_history
-from .session_tree import build_tree, delete_subtree, leaf_of, parent_id_of
+from .session_tree import delete_subtree, leaf_of, load_session_tree, parent_id_of
 from .tui_app import AltScreenApp
 from .tui_frame import panel_width, wrap_frame
 from .tui_panel import MenuPanel, menu_inner_width
@@ -275,10 +274,7 @@ class TreeBrowserScreen(AltScreenApp):
         self.flash = (f"Delete this branch{below}? Press d again to confirm · any key cancels.", "bold red")
 
     def _reload(self, *, select_index: int | None = None) -> None:
-        self.model = build_tree(
-            load_history(self.history_file),
-            load_branches(branches_file_for(self.history_file)),
-        )
+        self.model = load_session_tree(self.history_file)
         self.nodes = self.model.nodes
         self.index_by_id = {id(n): i for i, n in enumerate(self.nodes)}
         self.connectors = self._compute_connectors()
@@ -293,9 +289,7 @@ class TreeBrowserScreen(AltScreenApp):
 
 def run_tree_screen(session_context, config=None) -> TreeOutcome:
     """Build the tree for the active session and run the interactive view."""
-    history = load_history(session_context.history_file)
-    branches = load_branches(branches_file_for(session_context.history_file))
-    model = build_tree(history, branches)
+    model = load_session_tree(session_context.history_file)
     screen = TreeBrowserScreen(model=model, history_file=session_context.history_file)
     screen.run()
     return screen.outcome

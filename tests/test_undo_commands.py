@@ -7,9 +7,9 @@ import jarv.undo_commands as undo_commands
 from jarv.history import load_history, load_redo_stack, redo_file_for
 
 _EXCHANGES = [
-    {"role": "user", "content": "first question"},
+    {"role": "user", "content": "first question", "id": "first"},
     {"role": "assistant", "content": "first answer"},
-    {"role": "user", "content": "second question"},
+    {"role": "user", "content": "second question", "id": "second"},
     {"role": "assistant", "content": "second answer"},
 ]
 

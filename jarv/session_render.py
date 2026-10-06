@@ -6,6 +6,8 @@ import re
 from rich.console import Group
 from rich.text import Text
 
+from .terminal_text import safe_terminal_text
+
 from .display import (
     command_line_renderable,
     flatten_headings,
@@ -37,7 +39,7 @@ def _status_renderable(item: dict) -> Text:
     content = _history_content_to_str(item.get("content", "")).strip()
     phase = str(item.get("phase", "")).lower()
     prefix = "\u2713 " if phase == "tool" else "\u2726 "
-    return Text(f"{prefix}{content}", style="dim")
+    return Text(safe_terminal_text(f"{prefix}{content}"), style="dim")
 
 
 def _tool_call_arguments(item: dict) -> tuple[dict | None, str]:
@@ -96,7 +98,7 @@ _ARGS_PREVIEW_MAX_CHARS = 500
 def _edit_snippet_lines(
     text: str, prefix: str, style: str, *, expanded: bool = False
 ) -> list[Text]:
-    lines = text.splitlines() or [""]
+    lines = safe_terminal_text(text).splitlines() or [""]
     cap = len(lines) if expanded else _EDIT_SNIPPET_MAX_LINES
     shown = [Text(prefix + line, style=style) for line in lines[:cap]]
     hidden = len(lines) - cap
@@ -123,7 +125,7 @@ def _read_result_summary(output: str) -> str:
         return ""
     returned = total = image_bytes = None
     eof = media_type = ""
-    for line in output.splitlines():
+    for line in safe_terminal_text(output).splitlines():
         if not line.strip():
             break
         for label, target in (
@@ -173,7 +175,7 @@ def _web_search_result_summary(output: str) -> tuple[str, list[str]]:
     """Parse '<N> results' and the top result titles from web_search output."""
     titles: list[str] = []
     count = 0
-    for line in output.splitlines():
+    for line in safe_terminal_text(output).splitlines():
         match = _WEB_RESULT_TITLE_RE.match(line)
         if match is None:
             continue
@@ -200,7 +202,7 @@ def _edit_result_summary(output: str) -> str:
     """Condense an [EDIT RESULT] block into one line, e.g. '1 replacement  •  120 → 118 lines'."""
     replacements = ""
     lines_info = ""
-    for line in output.splitlines():
+    for line in safe_terminal_text(output).splitlines():
         if line.startswith("Replacements: "):
             replacements = line.removeprefix("Replacements: ").strip()
         elif line.startswith("Lines: "):
@@ -218,7 +220,7 @@ def _edit_result_summary(output: str) -> str:
 
 
 def _error_line(output: str) -> Text:
-    first = output.splitlines()[0] if output else ""
+    first = safe_terminal_text(output).splitlines()[0] if output else ""
     return Text(first, style="dim red")
 
 
@@ -263,22 +265,22 @@ def _tool_call_renderable(
             )
     elif name == "read" and args is not None:
         parts: list = [
-            Text(str(args.get("input", "")), no_wrap=True, overflow="ellipsis")
+            Text(safe_terminal_text(str(args.get("input", ""))), no_wrap=True, overflow="ellipsis")
         ]
         if failed and output:
             parts.append(_error_line(output))
         else:
             summary = _read_result_summary(output)
             if summary:
-                parts.append(Text(summary, style="dim"))
+                parts.append(Text(safe_terminal_text(summary), style="dim"))
             if expanded:
                 content = _read_result_content(output)
                 if content:
-                    parts.append(Text(content, style="dim"))
+                    parts.append(Text(safe_terminal_text(content), style="dim"))
         body = Group(*parts)
         metadata = _read_args_metadata(args)
     elif name == "edit" and args is not None:
-        parts = [Text(str(args.get("path", "")), no_wrap=True, overflow="ellipsis")]
+        parts = [Text(safe_terminal_text(str(args.get("path", ""))), no_wrap=True, overflow="ellipsis")]
         parts.extend(
             _edit_snippet_lines(
                 str(args.get("old_text", "")), "- ", "red", expanded=expanded
@@ -292,7 +294,7 @@ def _tool_call_renderable(
         if output.startswith("[EDIT RESULT]"):
             summary = _edit_result_summary(output)
             if summary:
-                parts.append(Text(summary, style="dim"))
+                parts.append(Text(safe_terminal_text(summary), style="dim"))
         elif failed and output:
             parts.append(_error_line(output))
         elif output:
@@ -302,18 +304,18 @@ def _tool_call_renderable(
         body = Group(*parts)
         metadata = "replace all" if args.get("replace_all") else ""
     elif name == "web_search" and args is not None:
-        parts = [Text(str(args.get("query", "")))]
+        parts = [Text(safe_terminal_text(str(args.get("query", ""))))]
         if failed and output:
             parts.append(_error_line(output))
         elif expanded and output:
-            parts.append(Text(output, style="dim"))
+            parts.append(Text(safe_terminal_text(output), style="dim"))
         else:
             summary, titles = _web_search_result_summary(output)
             if summary:
-                parts.append(Text(summary, style="dim"))
+                parts.append(Text(safe_terminal_text(summary), style="dim"))
                 for title in titles:
                     parts.append(
-                        Text(f"  {title}", style="dim", no_wrap=True, overflow="ellipsis")
+                        Text(safe_terminal_text(f"  {title}"), style="dim", no_wrap=True, overflow="ellipsis")
                     )
         body = Group(*parts)
         from .web import SEARCH_ENGINE_LABEL
@@ -322,10 +324,10 @@ def _tool_call_renderable(
     elif name == "ask_user" and args is not None:
         from rich.markdown import Markdown
 
-        parts = [Markdown(flatten_headings(str(args.get("question", ""))))]
+        parts = [Markdown(flatten_headings(safe_terminal_text(str(args.get("question", "")))))]
         if output:
             answer = Text("> ", style="bold cyan")
-            answer.append(output)
+            answer.append(safe_terminal_text(output))
             parts.append(answer)
         body = Group(*parts)
     elif name == "spawn" and args is not None:
@@ -356,22 +358,22 @@ def _tool_call_renderable(
                     line.append("\u2717 ", style="bold red")
                 else:
                     line.append("? ", style="yellow")
-                line.append(label, style="bold cyan")
+                line.append(safe_terminal_text(label), style="bold cyan")
                 if result.get("tldr"):
-                    line.append(f"  {result['tldr']}", style="dim")
+                    line.append(safe_terminal_text(f"  {result['tldr']}"), style="dim")
                 elif result.get("reason"):
-                    line.append(f"  {result['reason']}", style="dim red")
+                    line.append(safe_terminal_text(f"  {result['reason']}"), style="dim red")
                 lines.append(line)
-        body = Group(*lines) if lines else Text(raw_arguments, style="dim")
+        body = Group(*lines) if lines else Text(safe_terminal_text(raw_arguments), style="dim")
     else:
         if not expanded and len(raw_arguments) > _ARGS_PREVIEW_MAX_CHARS:
-            args_text = Text(raw_arguments[:_ARGS_PREVIEW_MAX_CHARS], style="dim")
+            args_text = Text(safe_terminal_text(raw_arguments[:_ARGS_PREVIEW_MAX_CHARS]), style="dim")
             args_text.append(
                 f" … +{len(raw_arguments) - _ARGS_PREVIEW_MAX_CHARS:,} chars",
                 style="dim italic",
             )
         else:
-            args_text = Text(raw_arguments, style="dim")
+            args_text = Text(safe_terminal_text(raw_arguments), style="dim")
         body = args_text
         if output:
             body = Group(
@@ -475,7 +477,7 @@ def _history_visual_lines_and_anchors(history: list, width: int, *, cancelled=No
         role = str(item.get("role", "")).lower()
         if role == "system":
             continue
-        body = _history_content_to_str(item.get("content", "")).strip()
+        body = safe_terminal_text(_history_content_to_str(item.get("content", ""))).strip()
         if not body:
             continue
         start = len(lines)

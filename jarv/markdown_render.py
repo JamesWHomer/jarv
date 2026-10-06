@@ -3,6 +3,7 @@
 import re
 
 from rich.text import Text
+from .terminal_text import safe_terminal_text
 
 
 # Intentionally narrow: anything capable of introducing Markdown, entities,
@@ -24,6 +25,7 @@ class _LiteralParagraph:
 
 def markdown_renderable(content: str):
     """Render plain paragraphs exactly like Markdown; delegate everything else."""
+    content = safe_terminal_text(content)
     if content and content == content.rstrip() and _LITERAL_PARAGRAPH.fullmatch(content):
         return _LiteralParagraph(content)
     from rich.markdown import Markdown

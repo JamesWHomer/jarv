@@ -3,8 +3,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 
-from .display import console
-
 
 @dataclass(frozen=True)
 class Artifact:
@@ -58,22 +56,20 @@ class ArtifactStore:
 
 def load_artifact_store(path: Path) -> ArtifactStore:
     store = ArtifactStore()
-    try:
-        data = read_json(path, {}, dict)
-        store.baseline = data.baseline
-        if isinstance(data, dict):
-            for label, item in data.items():
-                if isinstance(item, dict):
-                    store.put(
-                        label,
-                        item.get("longform", ""),
-                        item.get("tldr", ""),
-                        item.get("owner_label", label),
-                    )
-    except StorageError:
-        raise
-    except Exception as e:
-        console.print(f"[yellow]Could not load artifact store:[/yellow] {e}")
+    data = read_json(path, {}, dict)
+    store.baseline = data.baseline
+    for label, item in data.items():
+        if not isinstance(item, dict) or any(
+            not isinstance(item.get(field, ""), str)
+            for field in ("longform", "tldr", "owner_label")
+        ):
+            raise StorageError(f"Invalid artifact record {label!r} in {path}")
+        store.put(
+            label,
+            item.get("longform", ""),
+            item.get("tldr", ""),
+            item.get("owner_label", label),
+        )
     return store
 
 

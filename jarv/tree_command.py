@@ -11,7 +11,7 @@ from __future__ import annotations
 import sys
 
 from .display import console
-from .history import branches_file_for, load_branches, load_history, prepare_session_context
+from .history import prepare_session_context
 
 
 def cmd_tree(args: list | None = None) -> None:
@@ -60,12 +60,9 @@ def _tree_plain(ctx) -> None:
     from rich.text import Text
 
     from .display import jarv_panel
-    from .session_tree import build_tree
+    from .session_tree import load_session_tree
 
-    model = build_tree(
-        load_history(ctx.history_file),
-        load_branches(branches_file_for(ctx.history_file)),
-    )
+    model = load_session_tree(ctx.history_file)
     if not model.nodes:
         console.print("[yellow]No prompts yet in this session.[/yellow]")
         return

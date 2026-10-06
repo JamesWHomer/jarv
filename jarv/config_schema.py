@@ -73,7 +73,9 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
     ConfigField("persistent_shell", True, validator="bool", label="Reuse PowerShell", section="runtime", desc="reuse the Windows shell process for faster commands", ui_kind="bool", about="Reuse a Windows PowerShell process for noninteractive commands, with a fresh execution context per command. Only cwd and environment persist. Interactive commands and unsupported commands use a fresh process. Ignored on other platforms."),
     ConfigField("command_timeout", 60, validator="positive_int", label="Command timeout", section="runtime", desc="kill non-interactive commands; check in during interactive commands", ui_kind="int", about="Seconds before a non-interactive shell command is killed, or before an interactive command asks the model what to do next."),
     ConfigField("interactive_max_rounds", 40, validator="positive_int", label="Interactive rounds", section="runtime", desc="model rounds before an interactive command is aborted", ui_kind="int", about="Maximum model interaction rounds (stdin replies, waits, check-ins) for one interactive command before jarv kills the process. Each round is a model call. Only used when `interactive_commands` is enabled."),
-    ConfigField("web_timeout", 15, validator="positive_int", label="Web timeout", section="runtime", desc="seconds before web requests are cancelled", ui_kind="int", about="Seconds before a web search or URL read is killed."),
+    ConfigField("web_timeout", 15, validator="positive_int", label="Web timeout", section="runtime", desc="total search or URL request budget", ui_kind="int", about="Total seconds allowed for a web search, including queueing, retries and pagination, or a URL request, including redirects and body transfer."),
+    ConfigField("web_search_interval", 1, validator="positive_int", label="Search spacing", section="runtime", desc="minimum seconds between DuckDuckGo requests", ui_kind="int", about="Minimum seconds between DuckDuckGo requests across all agents in this process. Requests also run one at a time."),
+    ConfigField("web_search_max_pages", 5, validator="positive_int", label="Search page limit", section="runtime", desc="maximum result pages per web search", ui_kind="int", about="Maximum DuckDuckGo result pages fetched per search. Retries are limited separately to two per search."),
     ConfigField(
         "command_safety",
         "risky",
@@ -280,7 +282,7 @@ def validate_config_fields(
                 if not (0.0 < value < 1.0):
                     raise ValueError
                 config[key] = value
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 report(f"[red]Config '{key}' must be a number between 0 and 1.[/red]")
                 ok = False
         elif field.validator == "choices":

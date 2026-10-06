@@ -12,11 +12,13 @@ from .history_convert import (
     convert_tools,
     iter_history_segments,
     parse_json_arguments,
+    native_provider_content,
 )
 from .http_transport import (
     ProviderHTTPError,
     create_client as create_http_client,
     iter_sse_json,
+    normalized_token_count,
     open_stream_response,
     request_json,
     request_json_response,
@@ -90,6 +92,7 @@ def list_models(client, *, max_retries: int = 0) -> dict:
     """List all models visible to the current Anthropic account."""
     models: list[dict] = []
     after_id: str | None = None
+    seen_cursors: set[str] = set()
     while True:
         params: dict[str, Any] = {"limit": 1000}
         if after_id:
@@ -108,8 +111,9 @@ def list_models(client, *, max_retries: int = 0) -> dict:
         if not page.get("has_more"):
             break
         next_id = page.get("last_id")
-        if not isinstance(next_id, str) or not next_id or next_id == after_id:
+        if not isinstance(next_id, str) or not next_id or next_id in seen_cursors:
             break
+        seen_cursors.add(next_id)
         after_id = next_id
     return {"data": models, "has_more": False}
 
@@ -129,15 +133,7 @@ def to_messages(input_items: list[dict]) -> list[dict]:
             continue
         if kind == "reasoning":
             item = segment[1]
-            provider_content = item.get("provider_content")
-            if isinstance(provider_content, list):
-                blocks = [
-                    block
-                    for block in provider_content
-                    if isinstance(block, dict)
-                    and block.get("type") in ("thinking", "redacted_thinking")
-                ]
-                append_grouped(messages, "assistant", blocks)
+            append_grouped(messages, "assistant", native_provider_content(item, "anthropic"))
             continue
         if kind == "function_calls":
             calls = segment[1]
@@ -402,10 +398,10 @@ def iter_sse(response) -> Iterator[tuple[str, dict]]:
 
 def _normalized_usage(usage: dict | None) -> dict:
     source = usage if isinstance(usage, dict) else {}
-    uncached = int(source.get("input_tokens") or 0)
-    cache_write = int(source.get("cache_creation_input_tokens") or 0)
-    cached = int(source.get("cache_read_input_tokens") or 0)
-    output = int(source.get("output_tokens") or 0)
+    uncached = normalized_token_count(source.get("input_tokens"))
+    cache_write = normalized_token_count(source.get("cache_creation_input_tokens"))
+    cached = normalized_token_count(source.get("cache_read_input_tokens"))
+    output = normalized_token_count(source.get("output_tokens"))
     return {
         **source,
         "input_tokens": uncached + cache_write + cached,

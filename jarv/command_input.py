@@ -69,8 +69,9 @@ _WINDOWS_ENABLE_QUICK_EDIT_MODE = 0x0040
 _WINDOWS_ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
 _WINDOWS_ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200
 _WINDOWS_KEY_EVENT = 0x0001
-# KEY_EVENT_RECORD.dwControlKeyState shift bit (SHIFT_PRESSED).
+# KEY_EVENT_RECORD.dwControlKeyState modifier bits.
 _WINDOWS_SHIFT_PRESSED = 0x0010
+_WINDOWS_CTRL_PRESSED = 0x0004 | 0x0008
 _WINDOWS_MOUSE_EVENT = 0x0002
 _WINDOWS_MOUSE_WHEELED = 0x0004
 # Returned by the input readers when only non-key console events were pending
@@ -686,6 +687,8 @@ def _windows_key_from_virtual_key(
     if char == "\x03":
         raise KeyboardInterrupt
 
+    if virtual_key == 0x23 and control_key_state & _WINDOWS_CTRL_PRESSED:
+        return "CTRL_END"
     if control_key_state & _WINDOWS_SHIFT_PRESSED:
         # Preserve Shift for list selection and heads-up message navigation.
         shifted = {
@@ -951,9 +954,9 @@ def _csi_token(params: str, final: str) -> str:
     Ctrl and Shift into ``CTRL_``/``SHIFT_`` prefixes so the editable input can
     map them to word-wise motion and text selection. Up/Down fold Shift alone
     into ``SHIFT_UP``/``SHIFT_DOWN`` (the /sessions range-select chord), and
-    PageUp/PageDown preserve Shift for heads-up message navigation; every
-    other key ignores the modifier and returns its plain token (so e.g.
-    Ctrl+Home is still HOME).
+    PageUp/PageDown preserve Shift for heads-up message navigation. End
+    preserves Ctrl for jumping to the latest output; every other key ignores
+    the modifier and returns its plain token (so e.g. Ctrl+Home is still HOME).
     """
     parts = params.split(";")
     code = parts[0]
@@ -964,6 +967,8 @@ def _csi_token(params: str, final: str) -> str:
         base = _CSI_TILDE_TOKENS.get(code, "OTHER")
     else:
         base = _CSI_LETTER_TOKENS.get(final, "OTHER")
+    if base == "END" and modifier >= 2 and (modifier - 1) & 4:
+        return "CTRL_END"
     if base in ("LEFT", "RIGHT") and modifier >= 2:
         bits = modifier - 1
         prefix = ("CTRL_" if bits & 4 else "") + ("SHIFT_" if bits & 1 else "")
@@ -1164,6 +1169,7 @@ def _read_key_with_repeats(
     max_count: int = 128,
     batch_text: bool = False,
     translate_mouse_wheel: bool = True,
+    preserve_ctrl_end: bool = False,
 ) -> tuple[str, int]:
     """Read one key and fold immediately queued identical navigation repeats.
 
@@ -1172,12 +1178,17 @@ def _read_key_with_repeats(
     arrows lets menus advance several rows per refresh while preserving the
     first different key for the next input loop. Editable views can also batch
     queued printable characters so a paste triggers one redraw instead of one
-    redraw per character.
+    redraw per character. Ctrl+End retains its historical End behavior unless
+    a view opts in to handling the separate shortcut.
     """
     def read_key() -> str:
         if translate_mouse_wheel:
-            return _read_key(text_mode=text_mode)
-        return _read_key(text_mode=text_mode, translate_mouse_wheel=False)
+            key = _read_key(text_mode=text_mode)
+        else:
+            key = _read_key(text_mode=text_mode, translate_mouse_wheel=False)
+        if key == "CTRL_END" and not isinstance(key, TextInput) and not preserve_ctrl_end:
+            return "END"
+        return key
 
     key = read_key()
     if (
@@ -1245,7 +1256,7 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
     the modified arrows CTRL_LEFT/CTRL_RIGHT (word-wise), SHIFT_LEFT/
     SHIFT_RIGHT/CTRL_SHIFT_LEFT/CTRL_SHIFT_RIGHT (text selection) and
     SHIFT_UP/SHIFT_DOWN (list range selection), SHIFT_PAGEUP/SHIFT_PAGEDOWN
-    (message navigation), or the raw character. Raises
+    (message navigation), CTRL_END (jump to latest), or the raw character. Raises
     KeyboardInterrupt on Ctrl-C. When ``text_mode`` is True, the convenience
     q/Q → ESC mapping is disabled so a search query can include those letters. When
     ``translate_mouse_wheel`` is False, SGR wheel input returns MOUSE_WHEEL_*
@@ -1268,11 +1279,12 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
             # Legacy scan codes carry no modifier state, so Shift+Up/Down
             # degrades to plain UP/DOWN here. The console-record reader above
             # and the VT branch below both resolve the chord properly; this is
-            # only reached on a console offering neither.
+            # only reached on a console offering neither. Ctrl+End has its own
+            # extended code (0x75), so it can still be distinguished from End.
             second = msvcrt.getwch()
             return {
                 "H": "UP", "P": "DOWN", "K": "LEFT", "M": "RIGHT",
-                "G": "HOME", "O": "END",
+                "G": "HOME", "O": "END", "\x75": "CTRL_END",
                 "I": "PAGEUP", "Q": "PAGEDOWN", "S": "DELETE",
             }.get(second, "OTHER")
         if ch == "\r":
@@ -1310,7 +1322,7 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
                                 )
                             )
                         return "OTHER"
-                    if ch3 in ("1", "3", "5", "6"):
+                    if ch3 in ("1", "3", "4", "5", "6", "8"):
                         # Consume the full navigation sequence, including any
                         # modifier on arrows or tilde-terminated page keys.
                         params, final = _read_windows_csi_tail(

@@ -1,10 +1,8 @@
-from .storage import read_json, write_json, StorageError
+from .storage import read_json, write_json, transaction, StorageError
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
-
-from .display import console
 
 
 MAX_RETAINED_OUTPUT_CHARS = 4_001_000
@@ -28,9 +26,12 @@ class RetainedOutputStore:
 
     def _insert(self, output_id: str, content: str) -> None:
         if len(content) > MAX_RETAINED_OUTPUT_CHARS:
-            half = MAX_RETAINED_OUTPUT_CHARS // 2
-            content = (content[:half] + "\n[retained output limit reached; middle "
-                       "characters were discarded and are unavailable for read]\n" + content[-half:])
+            marker = ("\n[retained output limit reached; middle "
+                      "characters were discarded and are unavailable for read]\n")
+            remaining = MAX_RETAINED_OUTPUT_CHARS - len(marker)
+            head = (remaining + 1) // 2
+            tail = remaining // 2
+            content = content[:head] + marker + (content[-tail:] if tail else "")
         while self._items and (len(self._items) >= MAX_RETAINED_OUTPUTS or
                                self._total_chars + len(content) > MAX_RETAINED_TOTAL_CHARS):
             oldest = next(iter(self._items))
@@ -58,28 +59,17 @@ class RetainedOutputStore:
 
 def load_retained_output_store(path: Path) -> RetainedOutputStore:
     store = RetainedOutputStore()
-    try:
+    with transaction(path):
         if path.exists() and path.stat().st_size > MAX_RETAINED_FILE_BYTES:
             raise StorageError(f"Retained output file exceeds {MAX_RETAINED_FILE_BYTES} byte limit: {path}")
         data = read_json(path, {}, dict)
-        store.baseline = data.baseline
-        if isinstance(data, dict):
-            for output_id, item in data.items():
-                if not isinstance(output_id, str) or not output_id.startswith("cmd_"):
-                    continue
-                if isinstance(item, str):
-                    content = item
-                elif isinstance(item, dict):
-                    content = item.get("content")
-                else:
-                    continue
-                if isinstance(content, str):
-                    with store._lock:
-                        store._insert(output_id, content)
-    except StorageError:
-        raise
-    except Exception as e:
-        console.print(f"[yellow]Could not load retained outputs:[/yellow] {e}")
+    store.baseline = data.baseline
+    for output_id, item in data.items():
+        content = item.get("content") if isinstance(item, dict) else item
+        if not output_id.startswith("cmd_") or not isinstance(content, str):
+            raise StorageError(f"Invalid retained output record {output_id!r} in {path}")
+        with store._lock:
+            store._insert(output_id, content)
     return store
 
 

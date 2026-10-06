@@ -27,11 +27,17 @@ With them on, a command that stays alive after its output goes idle is treated a
 
 By default, tool output uses a line budget of one-third of the terminal height in `print` layout and one-half in `fullscreen` layout, with a minimum of three lines. Set `tool_output_display_lines` to an integer of at least 3 to pin that budget in both layouts. This controls display only; `max_tool_output_chars` controls the model's default output budget. Jarv also shows the resolved `head_chars` and `tail_chars` for each command.
 
-`read(input, offset, size)` pages through retained command output, artifacts, HTTP(S) URLs, and local files using Unicode character offsets, with at most 200,000 characters per page. PDFs with embedded text are extracted with page markers (scanned/image-only PDFs are not OCR'd). Local PDFs are limited to 20 MiB; extraction stops at 1,000 pages or 2,000,000 text characters. Consecutive `read` and `web_search` calls in one model response run concurrently, including mixed batches; results return to the model in call order. Commands and edits run sequentially within each agent.
+`read(input, offset, size)` pages through retained command output, artifacts, HTTP(S) URLs, and local files using Unicode character offsets, with at most 200,000 characters per page. PDFs with embedded text are extracted with page markers (scanned/image-only PDFs are not OCR'd). Local PDFs are limited to 20 MiB; extraction stops at 1,000 pages or 2,000,000 text characters. Consecutive `read` and `web_search` calls in one model response are scheduled concurrently, including mixed batches; results return to the model in call order. DuckDuckGo requests share a queue across all agents in the process; URL reads remain parallel. Commands and edits run sequentially within each agent.
 
 Image reads (`png`, `jpeg`, `webp`, and provider-supported `gif`) are returned as native multimodal input when Jarv recognizes image support for the selected model and route. Images are limited to 10 MiB and ignore `offset`/`size`. Local providers and OpenRouter's `auto`/`free` routes are currently excluded; Gemini image tool results require a Gemini 3 model and do not accept GIF. Unsupported routes return a text notice.
 
 Web search and URL reads need no extra API key. `web_search` accepts 1–20 results per call and a non-negative result offset. URL reads preserve links as absolute URLs, don't execute JavaScript, and mark fetched pages as untrusted content. Text and PDF web responses are capped at 2 MiB; images use the 10 MiB limit above. These limits apply to both transferred and decompressed data. Gzip and deflate compression are supported; other content encodings return a tool error.
+
+URL requests have one `web_timeout` budget covering connection setup, redirects, and the entire response transfer, including responses that keep sending small chunks. Expiry reports a timeout without cancelling sibling tools. JSON is pretty-printed only within bounded input, nesting, and output limits; otherwise its original text remains available through normal read pagination.
+
+DuckDuckGo requests run one at a time, spaced at least `web_search_interval` seconds apart (default 1). Each search permits up to two retries for network failures, timeouts, HTTP 429, and temporary server errors (500/502/503/504), using delays of about 2 then 5 seconds with jitter. A valid `Retry-After` delay takes precedence and pauses other searches too. A human-verification page pauses DuckDuckGo searches in the process for at least 60 seconds (longer if requested by `Retry-After`) and returns a clear blocked message; new calls during the pause fail promptly. Genuine empty results succeed with zero matches; unrecognized pages report an unexpected-response error.
+
+The `web_timeout` budget (default 15 seconds) includes waiting, retries, and all pages. Cancellation interrupts queueing, backoff, and active requests. Searches fetch at most `web_search_max_pages` result pages (default 5), with up to two additional retry attempts. Results gathered before a later failure or limit are returned with a **Partial results** notice; a failure before reaching the requested offset reports its actual cause. Searches are not cached, so requesting an offset walks earlier pages again within these limits.
 
 `edit` accepts existing UTF-8 files up to 5,000,000 bytes and checks that the replacement will stay within the same limit before preparing or writing it. Oversized replacements leave the file unchanged. Diff previews are capped at 60 lines and 12,000 characters; result previews are capped at 4,000 characters. Use `read` to inspect more of the edited file.
 
@@ -44,6 +50,10 @@ Disable with `project_context`; cap the injected file size with `project_context
 ## Command safety
 
 Before executing a shell command, jarv can prompt you for confirmation. The `command_safety` config key controls this:
+
+Approval previews show every script line in execution order, including blank lines, assignments, and directory changes. Risky lines are highlighted without hiding the surrounding code. In fullscreen mode the complete preview is scrollable; inline auditor status appears after the full script has been printed into terminal scrollback.
+
+Terminal controls embedded in commands, output, diffs, replies, and saved transcripts are displayed as visible escapes. This affects human-readable display only; original tool arguments, stored content, and JSON output are preserved.
 
 | Level | Behavior |
 | --- | --- |

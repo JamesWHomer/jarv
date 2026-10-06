@@ -17,6 +17,7 @@ from .http_transport import (
 )
 from .tool_schemas import strict_openai_tools
 from .unicode_safety import sanitize_json_value
+from .history_convert import provider_metadata
 
 
 OPENAI_API_URL = "https://api.openai.com/v1"
@@ -53,10 +54,13 @@ def build_responses_payload(
     clean_input = []
     for item in input_items:
         if isinstance(item, dict):
+            if (item.get("type") == "reasoning"
+                    and (provider_metadata(item) or {}).get("provider") != "openai"):
+                continue
             item = {
                 key: value
                 for key, value in item.items()
-                if key != "provider_content"
+                if key not in {"provider_content", "provider_metadata"}
             }
         clean_input.append(item)
     payload: dict[str, Any] = {
@@ -157,7 +161,12 @@ def build_chat_payload(
     if tools:
         payload["tools"] = tools
     if reasoning and reasoning.get("effort"):
-        if provider_name == "openrouter":
+        if provider_name == "deepseek":
+            effort = str(reasoning["effort"]).strip().lower()
+            payload["thinking"] = {"type": "disabled" if effort == "none" else "enabled"}
+            if effort != "none":
+                payload["reasoning_effort"] = effort
+        elif provider_name == "openrouter":
             payload["reasoning"] = {"effort": reasoning["effort"]}
             payload["provider"] = {"require_parameters": True}
         else:

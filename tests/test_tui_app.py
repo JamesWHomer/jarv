@@ -12,6 +12,8 @@ import threading
 import time
 from contextlib import contextmanager
 
+import pytest
+
 from conftest import FakeLive, wait_for
 from rich.text import Text
 
@@ -113,6 +115,33 @@ def test_run_enters_screen_and_dispatches_keys():
     live = holder["live"]
     assert live.entered and live.exited
     assert live.frames, "expected at least one painted frame"
+
+
+@pytest.mark.parametrize("stage", ["on_start", "render", "on_stop"])
+def test_run_cleans_up_when_startup_render_or_shutdown_fails(stage, neutral_tui_terminal):
+    app, holder = _make_app(keys=["STOP"])
+    stopped = []
+
+    def fail():
+        raise RuntimeError(stage)
+
+    def on_stop():
+        stopped.append(True)
+        if stage == "on_stop":
+            fail()
+
+    app.on_stop = on_stop
+    if stage != "on_stop":
+        setattr(app, stage, fail)
+
+    with pytest.raises(RuntimeError, match=stage):
+        app.run()
+
+    assert stopped == [True]
+    assert holder["live"].exited
+    assert not app._running
+    assert app.live is None
+    assert app._loop_thread is None
 
 
 def test_first_paint_happens_before_idle():

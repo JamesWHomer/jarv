@@ -359,3 +359,174 @@ def test_cancellable_tls_keeps_certificate_verification(local_tls_server):
                 cancellation_token=CancellationToken(), max_retries=0,
             )
     assert connections == []
+
+
+@pytest.mark.parametrize("method", ["connect_tcp", "connect_unix_socket"])
+def test_cancel_interrupts_connect_and_closes_late_stream(method):
+    from jarv.http_cancellation import _NetworkBackend, cancellation_scope
+
+    started, release, closed = threading.Event(), threading.Event(), threading.Event()
+    stream = Mock()
+    stream.close.side_effect = closed.set
+    backend = Mock()
+
+    def connect(*args, **kwargs):
+        started.set()
+        assert release.wait(3)
+        return stream
+
+    getattr(backend, method).side_effect = connect
+    token = CancellationToken()
+    outcomes = []
+
+    def request():
+        try:
+            with cancellation_scope(token):
+                getattr(_NetworkBackend(backend), method)("example.invalid", timeout=10)
+        except BaseException as exc:
+            outcomes.append(exc)
+
+    worker = threading.Thread(target=request, daemon=True)
+    worker.start()
+    try:
+        assert started.wait(1)
+        token.cancel()
+        worker.join(timeout=1)
+        assert not worker.is_alive(), "cancelled DNS/connect kept its caller blocked"
+        assert len(outcomes) == 1 and isinstance(outcomes[0], TurnCancelled)
+        stream.write.assert_not_called()
+    finally:
+        token.cancel()
+        release.set()
+        worker.join(timeout=1)
+    assert closed.wait(1)
+    stream.close.assert_called_once()
+
+
+def test_cancelled_connect_waits_for_no_helper_slot(monkeypatch):
+    from jarv import http_cancellation
+
+    slots = threading.BoundedSemaphore(1)
+    waiting = threading.Event()
+
+    class ObservedSlots:
+        def acquire(self, timeout):
+            waiting.set()
+            return slots.acquire(timeout=timeout)
+
+        def release(self):
+            slots.release()
+
+    monkeypatch.setattr(http_cancellation, "_CONNECT_SLOTS", ObservedSlots())
+    token = CancellationToken()
+    backend = Mock()
+    outcomes = []
+
+    def request():
+        try:
+            with http_cancellation.cancellation_scope(token):
+                http_cancellation._NetworkBackend(backend).connect_tcp("host", 80)
+        except BaseException as exc:
+            outcomes.append(exc)
+
+    with slots:
+        worker = threading.Thread(target=request, daemon=True)
+        worker.start()
+        try:
+            assert waiting.wait(1)
+            token.cancel()
+            worker.join(timeout=1)
+            assert not worker.is_alive()
+            assert len(outcomes) == 1 and isinstance(outcomes[0], TurnCancelled)
+            backend.connect_tcp.assert_not_called()
+        finally:
+            token.cancel()
+    worker.join(timeout=1)
+
+
+def test_cancellation_during_connect_completion_closes_result():
+    from jarv.http_cancellation import _NetworkBackend, cancellation_scope
+
+    token = CancellationToken()
+    stream = Mock()
+    closed = threading.Event()
+    stream.close.side_effect = closed.set
+    backend = Mock()
+
+    def connect(*args, **kwargs):
+        token.cancel()
+        return stream
+
+    backend.connect_tcp.side_effect = connect
+    with cancellation_scope(token), pytest.raises(TurnCancelled):
+        _NetworkBackend(backend).connect_tcp("host", 80)
+    assert closed.wait(1)
+    stream.close.assert_called_once()
+
+
+def test_completed_connect_releases_previous_token():
+    from jarv.http_cancellation import _NetworkBackend, cancellation_scope
+
+    token = CancellationToken()
+    stream = Mock()
+    backend = Mock()
+    backend.connect_tcp.return_value = stream
+    with cancellation_scope(token):
+        connected = _NetworkBackend(backend).connect_tcp("host", 80)
+    token.cancel()
+    stream.close.assert_not_called()
+    connected.close()
+    stream.close.assert_called_once()
+
+
+def test_cancel_interrupts_blocked_write():
+    from jarv.http_cancellation import _NetworkStream, cancellation_scope
+
+    writer, reader = socket.socketpair()
+    writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+    writer.settimeout(5)
+    started = threading.Event()
+    token = CancellationToken()
+    outcomes = []
+    stream = Mock()
+    stream.get_extra_info.return_value = writer
+
+    def write(buffer, timeout):
+        started.set()
+        writer.sendall(buffer)
+
+    stream.write.side_effect = write
+
+    def send():
+        try:
+            with cancellation_scope(token):
+                _NetworkStream(stream).write(b"x" * 2_000_000, timeout=5)
+        except BaseException as exc:
+            outcomes.append(exc)
+
+    worker = threading.Thread(target=send, daemon=True)
+    worker.start()
+    try:
+        assert started.wait(1)
+        token.cancel()
+        worker.join(timeout=1)
+        assert not worker.is_alive(), "cancelled write remained blocked"
+        assert len(outcomes) == 1 and isinstance(outcomes[0], TurnCancelled)
+        stream.write.assert_called_once()
+    finally:
+        token.cancel()
+        writer.close()
+        reader.close()
+        worker.join(timeout=1)
+
+
+def test_completed_write_does_not_leave_abort_callback():
+    from jarv.http_cancellation import _NetworkStream, cancellation_scope
+
+    token = CancellationToken()
+    stream = Mock()
+    stream.get_extra_info.return_value = None
+    with cancellation_scope(token):
+        _NetworkStream(stream).write(b"request", timeout=1)
+    token.cancel()
+    stream.close.assert_not_called()

@@ -23,7 +23,9 @@ Settings live in `~/.jarv/config.json` (created when config is first loaded). Us
 | `command_timeout` | `60` | Seconds before non-interactive shell commands are killed, or before interactive commands check in again. |
 | `interactive_max_rounds` | `40` | Model interaction rounds allowed for one interactive command before Jarv kills the process. Only used when `interactive_commands` is on. |
 | `persistent_shell` | `true` | Reuse PowerShell for noninteractive Windows commands with an isolated execution context per command. Disable to always start a fresh process. |
-| `web_timeout` | `15` | Seconds before a web search or URL read is killed. |
+| `web_timeout` | `15` | Total seconds allowed for a web search, including queueing, retries and pagination, or a URL request, including redirects and body transfer. |
+| `web_search_interval` | `1` | Minimum seconds between DuckDuckGo requests across agents in this process. Only one search request runs at a time. |
+| `web_search_max_pages` | `5` | Maximum result pages fetched per search; at most two additional attempts are allowed for transient failures. |
 | `command_safety` | `"risky"` | Command approval policy: `all` (human approval for every command), `risky` (review flagged commands, allowing auditor auto-approval), `none` (no approval gate). |
 | `audit` | `true` | LLM auditor for flagged commands. |
 | `auditor_auto_approve` | `true` | Let the auditor auto-approve commands it deems safe under `command_safety=risky`. With `all`, human approval is always required. |

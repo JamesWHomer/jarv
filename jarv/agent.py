@@ -50,10 +50,12 @@ from .provider import (
     ToolCallDone,
     ToolCallStarted,
     provider_response_notice,
+    requires_reasoning_history,
     stream_response,
+    validate_history_compatibility,
 )
 from .response_items import to_response_input_item
-from .response_items import status_history_item
+from .response_items import status_history_item, reasoning_history_item
 from .orchestrator import (
     ASK_USER_TOOL,
     PendingRunCommand,
@@ -79,8 +81,10 @@ from .retained_outputs import (
     save_retained_output_store,
 )
 from .tool_outputs import ToolOutput, with_tool_outcome
+from .terminal_text import safe_terminal_text
 from .turn_loop import StreamCollection, collect_stream_response, run_tool_execution_round
 from .turn_records import (
+    append_assistant_response_input_items,
     append_reasoning_input_items,
     append_tool_result_input_items,
     stream_usage_output_text,
@@ -167,10 +171,9 @@ class SessionPersistence:
     ``run_agent`` loads the session stores once after session prep, then mutates
     ``history`` in place for the rest of the turn. This collaborator owns those
     stores so the normal turn end, the error flush, and the cancel checkpoint all
-    persist through one method instead of three copies of the same writes. Fields
-    are populated incrementally during prep (mirroring the run-local variables) so
-    a failure part-way through prep persists exactly what was loaded so far -- the
-    same behaviour as the closures it replaces. Incognito runs never touch disk.
+    persist through one method instead of three copies of the same writes. Stores
+    are assigned after preparation commits, so a failed migration cannot be saved
+    again by an error checkpoint. Incognito runs never touch disk.
     """
 
     def __init__(self, *, incognito: bool):
@@ -181,6 +184,7 @@ class SessionPersistence:
         self.artifact_file = None
         self.retained_store = None
         self.reads_file = None
+        self.new_user_message = False
 
     def save(self, *, clear_redo: bool = False) -> None:
         if self.incognito:
@@ -191,7 +195,7 @@ class SessionPersistence:
             return
         with transaction(path):
             if self.session_context is not None:
-                if clear_redo:
+                if clear_redo or self.new_user_message:
                     redo_path = redo_file_for(self.session_context.history_file)
                     delete_json(redo_path)
                 save_history(self.history, self.session_context.history_file)
@@ -199,6 +203,7 @@ class SessionPersistence:
                 save_artifact_store(self.artifact_store, self.artifact_file)
             if self.retained_store is not None and self.reads_file is not None:
                 save_retained_output_store(self.retained_store, self.reads_file)
+        self.new_user_message = False
 
     def save_turn(self) -> None:
         """Persist the turn and drop any stale redo checkpoint."""
@@ -556,6 +561,7 @@ class _TurnRenderer:
         self.response_recorded = False
         self.tool_calls = []
         self.reasoning_items = []
+        self.provider_metadata = None
         self.saw_reasoning = False
         self.got_text = False
         self.started_tool_positions: dict[str, int] = {}
@@ -576,6 +582,7 @@ class _TurnRenderer:
         self.reasoning_items = stream_result.reasoning_items
         self.saw_reasoning = stream_result.saw_reasoning
         self.got_text = stream_result.got_text
+        self.provider_metadata = getattr(stream_result, "provider_metadata", None)
 
     # -- interactive-continuation invariant ---------------------------- #
     @property
@@ -709,7 +716,7 @@ class _TurnRenderer:
         elif self.interactive:
             console.print(Text(f"⚠ {text}", style="yellow"))
         else:
-            print(text, file=sys.stderr)
+            print(safe_terminal_text(text), file=sys.stderr)
 
     def note_tool_call_started(self, item_id: str, call_id: str, name: str) -> None:
         if self.interactive_continuation:
@@ -844,17 +851,17 @@ class _TurnRenderer:
             # shown in the card's "stdin> …" marker, so replaying it here as a
             # standalone message is what leaked "go library"/"quit" outside the
             # card box.
-            if result.final_text and self.stream_preview is not None:
-                self.stream_preview.replace(result.final_text)
-            elif result.final_text and self.ui is not None:
-                _ui_call(self.ui, "replace_stream_text", result.final_text)
+            if result.reply_text and self.stream_preview is not None:
+                self.stream_preview.replace(result.reply_text)
+            elif result.reply_text and self.ui is not None:
+                _ui_call(self.ui, "replace_stream_text", result.reply_text)
         if self.stream_preview is not None:
-            result.reply_text = self.stream_preview.text
             # Paint the authoritative final text into the live region before it
             # is stopped, so the last visible streamed frame matches the reprint
             # rather than freezing on a stale, throttled tail.
             self.stream_preview.flush(refresh=True)
         self.reply_text = result.reply_text
+        self.provider_metadata = getattr(result, "provider_metadata", None)
         if self.spinner_live is not None:
             self.spinner_live.stop()
             self.spinner_live = None
@@ -920,7 +927,9 @@ class TurnCheckpointer:
         renderer = self.renderer
         if renderer.reply_text and not renderer.tool_calls and not renderer.response_recorded:
             history.append(
-                {"role": "assistant", "content": renderer.reply_text, **renderer.metadata}
+                {"role": "assistant", "content": renderer.reply_text, **renderer.metadata,
+                 **({"provider_metadata": renderer.provider_metadata}
+                    if renderer.provider_metadata is not None else {})}
             )
         if renderer.response_recorded:
             self.append_unfinished_tool_results("interrupted by error")
@@ -939,18 +948,14 @@ class TurnCheckpointer:
         }
         for item in renderer.reasoning_items:
             if str(item.id) not in recorded_reasoning_ids:
-                stored_reasoning = {
-                    "type": "reasoning",
-                    "id": item.id,
-                    "summary": [],
-                    **metadata,
-                }
-                if item.provider_content:
-                    stored_reasoning["provider_content"] = item.provider_content
+                stored_reasoning = reasoning_history_item(item, metadata)
+                stored_reasoning["summary"] = []
                 history.append(stored_reasoning)
 
         if renderer.reply_text and not renderer.response_recorded:
-            history.append({"role": "assistant", "content": renderer.reply_text, **metadata})
+            history.append({"role": "assistant", "content": renderer.reply_text, **metadata,
+                            **({"provider_metadata": renderer.provider_metadata}
+                               if renderer.provider_metadata is not None else {})})
 
         self.append_unfinished_tool_results("cancelled by user", "cancelled")
         history.append({
@@ -974,6 +979,10 @@ class TurnCheckpointer:
         }
         with self._tools_lock:
             active_call_ids = set(self.active_tool_calls)
+        pending_metadata = (
+            self.renderer.provider_metadata
+            if not self.renderer.response_recorded and not self.renderer.reply_text else None
+        )
         for item in self.renderer.tool_calls:
             if str(item.call_id) in recorded_output_ids:
                 continue
@@ -986,7 +995,9 @@ class TurnCheckpointer:
                 history=history,
                 metadata=self.renderer.metadata,
                 include_call=str(item.call_id) not in recorded_call_ids,
+                provider_metadata=pending_metadata,
             )
+            pending_metadata = None
 
 
 def _abort_interactive_command(pending, note: str, ui, input_items: list) -> list:
@@ -1062,13 +1073,17 @@ def _advance_interactive_continuation(
                 None,
             )
         echoed: list = []
-        append_reasoning_input_items(echoed, renderer.reasoning_items)
+        append_assistant_response_input_items(
+            echoed, renderer.reasoning_items, renderer.reply_text, renderer.tool_calls,
+            provider_metadata=renderer.provider_metadata,
+        )
         for call in renderer.tool_calls:
             append_tool_result_input_items(
                 echoed,
                 call,
                 with_tool_outcome("[not executed: a terminal command is waiting for input; "
                 "reply to the terminal instead of calling tools]", "skipped"),
+                include_call=False,
             )
         return (
             input_items + echoed + [{
@@ -1081,10 +1096,12 @@ def _advance_interactive_continuation(
     # wait) so it lands on this step's "·N.Ns" marker.
     decision_seconds = max(0.0, time.perf_counter() - renderer.thought_started)
     terminal_reply = renderer.reply_text
-    input_items = input_items + [{
-        "role": "assistant",
-        "content": terminal_reply,
-    }]
+    reply_items = []
+    append_assistant_response_input_items(
+        reply_items, renderer.reasoning_items, terminal_reply, [],
+        provider_metadata=renderer.provider_metadata,
+    )
+    input_items = input_items + reply_items
     snapshot, terminal_action, terminal_kind, parse_note = (
         _continue_interactive_command(
             pending,
@@ -1387,6 +1404,13 @@ def run_agent(
     try:
         sigint_cancel_scope.__enter__()
         control.check()
+        tools = build_agent_tools(config)
+        if (not new_session and not incognito
+                and requires_reasoning_history(config, tools)):
+            # This read-only check precedes session marking, frame migration,
+            # trimming, and ownership by the error checkpoint path.
+            existing_context = prepare_session_context(mark_message=False, persist_metadata=False)
+            validate_history_compatibility(config, tools, load_history(existing_context.history_file))
         instructions_cwd = get_session_shell_state().cwd
         client, instructions = _prepare_client_and_instructions(config, client, cwd=instructions_cwd)
         control.check()
@@ -1398,21 +1422,30 @@ def run_agent(
             else prepare_session_context(mark_message=True, persist_metadata=True)
         )
         with nullcontext() if incognito else transaction(session_context.history_file):
-            persistence.session_context = session_context
-            history = [] if (new_session or incognito) else load_history(session_context.history_file)
-            persistence.history = history
+            if new_session or incognito:
+                history = []
+            else:
+                from .session_tree import preserve_redo_branches
+
+                # Capture the old continuation against the persisted leaf,
+                # before this invocation appends its new user message.
+                history = preserve_redo_branches(session_context.history_file)
             web_search_read_nudge_sent = history_has_web_search_read_nudge(history)
             metadata = history_metadata(session_context)
             renderer.metadata = metadata
 
             artifact_file = artifact_file_for(session_context.history_file)
             artifact_store = ArtifactStore() if incognito else load_artifact_store(artifact_file)
-            persistence.artifact_file = artifact_file
-            persistence.artifact_store = artifact_store
             reads_file = reads_file_for(session_context.history_file)
             retained_store = RetainedOutputStore() if incognito else load_retained_output_store(reads_file)
-            persistence.reads_file = reads_file
-            persistence.retained_store = retained_store
+        # A failed legacy migration or sidecar load must not make the error
+        # checkpoint persist a partial snapshot from an aborted transaction.
+        persistence.history = history
+        persistence.session_context = session_context
+        persistence.artifact_file = artifact_file
+        persistence.artifact_store = artifact_store
+        persistence.reads_file = reads_file
+        persistence.retained_store = retained_store
         usage_path = None if incognito else usage_file_for(session_context.history_file)
         root_node = AgentNode(
             label="root",
@@ -1428,8 +1461,8 @@ def run_agent(
         )
 
         history.append({"role": "user", "content": query, "id": new_frame_id(), **metadata})
+        persistence.new_user_message = True
 
-        tools = build_agent_tools(config)
         input_items = build_input(
             history,
             model=config["model"],
@@ -1537,9 +1570,9 @@ def run_agent(
                 elif interactive:
                     from rich.markdown import Markdown
 
-                    console.print(Markdown(flatten_headings(renderer.reply_text)))
+                    console.print(Markdown(flatten_headings(safe_terminal_text(renderer.reply_text))))
                 else:
-                    print(renderer.reply_text)
+                    print(safe_terminal_text(renderer.reply_text))
 
             if pending_interactive_command is not None:
                 checkpointer.flush_status_items()
@@ -1627,7 +1660,11 @@ def run_agent(
                     )
             else:
                 checkpointer.flush_status_items()
-                history.append({"role": "assistant", "content": renderer.reply_text, **metadata})
+                append_assistant_response_input_items(
+                    [], renderer.reasoning_items, renderer.reply_text, [],
+                    history=history, metadata=metadata,
+                    provider_metadata=renderer.provider_metadata,
+                )
                 persistence.save_turn()
                 if not incognito:
                     _print_agent_usage_if_enabled(
@@ -1663,7 +1700,7 @@ def run_agent(
         else:
             style = "red"
             console.print(f"[{style}]{label}:[/{style}] {escape(str(e))}")
-        if not isinstance(e, StorageError):
+        if not isinstance(e, StorageError) and persistence.session_context is not None:
             checkpointer.flush_error_state()
         return AgentRunResult(error=control.error or str(e), status=control.status or "error",
                               session_id=session_context.session_id if session_context else None,

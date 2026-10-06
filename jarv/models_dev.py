@@ -67,7 +67,7 @@ _NAMESPACES = {
 _LOCK = threading.RLock()
 _CATALOG: dict[str, dict[str, Any]] | None = None
 _STAMPS: tuple[Any, ...] = ()
-_INDEXES: dict[str, dict[str, dict[str, list[str]]]] = {}
+_INDEXES: dict[str, tuple[dict[str, Any], dict[str, dict[str, list[str]]]]] = {}
 
 
 @dataclass(frozen=True)
@@ -229,8 +229,8 @@ def clear_cache() -> None:
 def _index(provider_id: str, models: dict[str, Any]) -> dict[str, dict[str, list[str]]]:
     with _LOCK:
         cached = _INDEXES.get(provider_id)
-        if cached is not None:
-            return cached
+        if cached is not None and cached[0] is models:
+            return cached[1]
 
     built: dict[str, dict[str, list[str]]] = {
         "exact": {},
@@ -247,7 +247,9 @@ def _index(provider_id: str, models: dict[str, Any]) -> dict[str, dict[str, list
         built["family"].setdefault(model_family_key(model_id), []).append(model_id)
 
     with _LOCK:
-        _INDEXES[provider_id] = built
+        # In-flight lookups may still hold a catalog from before a refresh.
+        # Keep the source dictionary so its IDs cannot leak into a new catalog.
+        _INDEXES[provider_id] = (models, built)
     return built
 
 
@@ -308,7 +310,9 @@ def _find(
 def _positive_int(value: Any) -> int | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return int(value) if value > 0 else None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return int(value) if value >= 1 else None
 
 
 def _strings(value: Any) -> tuple[str, ...]:
@@ -447,10 +451,12 @@ def _tier_cost(cost: dict[str, Any], input_tokens: int | None) -> dict[str, Any]
         if not isinstance(bounds, dict) or bounds.get("type") != "context":
             continue
         size = bounds.get("size")
-        if not isinstance(size, (int, float)) or input_tokens <= size:
+        if (isinstance(size, bool) or not isinstance(size, (int, float))
+                or (isinstance(size, float) and not math.isfinite(size))
+                or size <= 0 or input_tokens <= size):
             continue
         if best is None or size > best[0]:
-            best = (float(size), tier)
+            best = (size, tier)
     if best is not None:
         return {**cost, **{key: value for key, value in best[1].items() if key != "tier"}}
     legacy = cost.get("context_over_200k")
@@ -468,7 +474,7 @@ def _rates(cost: Any, input_tokens: int | None = None) -> dict[str, float] | Non
             "input": float(effective["input"]),
             "output": float(effective["output"]),
         }
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OverflowError):
         return None
     for source, target in (("cache_read", "cached_input"), ("cache_write", "cache_write")):
         value = effective.get(source)
@@ -476,7 +482,7 @@ def _rates(cost: Any, input_tokens: int | None = None) -> dict[str, float] | Non
             continue
         try:
             rates[target] = float(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             continue
     if any(not math.isfinite(rate) or rate < 0 for rate in rates.values()):
         return None
@@ -500,9 +506,11 @@ def prices(
 # Refresh
 # ---------------------------------------------------------------------------
 
-def _cached_etag() -> str:
+def _cached_etag(source: str = DEFAULT_URL) -> str:
     payload = _read_json(CACHE_PATH)
     if not _providers_of(payload):
+        return ""
+    if str((payload or {}).get("source") or DEFAULT_URL) != source:
         return ""
     return str((payload or {}).get("etag") or "")
 
@@ -549,7 +557,7 @@ def refresh(config: dict | None = None) -> bool:
     connect_timeout = float(config.get("model_catalog_connect_timeout", 5) or 5)
 
     headers = {"User-Agent": "jarv"}
-    etag = _cached_etag()
+    etag = _cached_etag(url)
     if etag:
         headers["If-None-Match"] = etag
 
@@ -560,7 +568,7 @@ def refresh(config: dict | None = None) -> bool:
         ) as client:
             response = client.get(url, headers=headers)
             if response.status_code == 304:
-                return True
+                return bool(etag)
             response.raise_for_status()
             payload = response.json()
             response_etag = response.headers.get("ETag", "")

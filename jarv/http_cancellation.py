@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import socket
 import ssl
+import threading
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -22,6 +23,9 @@ _active_token: ContextVar[CancellationToken | None] = ContextVar(
     "http_cancellation_token", default=None,
 )
 _POLL_INTERVAL = 0.05
+# OS DNS resolution cannot be interrupted portably. Bound abandoned daemon
+# helpers so repeated cancellations cannot create an unbounded thread backlog.
+_CONNECT_SLOTS = threading.BoundedSemaphore(32)
 
 
 @contextmanager
@@ -68,9 +72,27 @@ class _NetworkStream(httpcore.NetworkStream):
 
     def write(self, buffer, timeout=None):
         token = _active_token.get()
-        if token is not None:
+        if token is None:
+            return self._stream.write(buffer, timeout)
+        token.throw_if_cancelled()
+        sock = self._stream.get_extra_info("socket")
+
+        def abort_write():
+            if isinstance(sock, socket.socket):
+                sock.shutdown(socket.SHUT_RDWR)
+            else:
+                self._stream.close()
+
+        unregister = token.register(abort_write)
+        try:
             token.throw_if_cancelled()
-        self._stream.write(buffer, timeout)
+            self._stream.write(buffer, timeout)
+            token.throw_if_cancelled()
+        except BaseException:
+            token.throw_if_cancelled()
+            raise
+        finally:
+            unregister()
 
     def start_tls(self, ssl_context, server_hostname=None, timeout=None):
         token = _active_token.get()
@@ -122,16 +144,69 @@ class _NetworkBackend(httpcore.NetworkBackend):
         self._backend = backend
 
     def connect_tcp(self, *args, **kwargs):
-        token = _active_token.get()
-        if token is not None:
-            token.throw_if_cancelled()
-        return _NetworkStream(self._backend.connect_tcp(*args, **kwargs))
+        return self._connect(self._backend.connect_tcp, *args, **kwargs)
 
     def connect_unix_socket(self, *args, **kwargs):
+        return self._connect(self._backend.connect_unix_socket, *args, **kwargs)
+
+    @staticmethod
+    def _connect(connect, *args, **kwargs):
         token = _active_token.get()
-        if token is not None:
+        if token is None:
+            return _NetworkStream(connect(*args, **kwargs))
+        token.throw_if_cancelled()
+        slots = _CONNECT_SLOTS
+        while not slots.acquire(timeout=_POLL_INTERVAL):
             token.throw_if_cancelled()
-        return _NetworkStream(self._backend.connect_unix_socket(*args, **kwargs))
+        lock = threading.Lock()
+        ready = threading.Event()
+        result = {"abandoned": False, "stream": None, "error": None}
+
+        def establish():
+            stream = None
+            error = None
+            try:
+                token.throw_if_cancelled()
+                stream = connect(*args, **kwargs)
+            except BaseException as exc:
+                error = exc
+            try:
+                with lock:
+                    abandoned = result["abandoned"] or token.cancelled
+                    if not abandoned:
+                        result["stream"], result["error"] = stream, error
+                if abandoned and stream is not None:
+                    stream.close()
+            finally:
+                slots.release()
+                ready.set()
+
+        try:
+            token.throw_if_cancelled()
+            threading.Thread(target=establish, name="jarv-http-connect", daemon=True).start()
+        except BaseException:
+            slots.release()
+            raise
+        stream = None
+        try:
+            while not ready.wait(_POLL_INTERVAL):
+                token.throw_if_cancelled()
+            token.throw_if_cancelled()
+            with lock:
+                stream, result["stream"] = result["stream"], None
+                error = result["error"]
+            token.throw_if_cancelled()
+            if error is not None:
+                raise error
+            return _NetworkStream(stream)
+        except BaseException:
+            with lock:
+                result["abandoned"] = True
+                late_stream, result["stream"] = result["stream"], None
+            for abandoned_stream in (stream, late_stream):
+                if abandoned_stream is not None:
+                    abandoned_stream.close()
+            raise
 
     def sleep(self, seconds):
         self._backend.sleep(seconds)

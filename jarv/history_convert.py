@@ -7,6 +7,45 @@ from collections.abc import Callable, Iterator
 from typing import Any
 
 
+def provider_metadata(item: dict) -> dict | None:
+    """Read internal provenance, inferring only recognizable legacy formats."""
+    metadata = item.get("provider_metadata")
+    if isinstance(metadata, dict):
+        return dict(metadata)
+    blocks = item.get("provider_content")
+    if isinstance(blocks, list) and blocks:
+        if all(isinstance(block, dict) and block.get("type") in
+               ("thinking", "redacted_thinking") for block in blocks):
+            return {"provider": "anthropic"}
+        if all(isinstance(block, dict) and (
+            "functionCall" in block or "thoughtSignature" in block
+            or block.get("thought") is True
+        ) for block in blocks):
+            return {"provider": "gemini"}
+        return None
+    if item.get("type") == "reasoning" and str(item.get("id", "")).startswith("rs_"):
+        return {"provider": "openai"}
+    return None
+
+
+def native_provider_content(item: dict, provider: str) -> list[dict]:
+    """Opaque blocks are reusable only by the protocol that produced them."""
+    if (provider_metadata(item) or {}).get("provider") != provider:
+        return []
+    blocks = item.get("provider_content")
+    if not isinstance(blocks, list):
+        return []
+    if provider == "anthropic":
+        return [block for block in blocks if isinstance(block, dict)
+                and block.get("type") in ("thinking", "redacted_thinking")]
+    if provider == "gemini":
+        return [block for block in blocks if isinstance(block, dict)
+                and not any(key in block for key in ("type", "thinking", "signature"))
+                and ("functionCall" in block or "thoughtSignature" in block
+                     or block.get("thought") is True)]
+    return []
+
+
 def parse_json_arguments(value: Any, *, fallback: Any = None) -> Any:
     """Parse tool-call arguments from a JSON string or pass through dict values."""
     if not isinstance(value, str):

@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     import threading
 
 from . import __version__
+from .terminal_text import safe_terminal_text
 
 STDIN_LABEL = "Input from stdin"
 
@@ -96,12 +97,12 @@ def _command_entry(query_parts: list[str]) -> None:
         _print_pending_results()
         _dispatch_command_query(query_parts)
     except (OSError, ValueError) as exc:
-        print(f"jarv: {exc}", file=sys.stderr)
+        print(safe_terminal_text(f"jarv: {exc}"), file=sys.stderr)
         raise SystemExit(2) from None
     except KeyboardInterrupt:
         raise SystemExit(130) from None
     except Exception as exc:
-        print(f"jarv: {exc}", file=sys.stderr)
+        print(safe_terminal_text(f"jarv: {exc}"), file=sys.stderr)
         raise SystemExit(1) from None
 
 
@@ -536,7 +537,7 @@ def main() -> None:
             if output:
                 output.finish(error=str(exc), status="error", exit_code=2)
             else:
-                print(f"jarv: {exc}", file=sys.stderr)
+                print(safe_terminal_text(f"jarv: {exc}"), file=sys.stderr)
             raise SystemExit(2) from None
         except SystemExit as exc:
             if output and not output.finished:
@@ -551,7 +552,7 @@ def main() -> None:
             if output:
                 output.finish(error=str(exc), status="error", exit_code=1)
             else:
-                print(f"jarv: {exc}", file=sys.stderr)
+                print(safe_terminal_text(f"jarv: {exc}"), file=sys.stderr)
             raise SystemExit(1) from None
 
 
@@ -601,7 +602,7 @@ def _main(parser, args, output=None) -> None:
             if output:
                 output.finish(error=message, status="input_required", exit_code=3)
             else:
-                print(message, file=sys.stderr)
+                print(safe_terminal_text(message), file=sys.stderr)
             raise SystemExit(3)
         result = cmd_setup()
         if not isinstance(result, dict) or not is_setup_complete(result):

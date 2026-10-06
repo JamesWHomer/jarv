@@ -10,10 +10,10 @@ from rich.console import Group, RenderableType
 from rich.markup import escape
 from rich.text import Text
 
+from .terminal_text import safe_terminal_text
 from .cancellation import CancellationToken, TurnCancelled
 from .display import (
     console,
-    hidden_lines_hint,
     live_display_depth,
     resolved_tool_call_display,
     tool_card,
@@ -155,79 +155,21 @@ def classify_command(command: str) -> tuple[bool, str]:
     return False, ""
 
 
-_CONTEXT_LINES_CAP = 4
-
-
 def _build_confirmation_body(command: str, reason: str) -> Group:
-    """Build the rich panel body, highlighting only risky lines."""
+    """Show the entire script in execution order, emphasizing risky lines."""
     reason_line = Text.from_markup(
-        f"[bold yellow]\u26a0  Risky command[/bold yellow]  [dim]\u2014[/dim]  [yellow]{escape(reason)}[/yellow]"
+        f"[bold yellow]⚠  Risky command[/bold yellow]  [dim]—[/dim]  [yellow]{escape(safe_terminal_text(reason))}[/yellow]"
     )
-
-    lines = [ln for ln in command.splitlines() if ln.strip()]
-
-    # Single-line command \u2014 show as before
-    if len(lines) <= 1:
-        command_line = Text.assemble(
-            ("$ ", "bold bright_black"),
-            (command.strip(), "bold bright_white"),
-        )
-        return Group(reason_line, Text(""), command_line)
-
-    # Multi-line: classify each line, show risky ones prominently
-    risky_indices: list[int] = []
-    for i, ln in enumerate(lines):
-        is_risky, _ = classify_command(ln)
-        if is_risky:
-            risky_indices.append(i)
-
-    parts: list[Text | str] = [reason_line, Text("")]
-
-    # Context before risky lines
-    if risky_indices:
-        first_risky = risky_indices[0]
-        context_before = lines[:first_risky]
-        if context_before:
-            if len(context_before) <= _CONTEXT_LINES_CAP:
-                for ln in context_before:
-                    parts.append(Text.assemble(("  ", ""), (ln, "dim")))
-            else:
-                for ln in context_before[:2]:
-                    parts.append(Text.assemble(("  ", ""), (ln, "dim")))
-                hidden = len(context_before) - 3
-                parts.append(Text("  ").append_text(hidden_lines_hint(hidden)))
-                parts.append(Text.assemble(("  ", ""), (context_before[-1], "dim")))
-            parts.append(Text(""))
-
-        # Risky lines
-        for idx in risky_indices:
-            parts.append(Text.assemble(
-                ("  $ ", "bold bright_black"),
-                (lines[idx], "bold bright_white"),
-            ))
-
-        # Context after last risky line
-        last_risky = risky_indices[-1]
-        context_after = lines[last_risky + 1:]
-        if context_after:
-            parts.append(Text(""))
-            if len(context_after) <= _CONTEXT_LINES_CAP:
-                for ln in context_after:
-                    parts.append(Text.assemble(("  ", ""), (ln, "dim")))
-            else:
-                for ln in context_after[:2]:
-                    parts.append(Text.assemble(("  ", ""), (ln, "dim")))
-                hidden = len(context_after) - 3
-                parts.append(Text("  ").append_text(hidden_lines_hint(hidden)))
-                parts.append(Text.assemble(("  ", ""), (context_after[-1], "dim")))
-    else:
-        # Fallback: no individual line matched (pattern spans lines)
-        command_line = Text.assemble(
-            ("$ ", "bold bright_black"),
-            (command.strip(), "bold bright_white"),
-        )
-        parts.append(command_line)
-
+    # Split only on actual newlines: other controls must remain visible. Keep
+    # blank lines and indentation, including leading/trailing blank lines.
+    lines = command.replace("\r\n", "\n").split("\n")
+    parts = [reason_line, Text("")]
+    for line in lines:
+        risky, _ = classify_command(line)
+        parts.append(Text.assemble(
+            ("$ " if len(lines) == 1 else "  ", "bold bright_black"),
+            (safe_terminal_text(line), "bold bright_white" if risky or len(lines) == 1 else "dim"),
+        ))
     return Group(*parts)
 
 
@@ -510,7 +452,7 @@ class _AuditPanel:
         if self.show_auditor:
             parts.append(Text(""))
             if self.audit_state["done"]:
-                reason = escape(self.audit_state["reason"])
+                reason = escape(safe_terminal_text(self.audit_state["reason"]))
                 if self.audit_state["allow"]:
                     parts.append(Text.from_markup(
                         f"[green]✓  auditor[/green]  [dim]{reason}[/dim]"
@@ -724,7 +666,8 @@ def _live_audit_poll(
 
     start = time.perf_counter()
     buf: list[str] = []
-    renderable = _AuditPanel(body, start, audit_state, buf)
+    # The full script belongs in scrollback; a Live viewport may crop it.
+    renderable = _AuditPanel(Text(""), start, audit_state, buf)
 
     # Unix: switch to character-at-a-time input
     restore_term = None
@@ -740,6 +683,7 @@ def _live_audit_poll(
 
     try:
         console.print()
+        console.print(_safety_card(body))
         with Live(renderable, refresh_per_second=10, console=console) as live:
             console.show_cursor(True)
             prefilled = False

@@ -590,7 +590,15 @@ class InteractiveCommandProcess:
             # The pipe is binary now; keep the CRLF translation text mode did.
             data = data.replace("\r\n", "\n").replace("\n", "\r\n")
         try:
-            self.proc.stdin.write(data.encode("utf-8"))
+            # Unbuffered pipes can accept fewer bytes than requested. Keep
+            # sending the remainder so large/Unicode input is not truncated.
+            pending = memoryview(data.encode("utf-8"))
+            while pending:
+                count = self.proc.stdin.write(pending)
+                if not count:
+                    self._stdin_closed = True
+                    return
+                pending = pending[count:]
             self.proc.stdin.flush()
         except (BrokenPipeError, OSError, ValueError):
             self._stdin_closed = True

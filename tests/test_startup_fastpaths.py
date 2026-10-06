@@ -27,7 +27,9 @@ def test_markdown_shortcut_preserves_segments(content, width):
     options = console.options.update(height=3)
     # Compare rendered text, colour/style and line boundaries, not just strings.
     actual = list(console.render(markdown_renderable(content), options))
-    expected = list(console.render(Markdown(content), options))
+    # Unsafe controls are now visible escapes at the display boundary.
+    from jarv.terminal_text import safe_terminal_text
+    expected = list(console.render(Markdown(safe_terminal_text(content)), options))
     assert actual == expected
 
 

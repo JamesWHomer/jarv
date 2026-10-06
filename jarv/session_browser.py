@@ -196,7 +196,8 @@ def cmd_sessions(args: list | None = None) -> int | None:
     # Full indexing stays on the worker. Prepare visible names separately.
     from .history import SESSIONS_FILE
     title_cache = SessionTitleCache(SESSIONS_FILE.with_name("session-titles.json"),
-                                    (meta.get("history_file") for meta in sessions.values()))
+                                    (meta.get("history_file") for meta in sessions.values()),
+                                    metadata_path=SESSIONS_FILE)
     rows: list[dict] = []
     for sid in sorted_sessions:
         meta = sessions[sid]

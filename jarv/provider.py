@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Iterator
 
-from .history_convert import iter_history_segments, parse_json_arguments
+from .history_convert import iter_history_segments, parse_json_arguments, provider_metadata
 from .provider_catalog import KEY_PATTERNS, LOCAL_PROVIDERS, PROVIDERS
 from .provider_auth import resolve_api_key
 from .provider_registry import ProviderError, create_client, get_backend
@@ -43,6 +43,7 @@ class ToolCallDone:
     name: str
     arguments: str
     provider_content: list[dict] | None = None
+    provider_metadata: dict | None = None
 
 
 @dataclass
@@ -50,6 +51,7 @@ class ReasoningDone:
     id: str
     summary: list
     provider_content: list[dict] | None = None
+    provider_metadata: dict | None = None
 
 
 @dataclass
@@ -60,6 +62,7 @@ class ReasoningStarted:
 @dataclass
 class StreamDone:
     response: Any
+    provider_metadata: dict | None = None
 
 
 class RetryableStreamError(ProviderError):
@@ -245,6 +248,7 @@ def _events_from_recovered_response(
             yield ReasoningDone(
                 id=item_id,
                 summary=_value(item, "summary") or [],
+                provider_metadata={"provider": "openai"},
             )
 
 
@@ -252,17 +256,42 @@ def _events_from_recovered_response(
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _to_chat_messages(instructions: str, input_items: list) -> list[dict]:
+def _to_chat_messages(
+    instructions: str, input_items: list, *, provider_name: str = "",
+) -> list[dict]:
     messages: list[dict] = [{"role": "system", "content": instructions}]
+    assistant: dict | None = None
+
+    def flush_assistant():
+        nonlocal assistant
+        if assistant is not None:
+            messages.append(assistant)
+            assistant = None
+
+    def copy_reasoning(item):
+        metadata = provider_metadata(item) or {}
+        if (provider_name == "deepseek" and metadata.get("provider") == provider_name
+                and isinstance(metadata.get("reasoning_content"), str)):
+            assistant["reasoning_content"] = metadata["reasoning_content"]
+
     for segment in iter_history_segments(input_items):
         kind = segment[0]
         if kind == "message":
             _, role, item = segment
-            messages.append({"role": role, "content": item.get("content", "") or ""})
+            flush_assistant()
+            message = {"role": role, "content": item.get("content", "") or ""}
+            if role == "assistant":
+                assistant = message
+                copy_reasoning(item)
+            else:
+                messages.append(message)
         elif kind == "function_calls":
             calls = segment[1]
+            if assistant is None:
+                assistant = {"role": "assistant", "content": None}
             tool_calls = []
             for fc in calls:
+                copy_reasoning(fc)
                 tool_calls.append({
                     "id": fc.get("call_id", fc.get("id", "")),
                     "type": "function",
@@ -271,15 +300,36 @@ def _to_chat_messages(instructions: str, input_items: list) -> list[dict]:
                         "arguments": fc.get("arguments", "{}"),
                     },
                 })
-            messages.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
+            assistant.setdefault("tool_calls", []).extend(tool_calls)
         elif kind == "function_outputs":
+            flush_assistant()
             for fco in segment[1]:
                 messages.append({
                     "role": "tool",
                     "tool_call_id": fco["call_id"],
                     "content": to_chat_tool_content(fco.get("output")),
                 })
+    flush_assistant()
     return messages
+
+
+def requires_reasoning_history(config: dict, tools: list) -> bool:
+    """DeepSeek thinking with tools requires all preceding assistant reasoning."""
+    return (config.get("provider") == "deepseek" and bool(tools)
+            and str(config.get("reasoning_effort") or "").strip().lower() != "none")
+
+
+def validate_history_compatibility(config: dict, tools: list, input_items: list) -> None:
+    """Reject unrecoverable reasoning history before any request or history write."""
+    if not requires_reasoning_history(config, tools):
+        return
+    messages = _to_chat_messages("", input_items, provider_name="deepseek")
+    if any(message.get("role") == "assistant"
+           and not isinstance(message.get("reasoning_content"), str) for message in messages):
+        raise ProviderError(
+            "This chat lacks the reasoning history required by DeepSeek. "
+            "Start a fresh chat with /new or --new."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -523,6 +573,7 @@ def _stream_responses_api(
                     yield ReasoningDone(
                         id=item_id,
                         summary=item.get("summary") or [],
+                        provider_metadata={"provider": "openai"},
                     )
             elif event_type == "response.completed":
                 yield StreamDone(response=response)
@@ -555,18 +606,26 @@ def _stream_chat_completions(
 ) -> Iterator:
     from .openai_http import build_chat_payload, stream_chat
 
+    provider_name = str((config or {}).get("provider") or "")
+    validate_history_compatibility(
+        {"provider": provider_name, "reasoning_effort": (reasoning or {}).get("effort")},
+        tools, input_items,
+    )
+    messages = _to_chat_messages(instructions, input_items, provider_name=provider_name)
     payload = build_chat_payload(
         model,
-        sanitize_json_value(_to_chat_messages(instructions, input_items)),
+        sanitize_json_value(messages),
         sanitize_json_value(_to_chat_tools(tools)) if tools else None,
         reasoning=reasoning,
         service_tier=service_tier,
-        provider_name=str((config or {}).get("provider") or ""),
+        provider_name=provider_name,
     )
     accumulators: dict[int, dict] = {}
     started_tool_indices: set[int] = set()
     final_chunk: dict[str, Any] = {}
     reasoning_started = False
+    reasoning_content: list[str] = []
+    reasoning_content_seen = False
     finished = False
     for chunk in stream_chat(
         client,
@@ -583,6 +642,9 @@ def _stream_chat_completions(
             continue
         choice = choices[0] if isinstance(choices[0], dict) else {}
         delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
+        if provider_name == "deepseek" and isinstance(delta.get("reasoning_content"), str):
+            reasoning_content_seen = True
+            reasoning_content.append(delta["reasoning_content"])
         if not reasoning_started and (
             _has_reasoning_signal(delta) or _has_reasoning_signal(choice)
         ):
@@ -623,7 +685,14 @@ def _stream_chat_completions(
         cancellation_token.throw_if_cancelled()
     if not finished:
         raise RetryableStreamError("Chat Completions stream ended before finish_reason")
-    yield StreamDone(response=final_chunk)
+    yield StreamDone(
+        response=final_chunk,
+        provider_metadata=(
+            {"provider": "deepseek",
+             **({"reasoning_content": "".join(reasoning_content)} if reasoning_content_seen else {})}
+            if provider_name == "deepseek" else None
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -634,6 +703,7 @@ def _map_dict_stream_events(
     events: Iterator,
     *,
     combine_tool_start_done: bool = False,
+    provider_name: str = "",
 ) -> Iterator:
     """Map Anthropic/Gemini HTTP dict events to normalized provider dataclasses."""
     reasoning_parts: list[dict] = []
@@ -654,6 +724,7 @@ def _map_dict_stream_events(
                 provider_content=(
                     reasoning_parts if combine_tool_start_done else event.get("provider_content")
                 ),
+                provider_metadata={"provider": provider_name} if provider_name else None,
             )
             if combine_tool_start_done:
                 reasoning_parts = []
@@ -678,6 +749,7 @@ def _map_dict_stream_events(
                 name=str(event.get("name") or ""),
                 arguments=str(event.get("arguments") or "{}"),
                 provider_content=event.get("provider_content"),
+                provider_metadata={"provider": provider_name} if provider_name else None,
             )
         elif event_type == "done":
             yield StreamDone(response=event.get("response"))
@@ -710,7 +782,7 @@ def _stream_anthropic(
         cancellation_token=cancellation_token,
         max_retries=int(config.get("anthropic_max_retries", 2)),
     ):
-        yield from _map_dict_stream_events([event])
+        yield from _map_dict_stream_events([event], provider_name="anthropic")
 
 
 # ---------------------------------------------------------------------------
@@ -739,6 +811,7 @@ def _stream_gemini(
             max_retries=int(config.get("gemini_max_retries", 2)),
         ),
         combine_tool_start_done=True,
+        provider_name="gemini",
     )
 
 

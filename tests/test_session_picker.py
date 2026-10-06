@@ -202,14 +202,16 @@ def test_archive_undo_and_deferred_delete_preserve_real_history_files(picker):
     assert history.load_sessions()["sessions"][sid]["archived"]
     picker.on_key("u", 1)
     restored = Path(picker.sessions[sid]["history_file"])
-    assert json.loads(restored.read_text(encoding="utf-8")) == original
+    normalized = json.loads(restored.read_text(encoding="utf-8"))
+    assert [{key: value for key, value in item.items() if key != "id"}
+            for item in normalized] == original
     assert history.load_sessions()["terminals"]["terminal"] == sid
     picker.on_key("d", 1)
     picker.on_key("d", 1)
     assert restored.exists()
     assert sid not in history.load_sessions()["sessions"]
     picker.on_key("u", 1)
-    assert json.loads(restored.read_text(encoding="utf-8")) == original
+    assert json.loads(restored.read_text(encoding="utf-8")) == normalized
     assert sid in history.load_sessions()["sessions"]
     picker.on_key("d", 1)
     picker.on_key("d", 1)

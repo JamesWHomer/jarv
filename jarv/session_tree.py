@@ -15,18 +15,21 @@ which already splits history into frames and stashes them in a sidecar.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .storage import transaction, delete_json
+from .storage import transaction, delete_json, StorageError
 from .history import (
     branches_file_for,
     load_branches,
     load_history,
+    load_redo_stack,
     new_frame_id,
     redo_file_for,
     save_branches,
     save_history,
+    save_redo_stack,
 )
 from .tool_outputs import flatten_content_text as _history_content_to_str
 
@@ -138,6 +141,9 @@ def _frame_id(frame: list, fallback: str) -> str:
             if isinstance(fid, str) and fid:
                 return fid
             break
+    for item in frame:
+        if isinstance(item, dict) and isinstance(item.get("_jarv_frame_id"), str):
+            return item["_jarv_frame_id"] or fallback
     return fallback
 
 
@@ -170,6 +176,8 @@ def build_tree(history: list, branches: list[dict]) -> TreeModel:
         if prev is not None:
             prev.children.append(node)
         active_nodes.append(node)
+        if node.frame_id in by_id:
+            raise StorageError(f"Duplicate active frame id: {node.frame_id}")
         by_id[node.frame_id] = node
         prev = node
     if active_nodes:
@@ -188,7 +196,11 @@ def build_tree(history: list, branches: list[dict]) -> TreeModel:
             depth=0,
             on_active_path=False,
         )
-        by_id.setdefault(node.frame_id, node)
+        if node.frame_id in by_id:
+            if by_id[node.frame_id].items != items:
+                raise StorageError(f"Conflicting copies of frame: {node.frame_id}")
+            continue
+        by_id[node.frame_id] = node
         parent_id = record.get("parent_frame_id", ROOT)
         pending.append((parent_id if isinstance(parent_id, str) else ROOT, node))
 
@@ -275,8 +287,110 @@ def _set_frame_id(frame: list) -> str:
                 fid = new_frame_id()
                 item["id"] = fid
             return fid
-    # No user item (rare leading-preamble frame): synthesize a carrier id.
-    return new_frame_id()
+    # Legacy leading system/status items also need a durable anchor. Keep the
+    # carrier separate from provider-owned item ids.
+    for item in frame:
+        if isinstance(item, dict):
+            fid = item.get("_jarv_frame_id")
+            if not isinstance(fid, str) or not fid:
+                fid = item["_jarv_frame_id"] = new_frame_id()
+            return fid
+    raise StorageError("A conversation frame must contain an object item")
+
+
+def preserve_redo_branches(history_file: Path, *, _aliases: dict | None = None) -> list:
+    """Normalize stable ids and keep undo's continuation before clearing redo.
+
+    Old redo files are reverse-ordered stacks without parent pointers. Attach
+    their continuation to the saved active leaf, before a new prompt is added.
+    Legacy aN/bN parent references are rewritten together with their frame ids.
+    Existing branch records retain their explicit parents.
+    """
+    with transaction(history_file):
+        history = load_history(history_file)
+        redo_path = redo_file_for(history_file)
+        redo = load_redo_stack(redo_path)
+        branches_path = branches_file_for(history_file)
+        branches = load_branches(branches_path)
+        original_history = copy.deepcopy(history)
+        original_redo = copy.deepcopy(redo)
+        original_branches = copy.deepcopy(branches)
+        aliases = {}
+        active = {}
+        parent_id = ROOT
+        for index, frame in enumerate(iter_frames(history)):
+            old_id = _frame_id(frame, f"a{index}")
+            parent_id = _set_frame_id(frame)
+            if parent_id in active:
+                raise StorageError(f"Duplicate active frame id: {parent_id}")
+            if old_id in aliases and aliases[old_id] != parent_id:
+                raise StorageError(f"Ambiguous legacy frame id: {old_id}")
+            aliases[old_id] = parent_id
+            active[parent_id] = frame
+
+        normalized = []
+        for index, record in enumerate(branches):
+            if not isinstance(record, dict) or not isinstance(record.get("items"), list):
+                raise StorageError(f"Invalid branch frame in {branches_path}")
+            items = record["items"]
+            old_id = _frame_id(items, f"b{index}")
+            fid = _set_frame_id(items)
+            if old_id in aliases and aliases[old_id] != fid:
+                raise StorageError(f"Ambiguous legacy frame id: {old_id}")
+            aliases[old_id] = fid
+            if fid in active:
+                if items != active[fid]:
+                    raise StorageError(f"Conflicting copies of frame: {fid}")
+                continue
+            normalized.append(record)
+
+        known = {}
+        branches[:] = []
+        for record in normalized:
+            fid = _frame_id(record["items"], ROOT)
+            previous_parent = record.get("parent_frame_id", ROOT)
+            record["parent_frame_id"] = aliases.get(previous_parent, previous_parent)
+            if fid in known:
+                if known[fid] != record:
+                    raise StorageError(f"Conflicting copies of frame: {fid}")
+                continue
+            known[fid] = record
+            branches.append(record)
+
+        redo_ids = set()
+        for frame in reversed(redo):
+            if not isinstance(frame, list) or not any(_is_user(item) for item in frame):
+                raise StorageError(f"Invalid redo frame in {redo_path}")
+            fid = _set_frame_id(frame)
+            if fid in active or fid in redo_ids:
+                raise StorageError(f"Duplicate redo frame: {fid}")
+            redo_ids.add(fid)
+            existing = known.get(fid)
+            if existing is not None:
+                if existing["items"] != frame:
+                    raise StorageError(f"Conflicting copies of frame: {fid}")
+            else:
+                record = {"parent_frame_id": parent_id, "items": copy.deepcopy(frame)}
+                branches.append(record)
+                known[fid] = record
+            parent_id = fid
+
+        if history != original_history:
+            save_history(history, history_file)
+        if redo != original_redo:
+            save_redo_stack(redo, redo_path)
+        if branches != original_branches:
+            save_branches(branches, branches_path)
+        if _aliases is not None:
+            _aliases.update(aliases)
+        return history
+
+
+def load_session_tree(history_file: Path, *, _aliases: dict | None = None) -> TreeModel:
+    """Read a consistent tree, including a legacy undo continuation."""
+    with transaction(history_file):
+        history = preserve_redo_branches(history_file, _aliases=_aliases)
+        return build_tree(history, load_branches(branches_file_for(history_file)))
 
 
 def checkout(history_file: Path, *, leaf_id: str) -> bool:
@@ -289,9 +403,10 @@ def checkout(history_file: Path, *, leaf_id: str) -> bool:
     prompt). Returns ``True`` if anything changed on disk.
     """
     with transaction(history_file):
-        history = load_history(history_file)
         branches_path = branches_file_for(history_file)
-        model = build_tree(history, load_branches(branches_path))
+        aliases = {}
+        model = load_session_tree(history_file, _aliases=aliases)
+        leaf_id = aliases.get(leaf_id, leaf_id)
 
         if leaf_id == ROOT:
             target: TreeNode | None = None
@@ -341,11 +456,11 @@ def delete_subtree(history_file: Path, *, node_id: str) -> bool:
     subtree was removed.
     """
     with transaction(history_file):
-        history = load_history(history_file)
         branches_path = branches_file_for(history_file)
-        model = build_tree(history, load_branches(branches_path))
+        aliases = {}
+        model = load_session_tree(history_file, _aliases=aliases)
 
-        target = model.find(node_id)
+        target = model.find(aliases.get(node_id, node_id))
         if target is None or target.on_active_path:
             return False
 
@@ -378,4 +493,11 @@ def delete_subtree(history_file: Path, *, node_id: str) -> bool:
 
         save_history(new_history, history_file)
         save_branches(new_frames, branches_path)
+        doomed_ids = {n.frame_id for n in model.nodes if id(n) in doomed}
+        redo_path = redo_file_for(history_file)
+        redo = load_redo_stack(redo_path)
+        remaining = [frame for frame in redo if _frame_id(frame, ROOT) not in doomed_ids]
+        if remaining != redo:
+            redo[:] = remaining
+            save_redo_stack(redo, redo_path)
         return True

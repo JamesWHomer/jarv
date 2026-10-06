@@ -2,6 +2,8 @@
 
 In heads-up mode, **Shift + PgUp/PgDn** jumps to the previous or next sent message, aligning its bubble with the top of the transcript where possible. Jumping forward past the last message returns to the latest output. PgUp/PgDn without Shift continues to scroll normally.
 
+Scrolling up pauses automatic scrolling and keeps your reading position as replies stream and tool output changes. Press **Ctrl + End** to jump to the latest output and resume following, or scroll down to the bottom. Editing a draft keeps your place; sending a message or running a slash command returns to the latest output.
+
 Each terminal is automatically bound to its own session. Jarv identifies terminals using environment variables (`WT_SESSION`, `TERM_SESSION_ID`, `TMUX`, `STY`) with a parent-process fallback, so history persists across runs in the same terminal.
 
 Session JSON is saved through a shared storage layer with interprocess locks, atomic file replacement, and a recovery journal. History, artifacts, retained outputs, and redo changes commit together; interrupted commits recover on the next access. Independent metadata edits from different terminals merge. Conflicting edits to the same history or metadata field report an error instead of overwriting another terminal's work. Corrupt files also report an error and are preserved for recovery. These protections require all concurrent Jarv processes to use this storage version.
@@ -13,7 +15,7 @@ Session JSON is saved through a shared storage layer with interprocess locks, at
 - In the sessions pane, `r` renames a conversation; clearing the title restores its first-prompt title. `Space` marks individual rows and keeps them selected while you navigate; `Shift`+`↑`/`↓` selects a range. Use `a` to archive/restore or `d`, then `d` to delete the selected conversations. Archived/restored rows leave the current filtered view immediately. Notifications stay visible briefly as you navigate without moving the layout; the undo hint names the action it will reverse. `u` undoes actions in reverse order until you close the picker; pending file deletions finish on exit. Failed archive/restore operations keep their original state, and failed undo operations can be retried. `Tab` cycles Active → Archived → All in the displayed order, `?` shows all shortcuts, and Esc returns to sessions, clears selection or search, then closes.
 - `/history` opens an interactive transcript where Up/Down scroll and Left/Right jump to the previous or next chat/reply.
 - `/tree` opens the session as a navigable tree — fork, edit, or resume from any earlier prompt.
-- `/undo` and `/redo` remove and restore conversation exchanges. They do not reverse file edits, shell commands, or usage charges. Sending a new message clears the redo stack. Archiving also discards redo history while preserving saved branches.
+- `/undo` and `/redo` remove and restore conversation exchanges on the active path. Undone exchanges remain available as branches in `/tree`. They do not reverse file edits, shell commands, or usage charges. Saving a new message, including an interrupted turn, clears the redo stack; tree checkout and archiving also clear redo while preserving saved branches. Deleting a branch permanently removes its exchanges from both the tree and redo.
 
 ![jarv session undo](https://github.com/JamesWHomer/jarv/releases/download/readme-assets/undo.webp)
 

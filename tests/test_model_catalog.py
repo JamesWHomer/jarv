@@ -1621,3 +1621,86 @@ def test_gemini_model_listing_follows_page_tokens():
         "models/gemini-3.1-pro-preview",
         "models/gemini-3-flash-preview",
     ]
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "gemini"])
+@pytest.mark.parametrize("cursors", [["a", "a"], ["a", "b", "a"]])
+def test_model_listing_stops_repeated_cursor_cycles(provider, cursors):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        assert len(requests) <= len(cursors), "revisited an earlier page cursor"
+        cursor = cursors[len(requests) - 1]
+        model = {"id": f"model-{len(requests)}"}
+        if provider == "anthropic":
+            return httpx.Response(200, json={
+                "data": [model], "has_more": True, "last_id": cursor,
+            })
+        return httpx.Response(200, json={"models": [model], "nextPageToken": cursor})
+
+    with httpx.Client(base_url="https://provider.test", transport=httpx.MockTransport(handler)) as client:
+        if provider == "anthropic":
+            result = list_anthropic_models(client)["data"]
+        else:
+            result = list_gemini_models(client)["models"]
+
+    assert len(requests) == len(cursors)
+    assert [model["id"] for model in result] == [
+        f"model-{index + 1}" for index in range(len(cursors))
+    ]
+
+
+def test_concurrent_openrouter_cache_refreshes_preserve_each_complete_snapshot(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from pathlib import Path
+
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    path = model_catalog._openrouter_endpoints_path("test/model")
+    ready = threading.Barrier(2, timeout=5)
+    read = threading.Barrier(2, timeout=5)
+    replacing = threading.Lock()
+    snapshots = []
+    original_replace = Path.replace
+
+    def synchronized_replace(staging, destination):
+        ready.wait()
+        snapshots.append(json.loads(staging.read_text(encoding="utf-8"))["endpoints"])
+        read.wait()
+        with replacing:
+            return original_replace(staging, destination)
+
+    monkeypatch.setattr(Path, "replace", synchronized_replace)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(
+            lambda name: model_catalog._write_openrouter_endpoints("test/model", [{"name": name}]),
+            ["first", "second"],
+        ))
+
+    assert sorted(snapshot[0]["name"] for snapshot in snapshots) == ["first", "second"]
+    assert json.loads(path.read_text(encoding="utf-8"))["endpoints"] in snapshots
+    assert list(path.parent.iterdir()) == [path]
+
+
+def test_openrouter_cache_write_failure_cleans_temporary_file(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    model_catalog._write_openrouter_endpoints("test/model", [{"name": "original"}])
+    path = model_catalog._openrouter_endpoints_path("test/model")
+
+    def fail_replace(*args):
+        raise OSError("read-only cache")
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+    model_catalog._write_openrouter_endpoints("test/model", [{"name": "new"}])
+    assert model_catalog.cached_openrouter_endpoints("test/model") == [{"name": "original"}]
+    assert list(path.parent.iterdir()) == [path]
+
+
+def test_openrouter_cache_with_invalid_encoding_is_ignored(tmp_path, monkeypatch):
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    path = model_catalog._openrouter_endpoints_path("test/model")
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"\xff")
+    assert model_catalog.cached_openrouter_endpoints("test/model") == []

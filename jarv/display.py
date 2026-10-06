@@ -14,6 +14,25 @@ from rich.style import Style
 from rich.text import Text
 
 from .tui_panel import MenuPanel
+from .terminal_text import safe_terminal_link, safe_terminal_text
+
+
+class SafeConsole(Console):
+    """Keep Rich's trusted controls, but never execute controls in content."""
+
+    def render_str(self, text, **kwargs):
+        return super().render_str(safe_terminal_text(text), **kwargs)
+
+    def render(self, renderable, options=None):
+        for segment in super().render(renderable, options):
+            if segment.control:
+                yield segment
+                continue
+            style = segment.style
+            if style is not None and style.link and not safe_terminal_link(style.link):
+                style = style.update_link(None)
+            yield Segment(safe_terminal_text(segment.text), style)
+
 
 def _truecolor_color_system() -> str | None:
     """Return ``"truecolor"`` when the terminal renders 24-bit colour, else ``None``.
@@ -41,7 +60,7 @@ def _truecolor_color_system() -> str | None:
 
 def _make_console() -> Console:
     forced = _truecolor_color_system()
-    return Console(color_system=forced) if forced else Console()
+    return SafeConsole(color_system=forced) if forced else SafeConsole()
 
 
 console = _make_console()
@@ -273,9 +292,9 @@ def tool_card(
     )
     title = Text()
     title.append(f"{icon} ", style=f"bold {accent}")
-    title.append(label, style=f"bold {accent}")
+    title.append(safe_terminal_text(label), style=f"bold {accent}")
 
-    metadata_text = Text(metadata, style="dim")
+    metadata_text = Text(safe_terminal_text(metadata), style="dim")
     status_text = Text(style="dim")
     if status:
         if status_style == "green":
@@ -286,7 +305,7 @@ def tool_card(
             status_text.append("\u2717 ", style="bold red")
         else:
             status_text.append("\u25cf ", style=status_style)
-        status_text.append(status)
+        status_text.append(safe_terminal_text(status))
 
     # Print mode stays quiet on success (the default state) but still signals
     # failures and in-flight work; fullscreen always shows the pill.
@@ -430,6 +449,7 @@ def output_renderable(
     display_mode: str = "print",
     expanded: bool = False,
 ) -> RenderableType:
+    output = safe_terminal_text(output)
     if expanded:
         return Text(output, style="dim")
     lines = output.splitlines()
@@ -459,6 +479,7 @@ def command_line_renderable(command: str, *, expanded: bool = False) -> Renderab
     ``COMMAND_DISPLAY_MAX_LINES`` lines (each capped at
     ``COMMAND_DISPLAY_MAX_LINE_CHARS`` characters) with a hidden-lines hint, so
     a pasted 200-line ``python -c`` body no longer floods the card."""
+    command = safe_terminal_text(command)
     header = Text("> ", style="bold yellow")
     if expanded:
         header.append(command)

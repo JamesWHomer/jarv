@@ -386,11 +386,18 @@ def _trend_chart(view: UsageView, width: int = 0) -> Group | None:
     rows = _CHART_ROWS_WIDE if width >= _WIDE else _CHART_ROWS
     peak_probe = max(b.spend_usd if use_spend else b.total_tokens for b in view.trend)
     axis_width = max(len(fmt(peak_probe)), len(fmt(0))) + 2
-    plot_width = max(8, (width or 80) - axis_width - 2)
-
-    columns, unit = _group_trend(view.trend, view.trend_unit, plot_width)
-    values = [spend if use_spend else tokens for _start, spend, tokens in columns]
-    peak = max(values)
+    while True:
+        plot_width = max(8, (width or 80) - axis_width - 2)
+        columns, unit = _group_trend(view.trend, view.trend_unit, plot_width)
+        values = [spend if use_spend else tokens for _start, spend, tokens in columns]
+        peak = max(values)
+        top_label, zero_label = fmt(peak), fmt(0)
+        required_axis_width = max(len(top_label), len(zero_label)) + 2
+        if required_axis_width <= axis_width:
+            break
+        # Grouped totals can need a wider label. Reserve its space and regroup
+        # if fewer columns fit; only widen to avoid oscillating at unit changes.
+        axis_width = required_axis_width
     peak_index = values.index(peak)
 
     slot = max(1, min(8, plot_width // len(columns)))
@@ -399,7 +406,6 @@ def _trend_chart(view: UsageView, width: int = 0) -> Group | None:
     levels = rows * 8
     heights = [0 if v <= 0 else max(1, round(v / peak * levels)) for v in values]
 
-    top_label, zero_label = fmt(peak), fmt(0)
     label_width = axis_width - 2
     lines: list[Text] = []
     for row in range(rows):

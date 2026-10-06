@@ -15,3 +15,7 @@ python scripts/update_models_dev.py
 models.dev is community-maintained and MIT licensed. Local providers — Ollama, LM Studio, vLLM — serve whatever you installed, so they are read live and have no catalog entry.
 
 Choose a provider and model with `jarv /setup`, or override them for one run with `--provider` and `--model`. See [Getting started](getting-started.md) for installation and API-key setup, and [Configuration](configuration.md) for saved settings.
+
+Jarv preserves provider reasoning needed to continue tool calls. Signed thinking blocks stay with the provider that generated them; switching providers keeps ordinary conversation and tool results without sending incompatible signed blocks.
+
+DeepSeek enables thinking by default and requires its previous reasoning when tools are available. Older chats created before Jarv retained that reasoning, or chats continued from another provider, cannot resume with DeepSeek thinking enabled. Jarv stops before sending that request and asks you to start a fresh chat with `/new` or `--new`. The old chat remains available, and Jarv does not change your reasoning setting. Explicitly selecting reasoning `none` sends DeepSeek's native thinking-disable option.

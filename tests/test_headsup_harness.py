@@ -219,3 +219,28 @@ def test_harness_safety_confirmation_end_to_end():
 
     assert results["gate"] == (True, "")
     assert "approved" in h.transcript
+
+
+def test_large_approval_script_remains_scrollable_while_prompting():
+    from jarv.safety import check_command
+
+    command = "\n".join(["rm -rf cache"] + [f"echo script-line-{n:03}" for n in range(80)])
+    results = {}
+
+    def agent(query, config, client, *, ui=None, **kwargs):
+        results["gate"] = check_command(command, "all", audit=False)
+        return SimpleNamespace(cancelled=False, error=None)
+
+    with HeadsupHarness(width=90, height=24, run_agent=agent) as h:
+        h.feed_text("review script")
+        h.feed_key("enter")
+        assert wait_for(lambda: h.answer_prompt is not None, timeout=3.0)
+        assert "script-line-000" in h.transcript
+        assert "script-line-040" in h.transcript
+        assert "script-line-079" in h.transcript
+        h.feed_key("pageup", repeat=100)
+        assert wait_for(lambda: "rm -rf cache" in h.plain_frame, timeout=3.0)
+        h.feed_text("n")
+        h.feed_key("enter")
+        assert h.wait_idle(timeout=3.0)
+    assert results["gate"][0] is False

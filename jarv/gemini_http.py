@@ -14,11 +14,13 @@ from .history_convert import (
     convert_tools,
     iter_history_segments,
     parse_json_arguments,
+    native_provider_content,
 )
 from .http_transport import (
     ProviderHTTPError,
     create_client as create_http_client,
     iter_sse_json,
+    normalized_token_count,
     open_stream_response,
     request_json,
     request_json_response,
@@ -56,6 +58,7 @@ def create_client(config: dict, api_key: str):
 def list_models(client, *, max_retries: int = 0) -> dict:
     models: list[dict] = []
     page_token: str | None = None
+    seen_cursors: set[str] = set()
     while True:
         params = {"pageSize": 1000}
         if page_token:
@@ -72,8 +75,9 @@ def list_models(client, *, max_retries: int = 0) -> dict:
         if isinstance(data, list):
             models.extend(item for item in data if isinstance(item, dict))
         next_token = page.get("nextPageToken")
-        if not isinstance(next_token, str) or not next_token or next_token == page_token:
+        if not isinstance(next_token, str) or not next_token or next_token in seen_cursors:
             break
+        seen_cursors.add(next_token)
         page_token = next_token
     return {"models": models}
 
@@ -132,8 +136,8 @@ def to_contents(input_items: list[dict]) -> list[dict]:
             continue
         if kind == "reasoning":
             item = segment[1]
-            provider_content = item.get("provider_content")
-            if isinstance(provider_content, list):
+            provider_content = native_provider_content(item, "gemini")
+            if provider_content:
                 append_grouped(
                     contents,
                     "model",
@@ -148,8 +152,8 @@ def to_contents(input_items: list[dict]) -> list[dict]:
                 call_id = str(call.get("call_id") or call.get("id") or "")
                 name = str(call.get("name") or "")
                 call_names[call_id] = name
-                provider_content = call.get("provider_content")
-                if isinstance(provider_content, list) and provider_content:
+                provider_content = native_provider_content(call, "gemini")
+                if provider_content:
                     for part in provider_content:
                         if not isinstance(part, dict):
                             continue
@@ -270,10 +274,10 @@ def _path(model: str, method: str) -> str:
 
 def normalize_response(data: dict) -> dict:
     usage = data.get("usageMetadata") if isinstance(data.get("usageMetadata"), dict) else {}
-    input_tokens = int(usage.get("promptTokenCount") or 0)
-    cached = int(usage.get("cachedContentTokenCount") or 0)
-    output_tokens = int(usage.get("candidatesTokenCount") or 0)
-    reasoning_tokens = int(usage.get("thoughtsTokenCount") or 0)
+    input_tokens = normalized_token_count(usage.get("promptTokenCount"))
+    cached = normalized_token_count(usage.get("cachedContentTokenCount"))
+    output_tokens = normalized_token_count(usage.get("candidatesTokenCount"))
+    reasoning_tokens = normalized_token_count(usage.get("thoughtsTokenCount"))
     parts = []
     candidates = data.get("candidates")
     if isinstance(candidates, list) and candidates:
@@ -293,9 +297,9 @@ def normalize_response(data: dict) -> dict:
             "uncached_input_tokens": max(input_tokens - cached, 0),
             "output_tokens": output_tokens,
             "reasoning_output_tokens": reasoning_tokens,
-            "total_tokens": int(
-                usage.get("totalTokenCount")
-                or input_tokens + output_tokens + reasoning_tokens
+            "total_tokens": normalized_token_count(
+                usage.get("totalTokenCount") or None,
+                default=input_tokens + output_tokens + reasoning_tokens,
             ),
         },
     }
@@ -350,6 +354,7 @@ def stream_content(
         max_retries=max_retries,
     )
     final: dict[str, Any] = {"candidates": [], "usageMetadata": {}}
+    accumulated_candidates: dict[int, dict] = {}
     served_tier = response.headers.get("x-gemini-service-tier")
     if served_tier:
         final["service_tier"] = served_tier
@@ -376,7 +381,20 @@ def stream_content(
             candidates = chunk.get("candidates")
             if not isinstance(candidates, list) or not candidates:
                 continue
-            final["candidates"] = candidates
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                index = int(candidate.get("index") or 0)
+                accumulated = accumulated_candidates.setdefault(index, {})
+                accumulated.update({key: value for key, value in candidate.items() if key != "content"})
+                content = candidate.get("content")
+                if isinstance(content, dict):
+                    accumulated_content = accumulated.setdefault("content", {"parts": []})
+                    accumulated_content.update({key: value for key, value in content.items() if key != "parts"})
+                    if isinstance(content.get("parts"), list):
+                        accumulated_content["parts"].extend(dict(part) for part in content["parts"]
+                                                            if isinstance(part, dict))
+            final["candidates"] = [accumulated_candidates[index] for index in sorted(accumulated_candidates)]
             finished = finished or bool(candidates[0].get("finishReason"))
             content = candidates[0].get("content")
             parts = content.get("parts") if isinstance(content, dict) else []

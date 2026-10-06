@@ -21,6 +21,7 @@ from rich.text import Text
 from .cancellation import CancellationToken
 from .config import get_setting
 from .safety import approval_lock, prompt_panel_confirmation
+from .terminal_text import safe_terminal_text
 from .tool_outputs import ToolOutput, with_tool_outcome
 
 
@@ -304,21 +305,32 @@ def _bounded_preview(lines, *, max_chars: int, max_lines: int | None = None) -> 
 
 
 def build_edit_diff(before: str, after: str, path: str) -> str:
+    def source_lines(text: str) -> list[str]:
+        # Only real LF/CRLF delimit lines. splitlines() also consumes standalone
+        # CR and C1 controls, potentially making a changed file look identical.
+        lines = text.replace("\r\n", "\n").split("\n")
+        if lines[-1] == "":
+            lines.pop()
+        return lines
+
     diff_lines = difflib.unified_diff(
-        before.splitlines(),
-        after.splitlines(),
+        source_lines(before),
+        source_lines(after),
         fromfile=path,
         tofile=path,
         lineterm="",
         n=_DIFF_CONTEXT_LINES,
     )
-    return _bounded_preview(diff_lines, max_chars=_MAX_DIFF_PREVIEW_CHARS,
+    # Compare original contents, then escape each display row before joining:
+    # an original trailing CR must not merge with our added LF into CRLF.
+    return _bounded_preview((safe_terminal_text(line) for line in diff_lines),
+                            max_chars=_MAX_DIFF_PREVIEW_CHARS,
                             max_lines=_MAX_DIFF_PREVIEW_LINES)
 
 
 def _diff_renderable(diff_text: str) -> Group:
     lines = []
-    for line in diff_text.splitlines():
+    for line in safe_terminal_text(diff_text).splitlines():
         if line.startswith(("+++", "---")):
             style = "dim"
         elif line.startswith("@@"):
@@ -397,8 +409,14 @@ def classify_edit(resolved: Path, *, cwd: str | Path | None = None) -> tuple[boo
 
 def _check_edit(
     resolved: Path, diff_text: str, config: dict, *, cwd: str | Path | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> tuple[bool, str]:
     """Gate an edit per command_safety. Returns (allowed, denial_message)."""
+    control = config.get("_run_control")
+    if cancellation_token is None and control is not None:
+        cancellation_token = control.token
+    if cancellation_token is not None:
+        cancellation_token.throw_if_cancelled()
     level = get_setting(config, "command_safety")
     if level == "none":
         return True, ""
@@ -412,9 +430,14 @@ def _check_edit(
 
     from .run_control import require_user_input
     require_user_input(config, f"Manual approval required for edit: {reason}.")
-    control = config.get("_run_control")
-    cancel_kwargs = {"cancellation_token": control.token} if control and control.deadline else {}
-    with approval_lock():
+    cancel_kwargs = {"cancellation_token": cancellation_token} if cancellation_token is not None else {}
+    lock = approval_lock()
+    while not lock.acquire(timeout=0.05):
+        if cancellation_token is not None:
+            cancellation_token.throw_if_cancelled()
+    try:
+        if cancellation_token is not None:
+            cancellation_token.throw_if_cancelled()
         body = Group(
             Text.from_markup(
                 f"[bold yellow]⚠  File edit[/bold yellow]  [dim]—[/dim]  "
@@ -423,15 +446,20 @@ def _check_edit(
             Text(""),
             _diff_renderable(diff_text),
         )
-        if prompt_panel_confirmation(
+        approved = prompt_panel_confirmation(
             body,
             subtitle="confirm to edit",
             question="Allow this edit?",
             kind="edit",
             reason=reason,
             **cancel_kwargs,
-        ):
+        )
+        if cancellation_token is not None:
+            cancellation_token.throw_if_cancelled()
+        if approved:
             return True, ""
+    finally:
+        lock.release()
     return False, f"[edit denied by user — {reason}]"
 
 
@@ -484,6 +512,9 @@ def dispatch_edit_tool(
         return with_tool_outcome(validated, "failed")
     value, old_text, new_text, replace_all = validated
 
+    control = config.get("_run_control")
+    if cancellation_token is None and control is not None:
+        cancellation_token = control.token
     if cancellation_token is not None:
         cancellation_token.throw_if_cancelled()
 
@@ -511,7 +542,9 @@ def _edit_locked(resolved: Path, old_text: str, new_text: str, replace_all: bool
     new_content, count = replaced
 
     diff_text = build_edit_diff(loaded.text, new_content, str(resolved))
-    allowed, denial = _check_edit(resolved, diff_text, config, cwd=cwd)
+    allowed, denial = _check_edit(
+        resolved, diff_text, config, cwd=cwd, cancellation_token=cancellation_token,
+    )
     if not allowed:
         return with_tool_outcome(denial, "denied")
 

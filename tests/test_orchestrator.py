@@ -1,4 +1,5 @@
 import unittest
+import sys
 import threading
 import time
 from unittest.mock import patch
@@ -64,6 +65,17 @@ class ToolArgumentSalvageTests(unittest.TestCase):
         args, results = self._execute_with_arguments('{"command": ')
         self.assertIsNone(args)
         self.assertIn("tool argument error", results[0])
+
+    def test_arguments_exceeding_json_number_limit_return_tool_error(self):
+        digit_limit = getattr(sys, "get_int_max_str_digits", lambda: 0)()
+        if not digit_limit:
+            self.skipTest("runtime does not limit integer conversion")
+        oversized = '{"command":' + '9' * (digit_limit + 1) + '}'
+        for arguments in (oversized, '```json\n' + oversized + '\n```'):
+            with self.subTest(fenced=arguments.startswith('```')):
+                args, results = self._execute_with_arguments(arguments)
+                self.assertIsNone(args)
+                self.assertIn("[tool argument error:", results[0])
 
 
 class OrchestratorTests(unittest.TestCase):
@@ -782,6 +794,43 @@ class OrchestratorTests(unittest.TestCase):
             timer.cancel()
 
         self.assertLess(time.perf_counter() - started, 0.25)
+
+    def test_spawn_batch_cancels_children_when_coordinator_fails_without_parent_token(self):
+        for error in (KeyboardInterrupt(), RuntimeError("coordinator failed")):
+            with self.subTest(error=type(error).__name__):
+                started_worker = threading.Event()
+                release = threading.Event()
+                tokens = []
+                parent = AgentNode("root", 0, None, "root", False)
+
+                def blocked_worker(*_args, cancellation_token, **_kwargs):
+                    tokens.append(cancellation_token)
+                    started_worker.set()
+                    deadline = time.monotonic() + 1
+                    while not cancellation_token.cancelled and time.monotonic() < deadline:
+                        if release.wait(0.005):
+                            break
+                    return None, "stopped"
+
+                def fail_wait(*_args, **_kwargs):
+                    self.assertTrue(started_worker.wait(1))
+                    raise error
+
+                started = time.monotonic()
+                try:
+                    with (
+                        patch("jarv.orchestrator.run_subagent_loop", side_effect=blocked_worker),
+                        patch("jarv.orchestrator.concurrent.futures.wait", side_effect=fail_wait),
+                        self.assertRaises(type(error)),
+                    ):
+                        spawn_batch(
+                            parent, [{"label": "child", "task": "work"}],
+                            ArtifactStore(), client=None, config=DEFAULT_CONFIG,
+                        )
+                    self.assertTrue(tokens[0].cancelled)
+                    self.assertLess(time.monotonic() - started, 0.5)
+                finally:
+                    release.set()
 
     def test_spawn_batch_times_out_one_stalled_child(self):
         parent = AgentNode(

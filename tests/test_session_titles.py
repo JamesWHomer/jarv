@@ -101,3 +101,173 @@ def test_history_changed_during_prefix_read_is_not_cached(tmp_path, monkeypatch)
     monkeypatch.setattr(cache, "_stamp", lambda path: next(stamps))
     assert cache.read(str(path)) is None
     assert not cache.entries
+
+
+def _metadata(tmp_path, paths):
+    from jarv.storage import write_json
+
+    path = tmp_path / "sessions.json"
+    write_json(path, {"sessions": {str(index): {"history_file": str(value)}
+                                   for index, value in enumerate(paths)}, "terminals": {}})
+    return path
+
+
+def test_deleted_session_title_is_removed_from_disk_and_stale_writer(tmp_path):
+    from jarv.session_store import delete_session_files
+
+    path = history_file(tmp_path, [{"role": "user", "content": "Private first prompt"}])
+    metadata = _metadata(tmp_path, [path])
+    cache_path = tmp_path / "session-titles.json"
+    stale = SessionTitleCache(cache_path, [str(path)], metadata_path=metadata)
+    assert stale.read(str(path)) == "Private first prompt"
+    cache = SessionTitleCache(cache_path, [str(path)], metadata_path=metadata)
+    cache.read(str(path))
+    cache.save()
+    _metadata(tmp_path, [])
+    delete_session_files(path)
+    assert not path.exists()
+    assert "Private first prompt" not in cache_path.read_text(encoding="utf-8")
+    stale.save()
+    assert json.loads(cache_path.read_text(encoding="utf-8"))["titles"] == {}
+
+
+def test_pruning_cache_without_new_titles_is_persisted(tmp_path):
+    path = history_file(tmp_path, [{"role": "user", "content": "Removed prompt"}])
+    cache_path = tmp_path / "session-titles.json"
+    cache = SessionTitleCache(cache_path, [str(path)])
+    cache.read(str(path))
+    cache.save()
+    reopened = SessionTitleCache(cache_path, [])
+    assert reopened.dirty
+    reopened.save()
+    assert json.loads(cache_path.read_text(encoding="utf-8"))["titles"] == {}
+
+
+def test_concurrent_cache_writers_keep_other_live_titles(tmp_path):
+    first = history_file(tmp_path, [{"role": "user", "content": "First prompt"}])
+    second = tmp_path / "history-second.json"
+    second.write_text('[{"role":"user","content":"Second prompt"}]', encoding="utf-8")
+    metadata = _metadata(tmp_path, [first, second])
+    cache_path = tmp_path / "session-titles.json"
+    # Their stale constructor inventories each omit the other live session.
+    a = SessionTitleCache(cache_path, [str(first)], metadata_path=metadata)
+    b = SessionTitleCache(cache_path, [str(second)], metadata_path=metadata)
+    a.read(str(first))
+    b.read(str(second))
+    a.save()
+    b.save()
+    titles = json.loads(cache_path.read_text(encoding="utf-8"))["titles"]
+    assert {entry["snippet"] for entry in titles.values()} == {"First prompt", "Second prompt"}
+
+
+def test_cache_update_during_save_is_kept_pending(tmp_path, monkeypatch):
+    import threading
+    from jarv import session_titles
+
+    first = history_file(tmp_path, [{"role": "user", "content": "First prompt"}])
+    second = tmp_path / "history-second.json"
+    second.write_text('[{"role":"user","content":"Second prompt"}]', encoding="utf-8")
+    metadata = _metadata(tmp_path, [first, second])
+    cache_path = tmp_path / "session-titles.json"
+    cache = SessionTitleCache(cache_path, [str(first), str(second)], metadata_path=metadata)
+    cache.read(str(first))
+    entered, resume = threading.Event(), threading.Event()
+    write = session_titles.write_json
+
+    def delayed_write(*args, **kwargs):
+        entered.set()
+        assert resume.wait(5)
+        return write(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(session_titles, "write_json", delayed_write)
+        worker = threading.Thread(target=cache.save)
+        worker.start()
+        try:
+            assert entered.wait(5)
+            assert cache.read(str(second)) == "Second prompt"
+        finally:
+            resume.set()
+            worker.join(5)
+        assert not worker.is_alive()
+    assert cache.dirty
+    cache.save()
+    assert not cache.dirty
+    assert len(json.loads(cache_path.read_text(encoding="utf-8"))["titles"]) == 2
+
+
+def test_other_process_cannot_restore_title_after_deletion(tmp_path):
+    import subprocess
+    import sys
+    from jarv.session_store import delete_session_files
+
+    path = history_file(tmp_path, [{"role": "user", "content": "Private first prompt"}])
+    metadata = _metadata(tmp_path, [path])
+    cache_path = tmp_path / "session-titles.json"
+    script = '''
+import sys
+from pathlib import Path
+from jarv.session_titles import SessionTitleCache
+path, cache_path, metadata = sys.argv[1:]
+cache = SessionTitleCache(Path(cache_path), [path], metadata_path=Path(metadata))
+cache.read(path)
+print("ready", flush=True)
+sys.stdin.readline()
+cache.save()
+'''
+    worker = subprocess.Popen([sys.executable, "-c", script, str(path), str(cache_path), str(metadata)],
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True)
+    try:
+        assert worker.stdout.readline().strip() == "ready"
+        cache = SessionTitleCache(cache_path, [str(path)], metadata_path=metadata)
+        cache.read(str(path))
+        cache.save()
+        _metadata(tmp_path, [])
+        delete_session_files(path)
+        _, error = worker.communicate("save\n", timeout=15)
+        assert worker.returncode == 0, error
+    finally:
+        if worker.poll() is None:
+            worker.kill()
+        worker.wait()
+    assert "Private first prompt" not in cache_path.read_text(encoding="utf-8")
+
+
+def test_failed_delete_preserves_history_and_cached_title(tmp_path, monkeypatch):
+    from jarv import storage
+    from jarv.session_store import delete_session_files
+
+    path = history_file(tmp_path, [{"role": "user", "content": "Keep on failure"}])
+    cache_path = tmp_path / "session-titles.json"
+    cache = SessionTitleCache(cache_path, [str(path)])
+    cache.read(str(path))
+    cache.save()
+    original = (path.read_bytes(), cache_path.read_bytes())
+
+    def fail(*args):
+        raise OSError("disk full")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(storage, "_atomic", fail)
+        with pytest.raises(storage.StorageError, match="disk full"):
+            delete_session_files(path)
+    assert (path.read_bytes(), cache_path.read_bytes()) == original
+
+
+def test_delete_prunes_previous_archive_location_titles(tmp_path):
+    from jarv.session_store import delete_session_files
+
+    path = history_file(tmp_path, [{"role": "user", "content": "Archived secret"}])
+    metadata = _metadata(tmp_path, [path])
+    cache_path = tmp_path / "session-titles.json"
+    cache = SessionTitleCache(cache_path, [str(path)], metadata_path=metadata)
+    cache.read(str(path))
+    cache.save()
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+    archived = archive_dir / "history-archived.json"
+    path.rename(archived)
+    _metadata(tmp_path, [])
+    delete_session_files(archived)
+    assert "Archived secret" not in cache_path.read_text(encoding="utf-8")

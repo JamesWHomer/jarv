@@ -28,6 +28,7 @@ class StreamCollection:
     final_text: str = ""
     got_text: bool = False
     saw_reasoning: bool = False
+    provider_metadata: dict | None = None
 
 
 def collect_stream_response(
@@ -59,6 +60,7 @@ def collect_stream_response(
                     result.reasoning_items.append(event)
                 elif isinstance(event, StreamDone):
                     result.final_response = event.response
+                    result.provider_metadata = event.provider_metadata
 
             result.final_text = response_output_text(result.final_response)
             if result.final_text and len(result.final_text) >= len(result.reply_text):
@@ -99,6 +101,7 @@ def run_tool_execution_round(
         stream_result.tool_calls,
         history=history,
         metadata=metadata,
+        provider_metadata=stream_result.provider_metadata,
     )
 
     def append_tool_result(item, output) -> None:

@@ -553,14 +553,17 @@ def append_web_search_read_nudge(output: str) -> str:
 
 def _parse_tool_args(arguments: str | None) -> tuple[dict | None, str | None]:
     try:
-        args = json.loads(arguments or "{}")
-    except json.JSONDecodeError as e:
-        # Local/chat-completions models often fence or narrate around the
-        # JSON; recover the object when it is unambiguous instead of failing
-        # the whole tool call.
-        salvaged = salvage_json_object(arguments or "")
-        if salvaged is not None:
-            return salvaged, None
+        try:
+            args = json.loads(arguments or "{}")
+        except json.JSONDecodeError:
+            # Local/chat-completions models often fence or narrate around the
+            # JSON; recover only when the argument object is unambiguous.
+            args = salvage_json_object(arguments or "")
+            if args is None:
+                raise
+    except (ValueError, TypeError, RecursionError) as e:
+        # Decoders also reject oversized integers and excessive nesting.
+        # Both direct parsing and recovery must leave the turn running.
         return None, with_tool_outcome(f"[tool argument error: invalid JSON: {e}]", "failed")
     if not isinstance(args, dict):
         return None, with_tool_outcome("[tool argument error: arguments must be an object]", "failed")
@@ -1292,6 +1295,7 @@ def spawn_batch(
     parent_unregisters: list[Callable[[], None]] = []
     timed_out_futures: set[concurrent.futures.Future] = set()
     deadline = time.monotonic() + timeout_seconds
+    completed = False
 
     try:
         for node in nodes:
@@ -1364,19 +1368,27 @@ def spawn_batch(
                 raw_results[n.label] = result
                 if observer is not None:
                     observer.on_child_done(parent.label, n.label, result)
+        completed = True
     except (KeyboardInterrupt, TurnCancelled):
         if cancellation_token is not None:
             cancellation_token.cancel()
         raise
     finally:
+        # Workers always have local tokens, even without a parent token.
+        # Stop them on every coordinator failure before detaching callbacks;
+        # waiting here could otherwise conceal Ctrl+C or an observer error.
+        if not completed:
+            for child_token in future_to_token.values():
+                child_token.cancel()
         for unregister in parent_unregisters:
             unregister()
         if (
-            (cancellation_token is not None and cancellation_token.cancelled)
+            not completed
+            or (cancellation_token is not None and cancellation_token.cancelled)
             or timed_out_futures
         ):
             for future in future_to_node:
-                if (
+                if not completed or (
                     cancellation_token is not None
                     and cancellation_token.cancelled
                 ) or future in timed_out_futures:

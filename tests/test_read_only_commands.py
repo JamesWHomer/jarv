@@ -592,6 +592,58 @@ def test_usage_chart_merges_long_daily_runs_into_weeks():
     assert "peak $7.00" in rendered
 
 
+@pytest.mark.parametrize("width", [60, 80, 148])
+@pytest.mark.parametrize(
+    "daily_spend,daily_tokens,peak_label",
+    [(2.0, 10, "$14.00"), (0.0, 900, "6,300")],
+)
+def test_usage_grouped_chart_keeps_axis_and_bars_aligned(width, daily_spend, daily_tokens, peak_label):
+    start = datetime(2026, 1, 1)
+    trend = [
+        usage_view.TrendBucket(
+            start=start + timedelta(days=d),
+            spend_usd=daily_spend,
+            total_tokens=daily_tokens,
+            request_count=1,
+        )
+        for d in range(70)
+    ]
+    chart = usage_command._trend_chart(_trend_view(trend, "day"), width=width)
+    output = io.StringIO()
+    console = Console(file=output, force_terminal=False, color_system=None, width=width)
+    console.print(chart)
+    lines = output.getvalue().splitlines()
+    top = next(line for line in lines if "┤" in line)
+    baseline = next(line for line in lines if "└" in line)
+    axis_column = baseline.index("└")
+
+    assert top.strip().startswith(peak_label)
+    assert top.index("┤") == axis_column
+    for line in lines:
+        if "│" in line:
+            assert line.index("│") == axis_column
+            # Equal weekly totals should form straight, full-height columns.
+            assert line[axis_column + 1:] == top[axis_column + 1:]
+
+
+def test_usage_grouped_chart_reserves_space_for_wider_peak_label():
+    start = datetime(2026, 1, 1)
+    trend = [
+        usage_view.TrendBucket(
+            start=start + timedelta(days=d), spend_usd=2.0, total_tokens=10, request_count=1,
+        )
+        for d in range(497)
+    ]
+    chart = usage_command._trend_chart(_trend_view(trend, "day"), width=80)
+    rendered = _render_read_only_text(chart)
+
+    # 71 weekly columns fit beside the daily label, but not the wider weekly
+    # peak. Regrouping keeps the full history visible within the chart width.
+    assert "Spend per 2 weeks" in rendered
+    assert "peak $28.00" in rendered
+    assert all(len(line.rstrip()) <= 80 for line in rendered.splitlines())
+
+
 def test_usage_chart_falls_back_to_tokens_without_spend():
     trend = [
         usage_view.TrendBucket(start=datetime(2026, 6, 28 + d), spend_usd=0.0, total_tokens=50_000 * (d + 1), request_count=1)

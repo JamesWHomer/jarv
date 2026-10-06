@@ -14,6 +14,17 @@ from .cancellation import CancellationToken
 RETRYABLE_STATUS_CODES = {408, 409, 429, 500, 502, 503, 504, 529}
 
 
+def normalized_token_count(value: Any, *, default: int = 0) -> int:
+    """Keep malformed usage metadata from discarding a valid provider reply."""
+    if isinstance(value, bool):
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return parsed if parsed >= 0 else default
+
+
 class ProviderHTTPError(Exception):
     def __init__(
         self,

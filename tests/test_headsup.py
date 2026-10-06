@@ -913,6 +913,38 @@ class HeadsupTests(unittest.TestCase):
         self.assertTrue(result.get("cancelled"))
         self.assertIn("cancelled", self._entry_text(app))
 
+    def test_child_edit_token_cancels_pending_approval_without_cancelling_parent(self):
+        from jarv.cancellation import CancellationToken
+
+        app, _test_console, _output = self._app()
+        app._foreground_input_active = True
+        parent = app._cancel_token = CancellationToken()
+        child = CancellationToken()
+        request = ConfirmRequest(body=Text("diff"), kind="edit", cancellation_token=child)
+        result = {}
+
+        def confirm():
+            try:
+                app._confirm_safety_request(request)
+            except TurnCancelled:
+                result["cancelled"] = True
+
+        thread = threading.Thread(target=confirm, daemon=True)
+        thread.start()
+        try:
+            self.assertTrue(self._wait_for(lambda: app._answer_request is not None))
+            child.cancel()
+            thread.join(timeout=1.0)
+            self.assertFalse(thread.is_alive())
+            self.assertTrue(result.get("cancelled"))
+            self.assertIsNone(app._answer_request)
+            self.assertFalse(parent.cancelled)
+            self.assertIn("cancelled", self._entry_text(app))
+        finally:
+            if thread.is_alive():
+                app._cancel_answer()
+                thread.join(timeout=1.0)
+
     def test_app_lifecycle_registers_confirm_handler(self):
         app, _test_console, _output = self._app()
         with patch("jarv.headsup.enable_mouse_wheel_reporting"), patch(
@@ -2194,22 +2226,142 @@ class HeadsupTests(unittest.TestCase):
                     app.on_key(key, 3)
                     self.assertEqual(app.scroll_offset, 0)
 
-    def test_streamed_content_preserves_scroll_offset_when_scrolled_up(self):
-        app, _test_console, _output = self._app()
-        # Pretend the user has scrolled up to read earlier history.
-        app.scroll_offset = 4
+    def test_streamed_content_preserves_visible_lines_when_scrolled_up(self):
+        app, test_console, output = self._app(width=80)
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)):
+            index = app.upsert_assistant_message(
+                None, "\n\n".join(f"Response paragraph {n}" for n in range(40))
+            )
+            app.render()
+            app.on_key("PAGEUP", 3)
+            before = self._rendered_text(app, test_console, output, height=24)
+            for end in (42, 50, 70):
+                app.upsert_assistant_message(
+                    index, "\n\n".join(f"Response paragraph {n}" for n in range(end))
+                )
+                self.assertEqual(
+                    self._rendered_text(app, test_console, output, height=24), before
+                )
+            app.add_tool(Text("\n".join(f"Tool output {n}" for n in range(30))))
+            app.add_notice(Text("Retrying response stream..."))
+            self.assertEqual(
+                self._rendered_text(app, test_console, output, height=24), before
+            )
+            app.add_user_message("next question")
+            self.assertEqual(app.scroll_offset, 0)
+            self.assertTrue(app._following_latest)
 
-        # A tool card and streamed assistant deltas must not yank the view back to
-        # the bottom while the user is reading earlier content.
-        app.add_tool(Text("tool output"))
-        self.assertEqual(app.scroll_offset, 4)
-        index = app.upsert_assistant_message(None, "streamed")
-        app.upsert_assistant_message(index, "streamed reply")
-        self.assertEqual(app.scroll_offset, 4)
+    def test_live_tool_invalidation_preserves_reading_position(self):
+        app, test_console, output = self._app(width=80)
+        card = Text("\n".join(f"Live output {n}" for n in range(50)))
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)):
+            app.upsert_live_tool("running", card)
+            app.render()
+            app.on_key("MOUSE_WHEEL_UP", 4)
+            before = self._rendered_text(app, test_console, output, height=24)
+            card.append("\n" + "\n".join(f"Live output {n}" for n in range(50, 80)))
+            app.invalidate_live_tool("running")
+            self.assertEqual(
+                self._rendered_text(app, test_console, output, height=24), before
+            )
+            app.replace_live_tool("running", card.copy().append("\nFinished"))
+            self.assertEqual(
+                self._rendered_text(app, test_console, output, height=24), before
+            )
 
-        # A new turn always jumps back to the bottom so the user follows it.
-        app.add_user_message("next question")
-        self.assertEqual(app.scroll_offset, 0)
+    def test_shrinking_content_does_not_resume_following(self):
+        app, test_console, output = self._app(width=80)
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)):
+            app.add_tool(Text("\n".join(f"History line {n}" for n in range(35))))
+            index = app.upsert_status(None, Text("\n".join(f"Status {n}" for n in range(40))))
+            app.render()
+            app.on_key("PAGEUP", 1)
+            app.upsert_status(index, Text("Complete"))
+            before = self._rendered_text(app, test_console, output, height=24)
+            self.assertEqual(app.scroll_offset, 0)
+            self.assertFalse(app._following_latest)
+            app.add_tool(Text("\n".join(f"New output {n}" for n in range(30))))
+            self.assertEqual(
+                self._rendered_text(app, test_console, output, height=24), before
+            )
+            app.on_key("CTRL_END", 1)
+            after = self._rendered_text(app, test_console, output, height=24)
+            self.assertIn("New output 29", after)
+            self.assertNotIn("Auto-scroll paused", after)
+            app.add_tool(Text("Latest line"))
+            self.assertIn("Latest line", self._rendered_text(app, test_console, output, height=24))
+
+    def test_draft_editing_does_not_resume_following(self):
+        app, _, _ = self._app(width=80)
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)):
+            app.add_tool(Text("\n".join(f"History line {n}" for n in range(50))))
+            app.render()
+            app.on_key("PAGEUP", 2)
+            width, rows = app._transcript_geometry()
+            before, _ = app._transcript_window(width, rows, app.scroll_offset)
+            app.on_key(TextInput("my draft"), 1)
+            app.on_key(TextInput("CTRL_END"), 1)
+            app.on_key("END", 1)
+            app._after_clipboard_paste()
+            app.render()
+            after, _ = app._transcript_window(width, rows, app.scroll_offset)
+            self.assertEqual([line.plain for line in after], [line.plain for line in before])
+            self.assertFalse(app._following_latest)
+            self.assertEqual(app.editor["buffer"], "my draftCTRL_END")
+
+    def test_scrolling_short_transcript_keeps_following(self):
+        app, _, _ = self._app(width=80)
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)):
+            app.add_tool(Text("Short output"))
+            app.render()
+            app.on_key("PAGEUP", 1)
+            self.assertTrue(app._following_latest)
+            self.assertEqual(app.scroll_offset, 0)
+
+    def test_paused_scrolling_keeps_prompt_feedback_and_answer_hints_visible(self):
+        app, _, _ = self._app(width=80)
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)):
+            app.add_tool(Text("History line\n" * 50))
+            app.on_key("PAGEUP", 2)
+            self.assertIn("Ctrl+End jump to latest", app._footer_line(80).plain)
+            app.set_prompt_notice(Text("Nothing to paste on the clipboard."))
+            self.assertIn("Nothing to paste", app._footer_line(80).plain)
+            app._clear_prompt_notice()
+            app._answer_request = {"label": "Answer"}
+            self.assertIn("Enter answer", app._footer_line(80).plain)
+            self.assertFalse(app._following_latest)
+
+    def test_submitting_alias_reveals_confirmation_after_scrolling_up(self):
+        app, test_console, output = self._app(width=80)
+
+        def answer(_label):
+            screen = self._rendered_text(app, test_console, output, height=24)
+            self.assertIn("Did you mean", screen)
+            self.assertIn("1 run command", screen)
+            return "1"
+
+        with (
+            patch("jarv.headsup.terminal_size", return_value=(80, 24)),
+            patch.object(app, "read_answer", side_effect=answer),
+            patch.object(app, "_run_slash") as run_slash,
+        ):
+            app.add_tool(Text("History line\n" * 50))
+            app.on_key("PAGEUP", 3)
+            app.on_key(TextInput("new"), 1)
+            self.assertFalse(app._following_latest)
+            app.on_key("ENTER", 1)
+            run_slash.assert_called_once_with("/new", [])
+            self.assertTrue(app._following_latest)
+
+    def test_scrolled_transcript_keeps_older_entries_lazy(self):
+        app, _, _ = self._app(width=80)
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)):
+            app.add_tool(Text("\n".join(f"History line {n}" for n in range(100))))
+            with patch.object(app.entries[0], "rendered_lines", side_effect=AssertionError("old entry rendered")):
+                app.render()
+                app.on_key("PAGEUP", 2)
+                app.add_tool(Text("More output\n" * 20))
+                app.render()
 
     def test_sgr_mouse_text_fragment_does_not_enter_prompt(self):
         app, _test_console, _output = self._app()

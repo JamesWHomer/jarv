@@ -53,6 +53,25 @@ with storage.transaction(root / "history.json"):
     assert not (tmp_path / ".jarv-transaction.json").exists()
 
 
+def test_invalid_journal_target_does_not_partially_recover(tmp_path):
+    root = tmp_path / "storage"
+    root.mkdir()
+    history = root / "history.json"
+    history.write_text('["original"]', encoding="utf-8")
+    outside = tmp_path / "outside.json"
+    outside.write_text('["outside"]', encoding="utf-8")
+    journal = root / ".jarv-transaction.json"
+    journal.write_text(json.dumps({str(history.resolve()): ["recovered"],
+                                   str(outside.resolve()): None}), encoding="utf-8")
+
+    with pytest.raises(storage.StorageError, match="Invalid transaction target"):
+        load_history(history)
+
+    assert json.loads(history.read_text(encoding="utf-8")) == ["original"]
+    assert json.loads(outside.read_text(encoding="utf-8")) == ["outside"]
+    assert journal.exists()
+
+
 def test_two_processes_merge_independent_metadata(tmp_path):
     script = '''
 import sys

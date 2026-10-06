@@ -1,13 +1,16 @@
 """Undo and redo command handlers."""
 
 from .display import console
-from .storage import transaction, write_json
+from .storage import transaction
+from .session_tree import _frame_id, preserve_redo_branches
 from .history import (
-    load_history,
+    branches_file_for,
+    load_branches,
     load_redo_stack,
     prepare_session_context,
     redo_file_for,
     save_history,
+    save_branches,
     save_redo_stack,
     split_last_exchange,
 )
@@ -40,7 +43,7 @@ def cmd_undo(args: list) -> int | None:
         return 2
     ctx = prepare_session_context()
     with transaction(ctx.history_file):
-        history = load_history(ctx.history_file)
+        history = preserve_redo_branches(ctx.history_file)
         redo_path = redo_file_for(ctx.history_file)
         stack = load_redo_stack(redo_path)
 
@@ -58,6 +61,7 @@ def cmd_undo(args: list) -> int | None:
 
         save_history(history, ctx.history_file)
         save_redo_stack(stack, redo_path)
+        preserve_redo_branches(ctx.history_file)
 
     if len(undone) == 1:
         text = _first_user_text(undone[0])
@@ -78,7 +82,7 @@ def cmd_redo(args: list) -> int | None:
         return 2
     ctx = prepare_session_context()
     with transaction(ctx.history_file):
-        history = load_history(ctx.history_file)
+        history = preserve_redo_branches(ctx.history_file)
         redo_path = redo_file_for(ctx.history_file)
         stack = load_redo_stack(redo_path)
 
@@ -96,6 +100,12 @@ def cmd_redo(args: list) -> int | None:
 
         save_history(history, ctx.history_file)
         save_redo_stack(stack, redo_path)
+        branches_path = branches_file_for(ctx.history_file)
+        branches = load_branches(branches_path)
+        restored_ids = {_frame_id(frame, "") for frame in restored}
+        branches[:] = [record for record in branches
+                       if _frame_id(record["items"], "") not in restored_ids]
+        save_branches(branches, branches_path)
 
     if len(restored) == 1:
         text = _first_user_text(restored[0])

@@ -388,6 +388,8 @@ class InvalidReplyStreakTests(unittest.TestCase):
     def _advance(self, pending, reply):
         renderer = SimpleNamespace(
             tool_calls=[],
+            reasoning_items=[],
+            provider_metadata=None,
             thought_started=time.perf_counter(),
             reply_text=reply,
         )
@@ -480,6 +482,7 @@ class MidInteractionToolCallTests(unittest.TestCase):
         renderer = SimpleNamespace(
             tool_calls=list(tool_calls),
             reasoning_items=[],
+            provider_metadata=None,
             thought_started=time.perf_counter(),
             reply_text="",
         )
@@ -565,6 +568,7 @@ class MidInteractionToolCallTests(unittest.TestCase):
         renderer = SimpleNamespace(
             tool_calls=[],
             reasoning_items=[],
+            provider_metadata=None,
             thought_started=time.perf_counter(),
             reply_text="<WAIT 1s>",
         )
@@ -617,6 +621,7 @@ class HelpRefreshTests(unittest.TestCase):
         renderer = SimpleNamespace(
             tool_calls=[],
             reasoning_items=[],
+            provider_metadata=None,
             thought_started=time.perf_counter(),
             reply_text="<WAIT 1s>",
         )

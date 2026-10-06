@@ -310,6 +310,7 @@ def discover_openrouter_endpoints(
 
 
 def _write_openrouter_endpoints(model: str, endpoints: list[dict]) -> None:
+    temporary = None
     try:
         path = _openrouter_endpoints_path(model)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -318,11 +319,18 @@ def _write_openrouter_endpoints(model: str, endpoints: list[dict]) -> None:
             "fetched_at": time.time(),
             "endpoints": endpoints,
         }
-        temporary = path.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, suffix=".tmp", delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            json.dump(payload, stream, indent=2)
         temporary.replace(path)
     except OSError:
         pass
+    finally:
+        if temporary is not None:
+            with suppress(OSError):
+                temporary.unlink(missing_ok=True)
 
 
 def cached_openrouter_endpoints(model: str | None) -> list[dict[str, Any]]:
@@ -332,7 +340,7 @@ def cached_openrouter_endpoints(model: str | None) -> list[dict[str, Any]]:
         payload = json.loads(
             _openrouter_endpoints_path(str(model)).read_text(encoding="utf-8")
         )
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return []
     if (
         not isinstance(payload, dict)

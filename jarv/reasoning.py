@@ -27,9 +27,11 @@ def _bool(value: Any) -> bool | None:
 
 
 def _positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
     try:
         parsed = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return parsed if parsed > 0 else None
 

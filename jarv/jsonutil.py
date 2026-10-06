@@ -30,6 +30,10 @@ def iter_json_objects(text: str) -> Iterator[object]:
             value, _end = decoder.raw_decode(text, match.start())
         except json.JSONDecodeError:
             continue
+        except (ValueError, RecursionError):
+            # Decoder limits are not stray prose: stop instead of selecting
+            # an inner fragment from an object we could not fully inspect.
+            return
         yield value
 
 
@@ -51,6 +55,8 @@ def salvage_json_object(text: str) -> dict | None:
         whole = json.loads(text.strip())
     except json.JSONDecodeError:
         pass
+    except (ValueError, RecursionError):
+        return None
     else:
         # The text as a whole is valid JSON: a non-object (array, string…) is
         # the model's actual answer — cherry-picking a dict out of it would
@@ -64,6 +70,8 @@ def salvage_json_object(text: str) -> dict | None:
         except json.JSONDecodeError:
             start = text.find("{", start + 1)
             continue
+        except (ValueError, RecursionError):
+            return None
         if not isinstance(value, dict):
             return None
         position = text.find("{", end)
@@ -73,6 +81,8 @@ def salvage_json_object(text: str) -> dict | None:
             except json.JSONDecodeError:
                 position = text.find("{", position + 1)
                 continue
+            except (ValueError, RecursionError):
+                return None
             return None
         return value
     return None

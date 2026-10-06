@@ -74,6 +74,20 @@ def test_lookup_matches_exact_case_and_snapshot_variants(models_dev_catalog):
     ).id == "deepseek-ai/DeepSeek-V4-Pro"
 
 
+def test_lookup_indexes_stay_with_their_catalog_snapshot(monkeypatch):
+    # A background refresh can replace the catalog while another caller still
+    # holds its previous dictionary. Each lookup must use that dictionary's IDs.
+    previous = {"openai": {"models": {"test-model": model_facts()}}}
+    refreshed = {"openai": {"models": {"test_model": model_facts()}}}
+    snapshots = iter([previous, refreshed, previous, refreshed])
+    monkeypatch.setattr(models_dev, "catalog", lambda: next(snapshots))
+    monkeypatch.setattr(models_dev, "_INDEXES", {})
+
+    assert [models_dev.lookup("openai", "test-model").id for _ in range(4)] == [
+        "test-model", "test_model", "test-model", "test_model",
+    ]
+
+
 def test_lookup_puts_the_openrouter_namespace_back_on(models_dev_catalog):
     models_dev_catalog({
         "openrouter": {"openai/gpt-5.5": model_facts(cost={"input": 5, "output": 30})},
@@ -266,6 +280,34 @@ def test_refresh_revalidates_with_the_stored_etag(tmp_path, monkeypatch, models_
     assert models_dev.refresh({}) is True
     assert seen == ['"cached"']
     assert models_dev.prices("openai", "gpt-5.5")["input"] == 9
+
+
+def test_refresh_does_not_reuse_another_catalog_sources_etag(monkeypatch, models_dev_catalog):
+    models_dev_catalog({"openai": {"old-model": model_facts()}})
+    models_dev.CACHE_PATH.write_text(json.dumps({
+        "source": "https://old-catalog.test/api.json", "etag": '"same-tag"',
+        "providers": {"openai": {"models": {"old-model": model_facts()}}},
+    }), encoding="utf-8")
+    requested = []
+
+    def handler(request):
+        requested.append(request.headers.get("If-None-Match"))
+        if request.headers.get("If-None-Match"):
+            return httpx.Response(304)
+        return httpx.Response(200, json={
+            "openai": {"models": {"new-model": model_facts()}},
+        })
+
+    _mock_httpx(monkeypatch, handler)
+    assert models_dev.refresh({"models_dev_url": "https://new-catalog.test/api.json"})
+    assert requested == [None]
+    assert models_dev.lookup("openai", "new-model") is not None
+
+
+def test_refresh_does_not_accept_not_modified_without_cached_version(monkeypatch, models_dev_catalog):
+    models_dev_catalog({"openai": {"test-model": model_facts()}})
+    _mock_httpx(monkeypatch, lambda _request: httpx.Response(304))
+    assert models_dev.refresh({}) is False
 
 
 @pytest.mark.parametrize("failure", [httpx.ConnectError("offline"), httpx.Response(500)])

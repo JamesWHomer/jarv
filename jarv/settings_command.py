@@ -295,11 +295,15 @@ def _settings_reset_row(row: dict, config: dict) -> tuple[dict, str]:
         return original, f"{row['label']} has no default"
     config[key] = _settings_reset_value(row, config)
     from .provider_catalog import reconcile_service_tier
+    from .reasoning import reconcile_reasoning_effort
 
+    reset_effort = reconcile_reasoning_effort(config) if key in ("model", "provider") else None
     reset_tier = reconcile_service_tier(config) if key in ("model", "provider", "base_url") else None
     if not _settings_save_validated(original, config):
         return original, "config validation failed"
     message = f"reset {row['label']}"
+    if reset_effort is not None:
+        message += " (reasoning effort reset to default)"
     if reset_tier is not None:
         message += " (processing tier reset to standard)"
     return original, message
@@ -446,6 +450,8 @@ def _settings_edit_is_dirty(edit: dict | None, config: dict) -> bool:
 
     row = edit["row"]
     key = row["key"]
+    if key == "api_key" and edit.get("cleared"):
+        return True
     if key == "provider":
         return edit.get("selected_provider") != edit.get(
             "original_selected_provider",

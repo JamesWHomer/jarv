@@ -1,6 +1,7 @@
 from .storage import read_json, write_json, transaction, StorageError
 from contextlib import nullcontext
 import json
+import math
 from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Lock
@@ -26,7 +27,14 @@ def _token_count(_model: str, text: str) -> int:
 
 def estimate_item_tokens(model: str, item: dict) -> int:
     """Estimate tokens for one API input item using the len//4 heuristic."""
-    return _token_count(model, _item_text(item))
+    return _token_count(model, _item_text(item)) + _token_count(model, _item_reasoning_text(item))
+
+
+def _item_reasoning_text(item: dict) -> str:
+    metadata = item.get("provider_metadata")
+    if isinstance(metadata, dict) and isinstance(metadata.get("reasoning_content"), str):
+        return metadata["reasoning_content"]
+    return ""
 
 
 def _item_text(item: dict) -> str:
@@ -74,6 +82,7 @@ def estimate_context_breakdown(
             role = item.get("role")
             typ = item.get("type")
             count = count_tokens(model, _item_text(item))
+            reasoning_tokens += count_tokens(model, _item_reasoning_text(item))
             if role in ("user", "assistant"):
                 history_tokens += count
             elif typ in ("function_call", "function_call_output"):
@@ -199,22 +208,24 @@ def _value(obj: Any, key: str) -> Any:
 
 def _int_value(obj: Any, key: str) -> int | None:
     value = _value(obj, key)
-    if value is None:
+    if value is None or isinstance(value, bool):
         return None
     try:
-        return int(value)
-    except (TypeError, ValueError):
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
         return None
+    return parsed if parsed >= 0 else None
 
 
 def _float_value(obj: Any, key: str) -> float | None:
     value = _value(obj, key)
-    if value is None:
+    if value is None or isinstance(value, bool):
         return None
     try:
-        return float(value)
-    except (TypeError, ValueError):
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
         return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def _first_present(*values: Any) -> Any:
@@ -516,9 +527,9 @@ def _context_window_from_catalog(model: str, config: dict) -> int | None:
             continue
         metadata = catalog_model.metadata if isinstance(catalog_model.metadata, dict) else {}
         for key in ("context_length", "inputTokenLimit", "max_input_tokens"):
-            value = metadata.get(key)
-            if isinstance(value, (int, float)) and value > 0:
-                return int(value)
+            value = _int_value(metadata, key)
+            if value is not None and value > 0:
+                return value
     return None
 
 

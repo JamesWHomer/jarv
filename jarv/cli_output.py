@@ -7,6 +7,8 @@ import json
 import sys
 import threading
 
+from .terminal_text import safe_terminal_text
+
 
 class DiagnosticStream:
     def __init__(self, stream):
@@ -69,7 +71,7 @@ class CliOutput:
         self.config = config
         self.event("start", provider=config.get("provider"), model=config.get("model"))
         if self.verbose:
-            print(f"Provider: {config.get('provider')}; model: {config.get('model')}", file=self.stderr)
+            print(safe_terminal_text(f"Provider: {config.get('provider')}; model: {config.get('model')}"), file=self.stderr)
 
     def show_tool_card(self, card):
         if not self.quiet:
@@ -95,13 +97,13 @@ class CliOutput:
             return
         self.finished = True
         if self.verbose:
-            print(f"Session: {session_id or '-'}; agent turns: {turns}; status: {status}", file=self.stderr)
+            print(safe_terminal_text(f"Session: {session_id or '-'}; agent turns: {turns}; status: {status}"), file=self.stderr)
         value = dict(type="result", status=status, text=text, error=error,
                      session_id=session_id, turns=turns, exit_code=exit_code)
         if self.format in ("json", "jsonl"):
             self._json(value)
         elif text:
-            self.stdout.write(text + ("" if text.endswith("\n") else "\n"))
+            self.stdout.write(safe_terminal_text(text) + ("" if text.endswith("\n") else "\n"))
             self.stdout.flush()
         if error:
-            print(error, file=self.stderr)
+            print(safe_terminal_text(error), file=self.stderr)

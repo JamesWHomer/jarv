@@ -602,6 +602,111 @@ def test_edit_cancelled_after_staging_cleans_up(workdir, monkeypatch):
     assert list(workdir.iterdir()) == [target]
 
 
+def test_edit_approval_lock_wait_is_cancellable(workdir, monkeypatch):
+    from jarv.cancellation import CancellationToken, TurnCancelled
+
+    target = workdir / "file.txt"
+    target.write_bytes(b"alpha\n")
+    token = CancellationToken()
+    waiting = threading.Event()
+    held_lock = threading.Lock()
+
+    class ObservedLock:
+        def acquire(self, timeout):
+            waiting.set()
+            return held_lock.acquire(timeout=timeout)
+
+        def release(self):
+            held_lock.release()
+
+    monkeypatch.setattr(edit_tool, "approval_lock", lambda: ObservedLock())
+    monkeypatch.setattr(edit_tool, "prompt_panel_confirmation", lambda *a, **k: pytest.fail("cancelled edit prompted"))
+    config = {**DEFAULT_CONFIG, "command_safety": "all"}
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with held_lock:
+            pending = pool.submit(dispatch_edit_tool, _args(target), config=config, cancellation_token=token)
+            assert waiting.wait(1)
+            token.cancel()
+            with pytest.raises(TurnCancelled):
+                pending.result(timeout=1)
+    assert target.read_bytes() == b"alpha\n"
+    assert held_lock.acquire(blocking=False)
+    held_lock.release()
+
+
+@pytest.mark.parametrize("explicit_child", [False, True])
+@pytest.mark.parametrize("approved", [False, True])
+def test_edit_approval_uses_token_without_deadline_and_checks_after_prompt(
+    workdir, monkeypatch, explicit_child, approved,
+):
+    from types import SimpleNamespace
+    from jarv.cancellation import CancellationToken, TurnCancelled
+
+    target = workdir / "file.txt"
+    target.write_bytes(b"alpha\n")
+    parent = CancellationToken()
+    child = CancellationToken() if explicit_child else None
+    expected = child or parent
+    config = {**DEFAULT_CONFIG, "command_safety": "all",
+              "_run_control": SimpleNamespace(token=parent, deadline=None)}
+
+    def prompt(*args, **kwargs):
+        assert kwargs["cancellation_token"] is expected
+        expected.cancel()
+        return approved
+
+    monkeypatch.setattr(edit_tool, "prompt_panel_confirmation", prompt)
+    with pytest.raises(TurnCancelled):
+        dispatch_edit_tool(_args(target), config=config, cancellation_token=child)
+    assert target.read_bytes() == b"alpha\n"
+    assert edit_tool.approval_lock().acquire(blocking=False)
+    edit_tool.approval_lock().release()
+    if explicit_child:
+        assert not parent.cancelled
+
+
+@pytest.mark.parametrize("control", ["\r", "\x85", "\x0b", "\x0c"])
+def test_edit_diff_keeps_controls_visible_when_replacing_with_newline(workdir, monkeypatch, control):
+    import io
+    from rich.console import Console
+    from jarv.terminal_text import safe_terminal_text
+
+    target = workdir / "file.txt"
+    original = f"before{control}after"
+    target.write_bytes(original.encode("utf-8"))
+    captured = io.StringIO()
+
+    def deny(body, **kwargs):
+        Console(file=captured, color_system=None, width=120).print(body)
+        return False
+
+    monkeypatch.setattr(edit_tool, "prompt_panel_confirmation", deny)
+    output = dispatch_edit_tool(
+        _args(target, old=original, new="before\nafter"),
+        config={**DEFAULT_CONFIG, "command_safety": "all"},
+    )
+    shown = captured.getvalue()
+    assert "[edit denied" in output
+    assert f"-before{safe_terminal_text(control)}after" in shown
+    assert "+before" in shown and "+after" in shown
+    assert target.read_bytes() == original.encode("utf-8")
+
+
+def test_edit_diff_escapes_standalone_trailing_cr_before_adding_row_separator():
+    diff = edit_tool.build_edit_diff("before\r", "after", "file.txt")
+    assert "-before\\r\n+after" in diff
+    # Actual CR and the literal two-character escape remain distinct for the
+    # comparison even though their visible representations are identical.
+    assert edit_tool.build_edit_diff("before\r", "before\\r", "file.txt")
+
+
+def test_edit_diff_preserves_regular_crlf_and_empty_file_behavior():
+    assert edit_tool.build_edit_diff("before\r\n", "after\r\n", "file.txt") == (
+        "--- file.txt\n+++ file.txt\n@@ -1 +1 @@\n-before\n+after"
+    )
+    assert "@@ -0,0 +1 @@" in edit_tool.build_edit_diff("", "after\n", "file.txt")
+
+
 # ── Orchestrator integration ──────────────────────────────────────────────
 
 def _root_node():

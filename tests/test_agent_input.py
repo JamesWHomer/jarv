@@ -633,7 +633,11 @@ class AgentInputTests(unittest.TestCase):
             item for item in saved if item.get("type") != "status"
         ]
         status_items = [item for item in saved if item.get("type") == "status"]
-        self.assertEqual(conversation_items[:2], existing)
+        self.assertEqual(
+            [{key: value for key, value in item.items() if key != "id"}
+             for item in conversation_items[:2]],
+            existing,
+        )
         self.assertEqual(conversation_items[2]["content"], "edit this prompt")
         self.assertEqual(conversation_items[3]["content"], "partial")
         self.assertEqual(conversation_items[4]["content"], "[Turn cancelled by user.]")

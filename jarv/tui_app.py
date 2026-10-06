@@ -221,32 +221,35 @@ class AltScreenApp:
         self._running = True
         self._dirty = True
         self._loop_thread = threading.current_thread()
-        self._last_size = self._terminal_size_fn(console=self.console)
-
-        disable_mouse_capture()
-        with self._screen_context():
-            self.on_start()
-            if self._running:
-                # Paint the initial frame before blocking on input, so the view
-                # appears immediately (and first-paint latency is measured here).
-                if self._paint():
-                    self._dirty = False
-            try:
-                while self._running:
-                    try:
-                        progressed = self._pump()
-                        self.on_tick()
-                        if self._dirty and self._running:
-                            if self._paint():
-                                self._dirty = False
-                        if self._running and not progressed:
-                            self._idle_wait()
-                    except KeyboardInterrupt:
-                        self._handle_keyboard_interrupt()
-            finally:
-                self._running = False
-                self.on_stop()
-                self.live = None
+        try:
+            self._last_size = self._terminal_size_fn(console=self.console)
+            disable_mouse_capture()
+            with self._screen_context():
+                try:
+                    self.on_start()
+                    if self._running:
+                        # Paint before blocking on input so the view appears
+                        # immediately; startup failures still run cleanup.
+                        if self._paint():
+                            self._dirty = False
+                    while self._running:
+                        try:
+                            progressed = self._pump()
+                            self.on_tick()
+                            if self._dirty and self._running:
+                                if self._paint():
+                                    self._dirty = False
+                            if self._running and not progressed:
+                                self._idle_wait()
+                        except KeyboardInterrupt:
+                            self._handle_keyboard_interrupt()
+                finally:
+                    self._running = False
+                    self.on_stop()
+        finally:
+            self._running = False
+            self.live = None
+            self._loop_thread = None
         return self.result
 
     def _pump(self) -> bool:

@@ -10,9 +10,10 @@ from .history import (
     artifact_file_for,
     branches_file_for,
     history_file_for_session,
-    load_history,
+    load_branches,
     reads_file_for,
     redo_file_for,
+    save_history,
     utc_now,
     isoformat_utc,
 )
@@ -67,8 +68,15 @@ def archive_session_files(history_path: Path) -> Path | None:
 
     Returns the new archived history path, or None if nothing was archived.
     """
-    if not history_path.exists() or not load_history(history_path):
+    from .session_tree import preserve_redo_branches
+
+    history = preserve_redo_branches(history_path)
+    branches_path = branches_file_for(history_path)
+    branches = load_branches(branches_path)
+    if not history and not branches:
         return None
+    if not history_path.exists():
+        save_history(history, history_path)
     ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
     cleared_at = utc_now().strftime("%Y%m%dT%H%M%SZ")
     stem_suffix = history_path.stem[len("history"):]
@@ -87,8 +95,9 @@ def archive_session_files(history_path: Path) -> Path | None:
     if usage_path.exists():
         _move(usage_path, ARCHIVE_DIR / f"usage-{cleared_at}{stem_suffix}.json")
 
-    branches_path = branches_file_for(history_path)
-    if branches_path.exists():
+    # Normalizing legacy redo can have staged a new sidecar that is not yet
+    # visible through Path.exists(); it must move in this same transaction.
+    if branches or branches_path.exists():
         _move(branches_path, ARCHIVE_DIR / f"branches-{cleared_at}{stem_suffix}.json")
 
     redo_path = redo_file_for(history_path)
@@ -118,6 +127,9 @@ def unarchive_session_files(archived_history_path: Path, session_id: str) -> Pat
 @_coordinated
 def delete_session_files(history_path: Path) -> None:
     """Permanently remove history and sidecars for a session."""
+    from .session_titles import forget_session_title
+
+    forget_session_title(history_path)
     for path in (
         history_path,
         artifact_file_for(history_path),

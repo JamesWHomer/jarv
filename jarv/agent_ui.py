@@ -14,6 +14,8 @@ from rich.live_render import LiveRender
 from rich.segment import Segment
 from rich.text import Text
 
+from .terminal_text import safe_terminal_text
+
 from .cancellation import CancellationToken, TurnCancelled
 from .command_input import read_editable_line
 from .config import DEFAULT_CONFIG, get_setting
@@ -395,7 +397,7 @@ class TailMarkdown:
         content_budget = max(0, max_lines - 1)
         from rich.markdown import Markdown
 
-        md = Markdown(self._text)
+        md = Markdown(safe_terminal_text(self._text))
         lines = console.render_lines(md, options, pad=False)
         hidden = max(0, len(lines) - content_budget)
         if hidden:
@@ -696,7 +698,7 @@ def _dispatch_ask_user(args: dict, config: dict | None = None, ui=None) -> str:
             display_mode = "print"
         from rich.markdown import Markdown
 
-        question_renderable = Markdown(flatten_headings(question))
+        question_renderable = Markdown(flatten_headings(safe_terminal_text(question)))
         if display_mode == "print":
             console.print(
                 tool_card(
@@ -738,7 +740,7 @@ def _dispatch_ask_user(args: dict, config: dict | None = None, ui=None) -> str:
                 console.print()
         if display_mode == "fullscreen":
             answer_line = Text("> ", style="bold cyan")
-            answer_line.append(answer, style="bright_white")
+            answer_line.append(safe_terminal_text(answer), style="bright_white")
             _replace_terminal_rows(waiting_height + 1)
             console.print(
                 tool_card(
@@ -838,15 +840,15 @@ def _dispatch_spawn_with_ui(
                 line.append(indent)
                 if status == "running":
                     line.append(f" {frame} ", style="yellow")
-                    line.append(lbl, style="bold")
+                    line.append(safe_terminal_text(lbl), style="bold")
                 elif status == "done":
                     line.append(" ✓ ", style="bold green")
-                    line.append(lbl, style="bold cyan")
-                    line.append(f"  {state.get('tldr', '')}", style="dim")
+                    line.append(safe_terminal_text(lbl), style="bold cyan")
+                    line.append(safe_terminal_text(f"  {state.get('tldr', '')}"), style="dim")
                 else:
                     line.append(" ✗ ", style="bold red")
-                    line.append(lbl, style="bold cyan")
-                    line.append(f"  {state.get('reason', '')}", style="dim red")
+                    line.append(safe_terminal_text(lbl), style="bold cyan")
+                    line.append(safe_terminal_text(f"  {state.get('reason', '')}"), style="dim red")
                 lines.append(line)
             total = len(snap)
             done = sum(1 for s in snap.values() if s["status"] != "running")
@@ -908,7 +910,7 @@ def _dispatch_spawn_with_ui(
             live.update(SpawnPanel())
             raise
         if output.startswith("[error:") or output.startswith("[tool argument error:"):
-            live.update(Text(output, style="red"))
+            live.update(Text(safe_terminal_text(output), style="red"))
             return output
         live.update(SpawnPanel())
 

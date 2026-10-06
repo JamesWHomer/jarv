@@ -96,12 +96,16 @@ def test_transcript_viewport_matches_full_render_through_scroll_and_changes(widt
         for rows in (1, 6, 28, 200):
             full = app._transcript_lines(width)
             for offset in (-10, 0, 1, 15, len(full) - rows, len(full) + 100):
+                # Each probe is independent navigation, not another streaming
+                # paint at the previous probe's saved reading anchor.
+                app._follow_latest()
                 expected, expected_offset = window_transcript(full, rows, offset)
                 actual, actual_offset = app._transcript_window(width, rows, offset)
                 assert actual == expected
                 assert actual_offset == expected_offset
     app.entries = []
     app._notice = None
+    app._follow_latest()
     assert app._transcript_window(width, 6, 100) == ([Text("")], 0)
 
 

@@ -6,6 +6,7 @@ import importlib
 import sys
 
 from .display import console
+from .terminal_text import safe_terminal_text
 from .tui_panel import menu_inner_width
 from .history import (
     forget_current_session,
@@ -123,7 +124,7 @@ def cmd_history() -> None:
                 line.append("▌ ", style="bold cyan")
                 line.append("You", style="bold cyan")
                 parts.append(line)
-                parts.append(Text(f"  {m.get('content', '')}"))
+                parts.append(Text(safe_terminal_text(f"  {m.get('content', '')}")))
                 parts.append(Text(""))
             elif role == "assistant":
                 content = m.get("content", "")

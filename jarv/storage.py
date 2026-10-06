@@ -107,10 +107,14 @@ def _read(path, default):
 def _replay(root, changes):
     if not isinstance(changes, dict):
         raise StorageError(f"Invalid transaction journal in {root}")
+    targets = []
     for name, value in changes.items():
         target = Path(name).resolve()
         if not target.is_relative_to(root) or target == root:
             raise StorageError(f"Invalid transaction target: {target}")
+        targets.append((target, value))
+    # Reject a corrupt journal before changing any of its otherwise valid files.
+    for target, value in targets:
         target.parent.mkdir(parents=True, exist_ok=True)
         if value is None:
             target.unlink(missing_ok=True)

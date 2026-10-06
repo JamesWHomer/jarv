@@ -20,6 +20,8 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.text import Text
 
+from .terminal_text import safe_terminal_text
+
 from .cancellation import CancellationToken, TurnCancelled
 from .client_lifecycle import close_client
 from .clipboard import copy_to_clipboard, read_clipboard_image, read_clipboard_text
@@ -247,7 +249,7 @@ class _UserMessage:
         # Preserve reading room on small terminals, while leaving a clear
         # left gutter on wider screens to distinguish prompts from replies.
         maximum = max(1, available - 2 if available < 60 else available * 4 // 5)
-        content = Text(self.content, style="bright_white", overflow="fold")
+        content = Text(safe_terminal_text(self.content), style="bright_white", overflow="fold")
         natural = max((line.cell_len for line in content.split("\n")), default=0) + 4
         width = min(maximum, max(9, natural))
         if width < 5:
@@ -523,7 +525,7 @@ class HeadsupAgentUI:
     def ask_user(self, question: str, _config: dict) -> str:
         from rich.markdown import Markdown
 
-        question_renderable = Markdown(flatten_headings(question))
+        question_renderable = Markdown(flatten_headings(safe_terminal_text(question)))
         self.app.upsert_live_tool(
             "ask_user",
             tool_card(
@@ -643,7 +645,7 @@ class SafetyConfirmCard:
         if state is None:
             return None
         if state.get("done"):
-            reason = escape(str(state.get("reason", "")))
+            reason = escape(safe_terminal_text(str(state.get("reason", ""))))
             if state.get("allow"):
                 return Text.from_markup(
                     f"[green]✓  auditor[/green]  [dim]{reason}[/dim]"
@@ -824,6 +826,10 @@ class HeadsupApp(AltScreenApp):
         initialize_text_editor(self.editor, "")
         self._pastes = PasteRegistry()
         self.scroll_offset = 0
+        self._following_latest = True
+        # Entry index (None for the notice slot), then visual row within it.
+        # Unlike a distance from the bottom, this survives streamed tail growth.
+        self._scroll_anchor: tuple[int | None, int] | None = None
         self.lock = threading.RLock()
         self._exit_armed = False
         self._cancel_token: CancellationToken | None = None
@@ -892,6 +898,7 @@ class HeadsupApp(AltScreenApp):
             batch_text=True,
             repeatable=_HEADSUP_REPEATABLE_KEYS,
             translate_mouse_wheel=False,
+            preserve_ctrl_end=True,
         )
 
     def _headsup_key_available(self) -> bool:
@@ -1004,6 +1011,10 @@ class HeadsupApp(AltScreenApp):
         if key == "CTRL_O":
             self._toggle_tool_expansion()
             return
+        if key == "CTRL_END" and not isinstance(key, TextInput):
+            with self.lock:
+                self._follow_latest()
+            return
         if key in {"SHIFT_PAGEUP", "SHIFT_PAGEDOWN"}:
             self._jump_to_user_message(backward=key == "SHIFT_PAGEUP", repeat=repeat)
             return
@@ -1035,7 +1046,6 @@ class HeadsupApp(AltScreenApp):
             and not self._prompt_has_multiline_draft()
         ):
             if self._navigate_prompt_history(key, repeat):
-                self.scroll_offset = 0
                 self._clear_prompt_notice()
                 self._exit_armed = False
             return
@@ -1043,7 +1053,6 @@ class HeadsupApp(AltScreenApp):
         if changed or user_text:
             if self._answer_request is None:
                 self._reset_prompt_history_navigation()
-            self.scroll_offset = 0
             self._clear_prompt_notice()
             self._exit_armed = False
             # Re-typing always re-highlights the top match and reopens a
@@ -1271,7 +1280,7 @@ class HeadsupApp(AltScreenApp):
         with self.lock:
             # A new turn always jumps back to the bottom so the user sees their
             # message and the streamed response, even if they had scrolled up.
-            self.scroll_offset = 0
+            self._follow_latest()
             self._notice = None
         self._append(
             "user",
@@ -1288,7 +1297,7 @@ class HeadsupApp(AltScreenApp):
         return self._upsert(
             index,
             "assistant",
-            Markdown(flatten_headings(text or " ")),
+            Markdown(flatten_headings(safe_terminal_text(text or " "))),
         )
 
     def add_usage(self, renderable: RenderableType) -> None:
@@ -1320,7 +1329,8 @@ class HeadsupApp(AltScreenApp):
     def add_notice(self, renderable: RenderableType) -> None:
         """Replace the current feedback without adding conversation entries."""
         with self.lock:
-            self.scroll_offset = 0
+            if self._idle_animation_active():
+                self._follow_latest()
             self._notice = TranscriptEntry("notice", renderable, spacer_before=True)
         self.refresh()
 
@@ -1345,19 +1355,22 @@ class HeadsupApp(AltScreenApp):
             self._prompt_notice_expires_at = None
         self.refresh()
 
-    def read_answer(self, label: str, *, echo_answer: bool = True) -> str:
+    def read_answer(self, label: str, *, echo_answer: bool = True,
+                    cancellation_token: CancellationToken | None = None) -> str:
         # Normal heads-up turns run on a worker thread while the loop owns the
         # screen, so the answer is collected by the loop (resize and repaint keep
         # working). _read_answer_direct is the defensive fallback for the
         # degenerate case where read_answer is invoked on the loop thread itself
         # (routing that to the foreground path would deadlock the loop).
+        token_args = {"cancellation_token": cancellation_token} if cancellation_token is not None else {}
         if self._foreground_input_active:
             if self._foreground_input_thread is threading.current_thread():
-                return self._read_answer_direct(label, echo_answer=echo_answer)
-            return self._read_answer_from_foreground(label, echo_answer=echo_answer)
-        return self._read_answer_direct(label, echo_answer=echo_answer)
+                return self._read_answer_direct(label, echo_answer=echo_answer, **token_args)
+            return self._read_answer_from_foreground(label, echo_answer=echo_answer, **token_args)
+        return self._read_answer_direct(label, echo_answer=echo_answer, **token_args)
 
-    def _read_answer_direct(self, label: str, *, echo_answer: bool = True) -> str:
+    def _read_answer_direct(self, label: str, *, echo_answer: bool = True,
+                            cancellation_token: CancellationToken | None = None) -> str:
         previous = dict(self.editor)
         initialize_text_editor(self.editor, "")
         with self.lock:
@@ -1370,8 +1383,13 @@ class HeadsupApp(AltScreenApp):
             }
         try:
             while True:
+                if cancellation_token is not None:
+                    cancellation_token.throw_if_cancelled()
                 # This nested modal read blocks the main loop, so paint in place.
                 self.paint_now()
+                if cancellation_token is not None and not _key_available():
+                    time.sleep(0.05)
+                    continue
                 try:
                     key, repeat = _read_key_with_repeats(
                         text_mode=True,
@@ -1382,7 +1400,7 @@ class HeadsupApp(AltScreenApp):
                 if key == "ENTER":
                     answer = str(self.editor.get("buffer", "")).strip()
                     if echo_answer:
-                        self.add_notice(Text(f"{label}{answer}", style="dim"))
+                        self.add_notice(Text(safe_terminal_text(f"{label}{answer}"), style="dim"))
                     return answer
                 if key == "ESC":
                     if self._cancel_token is not None:
@@ -1431,8 +1449,12 @@ class HeadsupApp(AltScreenApp):
                     approved = True
                     return True
             answer = self.read_answer(
-                f"{request.question} [y/N] > ", echo_answer=False
+                f"{request.question} [y/N] > ", echo_answer=False,
+                **({"cancellation_token": request.cancellation_token}
+                   if request.cancellation_token is not None else {}),
             )
+            if request.cancellation_token is not None:
+                request.cancellation_token.throw_if_cancelled()
             approved = answer.strip().lower() in ("y", "yes")
             return approved
         except (KeyboardInterrupt, TurnCancelled):
@@ -1533,7 +1555,6 @@ class HeadsupApp(AltScreenApp):
     def _after_clipboard_paste(self) -> None:
         """The same draft-changed bookkeeping on_key does after an editor key."""
         self._reset_prompt_history_navigation()
-        self.scroll_offset = 0
         self._clear_prompt_notice()
         self._exit_armed = False
         self._slash_menu_index = 0
@@ -1659,6 +1680,8 @@ class HeadsupApp(AltScreenApp):
             return None
         if query.lower() in {"exit", "quit"}:
             return "exit"
+        with self.lock:
+            self._follow_latest()
         if "\n" in query:
             self._run_agent_query(query)
             return None
@@ -1712,6 +1735,8 @@ class HeadsupApp(AltScreenApp):
 
     def _run_slash(self, command: str, rest: list[str]) -> str | None:
         """Run one slash command; returns "exit" when heads-up must stop."""
+        with self.lock:
+            self._follow_latest()
         meta = COMMANDS.get(command.lstrip("/"))
         if meta is not None and rest and not meta.takes_rest:
             self.add_notice(Text(f"{command} does not accept arguments.", style="red"))
@@ -1871,11 +1896,10 @@ class HeadsupApp(AltScreenApp):
         ):
             return  # leave an incomplete aside in place; the user can /tree it
         from . import session_tree
-        from .history import branches_file_for, load_branches, load_history
-        from .session_tree import build_tree
+        from .session_tree import load_session_tree
 
         history_file = self.session_context.history_file
-        model = build_tree(load_history(history_file), load_branches(branches_file_for(history_file)))
+        model = load_session_tree(history_file)
         active = model.active_path
         if len(active) < 2:
             return  # the aside is the only exchange — nothing to return to
@@ -2078,7 +2102,8 @@ class HeadsupApp(AltScreenApp):
                 return
             thread.join(timeout=remaining)
 
-    def _read_answer_from_foreground(self, label: str, *, echo_answer: bool = True) -> str:
+    def _read_answer_from_foreground(self, label: str, *, echo_answer: bool = True,
+                                    cancellation_token: CancellationToken | None = None) -> str:
         previous = dict(self.editor)
         with self._answer_condition:
             initialize_text_editor(self.editor, "")
@@ -2094,8 +2119,14 @@ class HeadsupApp(AltScreenApp):
 
         with self._answer_condition:
             while self._answer_request is not None:
-                self._answer_condition.wait()
+                if cancellation_token is not None and cancellation_token.cancelled:
+                    # A child's approval token must not cancel the parent run.
+                    self._cancel_answer(cancel_turn=False)
+                    raise TurnCancelled
+                self._answer_condition.wait(timeout=0.05 if cancellation_token is not None else None)
             request = self._answer_request_completed
+        if cancellation_token is not None:
+            cancellation_token.throw_if_cancelled()
         if request.get("cancelled"):
             raise TurnCancelled
         return str(request.get("answer") or "")
@@ -2108,7 +2139,7 @@ class HeadsupApp(AltScreenApp):
                 return
             if request.get("echo_answer", True):
                 label = request.get("label", "answer> ")
-                self.add_notice(Text(f"{label}{answer}", style="dim"))
+                self.add_notice(Text(safe_terminal_text(f"{label}{answer}"), style="dim"))
             previous = dict(request.get("previous") or {})
             if previous:
                 self.editor = previous
@@ -2121,7 +2152,7 @@ class HeadsupApp(AltScreenApp):
             self._answer_condition.notify_all()
         self.refresh()
 
-    def _cancel_answer(self) -> None:
+    def _cancel_answer(self, *, cancel_turn: bool = True) -> None:
         with self._answer_condition:
             request = self._answer_request
             if request is None:
@@ -2132,7 +2163,7 @@ class HeadsupApp(AltScreenApp):
             else:
                 initialize_text_editor(self.editor, "")
             token = self._cancel_token
-            if token is not None:
+            if cancel_turn and token is not None:
                 token.cancel()
             request["cancelled"] = True
             self._answer_request_completed = request
@@ -2254,7 +2285,7 @@ class HeadsupApp(AltScreenApp):
             self.entries = entries
             self._notice = None
             self._live_tool_index.clear()
-            self.scroll_offset = 0
+            self._follow_latest()
             self._prompt_history = self._history_user_messages(history)
             self._reset_prompt_history_navigation()
             self._outro_started_at = 0.0
@@ -2571,8 +2602,40 @@ class HeadsupApp(AltScreenApp):
                 return line
         return Text("")
 
+    def _follow_latest(self) -> None:
+        self.scroll_offset = 0
+        self._following_latest = True
+        self._scroll_anchor = None
+
+    def _transcript_geometry(self) -> tuple[int, int]:
+        term_w, term_h = terminal_size(console=self.console)
+        layout = compute_layout(
+            term_w, term_h, border=get_setting(self.config, "headsup_border")
+        )
+        menu_open = bool(self._slash_menu_box(layout.inner_width, layout))
+        prompt_lines = self._prompt_lines(
+            layout.inner_width, max_lines=layout.max_prompt_rows, menu_open=menu_open
+        )
+        return layout.inner_width, _transcript_rows_for(
+            layout.body_height, len(prompt_lines) + int(menu_open)
+        )
+
     def _scroll_transcript(self, delta: int) -> None:
-        self.scroll_offset = max(0, self.scroll_offset + delta)
+        with self.lock:
+            if self._idle_animation_active():
+                # The welcome screen has its own small notice viewport.
+                self.scroll_offset = max(0, self.scroll_offset + delta)
+                return
+            was_following = self._following_latest
+            width, rows = self._transcript_geometry()
+            # Resolve any output received since the last paint before moving.
+            _, current = self._transcript_window(width, rows, self.scroll_offset)
+            self.scroll_offset = max(0, current + delta)
+            self._scroll_anchor = None
+            self._following_latest = self.scroll_offset == 0
+            _, self.scroll_offset = self._transcript_window(width, rows, self.scroll_offset)
+            if self.scroll_offset == 0 and (delta < 0 or was_following):
+                self._follow_latest()
 
     def _jump_to_user_message(self, *, backward: bool, repeat: int) -> None:
         """Align the nearest sent prompt in the requested direction to the top."""
@@ -2587,6 +2650,9 @@ class HeadsupApp(AltScreenApp):
             )
             rows = _transcript_rows_for(
                 layout.body_height, len(prompt_lines) + int(menu_open)
+            )
+            _, self.scroll_offset = self._transcript_window(
+                layout.inner_width, rows, self.scroll_offset
             )
             counts = self._entry_line_counts(layout.inner_width)
             total = sum(counts)
@@ -2609,6 +2675,9 @@ class HeadsupApp(AltScreenApp):
                 candidates[min(max(1, repeat), len(candidates)) - 1]
                 if candidates else current
             )
+            self._following_latest = self.scroll_offset == 0
+            self._scroll_anchor = None
+            self._transcript_window(layout.inner_width, rows, self.scroll_offset)
 
     def _entry_line_counts(self, width: int) -> list[int]:
         """Per-entry visual line counts, mirroring ``_transcript_lines`` exactly
@@ -2635,6 +2704,8 @@ class HeadsupApp(AltScreenApp):
             term_w, term_h, border=get_setting(self.config, "headsup_border")
         ).inner_width
         with self.lock:
+            _, rows = self._transcript_geometry()
+            _, self.scroll_offset = self._transcript_window(width, rows, self.scroll_offset)
             target = not self.tool_cards_expanded
             expandable_entries = [
                 entry
@@ -2654,6 +2725,7 @@ class HeadsupApp(AltScreenApp):
                 self.tool_cards_expanded = target
                 if before_counts is not None:
                     self._reanchor_scroll(width, before_counts)
+                    self._transcript_window(width, rows, self.scroll_offset)
                 notice = Text(
                     "Expanded all tool output — Ctrl+O to collapse."
                     if target
@@ -2695,6 +2767,8 @@ class HeadsupApp(AltScreenApp):
         offset_in_entry = min(offset_in_entry, new_count - 1)
         new_anchor = sum(after_counts[:entry_index]) + offset_in_entry
         self.scroll_offset = max(0, sum(after_counts) - new_anchor - 1)
+        self._following_latest = False
+        self._scroll_anchor = None
 
     def _apply_expansion_mode(self, kind: str, renderable: RenderableType) -> None:
         """New tool cards join the transcript in the current Ctrl+O view mode."""
@@ -2707,10 +2781,7 @@ class HeadsupApp(AltScreenApp):
         with self.lock:
             self._apply_expansion_mode(kind, renderable)
             self.entries.append(TranscriptEntry(kind, renderable, spacer_before=spacer_before))
-            # Follow the newest line only while pinned to the bottom. When the user
-            # has scrolled up (scroll_offset > 0) to read history, preserve their
-            # position instead of snapping back down on every streamed line --
-            # add_user_message resets to the bottom when a new turn begins.
+            # The next paint resolves the reading anchor against the new content.
         self.refresh()
 
     def _upsert(self, index: int | None, kind: str, renderable: RenderableType) -> int:
@@ -2724,8 +2795,7 @@ class HeadsupApp(AltScreenApp):
             else:
                 self.entries.append(TranscriptEntry(kind, renderable))
                 result = len(self.entries) - 1
-            # See _append: stay put when the user has scrolled up; otherwise the
-            # offset is already 0 and the view keeps following the newest content.
+            # Streaming replaces entries in place, keeping anchor indices stable.
         self.refresh()
         return result
 
@@ -2750,19 +2820,42 @@ class HeadsupApp(AltScreenApp):
     def _transcript_window(self, width: int, rows: int, scroll_offset: int) -> tuple[list[Text], int]:
         # Work back from the newest entry until the viewport is covered. Older
         # entries stay intact and are rendered on demand when scrolling up.
+        if scroll_offset > 0:
+            self._following_latest = False
+        anchor = self._scroll_anchor if not self._following_latest else None
+        anchor_found = anchor is None
         needed = rows + max(0, scroll_offset)
         chunks = []
         count = 0
+        index = len(self.entries) if self._notice is not None else len(self.entries) - 1
         for entry in self._transcript_entries(reverse=True):
+            entry_index = None if index == len(self.entries) else index
             lines = entry.rendered_lines(width) or [Text("")]
             if entry.spacer_before:
                 lines = [Text(""), *lines]
-            chunks.append(lines)
+            chunks.append((entry_index, lines))
             count += len(lines)
-            if count >= needed:
+            if anchor is not None and entry_index == anchor[0]:
+                # Keep the same row, even within a response that is still growing.
+                # Proportional scaling here would move the reader on every delta.
+                scroll_offset = count - min(anchor[1], len(lines) - 1) - 1
+                needed = rows + scroll_offset
+                anchor_found = True
+            if anchor_found and count >= needed:
                 break
-        transcript = [line for chunk in reversed(chunks) for line in chunk]
-        return window_transcript(transcript or [Text("")], rows, scroll_offset)
+            index -= 1
+        transcript = [line for _, chunk in reversed(chunks) for line in chunk]
+        visible, offset = window_transcript(transcript or [Text("")], rows, scroll_offset)
+        if not self._following_latest:
+            # Retain detached state even if shrinking content clamps offset to 0.
+            # Only user navigation may resume following new output.
+            remaining = offset
+            for entry_index, lines in chunks:
+                if remaining < len(lines):
+                    self._scroll_anchor = (entry_index, len(lines) - remaining - 1)
+                    break
+                remaining -= len(lines)
+        return visible, offset
 
     def _prompt_label(self) -> str:
         request = self._answer_request
@@ -2870,6 +2963,7 @@ class HeadsupApp(AltScreenApp):
             answering = self._answer_request is not None
             cancelling = self._cancel_token is not None
             exit_armed = self._exit_armed
+            following_latest = self._following_latest
 
         if notice is not None:
             lines = rendered_text_lines(notice, width)
@@ -2883,6 +2977,8 @@ class HeadsupApp(AltScreenApp):
             value = "Esc/Ctrl+C exit   Any other key continue"
         elif answering:
             value = "Enter answer   Ctrl+N newline   Esc no response/cancel"
+        elif not following_latest:
+            value = "Ctrl+End jump to latest   Auto-scroll paused   Wheel/PgUp/PgDn scroll"
         elif has_selection:
             value = "Enter send   Ctrl+C copy selection   Esc clear draft   Wheel/PgUp/PgDn scroll"
         elif has_draft:

@@ -572,6 +572,31 @@ def test_windows_console_records_decode_shift_arrows(monkeypatch):
         command_input._PENDING_KEYS.clear()
 
 
+def test_windows_console_records_decode_ctrl_end(monkeypatch):
+    import ctypes
+
+    records = [
+        # Either Ctrl key, including Ctrl+Shift, should jump to latest.
+        {"type": 0x0001, "vk": 0x23, "ctrl_state": 0x0004},
+        {"type": 0x0001, "vk": 0x23, "ctrl_state": 0x0008},
+        {"type": 0x0001, "vk": 0x23, "ctrl_state": 0x0018},
+        {"type": 0x0001, "vk": 0x23},
+        {"type": 0x0001, "vk": 0x23, "ctrl_state": 0x0010},
+        {"type": 0x0001, "vk": 0x24, "ctrl_state": 0x0008},
+    ]
+    kernel32, pending = _make_console_records_kernel32(records)
+    monkeypatch.setattr(command_input.sys, "platform", "win32")
+    monkeypatch.setattr(ctypes, "windll", SimpleNamespace(kernel32=kernel32), raising=False)
+    monkeypatch.setattr(command_input, "_WINDOWS_MOUSE_CAPTURE_DEPTH", 1)
+    command_input._PENDING_KEYS.clear()
+
+    assert [command_input._read_key(text_mode=True) for _ in records] == [
+        "CTRL_END", "CTRL_END", "CTRL_END", "END", "END", "HOME",
+    ]
+    assert not pending
+    assert not command_input._PENDING_KEYS
+
+
 def test_key_available_peeks_when_mouse_capture_active(monkeypatch):
     import ctypes
 
@@ -695,6 +720,49 @@ def test_read_key_with_repeats_does_not_drain_non_repeatable_key(monkeypatch):
     assert command_input._read_key_with_repeats() == ("x", 1)
     assert keys == ["DOWN"]
     command_input._PENDING_KEYS.clear()
+
+
+@pytest.mark.parametrize("preserve_ctrl_end", [False, True])
+@pytest.mark.parametrize("translate_mouse_wheel", [False, True])
+def test_read_key_with_repeats_ctrl_end_is_opt_in(
+    monkeypatch, preserve_ctrl_end, translate_mouse_wheel
+):
+    command_input._PENDING_KEYS.clear()
+    command_input._PENDING_KEYS.extend(["CTRL_END", "END"])
+    kwargs = {"translate_mouse_wheel": translate_mouse_wheel}
+    if preserve_ctrl_end:
+        kwargs["preserve_ctrl_end"] = True
+
+    expected = "CTRL_END" if preserve_ctrl_end else "END"
+    assert command_input._read_key_with_repeats(**kwargs) == (expected, 1)
+    assert command_input._read_key_with_repeats(**kwargs) == ("END", 1)
+    assert not command_input._PENDING_KEYS
+
+
+@pytest.mark.parametrize("preserve_ctrl_end", [False, True])
+def test_read_key_with_repeats_preserves_ctrl_end_after_batched_text(
+    monkeypatch, preserve_ctrl_end
+):
+    command_input._PENDING_KEYS.clear()
+    command_input._PENDING_KEYS.extend(["a", "CTRL_END"])
+    monkeypatch.setattr(command_input, "_key_available", lambda: bool(command_input._PENDING_KEYS))
+    kwargs = {"text_mode": True, "batch_text": True, "preserve_ctrl_end": preserve_ctrl_end}
+
+    assert command_input._read_key_with_repeats(**kwargs) == (command_input.TextInput("a"), 1)
+    expected = "CTRL_END" if preserve_ctrl_end else "END"
+    assert command_input._read_key_with_repeats(**kwargs) == (expected, 1)
+    assert not command_input._PENDING_KEYS
+
+
+def test_read_key_with_repeats_does_not_translate_pasted_ctrl_end_text():
+    command_input._PENDING_KEYS.clear()
+    command_input._PENDING_KEYS.append(command_input.TextInput("CTRL_END"))
+
+    key, repeat = command_input._read_key_with_repeats(text_mode=True, batch_text=True)
+
+    assert isinstance(key, command_input.TextInput)
+    assert (key, repeat) == ("CTRL_END", 1)
+    assert not command_input._PENDING_KEYS
 
 
 def test_read_key_with_repeats_batches_queued_text(monkeypatch):
@@ -924,11 +992,62 @@ def test_read_key_keeps_ctrl_vertical_arrows_unmodified(monkeypatch):
 
 
 def test_read_key_maps_posix_modified_non_arrow_to_base(monkeypatch):
-    # A modifier on a non-arrow nav key falls back to its plain token, and the
+    # A modifier on Home falls back to its plain token, and the
     # whole sequence is consumed (no leftover bytes leak as literal input).
     stdin = _install_posix_input(monkeypatch, "\x1b[1;5H")
     assert command_input._read_key(text_mode=True) == "HOME"
     assert stdin.remaining == ""
+
+
+@pytest.mark.parametrize("platform", ["posix", "win32"])
+@pytest.mark.parametrize(
+    ("sequence", "expected"),
+    [
+        ("\x1b[1;5F", "CTRL_END"),
+        ("\x1b[4;5~", "CTRL_END"),
+        ("\x1b[8;5~", "CTRL_END"),
+        ("\x1b[1;6F", "CTRL_END"),
+        ("\x1b[F", "END"),
+        ("\x1b[4~", "END"),
+        ("\x1b[8~", "END"),
+        ("\x1b[1;2F", "END"),
+        ("\x1b[1;3F", "END"),
+    ],
+)
+def test_read_key_distinguishes_ctrl_end_from_end(monkeypatch, platform, sequence, expected):
+    if platform == "posix":
+        stdin = _install_posix_input(monkeypatch, sequence + "x")
+    else:
+        chars = deque(sequence + "x")
+        fake_msvcrt = SimpleNamespace(getwch=chars.popleft, kbhit=lambda: bool(chars))
+        monkeypatch.setattr(command_input.sys, "platform", "win32")
+        monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+        monkeypatch.setattr(command_input, "_WINDOWS_MOUSE_CAPTURE_DEPTH", 0)
+        command_input._PENDING_KEYS.clear()
+
+    assert command_input._read_key(text_mode=True) == expected
+    # Consume the entire escape sequence, leaving the next typed key intact.
+    assert command_input._read_key(text_mode=True) == "x"
+    if platform == "posix":
+        assert stdin.remaining == ""
+    else:
+        assert not chars
+    assert not command_input._PENDING_KEYS
+
+
+@pytest.mark.parametrize("prefix", ["\x00", "\xe0"])
+def test_read_key_maps_windows_legacy_ctrl_end(monkeypatch, prefix):
+    chars = deque(prefix + "\x75" + prefix + "O")
+    fake_msvcrt = SimpleNamespace(getwch=chars.popleft, kbhit=lambda: bool(chars))
+    monkeypatch.setattr(command_input.sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    monkeypatch.setattr(command_input, "_WINDOWS_MOUSE_CAPTURE_DEPTH", 0)
+    command_input._PENDING_KEYS.clear()
+
+    assert command_input._read_key(text_mode=True) == "CTRL_END"
+    assert command_input._read_key(text_mode=True) == "END"
+    assert not chars
+    assert not command_input._PENDING_KEYS
 
 
 def test_read_key_maps_posix_bracketed_paste_to_text_input(monkeypatch):

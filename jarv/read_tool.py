@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import copy
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -13,7 +14,7 @@ from .model_catalog import get_image_output_capability
 from .pdf_extract import PdfExtractionError, extract_pdf_text, is_pdf_bytes, is_pdf_media_type
 from .retained_outputs import RetainedOutputStore
 from .shell import truncate_command_output
-from .tool_outputs import ToolOutput, image_data_url, with_tool_outcome
+from .tool_outputs import ToolOutput, image_data_url, tool_outcome, with_tool_outcome
 from .web import (
     MAX_RESPONSE_BYTES,
     WebToolError,
@@ -294,7 +295,7 @@ def _resolve_source(
             timeout = float(get_setting(config, "web_timeout"))
         except (TypeError, ValueError):
             timeout = float(DEFAULT_CONFIG["web_timeout"])
-        if timeout <= 0:
+        if not math.isfinite(timeout) or timeout <= 0:
             timeout = float(DEFAULT_CONFIG["web_timeout"])
         try:
             web_bytes = fetch_web_bytes(
@@ -304,7 +305,9 @@ def _resolve_source(
                 cancellation_token=cancellation_token,
             )
         except WebToolError as exc:
-            return f"[read error: {exc}]"
+            return with_tool_outcome(
+                f"[read error: {exc}]", "timed_out" if exc.kind == "timeout" else "failed",
+            )
         web_metadata = (
             f"Requested URL: {web_bytes.requested_url}",
             f"Final URL: {web_bytes.final_url}",
@@ -539,7 +542,7 @@ def dispatch_read_tool(
         size=size,
     )
     if isinstance(source, str):
-        return with_tool_outcome(source, "failed")
+        return with_tool_outcome(source, tool_outcome(source) or "failed")
 
     if source.image is not None:
         output = _render_image_read_result(source, config)
