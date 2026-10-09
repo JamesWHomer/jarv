@@ -32,6 +32,34 @@ def notice_text(app):
     return "\n".join(line.plain for line in app._transcript_lines(100))
 
 
+def test_idle_waiter_cannot_observe_worker_before_start(app, monkeypatch):
+    original_start = threading.Thread.start
+    exposed = []
+
+    def checked_start(thread):
+        if thread.name == "headsup-agent-turn":
+            def inspect_worker():
+                acquired = app.lock.acquire(blocking=False)
+                try:
+                    exposed.append(acquired and app._agent_thread is thread)
+                finally:
+                    if acquired:
+                        app.lock.release()
+
+            observer = threading.Thread(target=inspect_worker)
+            original_start(observer)
+            observer.join(timeout=2.0)
+            assert not observer.is_alive()
+        original_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", checked_start)
+    monkeypatch.setattr(app, "_run_agent_query_now", lambda query: None)
+    app._queue_or_start_agent_query("prompt")
+    app._wait_for_agent_idle(timeout=2.0)
+    assert exposed == [False]
+    assert not app._agent_busy
+
+
 @pytest.mark.parametrize("incognito", [False, True])
 @pytest.mark.parametrize(("rest", "remaining", "message"), [
     ([], ["oldest", "newer"], "Cancelled queued message:"),

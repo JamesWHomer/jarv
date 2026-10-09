@@ -1454,11 +1454,18 @@ class HeadsupTests(unittest.TestCase):
             ("ENTER", 1),
         ]
 
+        def read_key(**kwargs):
+            # This test checks notice clearing after a submitted prompt, not
+            # cancellation when exit races the worker's first request.
+            if len(keys) == 2:
+                app._wait_for_agent_idle(timeout=2.0)
+            return keys.pop(0)
+
         with (
             patch("jarv.headsup.Live", FakeLive),
             patch("jarv.headsup.disable_mouse_capture") as disable_mouse_capture,
             patch("jarv.headsup._key_available", lambda: bool(keys)),
-            patch("jarv.headsup._read_key_with_repeats", side_effect=lambda **kwargs: keys.pop(0)),
+            patch("jarv.headsup._read_key_with_repeats", side_effect=read_key),
         ):
             app.run()
 

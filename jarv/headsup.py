@@ -2129,7 +2129,9 @@ class HeadsupApp(AltScreenApp):
             self._startup_cancel_token = CancellationToken()
             self._cancel_token = self._startup_cancel_token
             self._agent_thread = thread
-        thread.start()
+            # Publish and start under the same lock so idle waiters cannot
+            # observe the replacement worker before it is safe to join.
+            thread.start()
 
     def _agent_worker(self, query: str, on_complete: Callable | None = None) -> None:
         try:
