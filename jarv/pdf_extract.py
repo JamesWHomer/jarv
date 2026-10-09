@@ -54,11 +54,12 @@ def _load_pdf_reader_class() -> Any:
 def _normalize_page_text(value: str) -> str:
     normalized = value.replace("\r\n", "\n").replace("\r", "\n")
     lines = [line.rstrip() for line in normalized.split("\n")]
-    while lines and not lines[0].strip():
-        lines.pop(0)
-    while lines and not lines[-1].strip():
-        lines.pop()
-    return "\n".join(lines)
+    start, end = 0, len(lines)
+    while start < end and not lines[start]:
+        start += 1
+    while end > start and not lines[end - 1]:
+        end -= 1
+    return "\n".join(lines[start:end])
 
 
 def _metadata_value(value: object) -> str:

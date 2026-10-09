@@ -30,7 +30,8 @@ class _BoundedOutput:
 
     def __init__(self, limit: int = MAX_CAPTURE_CHARS):
         self.limit = limit
-        self.head = ""
+        self._head_parts = []
+        self._head_size = 0
         self.tail = deque()
         self.tail_size = 0
         self.total = 0
@@ -38,9 +39,12 @@ class _BoundedOutput:
 
     def append(self, text: str) -> None:
         self.total += len(text)
-        remaining = self.limit // 2 - len(self.head)
+        remaining = self.limit // 2 - self._head_size
         if remaining > 0:
-            self.head += text[:remaining]
+            prefix = text[:remaining]
+            if prefix:
+                self._head_parts.append(prefix)
+                self._head_size += len(prefix)
             text = text[remaining:]
         if text:
             self.tail.append(text)
@@ -55,9 +59,17 @@ class _BoundedOutput:
                 self.tail.appendleft(first[removed:])
         self._cached = None
 
+    @property
+    def head(self) -> str:
+        # Pipe reads can arrive in small chunks. Assemble the growing prefix
+        # only when observed, rather than copying it on every append.
+        if len(self._head_parts) > 1:
+            self._head_parts[:] = ["".join(self._head_parts)]
+        return self._head_parts[0] if self._head_parts else ""
+
     def text(self) -> str:
         if self._cached is None:
-            omitted = self.total - len(self.head) - self.tail_size
+            omitted = self.total - self._head_size - self.tail_size
             marker = (f"\n[command capture limit reached; {omitted} characters "
                       "omitted from the middle and unavailable for read]\n") if omitted else ""
             self._cached = self.head + marker + "".join(self.tail)

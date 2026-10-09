@@ -51,6 +51,12 @@ _THINKING_BUDGETS = {
     "xhigh": 8192,
     "max": 16384,
 }
+_STREAM_DELTA_FIELDS = {
+    "text_delta": ("text", "text"),
+    "thinking_delta": ("thinking", "thinking"),
+    "signature_delta": ("signature", "signature"),
+    "input_json_delta": ("_partial_json", "partial_json"),
+}
 
 
 class AnthropicHTTPError(ProviderHTTPError):
@@ -453,6 +459,7 @@ def stream_message(
         raise _provider_error(exc) from exc
     message: dict[str, Any] = {"content": [], "usage": {}}
     blocks: dict[int, dict] = {}
+    block_chunks: dict[int, dict[str, list[str]]] = {}
     try:
         for event_name, event in iter_sse(response):
             if cancellation_token is not None:
@@ -478,6 +485,7 @@ def stream_message(
                 if block.get("type") == "tool_use":
                     block["_partial_json"] = ""
                 blocks[index] = block
+                block_chunks.pop(index, None)
                 if block.get("type") in ("thinking", "redacted_thinking"):
                     yield {"type": "reasoning_started", "id": f"thinking_{index}"}
                 elif block.get("type") == "tool_use":
@@ -492,28 +500,24 @@ def stream_message(
                 delta = event.get("delta") or {}
                 block = blocks.setdefault(index, {})
                 delta_type = delta.get("type")
-                if delta_type == "text_delta":
-                    text = str(delta.get("text") or "")
-                    block["text"] = str(block.get("text") or "") + text
-                    if text:
+                fields = _STREAM_DELTA_FIELDS.get(delta_type) if isinstance(delta_type, str) else None
+                if fields is not None:
+                    field, delta_field = fields
+                    text = str(delta.get(delta_field) or "")
+                    chunks = block_chunks.setdefault(index, {})
+                    if field not in chunks:
+                        chunks[field] = [str(block.get(field) or "")]
+                    chunks[field].append(text)
+                    if delta_type == "text_delta" and text:
                         yield {"type": "text_delta", "delta": text}
-                elif delta_type == "thinking_delta":
-                    block["thinking"] = (
-                        str(block.get("thinking") or "") + str(delta.get("thinking") or "")
-                    )
-                elif delta_type == "signature_delta":
-                    block["signature"] = (
-                        str(block.get("signature") or "") + str(delta.get("signature") or "")
-                    )
-                elif delta_type == "input_json_delta":
-                    block["_partial_json"] = (
-                        str(block.get("_partial_json") or "")
-                        + str(delta.get("partial_json") or "")
-                    )
                 continue
             if event_type == "content_block_stop":
                 index = int(event.get("index") or 0)
                 block = blocks.pop(index, {})
+                # Blocks are exposed only when complete. Joining here avoids
+                # copying their growing text or tool arguments on every delta.
+                for field, chunks in block_chunks.pop(index, {}).items():
+                    block[field] = "".join(chunks)
                 block_type = block.get("type")
                 if block_type == "tool_use":
                     raw = str(block.pop("_partial_json", "") or "")

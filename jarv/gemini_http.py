@@ -395,7 +395,6 @@ def stream_content(
                     if isinstance(content.get("parts"), list):
                         accumulated_content["parts"].extend(dict(part) for part in content["parts"]
                                                             if isinstance(part, dict))
-            final["candidates"] = [accumulated_candidates[index] for index in sorted(accumulated_candidates)]
             finished = finished or bool(candidates[0].get("finishReason"))
             content = candidates[0].get("content")
             parts = content.get("parts") if isinstance(content, dict) else []
@@ -444,6 +443,9 @@ def stream_content(
                 "id": "gemini-thinking",
                 "provider_content": [],
             }
+        final["candidates"] = [
+            accumulated_candidates[index] for index in sorted(accumulated_candidates)
+        ]
         yield {"type": "done", "response": normalize_response(final)}
     finally:
         unregister()

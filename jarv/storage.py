@@ -220,7 +220,9 @@ def read_json(path, default, expected_type):
         value = copy.deepcopy(default if raw is None else raw)
         if not isinstance(value, expected_type):
             raise StorageError(f"Invalid JSON structure in {path}")
-        state.active.seen[str(path)] = copy.deepcopy(raw)
+        # _current returns storage-owned data. Keep that internal value as the
+        # observation; only the result and its public baseline need copies.
+        state.active.seen[str(path)] = raw
         result = JsonDict(value) if isinstance(value, dict) else JsonList(value)
         result.baseline = copy.deepcopy(raw)
         return result
@@ -261,7 +263,7 @@ def write_json(path, value, *, merge=False, baseline=_MISSING, snapshot=None):
         state = _state()
         active = state.active
         key = str(path)
-        wanted = copy.deepcopy(value)
+        wanted = copy.deepcopy(value) if snapshot is not None else None
         current = _current(path, active)
         if snapshot is not None and hasattr(snapshot, "baseline"):
             previous = active.snapshots.get((key, id(snapshot)))
@@ -274,7 +276,10 @@ def write_json(path, value, *, merge=False, baseline=_MISSING, snapshot=None):
             value = _merge(base or {}, value, current or {}, path)
         elif not _matches(base, current):
             raise StorageConflict(f"Concurrent changes to {path}; reload before saving")
-        active.changes[key] = copy.deepcopy(value)
+        # Without a merge the staged payload and the snapshot's intended value
+        # are identical. Neither escapes the transaction until the baseline is
+        # copied at commit, so one frozen copy is sufficient.
+        active.changes[key] = wanted if snapshot is not None and not merge else copy.deepcopy(value)
         active.seen[key] = active.changes[key]
         if snapshot is not None:
             active.snapshots[(key, id(snapshot))] = (snapshot, wanted)

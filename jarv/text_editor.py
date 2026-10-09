@@ -60,12 +60,13 @@ def visual_rows(value: str, content_width: int) -> list[tuple[int, int]]:
 
 
 def cursor_row_index(rows: list[tuple[int, int]], cursor: int) -> int:
-    matches = [
-        idx
-        for idx, (row_start, row_end) in enumerate(rows)
-        if row_start <= cursor <= row_end
-    ]
-    return matches[-1] if matches else max(0, len(rows) - 1)
+    # Wrapped rows share an endpoint; the last matching row owns the cursor.
+    # Drafts commonly have the cursor at the end, so search from there and stop.
+    for idx in range(len(rows) - 1, -1, -1):
+        row_start, row_end = rows[idx]
+        if row_start <= cursor <= row_end:
+            return idx
+    return max(0, len(rows) - 1)
 
 
 def _display_value(value: str, *, masked: bool, width: int | None = None) -> str:
@@ -102,13 +103,26 @@ def _append_segment(
     ``selection`` span (highest priority after the cursor) paints the selected
     range with ``selection_style``.
     """
+    length = len(segment)
+    if not spans and (selection is None or not selection_style):
+        # Plain drafts need at most three runs. Avoid asking for each character's
+        # style on every input repaint when there are no markers or selections.
+        if local_cursor is not None and 0 <= local_cursor < length:
+            line.append(segment[:local_cursor], style=base_style)
+            line.append(segment[local_cursor], style=cursor_style)
+            line.append(segment[local_cursor + 1:], style=base_style)
+        else:
+            line.append(segment, style=base_style)
+            if local_cursor is not None and local_cursor >= length:
+                line.append(" ", style=cursor_style)
+        return
+
     def style_at(offset: int) -> str:
         idx = abs_start + offset
         if selection is not None and selection_style and selection[0] <= idx < selection[1]:
             return selection_style
         return highlight_style if _index_in_spans(idx, spans) else base_style
 
-    length = len(segment)
     offset = 0
     while offset < length:
         if local_cursor is not None and offset == local_cursor:

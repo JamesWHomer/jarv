@@ -59,7 +59,10 @@ def _tool_call_arguments(item: dict) -> tuple[dict | None, str]:
 
 
 def _tool_call_output(history: list, call_index: int, call_id) -> str:
-    for item in history[call_index + 1:]:
+    # Copying the whole suffix for each tool call makes long histories quadratic
+    # even when the matching output is the very next item.
+    for index in range(*slice(call_index + 1, None).indices(len(history))):
+        item = history[index]
         if not isinstance(item, dict):
             continue
         if item.get("role") == "user":
@@ -77,7 +80,8 @@ def _tool_call_output(history: list, call_index: int, call_id) -> str:
 
 
 def _next_visible_history_item(history: list, start_index: int) -> dict | None:
-    for candidate in history[start_index:]:
+    for index in range(*slice(start_index, None).indices(len(history))):
+        candidate = history[index]
         if not isinstance(candidate, dict):
             continue
         if candidate.get("type") == "function_call":

@@ -1,10 +1,15 @@
 """Render untrusted terminal text visibly without changing its stored value."""
 
+import re
+
+
 _CONTROLS = {
     code: ("\\r" if code == 13 else f"\\x{code:02x}")
     for code in (*range(32), *range(127, 160))
     if code not in (9, 10)
 }
+_TEXT_CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+_LINK_CONTROLS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 def safe_terminal_text(text: str) -> str:
@@ -14,9 +19,13 @@ def safe_terminal_text(text: str) -> str:
     boundary can use it. The caller retains the original text for storage/API
     requests; visible escapes are exclusively a presentation concern.
     """
+    # translate has a fast ASCII path, but performs a dictionary lookup for
+    # every Unicode character. Most rendered Unicode text has no controls.
+    if type(text) is str and not text.isascii() and _TEXT_CONTROLS.search(text) is None:
+        return text
     return text.replace("\r\n", "\n").translate(_CONTROLS)
 
 
 def safe_terminal_link(target: str) -> bool:
     """OSC hyperlink targets must not contain any terminal controls."""
-    return not any(ord(char) < 32 or 127 <= ord(char) < 160 for char in target)
+    return _LINK_CONTROLS.search(target) is None

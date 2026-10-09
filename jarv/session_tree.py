@@ -312,9 +312,11 @@ def preserve_redo_branches(history_file: Path, *, _aliases: dict | None = None) 
         redo = load_redo_stack(redo_path)
         branches_path = branches_file_for(history_file)
         branches = load_branches(branches_path)
-        original_history = copy.deepcopy(history)
-        original_redo = copy.deepcopy(redo)
-        original_branches = copy.deepcopy(branches)
+        # Only item equality is used below. The loaded lists also carry storage
+        # baselines, which need not be copied along with every transcript.
+        original_history = copy.deepcopy(list(history))
+        original_redo = copy.deepcopy(list(redo))
+        original_branches = copy.deepcopy(list(branches))
         aliases = {}
         active = {}
         parent_id = ROOT

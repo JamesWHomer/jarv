@@ -489,6 +489,16 @@ def load_global_usage_records(
     return valid_records
 
 
+def aggregate_usage_totals(records: list[dict]) -> dict:
+    """Sum records when no source, provider, model, or tier breakdown is needed."""
+    totals = _empty_usage(None)["totals"]
+    for record in records:
+        if isinstance(record, dict):
+            _normalize_token_bucket(record, include_request_count=False)
+            _add_tokens(totals, record)
+    return totals
+
+
 def aggregate_usage_records(records: list[dict]) -> dict:
     aggregate = _empty_usage(None)
     aggregate["session_id"] = None

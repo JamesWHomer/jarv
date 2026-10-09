@@ -51,6 +51,9 @@ def collect_stream_response(
     stream_replays = 0
     while True:
         result = StreamCollection()
+        # Without an event observer, partial text is needed only at attempt end.
+        # Keep the observed path eager so callbacks retain their existing view.
+        text_chunks: list[str] | None = [] if on_event is None else None
         retry_stream = False
         first_text_at: float | None = None
         try:
@@ -68,12 +71,16 @@ def collect_stream_response(
                         result.first_text_chunk = event.delta
                     else:
                         result.text_stream_seconds = max(0.0, received_at - first_text_at)
-                    result.streamed_text += event.delta
+                    if text_chunks is None:
+                        result.streamed_text += event.delta
                     result.text_chunk_count += 1
                 if on_event is not None:
                     on_event(event, result)
                 if isinstance(event, TextDelta):
-                    result.reply_text += event.delta
+                    if text_chunks is None:
+                        result.reply_text += event.delta
+                    else:
+                        text_chunks.append(event.delta)
                     result.got_text = True
                 elif isinstance(event, ToolCallDone):
                     result.tool_calls.append(event)
@@ -88,6 +95,9 @@ def collect_stream_response(
 
             if result.elapsed_seconds is None:
                 result.elapsed_seconds = max(0.0, perf_counter() - started_at)
+            if text_chunks is not None:
+                result.reply_text = result.streamed_text = "".join(text_chunks)
+                text_chunks = None
             result.final_text = response_output_text(result.final_response)
             if result.final_text and len(result.final_text) >= len(result.reply_text):
                 result.reply_text = result.final_text
@@ -99,6 +109,8 @@ def collect_stream_response(
                 raise
             stream_replays += 1
         finally:
+            if text_chunks is not None:
+                result.reply_text = result.streamed_text = "".join(text_chunks)
             if on_attempt_end is not None:
                 on_attempt_end(result, retry_stream)
         if on_retry is not None:

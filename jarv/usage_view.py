@@ -15,6 +15,7 @@ from datetime import datetime, time, timedelta, tzinfo
 from .history import parse_timestamp, prepare_session_context, utc_now
 from .usage import (
     aggregate_usage_records,
+    aggregate_usage_totals,
     global_usage_jsonl_file,
     known_context_window,
     load_global_usage_records,
@@ -249,7 +250,7 @@ def _bucket_trend(records: list[dict], scope: Scope, now: datetime) -> list[Tren
     while cursor <= last:
         bucket_records = by_bucket.get(cursor)
         if bucket_records:
-            totals = _dict(aggregate_usage_records(bucket_records).get("totals"))
+            totals = aggregate_usage_totals(bucket_records)
             out.append(
                 TrendBucket(
                     start=cursor,
@@ -275,7 +276,7 @@ def _window_short_label(window: timedelta) -> str:
 def _previous_spend(records: list[dict] | None) -> float | None:
     if not records:
         return None
-    totals = _dict(aggregate_usage_records(records).get("totals"))
+    totals = aggregate_usage_totals(records)
     return float(usage_cost_summary(totals).get("total_usd") or 0.0)
 
 
@@ -347,10 +348,21 @@ def _split_windows(
     """Split records into ``(current window, the equally long window before it)``."""
     if window is None:
         return list(records), None
-    return (
-        _filter_records(records, window, now),
-        _filter_records(records, window * 2, now, until=now - window),
-    )
+    cutoff = now - window
+    previous_cutoff = now - window * 2
+    current: list[dict] = []
+    previous: list[dict] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        created_at = parse_timestamp(str(record.get("created_at") or ""))
+        if created_at is None:
+            continue
+        if created_at >= cutoff:
+            current.append(record)
+        elif created_at >= previous_cutoff:
+            previous.append(record)
+    return current, previous
 
 
 def _window_view(scope: Scope, now: datetime) -> UsageView:

@@ -167,15 +167,16 @@ def flatten_content_text(content: ToolOutput | Any) -> str:
                 lines.append(text)
             continue
         if typ == "input_image":
-            parsed = parse_image_data_url(str(block.get("image_url") or ""))
+            match = _DATA_URL_RE.match(str(block.get("image_url") or ""))
             image_count += 1
-            if parsed is None:
+            if match is None:
                 lines.append(
                     f"[image output {image_count}: external or invalid image URL]"
                 )
                 continue
-            media_type, data = parsed
-            approx_bytes = (len(data) * 3) // 4
+            media_type = match.group("media_type").lower()
+            # A display summary needs the length, not a copy of image data.
+            approx_bytes = ((match.end("data") - match.start("data")) * 3) // 4
             lines.append(
                 f"[image output {image_count}: {media_type}, {approx_bytes} bytes]"
             )

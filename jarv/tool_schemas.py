@@ -6,8 +6,8 @@ from copy import deepcopy
 from typing import Any
 
 
-def _nullable(schema: dict[str, Any]) -> dict[str, Any]:
-    out = deepcopy(schema)
+def _nullable(schema: dict[str, Any], *, in_place: bool = False) -> dict[str, Any]:
+    out = schema if in_place else deepcopy(schema)
     typ = out.get("type")
     if isinstance(typ, list):
         if "null" not in typ:
@@ -49,7 +49,9 @@ def _openai_strict_schema(schema: Any) -> Any:
             for name, property_schema in properties.items():
                 normalized = _openai_strict_schema(property_schema)
                 if name not in original_required and isinstance(normalized, dict):
-                    normalized = _nullable(normalized)
+                    # Normalization already owns an independent copy of this
+                    # property, including when input properties share a schema.
+                    normalized = _nullable(normalized, in_place=True)
                 strict_properties[name] = normalized
             out["properties"] = strict_properties
             out["required"] = list(strict_properties)
