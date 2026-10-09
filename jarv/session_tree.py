@@ -392,6 +392,30 @@ def load_session_tree(history_file: Path, *, _aliases: dict | None = None) -> Tr
         return build_tree(history, load_branches(branches_file_for(history_file)))
 
 
+def _save_tree_paths(
+    history_file: Path, spine: list[TreeNode], branches: list[TreeNode],
+) -> None:
+    """Save a tree's active path and branches within the caller's transaction."""
+    # Assign all ids before computing parent pointers so every reference is stable.
+    for node in spine:
+        node.frame_id = _set_frame_id(node.items)
+    for node in branches:
+        node.frame_id = _set_frame_id(node.items)
+
+    history: list = []
+    for node in spine:
+        history.extend(node.items)
+    frames = [
+        {
+            "parent_frame_id": node.parent.frame_id if node.parent is not None else ROOT,
+            "items": node.items,
+        }
+        for node in branches
+    ]
+    save_history(history, history_file)
+    save_branches(frames, branches_file_for(history_file))
+
+
 def checkout(history_file: Path, *, leaf_id: str) -> bool:
     """Make ``leaf_id`` the active leaf; stash every other frame as a branch.
 
@@ -402,7 +426,6 @@ def checkout(history_file: Path, *, leaf_id: str) -> bool:
     prompt). Returns ``True`` if anything changed on disk.
     """
     with transaction(history_file):
-        branches_path = branches_file_for(history_file)
         aliases = {}
         model = load_session_tree(history_file, _aliases=aliases)
         leaf_id = aliases.get(leaf_id, leaf_id)
@@ -422,26 +445,7 @@ def checkout(history_file: Path, *, leaf_id: str) -> bool:
         spine_set = {id(n) for n in spine}
         off_spine = [n for n in model.nodes if id(n) not in spine_set]
 
-        # Assign real ids before computing parent pointers so every reference is stable.
-        for node in spine:
-            node.frame_id = _set_frame_id(node.items)
-        for node in off_spine:
-            node.frame_id = _set_frame_id(node.items)
-
-        new_history: list = []
-        for node in spine:
-            new_history.extend(node.items)
-
-        new_frames = [
-            {
-                "parent_frame_id": node.parent.frame_id if node.parent is not None else ROOT,
-                "items": node.items,
-            }
-            for node in off_spine
-        ]
-
-        save_history(new_history, history_file)
-        save_branches(new_frames, branches_path)
+        _save_tree_paths(history_file, spine, off_spine)
         delete_json(redo_file_for(history_file))
         return True
 
@@ -455,7 +459,6 @@ def delete_subtree(history_file: Path, *, node_id: str) -> bool:
     subtree was removed.
     """
     with transaction(history_file):
-        branches_path = branches_file_for(history_file)
         aliases = {}
         model = load_session_tree(history_file, _aliases=aliases)
 
@@ -472,26 +475,7 @@ def delete_subtree(history_file: Path, *, node_id: str) -> bool:
 
         survivors = [n for n in model.nodes if not n.on_active_path and id(n) not in doomed]
 
-        # A survivor's parent is always on the active path or another survivor (we drop
-        # whole subtrees), so backfilling ids on both keeps every reference resolvable.
-        for node in model.active_path:
-            node.frame_id = _set_frame_id(node.items)
-        for node in survivors:
-            node.frame_id = _set_frame_id(node.items)
-
-        new_history: list = []
-        for node in model.active_path:
-            new_history.extend(node.items)
-        new_frames = [
-            {
-                "parent_frame_id": node.parent.frame_id if node.parent is not None else ROOT,
-                "items": node.items,
-            }
-            for node in survivors
-        ]
-
-        save_history(new_history, history_file)
-        save_branches(new_frames, branches_path)
+        _save_tree_paths(history_file, model.active_path, survivors)
         doomed_ids = {n.frame_id for n in model.nodes if id(n) in doomed}
         redo_path = redo_file_for(history_file)
         redo = load_redo_stack(redo_path)

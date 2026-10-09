@@ -227,13 +227,38 @@ def _windows_updater_creation_flags(*, allow_breakaway: bool = True) -> int:
     return flags
 
 
+def _launch_windows_helper(command: list[str]) -> subprocess.Popen:
+    """Start an updater/uninstaller, retrying if its job forbids breakaway."""
+    import subprocess
+
+    popen_kwargs = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    try:
+        return subprocess.Popen(
+            command,
+            creationflags=_windows_updater_creation_flags(),
+            **popen_kwargs,
+        )
+    except OSError as exc:
+        if getattr(exc, "winerror", None) != 5:
+            raise
+        return subprocess.Popen(
+            command,
+            creationflags=_windows_updater_creation_flags(allow_breakaway=False),
+            **popen_kwargs,
+        )
+
+
 def _stage_windows_updater(
     source: Path,
     target: Path,
     expected_version: str,
 ) -> subprocess.Popen:
     import shutil
-    import subprocess
 
     script = source.parent / "jarv-update.ps1"
     script.write_text(
@@ -389,26 +414,7 @@ finally {
         "-RetryDelayMs",
         str(WINDOWS_UPDATE_RETRY_DELAY_MS),
     ]
-    popen_kwargs = {
-        "stdin": subprocess.DEVNULL,
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
-        "close_fds": True,
-    }
-    try:
-        return subprocess.Popen(
-            command,
-            creationflags=_windows_updater_creation_flags(),
-            **popen_kwargs,
-        )
-    except OSError as exc:
-        if getattr(exc, "winerror", None) != 5:
-            raise
-        return subprocess.Popen(
-            command,
-            creationflags=_windows_updater_creation_flags(allow_breakaway=False),
-            **popen_kwargs,
-        )
+    return _launch_windows_helper(command)
 
 
 def consume_windows_update_result(

@@ -768,13 +768,15 @@ def _stream_anthropic(
         stream=True,
         max_tokens=max_tokens,
     )
-    for event in stream_message(
-        client,
-        payload,
-        cancellation_token=cancellation_token,
-        max_retries=int(config.get("anthropic_max_retries", 2)),
-    ):
-        yield from _map_dict_stream_events([event], provider_name="anthropic")
+    yield from _map_dict_stream_events(
+        stream_message(
+            client,
+            payload,
+            cancellation_token=cancellation_token,
+            max_retries=int(config.get("anthropic_max_retries", 2)),
+        ),
+        provider_name="anthropic",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -851,9 +853,7 @@ def _stream_response_direct(
             )
         else:
             raise ProviderError(f"Unknown backend: {backend}")
-    except ProviderError:
-        raise
-    except TurnCancelled:
+    except (ProviderError, TurnCancelled):
         raise
     except Exception as e:
         raise ProviderError(str(e)) from e

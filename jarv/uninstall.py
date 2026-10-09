@@ -134,7 +134,7 @@ Remove-Item -LiteralPath $ScriptDir -Recurse -Force -ErrorAction SilentlyContinu
         encoding="utf-8",
     )
 
-    from .standalone import _windows_updater_creation_flags
+    from .standalone import _launch_windows_helper
 
     powershell = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
     command = [
@@ -148,29 +148,10 @@ Remove-Item -LiteralPath $ScriptDir -Recurse -Force -ErrorAction SilentlyContinu
         "-ParentPid",
         str(os.getpid()),
     ]
-    popen_kwargs = {
-        "stdin": subprocess.DEVNULL,
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
-        "close_fds": True,
-    }
     with suppress(OSError):
         UNINSTALL_RESULT_FILE.unlink(missing_ok=True)
     try:
-        try:
-            return subprocess.Popen(
-                command,
-                creationflags=_windows_updater_creation_flags(),
-                **popen_kwargs,
-            )
-        except OSError as exc:
-            if getattr(exc, "winerror", None) != 5:
-                raise
-            return subprocess.Popen(
-                command,
-                creationflags=_windows_updater_creation_flags(allow_breakaway=False),
-                **popen_kwargs,
-            )
+        return _launch_windows_helper(command)
     except Exception:
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise

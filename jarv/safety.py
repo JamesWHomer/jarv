@@ -286,9 +286,13 @@ def _console_confirm(request: ConfirmRequest) -> bool:
     console.print(_safety_card(request.body, subtitle=request.subtitle))
 
     prompt = f"[bold]{request.question}[/bold] [dim]\\[y/N][/dim] [bold cyan]\u203a[/bold cyan] "
+    return _read_confirmation(prompt, request.cancellation_token)
+
+
+def _read_confirmation(prompt: str, cancellation_token: CancellationToken | None) -> bool:
     try:
-        if request.cancellation_token is not None:
-            choice = _cancellable_confirmation_input(prompt, request.cancellation_token)
+        if cancellation_token is not None:
+            choice = _cancellable_confirmation_input(prompt, cancellation_token)
         else:
             choice = console.input(prompt).strip().lower()
     except EOFError:
@@ -614,20 +618,7 @@ def _audit_poll_without_live(
         "[bold]Allow this command?[/bold] [dim]\\[y/N][/dim] [bold cyan]›[/bold cyan] ",
         end="",
     )
-    try:
-        if cancellation_token is not None:
-            choice = _cancellable_confirmation_input("", cancellation_token)
-        else:
-            choice = console.input("").strip().lower()
-    except EOFError:
-        console.print("[dim]  denied.[/dim]")
-        return False
-    approved = choice in ("y", "yes")
-    if approved:
-        console.print("[green]  ✓ approved[/green]\n")
-    else:
-        console.print("[red]  ✗ denied[/red]\n")
-    return approved
+    return _read_confirmation("", cancellation_token)
 
 
 def _cancellable_confirmation_input(prompt, token):

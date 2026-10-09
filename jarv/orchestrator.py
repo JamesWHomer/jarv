@@ -24,7 +24,6 @@ from .safety import check_command
 from .anthropic_http import DEFAULT_SUBAGENT_MAX_TOKENS
 from .provider import (
     ProviderError,
-    RetryableStreamError,
     get_backend,
     stream_response,
 )
@@ -1106,8 +1105,6 @@ def _run_subagent_loop(
                     context_breakdown=context_breakdown,
                     output_text=stream_usage_output_text("", tool_calls),
                 )
-        except RetryableStreamError as e:
-            return None, f"provider error: {e}"
         except ProviderError as e:
             return None, f"provider error: {e}"
         except TurnCancelled:

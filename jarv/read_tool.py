@@ -410,19 +410,13 @@ def _resolve_source(
         return f"[read error: could not read local file: {exc}]"
     if pdf:
         return _source_from_pdf("local PDF", str(resolved), data)
-    if media_type is not None:
-        size_error = _image_too_large_error(str(resolved), len(data))
-        if size_error is not None:
-            return size_error
-        if media_type not in _SUPPORTED_IMAGE_MEDIA_TYPES:
-            return _unsupported_image_media_type(str(resolved), media_type)
-        return ReadSource(
-            "local image",
-            str(resolved),
-            image=ReadImage(media_type=media_type, data=data),
-        )
-    content = data.decode("utf-8", errors="replace")
-    return ReadSource("local file", str(resolved), content=content)
+    if media_type not in _SUPPORTED_IMAGE_MEDIA_TYPES:
+        return _unsupported_image_media_type(str(resolved), media_type)
+    return ReadSource(
+        "local image",
+        str(resolved),
+        image=ReadImage(media_type=media_type, data=data),
+    )
 
 
 def _render_text_read_result(source: ReadSource, offset: int, size: int) -> str:
