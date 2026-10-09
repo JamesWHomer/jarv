@@ -10,6 +10,17 @@ from jarv.text_editor import (
 )
 
 
+def test_pasted_key_names_replace_selection_as_literal_text():
+    for value in ("DELETE", "LEFT", "CTRL_LEFT", "SHIFT_RIGHT", "HOME", "ENTER"):
+        state = {}
+        initialize_text_editor(state, "before")
+        state["selection_anchor"] = 0
+        assert apply_text_editor_key(state, TextInput(value), allow_newlines=True)
+        assert state["buffer"] == value
+        assert state["cursor"] == len(value)
+        assert state["selection_anchor"] is None
+
+
 def test_wide_and_combining_text_wraps_by_terminal_cells():
     assert visual_rows("界界界界", 4) == [(0, 2), (2, 4), (4, 4)]
     assert visual_rows("e\u0301e\u0301x", 2) == [(0, 4), (4, 5)]

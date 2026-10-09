@@ -341,6 +341,21 @@ def apply_text_editor_key(
     selection = selection_bounds(state)
     changed = False
 
+    # A batched/pasted literal may itself spell a key token (e.g. "DELETE").
+    # Handle it before interpreting motion or editing shortcuts.
+    if isinstance(key, TextInput):
+        inserted = str(key).replace("\r\n", "\n").replace("\r", "\n")
+        if not allow_newlines:
+            inserted = inserted.replace("\n", " ")
+        if inserted and all(char == "\n" or char == "\t" or char.isprintable() for char in inserted):
+            lo, hi = selection if selection is not None else (cursor, cursor)
+            state["buffer"] = value[:lo] + inserted + value[hi:]
+            state["cursor"] = lo + len(inserted)
+            state["selection_anchor"] = None
+            state["preferred_visual_column"] = None
+            return True
+        return False
+
     # --- Selection-extending motion: keep the anchor, move the cursor. ---
     if key in _SELECT_EXTEND_KEYS:
         if state.get("selection_anchor") is None:
@@ -440,19 +455,6 @@ def apply_text_editor_key(
         state["cursor"] = lo + 1
         state["selection_anchor"] = None
         changed = True
-    elif isinstance(key, TextInput):
-        inserted = str(key).replace("\r\n", "\n").replace("\r", "\n")
-        if not allow_newlines:
-            inserted = inserted.replace("\n", " ")
-        if inserted and all(
-            char == "\n" or char == "\t" or char.isprintable()
-            for char in inserted
-        ):
-            lo, hi = selection if selection is not None else (cursor, cursor)
-            state["buffer"] = value[:lo] + inserted + value[hi:]
-            state["cursor"] = lo + len(inserted)
-            state["selection_anchor"] = None
-            changed = True
     elif (
         isinstance(key, str)
         and key
