@@ -83,17 +83,14 @@ def archive_session_files(history_path: Path) -> Path | None:
     archived_history = ARCHIVE_DIR / f"history-{cleared_at}{stem_suffix}.json"
     _move(history_path, archived_history)
 
-    artifact_path = artifact_file_for(history_path)
-    if artifact_path.exists():
-        _move(artifact_path, ARCHIVE_DIR / f"artifacts-{cleared_at}{stem_suffix}.json")
-
-    reads_path = reads_file_for(history_path)
-    if reads_path.exists():
-        _move(reads_path, ARCHIVE_DIR / f"reads-{cleared_at}{stem_suffix}.json")
-
-    usage_path = usage_file_for(history_path)
-    if usage_path.exists():
-        _move(usage_path, ARCHIVE_DIR / f"usage-{cleared_at}{stem_suffix}.json")
+    for kind, path_for in (
+        ("artifacts", artifact_file_for),
+        ("reads", reads_file_for),
+        ("usage", usage_file_for),
+    ):
+        sidecar = path_for(history_path)
+        if sidecar.exists():
+            _move(sidecar, ARCHIVE_DIR / f"{kind}-{cleared_at}{stem_suffix}.json")
 
     # Normalizing legacy redo can have staged a new sidecar that is not yet
     # visible through Path.exists(); it must move in this same transaction.

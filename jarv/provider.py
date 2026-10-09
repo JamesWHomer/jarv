@@ -187,12 +187,6 @@ def _has_reasoning_signal(obj: Any) -> bool:
             continue
         if _has_reasoning_block(extra):
             return True
-        for key in _REASONING_SIGNAL_KEYS:
-            value = extra.get(key)
-            if _truthy_reasoning_value(value) or _has_reasoning_block(value):
-                return True
-        if _has_reasoning_block(extra.get("content")):
-            return True
     return False
 
 
@@ -372,21 +366,6 @@ def _flush_tool_calls(accumulators: dict[int, dict]) -> Iterator[ToolCallDone]:
             arguments=acc["arguments"],
         )
     accumulators.clear()
-
-
-def _accumulate_tool_delta(accumulators: dict[int, dict], tc_delta) -> None:
-    idx = getattr(tc_delta, "index", 0)
-    if idx not in accumulators:
-        accumulators[idx] = {"id": "", "name": "", "arguments": ""}
-    acc = accumulators[idx]
-    if getattr(tc_delta, "id", None):
-        acc["id"] = tc_delta.id
-    fn = getattr(tc_delta, "function", None)
-    if fn:
-        if getattr(fn, "name", None):
-            acc["name"] += fn.name
-        if getattr(fn, "arguments", None):
-            acc["arguments"] += fn.arguments
 
 
 # ---------------------------------------------------------------------------

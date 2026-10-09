@@ -1,9 +1,38 @@
 import io
+from unittest.mock import Mock
+
+import pytest
 
 from rich.console import Console
 
 from jarv import setup_interactive, settings_command
 from jarv.config import DEFAULT_CONFIG
+
+
+@pytest.mark.parametrize("provider", ["openai", "groq", "anthropic", "gemini"])
+@pytest.mark.parametrize("fails", [False, True])
+def test_connection_probe_closes_each_provider_client(monkeypatch, provider, fails):
+    from jarv import anthropic_http, gemini_http, openai_http, provider as providers
+
+    client = Mock()
+    monkeypatch.setattr(providers, "create_client", lambda config: client)
+    request = Mock(side_effect=RuntimeError("probe failed") if fails else None)
+    if provider == "anthropic":
+        payload = {"probe": True}
+        monkeypatch.setattr(anthropic_http, "build_payload", lambda *args, **kwargs: payload)
+        monkeypatch.setattr(anthropic_http, "create_message", request)
+    else:
+        module = gemini_http if provider == "gemini" else openai_http
+        monkeypatch.setattr(module, "list_models", request)
+
+    result = setup_interactive.probe_connection({"provider": provider})
+
+    assert result == ((False, "probe failed") if fails else (True, None))
+    client.close.assert_called_once_with()
+    if provider == "anthropic":
+        request.assert_called_once_with(client, payload, max_retries=0)
+    else:
+        request.assert_called_once_with(client)
 
 
 class FakeCatalogRefresher:

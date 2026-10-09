@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import concurrent.futures
 import copy
-import math
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -22,6 +21,7 @@ from .web import (
     fragment_note,
     url_fragment,
     web_content_from_bytes,
+    web_timeout,
 )
 
 
@@ -291,12 +291,7 @@ def _resolve_source(
     except ValueError as exc:
         return f"[read error: invalid URL or path: {exc}]"
     if parsed.scheme.lower() in {"http", "https"}:
-        try:
-            timeout = float(get_setting(config, "web_timeout"))
-        except (TypeError, ValueError):
-            timeout = float(DEFAULT_CONFIG["web_timeout"])
-        if not math.isfinite(timeout) or timeout <= 0:
-            timeout = float(DEFAULT_CONFIG["web_timeout"])
+        timeout = web_timeout(config)
         try:
             web_bytes = fetch_web_bytes(
                 value,

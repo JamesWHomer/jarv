@@ -245,17 +245,7 @@ def _settings_model_apply_key(
     ):
         if not edit.get("model_input_active"):
             edit["model_input_active"] = True
-        apply_text_editor_key(
-            edit,
-            key,
-            repeat_count,
-            content_width=1,
-            allow_newlines=False,
-        )
-        edit["error"] = ""
-        return True
-
-    if key in ("ENTER", "ESC"):
+    elif key in ("ENTER", "ESC"):
         return False
 
     if edit.get("model_input_active"):

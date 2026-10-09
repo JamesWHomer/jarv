@@ -463,23 +463,19 @@ def _check_edit(
     return False, f"[edit denied by user — {reason}]"
 
 
-def _first_change_line(before: str, after: str) -> int:
-    """1-based line number of the first differing line."""
+def _format_result(path: Path, count: int, before: str, after: str) -> str:
+    # Reuse the split lines for counts, the first change, and its context.
     before_lines = before.splitlines()
     after_lines = after.splitlines()
-    for index, (old_line, new_line) in enumerate(zip(before_lines, after_lines)):
-        if old_line != new_line:
-            return index + 1
-    return min(len(before_lines), len(after_lines)) + 1
-
-
-def _format_result(path: Path, count: int, before: str, after: str) -> str:
-    before_count = len(before.splitlines())
-    after_count = len(after.splitlines())
+    before_count = len(before_lines)
+    after_count = len(after_lines)
     delta = after_count - before_count
-    change_line = _first_change_line(before, after)
+    change_line = min(before_count, after_count) + 1
+    for number, (old_line, new_line) in enumerate(zip(before_lines, after_lines), 1):
+        if old_line != new_line:
+            change_line = number
+            break
 
-    after_lines = after.splitlines()
     start = max(0, change_line - 1 - _RESULT_CONTEXT_LINES)
     end = min(len(after_lines), change_line + _RESULT_CONTEXT_LINES)
     width = len(str(end)) if end else 1

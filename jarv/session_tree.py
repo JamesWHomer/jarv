@@ -235,16 +235,13 @@ def build_tree(history: list, branches: list[dict]) -> TreeModel:
 
     # Order each node's children so the active continuation leads, then flatten
     # depth-first into display order with correct depth.
-    def _order(node: TreeNode) -> None:
-        node.children.sort(key=lambda c: (not c.on_active_path,))
-
-    roots.sort(key=lambda c: (not c.on_active_path,))
+    roots.sort(key=lambda c: not c.on_active_path)
     stack = [(node, 0) for node in reversed(roots)]
     while stack:
         node, depth = stack.pop()
         node.depth = depth
         nodes_in_order.append(node)
-        _order(node)
+        node.children.sort(key=lambda c: not c.on_active_path)
         stack.extend((child, depth + 1) for child in reversed(node.children))
 
     return TreeModel(roots=roots, nodes=nodes_in_order, by_id=by_id, active_path=active_nodes)

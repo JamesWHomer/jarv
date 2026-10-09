@@ -784,7 +784,6 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
     from .provider_catalog import reconcile_service_tier
 
     original = config
-    config = copy.deepcopy(config)
     row = edit["row"]
     key = row["key"]
     raw_buffer = edit["buffer"]
@@ -793,6 +792,7 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
     if edit.get("readonly"):
         return original, f"{row['label']} unchanged", "dim", True
 
+    config = copy.deepcopy(config)
     if key == "provider":
         from .reasoning import reconcile_reasoning_effort
 
@@ -803,9 +803,6 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
         old_model = str(config.get("model") or "")
         old_default = _settings_default_model_for_provider(old_provider, config=config)
         provider = selected_provider
-        if provider is None:
-            edit["error"] = "Unknown provider. Enter a listed number or provider name."
-            return original, edit["error"], "red", False
         config["provider"] = provider
         provider_models = [name for name, _desc in _settings_model_choices(config)]
         if (
@@ -833,19 +830,10 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
 
     if key == "api_key":
         provider = config.get("provider", "openai")
-        if not raw:
-            if edit.get("cleared"):
-                # User backspaced over the masked stand-in for a stored key.
-                api_keys = config.get("api_keys")
-                if isinstance(api_keys, dict):
-                    api_keys.pop(provider, None)
-                config["api_key"] = ""
-                if not _settings_save_validated(original, config):
-                    edit["error"] = "Could not clear API key."
-                    return original, edit["error"], "red", False
-                return original, "cleared stored API key", "cyan", True
+        if not raw and not edit.get("cleared"):
             return original, "API key unchanged", "dim", True
-        if raw.lower() == "clear":
+        # Backspacing the masked key and typing "clear" use the same save path.
+        if not raw or raw.lower() == "clear":
             api_keys = config.get("api_keys")
             if isinstance(api_keys, dict):
                 api_keys.pop(provider, None)
@@ -893,90 +881,70 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
             edit.pop("model_validation_suggestion", None)
             edit.pop("model_warning_actions", None)
             edit.pop("model_warning_selection", None)
-            if key == "model":
-                from .reasoning import reconcile_reasoning_effort
-
-                config["model"] = model
-                reset_effort = reconcile_reasoning_effort(config)
-                reset_tier = reconcile_service_tier(config)
-            else:
-                config["auditor_model"] = model
-                reset_effort = None
-                reset_tier = None
-            if not _settings_save_validated(original, config):
-                edit["error"] = "Model change failed validation."
-                return original, edit["error"], "red", False
-            display = model if model else AUDITOR_DEFAULT_MODEL_CHOICE
-            message = f"saved {row['label']}: {display}"
-            if reset_effort is not None:
-                message += " (reasoning effort reset to default)"
-            if reset_tier is not None:
-                message += " (processing tier reset to standard)"
-            return original, message, "yellow", True
-
-        models = edit.get("model_choices")
-        input_active = bool(edit.get("model_input_active"))
-        if (
-            isinstance(models, list)
-            and models
-            and not input_active
-        ):
-            selected = max(
-                0,
-                min(
-                    int(edit.get("selected_model_index", 0)),
-                    len(models) - 1,
-                ),
-            )
-            raw = models[selected][0]
-        if key == "auditor_model":
-            model = _settings_resolve_auditor_model(
-                config,
-                raw,
-                models=models if isinstance(models, list) else None,
-            )
         else:
-            model = _settings_resolve_model(
-                config,
-                raw,
-                models=models if isinstance(models, list) else None,
-            )
-        if key == "model" and not model.strip():
-            edit["error"] = "Model must not be empty."
-            return original, edit["error"], "red", False
-        if input_active and model:
-            from .model_catalog import cached_provider_has_model
-
-            listed_model = (
+            models = edit.get("model_choices")
+            input_active = bool(edit.get("model_input_active"))
+            if (
                 isinstance(models, list)
-                and any(
-                    name.lower() == model.lower()
-                    for name, _description in models
+                and models
+                and not input_active
+            ):
+                selected = max(
+                    0,
+                    min(
+                        int(edit.get("selected_model_index", 0)),
+                        len(models) - 1,
+                    ),
                 )
-            )
-            if not listed_model and not cached_provider_has_model(config, model):
-                suggestion = _settings_model_suggestion(config, model)
-                edit["model_validation_warning"] = model
-                edit["model_validation_suggestion"] = suggestion
-                if suggestion:
-                    edit["model_warning_actions"] = [
-                        {"label": f"Use {suggestion}", "value": suggestion},
-                        {"label": "Keep editing", "value": "edit"},
-                        {"label": f"Use {model} anyway", "value": "continue"},
-                    ]
-                else:
-                    edit["model_warning_actions"] = [
-                        {"label": "Keep editing", "value": "edit"},
-                        {"label": "Use anyway", "value": "continue"},
-                    ]
-                edit["model_warning_selection"] = 0
-                edit["error"] = ""
-                return (
-                    original,
-                    f"Model not found in cached provider list: {model}",
-                    "yellow",
-                    False,
+                raw = models[selected][0]
+            if key == "auditor_model":
+                model = _settings_resolve_auditor_model(
+                    config,
+                    raw,
+                    models=models if isinstance(models, list) else None,
                 )
+            else:
+                model = _settings_resolve_model(
+                    config,
+                    raw,
+                    models=models if isinstance(models, list) else None,
+                )
+            if key == "model" and not model.strip():
+                edit["error"] = "Model must not be empty."
+                return original, edit["error"], "red", False
+            if input_active and model:
+                from .model_catalog import cached_provider_has_model
+
+                listed_model = (
+                    isinstance(models, list)
+                    and any(
+                        name.lower() == model.lower()
+                        for name, _description in models
+                    )
+                )
+                if not listed_model and not cached_provider_has_model(config, model):
+                    suggestion = _settings_model_suggestion(config, model)
+                    edit["model_validation_warning"] = model
+                    edit["model_validation_suggestion"] = suggestion
+                    if suggestion:
+                        edit["model_warning_actions"] = [
+                            {"label": f"Use {suggestion}", "value": suggestion},
+                            {"label": "Keep editing", "value": "edit"},
+                            {"label": f"Use {model} anyway", "value": "continue"},
+                        ]
+                    else:
+                        edit["model_warning_actions"] = [
+                            {"label": "Keep editing", "value": "edit"},
+                            {"label": "Use anyway", "value": "continue"},
+                        ]
+                    edit["model_warning_selection"] = 0
+                    edit["error"] = ""
+                    return (
+                        original,
+                        f"Model not found in cached provider list: {model}",
+                        "yellow",
+                        False,
+                    )
         if key == "model":
             from .reasoning import reconcile_reasoning_effort
 
@@ -996,7 +964,7 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
             message += " (reasoning effort reset to default)"
         if reset_tier is not None:
             message += " (processing tier reset to standard)"
-        return original, message, "green", True
+        return original, message, "yellow" if warning_model else "green", True
 
     if key == "system_prompt":
         config[key] = raw_buffer
@@ -1068,5 +1036,4 @@ def cmd_settings() -> None:
         "jarv.settings_interactive"
     ).run_settings_interactive
     run_settings_interactive(config)
-
 

@@ -711,8 +711,6 @@ def _dispatch_ask_user(args: dict, config: dict | None = None, ui=None) -> str:
             cancel_kwargs = {"cancellation_token": control.token} if control and control.deadline else {}
             answer = read_editable_line(prompt, text_style=prompt_text_style, **cancel_kwargs).strip()
             outcome = "success"
-        except KeyboardInterrupt:
-            raise
         except EOFError:
             answer = "[no response]"
             outcome = "failed"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+from bisect import bisect_left, bisect_right
 
 from .display import console
 from .terminal_text import safe_terminal_text
@@ -121,19 +122,19 @@ def cmd_history() -> None:
         parts: list = [section_rule("conversation"), Text("")]
         pending_tool_parts: list = []
 
-        def _append_jarv_heading() -> None:
+        def _append_jarv_parts() -> None:
             line = Text()
             line.append("▌ ", style="bold green")
             line.append("Jarv", style="bold green")
             parts.append(line)
+            parts.extend(pending_tool_parts)
+            pending_tool_parts.clear()
 
         for item_index, m in enumerate(history):
             role = m.get("role")
             if role == "user":
                 if pending_tool_parts:
-                    _append_jarv_heading()
-                    parts.extend(pending_tool_parts)
-                    pending_tool_parts.clear()
+                    _append_jarv_parts()
                 line = Text()
                 line.append("▌ ", style="bold cyan")
                 line.append("You", style="bold cyan")
@@ -143,17 +144,13 @@ def cmd_history() -> None:
             elif role == "assistant":
                 content = m.get("content", "")
                 if content:
-                    _append_jarv_heading()
-                    parts.extend(pending_tool_parts)
-                    pending_tool_parts.clear()
+                    _append_jarv_parts()
                     parts.append(markdown_renderable(flatten_headings(content)))
                     parts.append(Text(""))
             elif m.get("type") == "status":
                 content = str(m.get("content") or "").strip()
                 if content:
-                    _append_jarv_heading()
-                    parts.extend(pending_tool_parts)
-                    pending_tool_parts.clear()
+                    _append_jarv_parts()
                     parts.append(_status_renderable(m))
             elif m.get("type") == "function_call":
                 pending_tool_parts.append(
@@ -167,8 +164,7 @@ def cmd_history() -> None:
                     )
                 )
         if pending_tool_parts:
-            _append_jarv_heading()
-            parts.extend(pending_tool_parts)
+            _append_jarv_parts()
         console.print(jarv_panel(Group(*parts), title="history", subtitle=f"{exchanges} exchange(s)"))
         return
 
@@ -198,13 +194,11 @@ def cmd_history() -> None:
         if not anchors:
             return
         if delta < 0:
-            candidates = [anchor for anchor in anchors if anchor < state.offset]
-            target = candidates[-1] if candidates else anchors[0]
+            index = max(0, bisect_left(anchors, state.offset) - 1)
         else:
-            candidates = [anchor for anchor in anchors if anchor > state.offset]
-            target = candidates[0] if candidates else anchors[-1]
+            index = min(len(anchors) - 1, bisect_right(anchors, state.offset))
         body_rows, _ = body_content_rows(term_h)
-        state.offset = clamp_scroll_offset(target, len(_lines(width)), body_rows)
+        state.offset = clamp_scroll_offset(anchors[index], len(_lines(width)), body_rows)
 
     def _render() -> Panel:
         term_w, term_h = terminal_size(console=console)
@@ -217,9 +211,7 @@ def cmd_history() -> None:
         start = state.offset
         end = min(total, start + body_rows)
 
-        parts: list = []
-        for index in range(start, end):
-            parts.append(lines[index])
+        parts: list = lines[start:end]
         if not lines:
             parts.append(Text("  (empty)", style="dim"))
 

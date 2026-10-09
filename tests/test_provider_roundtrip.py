@@ -25,6 +25,23 @@ from jarv.turn_records import append_assistant_response_input_items, append_tool
 from jarv.usage import estimate_context_breakdown, estimate_item_tokens
 
 
+@pytest.mark.parametrize("container", ["additional_kwargs", "model_extra", "provider_specific_fields"])
+@pytest.mark.parametrize("metadata,expected", [
+    ({}, False),
+    ({"reasoning_content": "  ", "content": [{"type": "text", "text": "answer"}]}, False),
+    ({"reasoning_content": "thought"}, True),
+    ({"content": [{"type": "thinking_delta", "text": ""}]}, True),
+    ({"nested": {"content": [{"type": "reasoning", "text": "thought"}]}}, True),
+    ({"thinking_blocks": []}, False),
+    ({"thinking": False}, True),
+])
+def test_reasoning_detection_in_provider_metadata(container, metadata, expected):
+    from jarv.provider import _has_reasoning_signal
+
+    assert _has_reasoning_signal({container: metadata}) is expected
+    assert _has_reasoning_signal(SimpleNamespace(**{container: metadata})) is expected
+
+
 def sse(chunks):
     return httpx.Response(200, headers={"content-type": "text/event-stream"},
                           content="".join("data: " + json.dumps(chunk) + "\n\n" for chunk in chunks))

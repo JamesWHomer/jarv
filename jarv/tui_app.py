@@ -351,30 +351,26 @@ class AltScreenApp:
     # ------------------------------------------------------------------ #
     # Screen / input plumbing (overridable via injection)
     # ------------------------------------------------------------------ #
+    @contextmanager
     def _screen_context(self):
         """Context manager that owns the Live display and terminal modes."""
-
-        @contextmanager
-        def _ctx():
-            live = self._live_factory(self.render, self.console)
-            with ExitStack() as stack:
-                # Outermost so cooked mode is restored only after the alt screen
-                # is left: holds the POSIX terminal in no-echo/non-canonical mode
-                # for the whole loop (a no-op on Windows / non-tty) so keys typed
-                # between polled reads aren't echoed into the corner and line
-                # buffered out of reach. See raw_input_mode.
-                stack.enter_context(raw_input_mode())
-                stack.enter_context(live)
-                self.live = live
-                if self.use_mouse_capture:
-                    stack.enter_context(mouse_capture())
-                if self.use_bracketed_paste:
-                    stack.enter_context(bracketed_paste())
-                if self.use_vt_input:
-                    stack.enter_context(windows_vt_input())
-                yield live
-
-        return _ctx()
+        live = self._live_factory(self.render, self.console)
+        with ExitStack() as stack:
+            # Outermost so cooked mode is restored only after the alt screen
+            # is left: holds the POSIX terminal in no-echo/non-canonical mode
+            # for the whole loop (a no-op on Windows / non-tty) so keys typed
+            # between polled reads aren't echoed into the corner and line
+            # buffered out of reach. See raw_input_mode.
+            stack.enter_context(raw_input_mode())
+            stack.enter_context(live)
+            self.live = live
+            if self.use_mouse_capture:
+                stack.enter_context(mouse_capture())
+            if self.use_bracketed_paste:
+                stack.enter_context(bracketed_paste())
+            if self.use_vt_input:
+                stack.enter_context(windows_vt_input())
+            yield live
 
     @contextmanager
     def _preserve_alt_screen(self):

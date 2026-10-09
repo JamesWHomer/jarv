@@ -485,17 +485,7 @@ def _history_visual_lines_and_anchors(history: list, width: int, *, cancelled=No
         if not body:
             continue
         start = len(lines)
-        if role == "user":
-            jarv_turn_open = False
-            for j, raw in enumerate(body.splitlines() or [""]):
-                t = Text(no_wrap=False, overflow="fold")
-                if j == 0:
-                    t.append("user: ", style="bold cyan")
-                else:
-                    t.append("  ")
-                t.append(raw, style="bold")
-                lines.extend(rendered_text_lines(t, width))
-        elif role == "assistant":
+        if role == "assistant":
             if not jarv_turn_open:
                 lines.append(Text("jarv:", style="bold green", no_wrap=True, overflow="crop"))
             lines.extend(_markdown_to_text_lines(body, width))
@@ -503,13 +493,15 @@ def _history_visual_lines_and_anchors(history: list, width: int, *, cancelled=No
         else:
             jarv_turn_open = False
             label = role or "?"
+            label_style = "bold cyan" if role == "user" else "dim"
+            body_style = "bold" if role == "user" else "dim"
             for j, raw in enumerate(body.splitlines() or [""]):
                 t = Text(no_wrap=False, overflow="fold")
                 if j == 0:
-                    t.append(f"{label}: ", style="dim")
+                    t.append(f"{label}: ", style=label_style)
                 else:
                     t.append("  ")
-                t.append(raw, style="dim")
+                t.append(raw, style=body_style)
                 lines.extend(rendered_text_lines(t, width))
         if len(lines) > start:
             anchors.append(start)

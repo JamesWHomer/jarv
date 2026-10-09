@@ -145,39 +145,29 @@ def probe_connection(config: dict) -> tuple[bool, str | None]:
             urllib.request.urlopen(
                 urllib.request.Request(health_url, method="GET"), timeout=5
             )
-        elif backend in ("responses", "openai_compat"):
-            from .openai_http import list_models
+        elif backend in ("responses", "openai_compat", "anthropic", "gemini"):
+            if backend == "anthropic":
+                from .anthropic_http import build_payload, create_message
+            else:
+                from .provider_registry import list_models
 
             client = create_client(config)
             try:
-                list_models(client)
-            finally:
-                client.close()
-        elif backend == "anthropic":
-            from .anthropic_http import build_payload, create_message
-
-            client = create_client(config)
-            try:
-                create_message(
-                    client,
-                    build_payload(
-                        config,
-                        config.get("model", ""),
-                        "",
-                        [],
-                        [{"role": "user", "content": "hi"}],
-                        max_tokens=1,
-                    ),
-                    max_retries=0,
-                )
-            finally:
-                client.close()
-        elif backend == "gemini":
-            from .gemini_http import list_models
-
-            client = create_client(config)
-            try:
-                list_models(client)
+                if backend == "anthropic":
+                    create_message(
+                        client,
+                        build_payload(
+                            config,
+                            config.get("model", ""),
+                            "",
+                            [],
+                            [{"role": "user", "content": "hi"}],
+                            max_tokens=1,
+                        ),
+                        max_retries=0,
+                    )
+                else:
+                    list_models(client, backend)
             finally:
                 client.close()
         return True, None

@@ -207,23 +207,17 @@ def trim_turn_input(
     )
 
 
-def _is_turn_start(item: dict) -> bool:
-    return item.get("role") == "user"
-
-
 def iter_turn_ranges(history: list) -> list[tuple[int, int]]:
+    """Return user-led turn ranges, ignoring any leading non-user items."""
     ranges: list[tuple[int, int]] = []
-    index = 0
-    while index < len(history):
-        while index < len(history) and not _is_turn_start(history[index]):
-            index += 1
-        if index >= len(history):
-            break
-        start = index
-        index += 1
-        while index < len(history) and not _is_turn_start(history[index]):
-            index += 1
-        ranges.append((start, index))
+    start = None
+    for index, item in enumerate(history):
+        if item.get("role") == "user":
+            if start is not None:
+                ranges.append((start, index))
+            start = index
+    if start is not None:
+        ranges.append((start, len(history)))
     return ranges
 
 

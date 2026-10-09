@@ -420,30 +420,22 @@ class InteractiveCommandProcess:
         # drained quickly when the process exits (text mode forced per-char
         # reads to stay responsive).
         try:
-            if platform.system() == "Windows":
-                proc = subprocess.Popen(
-                    invocation.popen_args,
-                    shell=False,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    bufsize=0,
-                    cwd=invocation.cwd,
-                    env=invocation.env,
-                    creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
-                )
-            else:
-                proc = subprocess.Popen(
-                    invocation.popen_args,
-                    shell=True,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    bufsize=0,
-                    cwd=invocation.cwd,
-                    env=invocation.env,
-                    start_new_session=True,
-                )
+            windows = platform.system() == "Windows"
+            process_group = (
+                {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+                if windows else {"start_new_session": True}
+            )
+            proc = subprocess.Popen(
+                invocation.popen_args,
+                shell=not windows,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+                cwd=invocation.cwd,
+                env=invocation.env,
+                **process_group,
+            )
         except Exception:
             if invocation.capture is not None:
                 invocation.capture.cleanup()

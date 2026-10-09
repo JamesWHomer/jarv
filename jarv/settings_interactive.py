@@ -244,15 +244,21 @@ class SettingsApp(AltScreenApp):
         return line_count
 
     def _settings_window_end(self, start: int, max_lines: int) -> int:
-        end = start
-        while end < len(self.rows):
-            candidate = end + 1
-            if candidate > start + 1 and self._settings_rendered_row_count(start, candidate) > max_lines:
-                break
-            end = candidate
-            if self._settings_rendered_row_count(start, end) >= max_lines:
-                break
-        return end
+        line_count = 0
+        last_section = None
+        for end in range(start, len(self.rows)):
+            section = self.rows[end]["section"]
+            candidate_count = line_count + 1
+            if section != last_section:
+                candidate_count += 1 + (end > start)
+            # Always show at least one setting, even in a very short terminal.
+            if end > start and candidate_count > max_lines:
+                return end
+            line_count = candidate_count
+            last_section = section
+            if line_count >= max_lines:
+                return end + 1
+        return len(self.rows)
 
     def _settings_visible_window(self, max_lines: int) -> tuple[int, int]:
         if not self.rows:
@@ -296,6 +302,9 @@ class SettingsApp(AltScreenApp):
         parts.append(Text(_clip_text(f"  showing {start + 1}-{end} of {len(self.rows)}", inner_width), style="dim"))
 
         last_section = None
+        label_width, value_width, _value_start, _description_start = (
+            _settings_column_layout(inner_width)
+        )
         for idx in range(start, end):
             row = self.rows[idx]
             if row["section"] != last_section:
@@ -306,9 +315,6 @@ class SettingsApp(AltScreenApp):
 
             is_selected = idx == self.selected
             prefix = " › " if is_selected else "   "
-            label_width, value_width, _value_start, _description_start = (
-                _settings_column_layout(inner_width)
-            )
             desc_width = max(0, inner_width - len(prefix) - label_width - value_width - 4)
 
             line = Text(no_wrap=True, overflow="crop")

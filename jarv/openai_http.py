@@ -12,8 +12,6 @@ from .http_transport import (
     iter_sse_json,
     open_stream_response,
     request_json,
-    response_error,
-    send_with_retries,
 )
 from .tool_schemas import strict_openai_tools
 from .unicode_safety import sanitize_json_value

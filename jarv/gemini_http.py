@@ -13,7 +13,6 @@ from .history_convert import (
     append_grouped,
     convert_tools,
     iter_history_segments,
-    parse_json_arguments,
     native_provider_content,
 )
 from .http_transport import (
@@ -23,7 +22,6 @@ from .http_transport import (
     normalized_token_count,
     open_stream_response,
     request_json,
-    request_json_response,
     response_error,
     send_with_retries,
 )

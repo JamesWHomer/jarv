@@ -49,6 +49,23 @@ from .tui_overlay import (
     scroll_position_hint,
 )
 
+
+def _session_time_label(ts, now) -> str:
+    """Format the same last-active label in both session browsers."""
+    if ts is None:
+        return "—"
+    secs = int((now - ts).total_seconds())
+    if secs < 60:
+        return "just now"
+    if secs < 3600:
+        return f"{secs // 60}m ago"
+    if secs < 86400:
+        return f"{secs // 3600}h ago"
+    if secs < 7 * 86400:
+        return f"{secs // 86400}d ago"
+    return ts.strftime("%b %d")
+
+
 def _sessions_plain(sessions: dict, terminals: dict) -> None:
     """Non-interactive fallback session list (used when stdout is not a tty)."""
     terminal_id, _ = detect_terminal()
@@ -71,21 +88,7 @@ def _sessions_plain(sessions: dict, terminals: dict) -> None:
         meta = sessions[sid]
         ts_str = meta.get("last_message_at") or meta.get("last_used_at")
         ts = parse_timestamp(ts_str)
-        if ts:
-            delta = now - ts
-            secs = int(delta.total_seconds())
-            if secs < 60:
-                time_str = "just now"
-            elif secs < 3600:
-                time_str = f"{secs // 60}m ago"
-            elif secs < 86400:
-                time_str = f"{secs // 3600}h ago"
-            elif secs < 7 * 86400:
-                time_str = f"{secs // 86400}d ago"
-            else:
-                time_str = ts.strftime("%b %d")
-        else:
-            time_str = "—"
+        time_str = _session_time_label(ts, now)
 
         snippet = ""
         history_path_str = meta.get("history_file")
@@ -193,21 +196,7 @@ def cmd_sessions(args: list | None = None) -> int | None:
         meta = sessions[sid]
         ts_str = meta.get("last_message_at") or meta.get("last_used_at")
         ts = parse_timestamp(ts_str)
-        if ts:
-            delta = now - ts
-            secs = int(delta.total_seconds())
-            if secs < 60:
-                time_str = "just now"
-            elif secs < 3600:
-                time_str = f"{secs // 60}m ago"
-            elif secs < 86400:
-                time_str = f"{secs // 3600}h ago"
-            elif secs < 7 * 86400:
-                time_str = f"{secs // 86400}d ago"
-            else:
-                time_str = ts.strftime("%b %d")
-        else:
-            time_str = "—"
+        time_str = _session_time_label(ts, now)
 
         cached_snippet = meta.get("first_user_snippet")
         if not isinstance(cached_snippet, str):

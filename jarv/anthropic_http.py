@@ -22,8 +22,6 @@ from .http_transport import (
     open_stream_response,
     request_json,
     request_json_response,
-    response_error,
-    send_with_retries,
 )
 from .tool_schemas import anthropic_tool_schema
 from .tool_outputs import to_anthropic_tool_result_content
@@ -367,11 +365,6 @@ def _provider_error(exc: ProviderHTTPError) -> AnthropicHTTPError:
         error_type=exc.error_type,
         request_id=exc.request_id,
     )
-
-
-def _response_error(response, data: dict | None = None) -> AnthropicHTTPError:
-    exc = response_error("Anthropic", response, data)
-    return _provider_error(exc)
 
 
 def create_message(

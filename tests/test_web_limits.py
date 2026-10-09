@@ -171,19 +171,29 @@ def test_url_deadline_returns_during_dns_and_never_sends_late_request(monkeypatc
     stream.close.assert_called_once()
 
 
-def test_web_timeout_outcome_survives_url_read_and_search(monkeypatch):
+@pytest.mark.parametrize("configured, expected", [
+    (2.5, 2.5), ("3.5", 3.5), (True, 1.0),
+    (None, None), ("invalid", None), ([], None),
+    (0, None), (-1, None), (float("inf"), None), (float("nan"), None),
+])
+def test_web_timeout_outcome_survives_url_read_and_search(monkeypatch, configured, expected):
+    config = {**DEFAULT_CONFIG, "web_timeout": configured}
+    if expected is None:
+        expected = float(DEFAULT_CONFIG["web_timeout"])
+
     def timed_out(*args, **kwargs):
+        assert kwargs["timeout"] == expected
         raise web.WebToolError("request timed out", kind="timeout")
 
     monkeypatch.setattr("jarv.read_tool.fetch_web_bytes", timed_out)
     output = dispatch_read_tool(
-        {"input": "https://example.test/"}, config=DEFAULT_CONFIG,
+        {"input": "https://example.test/"}, config=config,
         visible_labels=set(), artifact_store=ArtifactStore(), retained_store=RetainedOutputStore(),
     )
     assert output.startswith("[read error:")
     assert tool_outcome(output).status == "timed_out"
     monkeypatch.setattr(web, "search_web", timed_out)
-    output = web.dispatch_web_tool("web_search", {"query": "test"}, DEFAULT_CONFIG)
+    output = web.dispatch_web_tool("web_search", {"query": "test"}, config)
     assert tool_outcome(output).status == "timed_out"
 
 

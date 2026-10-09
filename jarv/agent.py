@@ -145,9 +145,7 @@ from .agent_ui import (
     tool_complete_indicator,
     thought_complete_indicator,
 )
-from .context_budget import build_input
 from .project_context import build_project_context
-from .response_items import to_response_input_item
 from .safety import check_command
 from .shell import InteractiveCommandProcess, get_session_shell_state
 

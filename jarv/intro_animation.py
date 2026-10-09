@@ -447,13 +447,7 @@ def render_intro(
         _draw_logo(chars, colors, top, t, width, _stage(t, _LOGO_IN))
         _draw_wave(chars, colors, wave_y, t, width, _stage(t, _WAVE_IN))
 
-        if hint:
-            hint_y = wave_y + 2
-            hx = (width - len(hint)) // 2
-            _clear_box(chars, colors, hint_y, hint_y + 1, hx - 1, hx + len(hint) + 1)
-            _draw_typed_line(
-                chars, colors, hint_y, hint, t, _stage(t, _HINT_IN), _hint_color_fn(t),
-            )
+        hint_y = wave_y + 2
     else:
         title = "J A R V"
         tx = (width - len(title)) // 2
@@ -467,13 +461,14 @@ def render_intro(
         shown = title[: max(0, int(reveal * len(title)))] if reveal < 1.0 else title
         _place_text(chars, colors, top, shown, title_fn, center_len=len(title))
 
-        if hint:
-            hint_y = top + 2
-            hx = (width - len(hint)) // 2
-            _clear_box(chars, colors, hint_y, hint_y + 1, hx - 1, hx + len(hint) + 1)
-            _draw_typed_line(
-                chars, colors, hint_y, hint, t, _stage(t, _HINT_IN), _hint_color_fn(t),
-            )
+        hint_y = top + 2
+
+    if hint:
+        hx = (width - len(hint)) // 2
+        _clear_box(chars, colors, hint_y, hint_y + 1, hx - 1, hx + len(hint) + 1)
+        _draw_typed_line(
+            chars, colors, hint_y, hint, t, _stage(t, _HINT_IN), _hint_color_fn(t),
+        )
 
     if exit > 0.0:
         _apply_exit(chars, colors, exit, width, height)

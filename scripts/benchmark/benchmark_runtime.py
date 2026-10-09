@@ -126,8 +126,10 @@ def make_cases(home):
     cases["history render 100 turns"] = lambda: _history_visual_lines(history[:400], 96)
     cases["session tree 1000 turns"] = lambda: [(n.frame_id, n.depth, n.prompt_text, n.response_preview) for n in build_tree(history, []).nodes]
     browser = SessionBrowserScreen.__new__(SessionBrowserScreen)
+    browser.background = False
     browser.sessions = {"bench": {"history_file": str(history_path), "label": "benchmark"}}
     browser.search_text_cache = {}
+    browser.search_folded_cache = {}
     cases["session search cold 1000 turns"] = lambda: browser._build_search_text("bench")
     browser._search_text("bench")
     cases["session search warm 1000 turns"] = lambda: browser._search_text("bench")

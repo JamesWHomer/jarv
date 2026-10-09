@@ -247,8 +247,8 @@ def assemble_body(
 ) -> list[RenderableType]:
     """Pad/trim the visible transcript and stack footer + prompt beneath it."""
     parts: list[RenderableType] = list(visible)
-    while len(parts) < rows:
-        parts.insert(0, Text(""))
+    if len(parts) < rows:
+        parts[:0] = [Text("") for _ in range(rows - len(parts))]
     target_rows_before_footer = max(0, body_height - 1 - len(prompt_lines))
     if len(parts) > target_rows_before_footer:
         del parts[target_rows_before_footer:]

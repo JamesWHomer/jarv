@@ -12,6 +12,7 @@ from jarv.context_budget import (
     compact_oldest_turns,
     context_budget_status,
     estimate_history_tokens,
+    iter_turn_ranges,
     summarize_turn_items,
     trim_items_to_budget,
     trim_turn_input,
@@ -22,6 +23,21 @@ from jarv.usage import estimate_item_tokens, resolve_context_window
 
 
 class ContextBudgetTests(unittest.TestCase):
+    def test_turn_ranges_preserve_user_boundaries_and_ignore_preamble(self):
+        cases = [
+            ([], []),
+            (["assistant", "tool"], []),
+            (["user"], [(0, 1)]),
+            (["user", "user"], [(0, 1), (1, 2)]),
+            (["assistant", "user", "tool", "assistant", "user"], [(1, 4), (4, 5)]),
+            (["user", "tool", "assistant"], [(0, 3)]),
+        ]
+        for roles, expected in cases:
+            with self.subTest(roles=roles):
+                history = [{"role": role} for role in roles]
+                self.assertEqual(iter_turn_ranges(history), expected)
+                self.assertEqual([item["role"] for item in history], roles)
+
     def _tiny_config(self) -> dict:
         return {
             **DEFAULT_CONFIG,

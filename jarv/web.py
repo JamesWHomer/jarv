@@ -201,7 +201,7 @@ class _DuckDuckGoHTMLParser(HTMLParser):
             self.challenge = True
         if classes & {"no-results", "no-results__message", "result--no-result"}:
             self.no_results = True
-        if tag == "form" and "nav-link" in _class_tokens(attrs):
+        if tag == "form" and "nav-link" in classes:
             self._form_params = {}
             self._form_is_next = False
             return
@@ -215,7 +215,6 @@ class _DuckDuckGoHTMLParser(HTMLParser):
             return
         if tag != "a" or self._anchor_kind is not None:
             return
-        classes = _class_tokens(attrs)
         if "result__a" in classes:
             self._anchor_kind = "title"
         elif "result__snippet" in classes:
@@ -1213,6 +1212,17 @@ def fetch_web(
     return "\n".join(lines)
 
 
+def web_timeout(config: dict) -> float:
+    """Normalize the shared timeout for web searches and URL reads."""
+    try:
+        timeout = float(get_setting(config, "web_timeout"))
+    except (TypeError, ValueError):
+        timeout = float(DEFAULT_CONFIG["web_timeout"])
+    if not math.isfinite(timeout) or timeout <= 0:
+        timeout = float(DEFAULT_CONFIG["web_timeout"])
+    return timeout
+
+
 def dispatch_web_tool(
     name: str,
     args: dict[str, Any],
@@ -1220,12 +1230,7 @@ def dispatch_web_tool(
     *,
     cancellation_token: CancellationToken | None = None,
 ) -> str:
-    try:
-        timeout = float(get_setting(config, "web_timeout"))
-    except (TypeError, ValueError):
-        timeout = float(DEFAULT_CONFIG["web_timeout"])
-    if not math.isfinite(timeout) or timeout <= 0:
-        timeout = float(DEFAULT_CONFIG["web_timeout"])
+    timeout = web_timeout(config)
 
     try:
         if name == "web_search":

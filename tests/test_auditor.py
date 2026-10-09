@@ -100,6 +100,66 @@ def test_audit_without_ask_user_keeps_existing_context(monkeypatch):
     audit_command("rm build", "deletion", {}, [{"role": "user", "content": "Clean up."}])
 
 
+@pytest.mark.parametrize("provider,transport", [
+    ("openai", "jarv.openai_http.create_chat"),
+    ("anthropic", "jarv.anthropic_http.create_message"),
+    ("gemini", "jarv.gemini_http.generate_content"),
+])
+@pytest.mark.parametrize("replies,expected", [
+    (['{"allow": true, "reason": "safe"}'], (True, "safe")),
+    (['{"allow": false, "reason": "unsafe"}'], (False, "unsafe")),
+    (["unclear", '{"allow": true, "reason": "safe"}'], (True, "safe")),
+    (["unclear", "still unclear"], (False, "could not parse auditor response")),
+])
+def test_auditor_attempts_preserve_prompts_and_usage(monkeypatch, provider, transport, replies, expected):
+    from jarv import auditor
+
+    requests, records = [], []
+    monkeypatch.setattr(auditor, "_get_auditor_client", lambda *args: object())
+
+    def send(*args, **kwargs):
+        requests.append(args[-1])
+        return {"output_text": replies[len(requests) - 1]}
+
+    def record(_path, _session, _model, response, messages, content, **kwargs):
+        assert response["output_text"] == content
+        records.append((messages, content))
+
+    monkeypatch.setattr(transport, send)
+    monkeypatch.setattr(auditor, "_record_auditor_response", record)
+
+    assert audit_command("git status", "inspection", {"provider": provider}) == expected
+    assert len(requests) == len(records) == len(replies)
+    for attempt, (payload, (messages, content)) in enumerate(zip(requests, records)):
+        assert content == replies[attempt]
+        assert messages[0]["content"] == auditor.AUDITOR_SYSTEM_PROMPT
+        assert "Command: git status" in messages[1]["content"]
+        retry_marker = "Your previous response could not be parsed."
+        assert (retry_marker in json.dumps(payload)) == bool(attempt)
+        assert (retry_marker in messages[1]["content"]) == bool(attempt)
+
+
+@pytest.mark.parametrize("provider,transport", [
+    ("openai", "jarv.openai_http.create_chat"),
+    ("anthropic", "jarv.anthropic_http.create_message"),
+    ("gemini", "jarv.gemini_http.generate_content"),
+])
+def test_auditor_cancellation_takes_precedence_over_transport_failure(monkeypatch, provider, transport):
+    from jarv import auditor
+    from jarv.cancellation import CancellationToken, TurnCancelled
+
+    token = CancellationToken()
+    monkeypatch.setattr(auditor, "_get_auditor_client", lambda *args: object())
+
+    def send(*args, **kwargs):
+        token.cancel()
+        raise RuntimeError("connection closed")
+
+    monkeypatch.setattr(transport, send)
+    with pytest.raises(TurnCancelled):
+        audit_command("git status", "inspection", {"provider": provider}, cancellation_token=token)
+
+
 def test_same_batch_ask_user_answer_reaches_command_audit(monkeypatch):
     from jarv.orchestrator import ToolExecutionHooks, execute_tool_calls
     from jarv.provider import ToolCallDone

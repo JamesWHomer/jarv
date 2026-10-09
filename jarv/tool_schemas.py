@@ -100,21 +100,14 @@ def strict_openai_tools(tools: list[dict]) -> list[dict]:
     strict_tools = []
     for tool in tools:
         copied = deepcopy(tool)
-        function = copied.get("function")
-        if (
-            copied.get("type") == "function"
-            and isinstance(function, dict)
-        ):
+        if copied.get("type") == "function":
+            function = copied.get("function")
+            if not isinstance(function, dict):
+                function = copied
             function["parameters"] = _openai_strict_schema(
                 function.get("parameters", {"type": "object"})
             )
             function["strict"] = True
             function.pop("input_examples", None)
-        elif copied.get("type") == "function":
-            copied["parameters"] = _openai_strict_schema(
-                copied.get("parameters", {"type": "object"})
-            )
-            copied["strict"] = True
-            copied.pop("input_examples", None)
         strict_tools.append(copied)
     return strict_tools

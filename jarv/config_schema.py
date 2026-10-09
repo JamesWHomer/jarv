@@ -240,18 +240,19 @@ def validate_config_fields(
     ok = True
     for field in CONFIG_FIELDS:
         key = field.key
-        if field.validator in ("string", "nullable_string"):
+        validator = field.validator
+        if validator in ("string", "nullable_string"):
             value = config.get(key, field.default)
-            if field.validator == "nullable_string" and value is None:
+            if validator == "nullable_string" and value is None:
                 continue
             if not isinstance(value, str):
                 report(f"[red]Config '{key}' must be a string.[/red]")
                 ok = False
-        elif field.validator == "bool":
+        elif validator == "bool":
             if not isinstance(config.get(key, field.default), bool):
                 report(f"[red]Config '{key}' must be a boolean (true or false).[/red]")
                 ok = False
-        elif field.validator == "string_map":
+        elif validator == "string_map":
             value = config.get(key, field.default)
             if not isinstance(value, dict) or any(
                 not isinstance(name, str) or not isinstance(item, str)
@@ -259,31 +260,21 @@ def validate_config_fields(
             ):
                 report(f"[red]Config '{key}' must be an object with string values.[/red]")
                 ok = False
-        elif field.validator == "positive_int":
+        elif validator in ("positive_int", "non_negative_int"):
+            minimum = 1 if validator == "positive_int" else 0
             try:
                 raw = config.get(key, field.default)
                 if isinstance(raw, (bool, float)):
                     raise ValueError
                 value = int(raw)
-                if value <= 0:
+                if value < minimum:
                     raise ValueError
                 config[key] = value
             except (TypeError, ValueError):
-                report(f"[red]Config '{key}' must be a positive integer.[/red]")
+                requirement = "positive" if minimum else "non-negative"
+                report(f"[red]Config '{key}' must be a {requirement} integer.[/red]")
                 ok = False
-        elif field.validator == "non_negative_int":
-            try:
-                raw = config.get(key, field.default)
-                if isinstance(raw, (bool, float)):
-                    raise ValueError
-                value = int(raw)
-                if value < 0:
-                    raise ValueError
-                config[key] = value
-            except (TypeError, ValueError):
-                report(f"[red]Config '{key}' must be a non-negative integer.[/red]")
-                ok = False
-        elif field.validator == "ratio":
+        elif validator == "ratio":
             try:
                 value = float(config.get(key, field.default))
                 if not (0.0 < value < 1.0):
@@ -292,13 +283,13 @@ def validate_config_fields(
             except (TypeError, ValueError, OverflowError):
                 report(f"[red]Config '{key}' must be a number between 0 and 1.[/red]")
                 ok = False
-        elif field.validator == "choices":
+        elif validator == "choices":
             value = config.get(key, field.default)
             if value not in field.choices:
                 choices = ", ".join(field.choices)
                 report(f"[red]Config '{key}' must be one of: {choices}.[/red]")
                 ok = False
-        elif field.validator == "disabled_tools":
+        elif validator == "disabled_tools":
             disabled_tools = config.get(key, field.default)
             if not isinstance(disabled_tools, list):
                 report("[red]Config 'disabled_tools' must be a list.[/red]")
@@ -318,7 +309,7 @@ def validate_config_fields(
                     ok = False
                 elif len(set(disabled_tools)) != len(disabled_tools):
                     config[key] = list(dict.fromkeys(disabled_tools))
-        elif field.validator == "display_lines":
+        elif validator == "display_lines":
             value = config.get(key, field.default)
             if value in ("auto", "", None):
                 config[key] = "auto"
@@ -335,7 +326,7 @@ def validate_config_fields(
                         f"[red]Config '{key}' must be 'auto' or an integer of at least 3.[/red]"
                     )
                     ok = False
-        elif field.validator == "service_tiers":
+        elif validator == "service_tiers":
             service_tiers = config.get(key, field.default)
             if not isinstance(service_tiers, dict):
                 report("[red]Config 'service_tiers' must be an object.[/red]")

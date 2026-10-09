@@ -1413,13 +1413,10 @@ class HeadsupApp(AltScreenApp):
                 if cancellation_token is not None and not _key_available():
                     time.sleep(0.05)
                     continue
-                try:
-                    key, repeat = _read_key_with_repeats(
-                        text_mode=True,
-                        batch_text=True,
-                    )
-                except KeyboardInterrupt:
-                    raise
+                key, repeat = _read_key_with_repeats(
+                    text_mode=True,
+                    batch_text=True,
+                )
                 if key == "ENTER":
                     answer = str(self.editor.get("buffer", "")).strip()
                     if echo_answer:

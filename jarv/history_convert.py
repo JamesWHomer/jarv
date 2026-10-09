@@ -96,23 +96,15 @@ def iter_history_segments(input_items: list[dict]) -> Iterator[tuple[str, Any]]:
             i += 1
             continue
 
-        if typ == "function_call":
-            calls: list[dict] = []
-            while i < len(input_items) and input_items[i].get("type") == "function_call":
-                calls.append(input_items[i])
+        if typ in ("function_call", "function_call_output"):
+            start = i
+            i += 1
+            while i < len(input_items) and input_items[i].get("type") == typ:
                 i += 1
-            yield ("function_calls", calls)
-            continue
-
-        if typ == "function_call_output":
-            outputs: list[dict] = []
-            while (
-                i < len(input_items)
-                and input_items[i].get("type") == "function_call_output"
-            ):
-                outputs.append(input_items[i])
-                i += 1
-            yield ("function_outputs", outputs)
+            yield (
+                "function_calls" if typ == "function_call" else "function_outputs",
+                input_items[start:i],
+            )
             continue
 
         i += 1
