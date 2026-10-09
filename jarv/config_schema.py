@@ -6,6 +6,8 @@ import copy
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from .turn_summary_settings import TURN_SUMMARY_FIELDS
+
 DEFAULT_SYSTEM_PROMPT = (
     "You are Jarv, a helpful CLI assistant. "
     "You can run shell commands when needed to answer questions or complete tasks. "
@@ -135,8 +137,13 @@ CONFIG_FIELDS: tuple[ConfigField, ...] = (
     ConfigField("headsup_border", True, validator="bool", label="Menu borders", section="display", desc="outer frames in heads-up and menus; off removes side padding too", ui_kind="bool", about="Show outer borders in heads-up mode and all menus, including settings, setup, sessions, tree, usage, and read-only screens. When `false`, remove outer borders and horizontal frame padding while keeping headers, footers, and the heads-up input box."),
     ConfigField("headsup_intro_logo", True, validator="bool", label="Rainbow JARV", section="display", desc="rainbow logo and wave on new heads-up sessions", ui_kind="bool", about="Show the animated rainbow JARV logo, wave, and welcome hint in an empty heads-up session. Independent of `headsup_intro_stars`; both default to on."),
     ConfigField("headsup_intro_stars", True, validator="bool", label="Welcome stars", section="display", desc="twinkling stars on new heads-up sessions", ui_kind="bool", about="Show the twinkling starfield in an empty heads-up session. Turn this and `headsup_intro_logo` off for a blank welcome area."),
-    ConfigField("print_usage_after_agent", False, validator="bool", label="Print usage", section="display", desc="print token totals after completed agent runs", ui_kind="bool", about="When `true`, print a compact token usage line after each completed agent run."),
     ConfigField("colour", True, validator="bool", label="Colour", section="display", desc="render output in colour", ui_kind="bool", about="When `true` (the default), jarv renders output in colour. When `false`, colour is stripped while keeping bold, dim, and underline. The `NO_COLOR` environment variable disables colour regardless of this setting."),
+    ConfigField("turn_summary", False, validator="bool", label="Turn summary", section="turn summary", desc="show selected details once after each completed turn in either mode", ui_kind="bool", about="Show one summary after Jarv finishes responding to your prompt in one-shot and heads-up mode. Token counts and model time cover all successful model requests in the turn, including tool continuations. Output speed describes the final response. Select fields with the `turn_summary_*` settings. Turning this off preserves the selected fields."),
+    *(ConfigField(
+        field.key, field.default, validator="bool", label=field.label,
+        section="turn summary", desc=field.description, ui_kind="bool",
+        about=f"Include {field.description} when `turn_summary` is on.",
+    ) for field in TURN_SUMMARY_FIELDS),
 )
 
 CONFIG_FIELD_BY_KEY = {field.key: field for field in CONFIG_FIELDS}

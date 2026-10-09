@@ -40,7 +40,8 @@ from .orchestrator import (
 )
 from .retained_outputs import RetainedOutputStore
 from .tool_outputs import with_tool_outcome
-from .usage import format_cost, format_int, load_usage, usage_cost_summary
+from .turn_summary_settings import enabled_turn_summary_fields
+from .usage import load_usage
 from .response_wait import (
     _THINKING_FRAMES,
     ResponseWaitIndicator,
@@ -541,62 +542,43 @@ def tool_activity_complete_status(seconds: float, tool_names: tuple[str, ...]) -
     return f"{completed} in {duration}."
 
 
-def _format_agent_usage_line(usage: dict) -> Text | None:
-    totals = usage.get("totals") if isinstance(usage.get("totals"), dict) else {}
-    last_root = usage.get("last_root_request") if isinstance(usage.get("last_root_request"), dict) else None
-    if not isinstance(last_root, dict):
-        return None
-
-    session_total = int(totals.get("total_tokens") or 0)
-    last_total = int(last_root.get("total_tokens") or 0)
-    if session_total <= 0 and last_total <= 0:
-        return None
-
-    input_tokens = int(last_root.get("input_tokens") or 0)
-    cached_input = int(last_root.get("cached_input_tokens") or 0)
-    output_tokens = int(last_root.get("output_tokens") or 0)
-
-    line = Text("Usage: ", style="dim")
-    line.append(format_int(input_tokens), style="bold")
-    line.append(" in", style="dim")
-    if cached_input:
-        line.append(" (", style="dim")
-        line.append(format_int(cached_input), style="cyan")
-        line.append(" cached)", style="dim")
-    line.append(" · ", style="dim")
-    line.append(format_int(output_tokens), style="bold")
-    line.append(" out · ", style="dim")
-    line.append(format_int(last_total), style="bold")
-    line.append(" last · ", style="dim")
-    line.append(format_int(session_total), style="bold")
-    line.append(" session", style="dim")
-
-    cost = usage_cost_summary(totals)
-    known_cost_requests = cost["exact_requests"] + cost["estimated_requests"]
-    if known_cost_requests or cost["has_tracked_cost"]:
-        label = "cost " if cost["exact_requests"] and not cost["estimated_requests"] else "est. "
-        line.append(f" · {label}", style="dim")
-        line.append(format_cost(cost["total_usd"]), style="green")
-    if cost["unknown_requests"] or cost["contract_requests"]:
-        line.append(" · cost incomplete", style="yellow")
-    if last_root.get("estimated"):
-        line.append(" · usage estimated", style="yellow")
-    return line
-
-
-def _print_agent_usage_if_enabled(
+def _print_turn_summary_if_enabled(
     config: dict,
-    usage_path,
-    session_id: str | None,
-    ui=None,
+    response,
     *,
-    heads_up: bool = False,
+    model: str,
+    elapsed_seconds: float | None,
+    stream_result=None,
+    turn_stats=None,
+    context_breakdown: dict | None = None,
+    output_text: str | None = None,
+    usage_path=None,
+    session_id: str | None = None,
+    ui=None,
 ) -> None:
-    if heads_up:
+    """Render selected statistics once after the full agent turn completes."""
+    if config.get("_quiet"):
         return
-    if not get_setting(config, "print_usage_after_agent"):
+    fields = enabled_turn_summary_fields(config)
+    if not fields:
         return
-    usage_line = _format_agent_usage_line(load_usage(usage_path, session_id, warn=False))
+    from .turn_stats import format_turn_summary
+
+    session_usage = None
+    if usage_path is not None and fields.intersection({"session", "cost"}):
+        session_usage = load_usage(usage_path, session_id, warn=False)
+    usage_line = format_turn_summary(
+        response,
+        model=model,
+        elapsed_seconds=elapsed_seconds,
+        stream_result=stream_result,
+        turn_stats=turn_stats,
+        fields=fields,
+        context_breakdown=context_breakdown,
+        output_text=output_text,
+        provider=config.get("provider"),
+        session_usage=session_usage,
+    )
     if usage_line is not None:
         if ui is not None:
             _ui_call(ui, "show_usage_line", usage_line)

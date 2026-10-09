@@ -19,6 +19,7 @@ def isolate_cli(monkeypatch):
     ["/history", "unexpected"], ["/setup", "unknown"],
     ["/unset", "model", "extra"], ["/setup", "model", "extra"],
     ["/undo", "banana"], ["/redo", "0"], ["/usage", "unknown"],
+    ["/restart", "unexpected"],
 ])
 def test_invalid_command_exits_nonzero(monkeypatch, arguments):
     monkeypatch.setattr(sys, "argv", ["jarv", *arguments])
@@ -35,6 +36,21 @@ def test_failed_session_load_exits_nonzero(monkeypatch):
     with pytest.raises(SystemExit) as error:
         cli.main()
     assert error.value.code == 1
+
+
+@pytest.mark.parametrize("command", ["/restart", "restart"])
+def test_restart_outside_headsup_exits_with_guidance(monkeypatch, command):
+    from rich.console import Console
+
+    console = Console(force_terminal=False, color_system=None)
+    monkeypatch.setattr(commands, "console", console)
+    monkeypatch.setattr(sys, "argv", ["jarv", command])
+    monkeypatch.setattr(cli, "_stdin_is_piped", lambda: False)
+    monkeypatch.setattr("builtins.input", lambda *_args: "1")
+    with console.capture() as capture, pytest.raises(SystemExit) as error:
+        cli.main()
+    assert error.value.code == 2
+    assert "/restart works inside heads-up mode" in capture.get()
 
 
 def test_command_alias_preserves_update_failure_status(monkeypatch):

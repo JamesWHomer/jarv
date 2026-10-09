@@ -28,7 +28,7 @@ def _render_read_only_text(body) -> str:
 def test_read_only_command_display_default_is_fullscreen():
     assert READ_ONLY_COMMAND_DISPLAY_CHOICES == ("fullscreen", "print")
     assert DEFAULT_CONFIG["read_only_command_display"] == "fullscreen"
-    assert DEFAULT_CONFIG["print_usage_after_agent"] is False
+    assert DEFAULT_CONFIG["turn_summary"] is False
     assert DEFAULT_CONFIG["colour"] is True
     assert validate_config(dict(DEFAULT_CONFIG))
 
@@ -67,19 +67,19 @@ def test_settings_exposes_read_only_command_display(monkeypatch):
     assert message == "saved Read-only commands: print"
 
 
-def test_settings_exposes_print_usage_after_agent(monkeypatch):
+def test_settings_exposes_turn_summary(monkeypatch):
     config = dict(DEFAULT_CONFIG)
-    row = next(row for row in settings_command._settings_rows(config) if row["key"] == "print_usage_after_agent")
+    row = next(row for row in settings_command._settings_rows(config) if row["key"] == "turn_summary")
 
-    assert row["section"] == "display"
-    assert row["label"] == "Print usage"
+    assert row["section"] == "turn summary"
+    assert row["label"] == "Turn summary"
     assert settings_command._settings_value_text(row, config).plain == "off"
 
     monkeypatch.setattr(settings_command, "save_config", lambda _config: None)
     updated, message = settings_command._settings_apply_quick(row, config)
 
-    assert updated["print_usage_after_agent"] is True
-    assert message == "saved Print usage: on"
+    assert updated["turn_summary"] is True
+    assert message == "saved Turn summary: on"
 
 
 def test_settings_exposes_colour(monkeypatch):

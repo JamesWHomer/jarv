@@ -487,6 +487,7 @@ def main() -> None:
 
     parser = _build_parser()
     args, unknown = parser.parse_known_args()
+    args._restart_invocation_cwd = os.getcwd()
     if unknown:
         if args.query and args.query[0].lower() in {"/uninstall", "uninstall"}:
             args.query.extend(unknown)

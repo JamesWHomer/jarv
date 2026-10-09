@@ -37,7 +37,14 @@ Settings live in `~/.jarv/config.json` (created when config is first loaded). Us
 | `read_only_command_display` | `"fullscreen"` | Display mode for `/help`, `/about`, `/usage`, and `/config`: temporary `fullscreen` view or permanent `print` output. |
 | `tool_call_display` | `"auto"` | Tool-call layout: `auto` selects `print` for one-shot runs and `fullscreen` in heads-up mode; explicit modes override it. |
 | `tool_output_display_lines` | `"auto"` | Display-only output line budget per tool card: `auto` uses one-third of terminal height in `print` layout and one-half in `fullscreen`, with a minimum of 3; an integer of at least 3 fixes the budget. |
-| `print_usage_after_agent` | `false` | Print a compact token usage line after each completed agent run. |
+| `turn_summary` | `false` | Show one summary after Jarv finishes responding to your prompt in one-shot and heads-up mode. Turning this off preserves the field selections below. |
+| `turn_summary_tokens` | `true` | Include input, output, and total tokens summed across successful model requests in the turn. |
+| `turn_summary_cache` | `true` | Include provider-reported cached input tokens summed across the turn. |
+| `turn_summary_reasoning` | `true` | Include provider-reported reasoning output tokens summed across the turn. |
+| `turn_summary_speed` | `true` | Include the final response's server-reported generation tok/s when available, otherwise estimated text streaming speed excluding the initial wait. Short or unmeasurable streams show unavailable. |
+| `turn_summary_time` | `true` | Include total model request time across the turn, excluding tool execution. |
+| `turn_summary_session` | `false` | Include the running token total for the saved session. |
+| `turn_summary_cost` | `false` | Include running session cost, labelled when estimated or incomplete. |
 | `headsup_border` | `true` | Show outer frames in heads-up mode and all menus. Turn off to remove borders and side padding while keeping headers, footers, and the heads-up input box. |
 | `headsup_intro_logo` | `true` | Show the rainbow JARV logo, wave, and welcome hint in new heads-up sessions. Toggle **Rainbow JARV** in Display settings. |
 | `headsup_intro_stars` | `true` | Show twinkling stars in new heads-up sessions. Toggle **Welcome stars** in Display settings. Turn both welcome settings off for a blank area. |
@@ -46,3 +53,5 @@ Settings live in `~/.jarv/config.json` (created when config is first loaded). Us
 | `project_context` | `true` | Read `JARV.md`/`AGENTS.md`/`CLAUDE.md` and git branch, status, and recent commits into the system prompt. |
 
 Processing tier choices depend on the active provider. Jarv offers Standard, Flex, and Priority for OpenAI, OpenRouter, and Gemini; OpenAI also offers Ultrafast for the direct Astra route described in the [CLI reference](cli.md). Anthropic offers Standard and Priority; Jarv maps Priority to Anthropic's `auto` tier. Other providers remain on Standard. Apart from Ultrafast's explicit model/endpoint check, the provider API determines whether a selected tier is available for the model and account.
+
+Legacy `print_usage_after_model` and `print_usage_after_agent` settings migrate automatically to the unified turn summary. Model stats enable the token and timing fields; print usage enables token, session, and cost fields. Existing `turn_summary*` values take precedence. The summary appears once at the end of the full turn, after tool calls and internal continuations finish.

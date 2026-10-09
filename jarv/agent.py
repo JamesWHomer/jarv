@@ -82,7 +82,10 @@ from .retained_outputs import (
 )
 from .tool_outputs import ToolOutput, with_tool_outcome
 from .terminal_text import safe_terminal_text
+from .unicode_safety import sanitize_json_value
 from .turn_loop import StreamCollection, collect_stream_response, run_tool_execution_round
+from .turn_stats import TurnSummaryStats
+from .turn_summary_settings import enabled_turn_summary_fields
 from .turn_records import (
     append_assistant_response_input_items,
     append_reasoning_input_items,
@@ -91,11 +94,7 @@ from .turn_records import (
 )
 from .usage import (
     estimate_context_breakdown,
-    format_cost,
-    format_int,
-    load_usage,
     record_response_usage,
-    usage_cost_summary,
     usage_file_for,
 )
 from .web import WEB_SEARCH_TOOL
@@ -133,8 +132,7 @@ from .agent_ui import (
     ToolActivityIndicator,
     _dispatch_ask_user,
     _dispatch_spawn_with_ui,
-    _format_agent_usage_line,
-    _print_agent_usage_if_enabled,
+    _print_turn_summary_if_enabled,
     _print_tool_card,
     _start_response_wait_indicator,
     _ui_call,
@@ -176,8 +174,9 @@ class SessionPersistence:
     again by an error checkpoint. Incognito runs never touch disk.
     """
 
-    def __init__(self, *, incognito: bool):
+    def __init__(self, *, incognito: bool, on_history_saved=None):
         self.incognito = incognito
+        self.on_history_saved = on_history_saved
         self.history: list = []
         self.session_context = None
         self.artifact_store = None
@@ -193,17 +192,24 @@ class SessionPersistence:
                 else self.artifact_file or self.reads_file)
         if path is None:
             return
+        saved_history = None
         with transaction(path):
             if self.session_context is not None:
                 if clear_redo or self.new_user_message:
                     redo_path = redo_file_for(self.session_context.history_file)
                     delete_json(redo_path)
+                if self.on_history_saved is not None:
+                    saved_history = sanitize_json_value(self.history)
                 save_history(self.history, self.session_context.history_file)
             if self.artifact_store is not None and self.artifact_file is not None:
                 save_artifact_store(self.artifact_store, self.artifact_file)
             if self.retained_store is not None and self.reads_file is not None:
                 save_retained_output_store(self.retained_store, self.reads_file)
         self.new_user_message = False
+        if saved_history is not None:
+            # Report exactly what this transaction saved. Re-reading here could
+            # mistake another writer's later edit for our own visible turn.
+            self.on_history_saved(self.session_context.history_file, saved_history)
 
     def save_turn(self) -> None:
         """Persist the turn and drop any stale redo checkpoint."""
@@ -1342,7 +1348,11 @@ def run_agent(
     retained_store = None
     usage_path = None
     pending_interactive_command: PendingRunCommand | None = None
-    persistence = SessionPersistence(incognito=incognito)
+    history_saved = getattr(ui, "history_saved", None)
+    persistence = SessionPersistence(
+        incognito=incognito,
+        on_history_saved=history_saved if callable(history_saved) else None,
+    )
     persistence.history = history
     pending_status_history_items: list[dict] = []
     # The terminal-control help line is sent on the first interactive waiting
@@ -1353,6 +1363,11 @@ def run_agent(
     control = RunControl(cancellation_token, max_turns=config.get("_max_turns"),
                          timeout=config.get("_run_timeout"))
     config["_run_control"] = control
+    turn_stats = (
+        TurnSummaryStats()
+        if not config.get("_quiet") and enabled_turn_summary_fields(config)
+        else None
+    )
     renderer = _TurnRenderer(
         ui=ui,
         interactive=interactive,
@@ -1438,6 +1453,13 @@ def run_agent(
             artifact_store = ArtifactStore() if incognito else load_artifact_store(artifact_file)
             reads_file = reads_file_for(session_context.history_file)
             retained_store = RetainedOutputStore() if incognito else load_retained_output_store(reads_file)
+            # Commit replaces the snapshot baseline after legacy ids are added.
+            # Keep the original prefix so normalization is not an external edit.
+            loaded_history = getattr(history, "baseline", history)
+            if not isinstance(loaded_history, list):
+                loaded_history = []
+        if not incognito:
+            _ui_call(ui, "history_loaded", session_context.history_file, loaded_history)
         # A failed legacy migration or sidecar load must not make the error
         # checkpoint persist a partial snapshot from an aborted transaction.
         persistence.history = history
@@ -1574,6 +1596,19 @@ def run_agent(
                 else:
                     print(safe_terminal_text(renderer.reply_text))
 
+            if turn_stats is not None:
+                turn_stats.add_response(
+                    final_response,
+                    model=config["model"],
+                    elapsed_seconds=stream_result.elapsed_seconds,
+                    stream_result=stream_result,
+                    context_breakdown=_ctx_breakdown,
+                    output_text=stream_usage_output_text(
+                        renderer.reply_text, renderer.tool_calls
+                    ),
+                    provider=config.get("provider"),
+                )
+
             if pending_interactive_command is not None:
                 checkpointer.flush_status_items()
                 kwargs["input"], pending_interactive_command = (
@@ -1666,16 +1701,23 @@ def run_agent(
                     provider_metadata=renderer.provider_metadata,
                 )
                 persistence.save_turn()
-                if not incognito:
-                    _print_agent_usage_if_enabled(
-                        config,
-                        usage_path,
-                        session_context.session_id,
-                        ui=ui,
-                        heads_up=heads_up,
-                    )
                 break
         control.check()
+        _print_turn_summary_if_enabled(
+            config,
+            final_response,
+            model=config["model"],
+            elapsed_seconds=stream_result.elapsed_seconds,
+            stream_result=stream_result,
+            turn_stats=turn_stats,
+            context_breakdown=_ctx_breakdown,
+            output_text=stream_usage_output_text(
+                renderer.reply_text, renderer.tool_calls
+            ),
+            usage_path=usage_path,
+            session_id=session_context.session_id,
+            ui=ui,
+        )
         return AgentRunResult(text=renderer.reply_text, session_id=session_context.session_id,
                               turns=control.turns)
     except (KeyboardInterrupt, TurnCancelled) as exc:

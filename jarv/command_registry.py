@@ -84,7 +84,7 @@ COMMANDS: dict[str, CommandMeta] = {
     "tree": CommandMeta(False, needs_nudge=True, summary="Browse the session as a tree — fork, edit, or resume any prompt"),
     "btw": CommandMeta(True, needs_nudge=True, summary="Ask an aside in heads-up mode", arg_hint="<question>"),
     "history": CommandMeta(False, needs_nudge=True, summary="Show recent conversation history"),
-    "undo": CommandMeta(True, needs_nudge=True, summary="Unsend the last n exchanges", arg_hint="[n]"),
+    "undo": CommandMeta(True, needs_nudge=True, summary="Cancel queued messages or unsend the last n exchanges", arg_hint="[n]"),
     "redo": CommandMeta(True, needs_nudge=True, summary="Restore undone exchanges", arg_hint="[n]"),
     "sessions": CommandMeta(True, needs_nudge=True, summary="List sessions"),
     "session": CommandMeta(True, needs_nudge=True, summary="List sessions", menu=False),
@@ -96,6 +96,7 @@ COMMANDS: dict[str, CommandMeta] = {
     "help": CommandMeta(False, summary="Show help menu"),
     "about": CommandMeta(False, summary="Show detailed reference information"),
     "update": CommandMeta(False, needs_nudge=True, summary="Update jarv"),
+    "restart": CommandMeta(False, summary="Relaunch jarv in heads-up mode"),
     "uninstall": CommandMeta(True, summary="Uninstall jarv", arg_hint="[--purge] [--yes]"),
 }
 
@@ -108,6 +109,7 @@ HANDLER_SPECS: dict[str, tuple[str, str]] = {
     "help": ("jarv.commands", "print_help"),
     "about": ("jarv.commands", "print_about"),
     "update": ("jarv.commands", "cmd_update"),
+    "restart": ("jarv.commands", "cmd_restart"),
     "uninstall": ("jarv.uninstall", "cmd_uninstall"),
     "new": ("jarv.commands", "cmd_new"),
     "resume": ("jarv.session_commands", "cmd_resume"),

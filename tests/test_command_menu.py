@@ -49,9 +49,23 @@ def test_menu_entries_complete_to_runnable_or_open_ended_text():
     # Parameterless commands complete to the bare command and run on Enter.
     assert by_name["settings"].insert == "/settings"
     assert by_name["settings"].runs_on_enter is True
+    assert by_name["restart"].insert == "/restart"
+    assert by_name["restart"].runs_on_enter is True
     # Commands with possible arguments gain a trailing space and defer running.
     assert by_name["usage"].insert == "/usage "
     assert by_name["usage"].runs_on_enter is False
+
+
+def test_restart_is_discoverable_in_menu_and_help():
+    from rich.console import Console
+
+    from jarv.commands import _help_body
+
+    assert [entry.name for entry in filter_entries(menu_entries(), "rest")] == ["restart"]
+    console = Console(width=180, force_terminal=False, color_system=None)
+    with console.capture() as capture:
+        console.print(_help_body())
+    assert "/restart" in capture.get()
 
 
 def test_argument_entries_for_usage_periods():

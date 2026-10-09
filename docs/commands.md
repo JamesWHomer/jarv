@@ -18,17 +18,24 @@
 | `/sessions <id>` | Load a specific session by ID prefix |
 | `/history` | Show recent conversation history |
 | `/tree` | Browse the session as a tree — fork, edit, or resume any prompt |
-| `/undo [n]` | Remove last *n* exchanges (default 1) |
+| `/undo [n]` | Cancel up to *n* newest queued messages in heads-up mode, or remove last *n* exchanges (default 1) |
 | `/redo [n]` | Restore last *n* undone exchanges (default 1) |
 | `/btw <question>` | Heads-up only: ask an aside, then save the completed exchange as a branch outside the main context |
 | `/usage` | Interactive usage screen — spend vs the previous period, tokens, requests, context headroom, a spend-over-time chart, and share-of-spend by model. `←/→` (or `1-5` / `s t w m a`) switches scope live |
 | `/usage <session\|day\|week\|month\|all>` | Open straight to a scope (`day`/`today`, `week`, `month` = rolling 24h, 7d, 30d; `all` = full system-wide history) |
 | `/update` | Update Jarv to the latest version for the active install channel |
+| `/restart` | Heads-up only: relaunch the entire Jarv process and reload code and settings |
 | `/uninstall [--purge] [--yes]` | Uninstall Jarv or show its package-manager uninstall command |
 
-Except for `/btw` and the heads-up exit commands, commands work both as `jarv /command` and inside heads-up mode. `/session` aliases `/sessions`; `jarv help` also opens help. Read-only commands (`/help`, `/about`, `/usage`, and `/config`) use a temporary display by default in interactive terminals; change `read_only_command_display` in `/settings` to print them permanently instead. Without an interactive terminal, `/history`, `/tree`, and `/usage` print a static view, and `/sessions` lists the five most recent sessions, including archived ones.
+Except for `/btw`, `/restart`, and the heads-up exit commands, commands work both as `jarv /command` and inside heads-up mode. `/session` aliases `/sessions`; `jarv help` also opens help. Read-only commands (`/help`, `/about`, `/usage`, and `/config`) use a temporary display by default in interactive terminals; change `read_only_command_display` in `/settings` to print them permanently instead. Without an interactive terminal, `/history`, `/tree`, and `/usage` print a static view, and `/sessions` lists the five most recent sessions, including archived ones.
+
+`/resume` reports when the latest chat is already selected and refreshes its saved conversation in heads-up mode if another terminal has changed it. Switching chats shows the title and short ID. Use `/sessions` to choose a different chat; wait for an active turn or cancellation to finish before resuming.
 
 `/btw` returns to the preceding exchange after a successful aside. If it is the first exchange, is cancelled, or fails, it stays on the active path. In incognito mode it runs as an ordinary prompt.
+
+In heads-up mode, `/undo` cancels the newest queued message while the current turn continues. `/undo n` cancels up to *n* queued messages, newest first, and stops there even if fewer than *n* are queued. This also works in incognito mode and for queued `/btw` questions. Cancelled queued messages cannot be restored with `/redo`. When the queue is empty, `/undo` removes saved exchanges as usual; wait for the active turn to finish or cancel it with Esc before undoing history.
+
+`/restart` takes no arguments. It relaunches Jarv, preserving the current saved session and the launch overrides, and reloads code and settings from disk. An original `--new` flag is not applied again; incognito sessions start fresh because their conversation is not saved. Shell state, such as environment changes made by shell commands, resets with the process. Wait for an active turn or update to finish before restarting. For a staged Windows standalone update, exit Jarv and run it again to finish the update.
 
 Agent tool calls have a separate `tool_call_display` setting. `auto` uses `print` for one-shot runs and `fullscreen` in heads-up mode. `print` is resize-safe and left-aligned; `fullscreen` uses bordered cards with right-aligned status.
 

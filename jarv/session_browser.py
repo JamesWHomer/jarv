@@ -29,7 +29,7 @@ from .session_titles import SessionTitleCache
 from .session_browser_live import SessionBrowserLive as Live
 from .session_browser_render import (
     beside, conversation_title, first_prompt, fitted, highlighted, highlighted_transcript, match_excerpt,
-    one_line, pane_heading, reflow_position, session_row,
+    one_line, pane_heading, reflow_position, session_row, short_session_id as _short_session_id,
 )
 from .text_editor import initialize_text_editor, apply_text_editor_key, render_single_line
 from .tool_outputs import flatten_content_text
@@ -48,16 +48,6 @@ from .tui_overlay import (
     clamp_selection_scroll,
     scroll_position_hint,
 )
-
-def _short_session_id(sid: str) -> str:
-    """Return the shortest unambiguous prefix hint for display (type prefix + 6 hash chars)."""
-    # IDs look like: parent-5d44fec1a0fe  or  windows-terminal-3dece1d0fac8
-    # Keep the descriptive prefix and show only 6 chars of the trailing hash.
-    parts = sid.rsplit("-", 1)
-    if len(parts) == 2 and len(parts[1]) >= 6:
-        return f"{parts[0]}-{parts[1][:6]}"
-    return sid[:16]
-
 
 def _sessions_plain(sessions: dict, terminals: dict) -> None:
     """Non-interactive fallback session list (used when stdout is not a tty)."""

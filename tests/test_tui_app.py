@@ -184,6 +184,112 @@ def test_worker_thread_event_is_painted():
     assert app.app_events[0].payload == "hello"
 
 
+@pytest.mark.parametrize("stage", ["startup", "loop"])
+def test_worker_invalidation_during_paint_survives_without_keyboard_input(stage):
+    app, holder = _make_app(keys=[])
+    state = {"text": "before"}
+    captured = threading.Event()
+    updated = threading.Event()
+    target_frame = 1 if stage == "startup" else 2
+    app.render = lambda: Text(state["text"])
+    original_factory = app._live_factory
+
+    def live_factory(get_renderable, console):
+        live = original_factory(get_renderable, console)
+        original_refresh = live.refresh
+
+        def refresh():
+            original_refresh()
+            if len(live.frames) == target_frame:
+                # Hold the old frame on screen while the worker requests the
+                # next frame, reproducing completion during Rich rendering.
+                captured.set()
+                assert updated.wait(1.0), "worker failed to invalidate"
+
+        live.refresh = refresh
+        return live
+
+    def producer():
+        if captured.wait(1.0):
+            state["text"] = "after"
+            app.invalidate()
+            updated.set()
+
+    def tick():
+        app.ticks += 1
+        if stage == "loop" and app.ticks == 1:
+            app.invalidate()
+        if app.ticks == 4:
+            app.stop()
+
+    app._live_factory = live_factory
+    app.on_tick = tick
+    worker = threading.Thread(target=producer)
+    worker.start()
+    try:
+        app.run()
+    finally:
+        captured.set()
+        worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert updated.is_set()
+    assert app.seen_keys == []
+    assert holder["live"].frames[target_frame - 1].plain == "before"
+    assert holder["live"].frames[-1].plain == "after"
+
+
+def test_paint_now_preserves_invalidation_requested_while_rendering():
+    app, _ = _make_app(keys=[])
+    state = {"text": "before"}
+    captured = threading.Event()
+    updated = threading.Event()
+    frames = []
+
+    def refresh():
+        frames.append(state["text"])
+        if len(frames) == 1:
+            captured.set()
+            assert updated.wait(1.0), "worker failed to invalidate"
+
+    def producer():
+        if captured.wait(1.0):
+            state["text"] = "after"
+            app.invalidate()
+            updated.set()
+
+    app.live = type("Live", (), {"refresh": staticmethod(refresh)})()
+    app._loop_thread = threading.current_thread()
+    worker = threading.Thread(target=producer)
+    worker.start()
+    try:
+        app.paint_now()
+        assert app._dirty is True
+        app.paint_now()
+        assert app._dirty is False
+    finally:
+        captured.set()
+        worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert frames == ["before", "after"]
+
+
+def test_paint_now_keeps_interrupted_frame_dirty_when_app_continues():
+    app, _ = _make_app(keys=[])
+    interrupts = []
+
+    def refresh():
+        raise KeyboardInterrupt
+
+    app.live = type("Live", (), {"refresh": staticmethod(refresh)})()
+    app.on_interrupt = lambda: interrupts.append(True)
+    app.paint_now()
+
+    assert interrupts == [True]
+    assert app._dirty is True
+
+
 def test_resize_detected_and_clears_console():
     console = FakeConsole()
     # Size is stable, then grows; clamps so later polls keep the new size.

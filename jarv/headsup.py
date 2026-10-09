@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import threading
 import time
 from collections import deque
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 
 from rich.align import Align
@@ -57,7 +60,8 @@ from .display import (
     tool_card,
 )
 from .history import (
-    ephemeral_session_context, forget_current_session, load_history, prepare_session_context,
+    ephemeral_session_context, forget_current_session, latest_session_for_directory,
+    load_history, prepare_session_context,
 )
 from .intro_animation import intro_footer_rows, render_intro
 from .model_catalog import get_image_output_capability
@@ -68,6 +72,7 @@ from .session_render import (
     _tool_call_output,
     tool_call_card,
 )
+from .storage import transaction
 from .text_editor import (
     apply_text_editor_key,
     initialize_text_editor,
@@ -137,11 +142,11 @@ class _CommandOutput:
         return Group(*content) if content else None
 
 
-# These commands can replace/delete the history or change the active checkout.
+# These commands can replace/delete history or shut down the active runtime.
 # Session browsers and /tree must be guarded before opening their action menus.
 _SESSION_CHANGING_SLASH_COMMANDS = frozenset({
     "/new", "/resume", "/undo", "/redo", "/archive", "/session", "/sessions", "/tree",
-    "/uninstall",
+    "/uninstall", "/restart",
 })
 
 _FULLSCREEN_SLASH_COMMANDS = frozenset({
@@ -370,6 +375,17 @@ class HeadsupAgentUI:
         self._stream_dirty = False
         self._last_stream_refresh_at = None
         self.app.add_user_message(query)
+
+    def history_saved(self, history_file: Path, history: list) -> None:
+        self.app._remember_saved_history(history_file, history)
+
+    def history_loaded(self, history_file: Path, history: list) -> None:
+        snapshot = self.app._history_snapshot(history_file, history)
+        with self.app.lock:
+            if snapshot != self.app._saved_history_snapshot:
+                # A local turn may inherit external messages the screen has
+                # never shown. Its later saves must not hide that discrepancy.
+                self.app._history_needs_reload = True
 
     def start_response_wait(self, start_time: float) -> None:
         self._response_started_at = start_time
@@ -693,7 +709,7 @@ def _update_outcome_lines(outcome) -> tuple[Text, list[Text]]:
         line = Text("✓ ", style="bold green")
         if outcome.kind == "updated":
             line.append(f"Updated to {version}", style="green")
-            line.append(" — restart jarv to start using it.", style="dim")
+            line.append(" — run /restart to start using it.", style="dim")
         else:
             line.append(f"Update to {version} staged", style="green")
             line.append(" — exit jarv and run it again to finish.", style="dim")
@@ -768,6 +784,8 @@ class _UpdateTask:
         summary, details = _update_outcome_lines(outcome)
         with self.app.lock:
             self.done = True
+            if outcome.kind == "staged":
+                self.app._update_staged = True
             self._status_index = self.app.upsert_status(self._status_index, summary)
         if details:
             self.app.add_notice(Group(*details))
@@ -847,6 +865,7 @@ class HeadsupApp(AltScreenApp):
         self._agent_busy = False
         self._agent_thread: threading.Thread | None = None
         self._update_task: _UpdateTask | None = None
+        self._update_staged = False
         self._queued_queries: deque[tuple[str, Callable | None]] = deque()
         self._answer_request: dict | None = None
         self._answer_request_completed: dict = {}
@@ -854,12 +873,15 @@ class HeadsupApp(AltScreenApp):
         self.incognito = bool(getattr(args, "incognito", False))
         self._started_new_session = bool(getattr(args, "new", False)) and not self.incognito
         self._initial_history_synced = False
+        self._saved_history_snapshot: tuple[Path, bytes] | None = None
+        self._history_needs_reload = False
         if self._started_new_session:
             forget_current_session()
         self.session_context = (
             ephemeral_session_context() if self.incognito
             else prepare_session_context(persist_metadata=False)
         )
+        self._saved_history_snapshot = self._history_snapshot(self.session_context.history_file, [])
         self.usage_path = None if self.incognito else usage_file_for(self.session_context.history_file)
         self._prompt_history = (
             []
@@ -907,9 +929,9 @@ class HeadsupApp(AltScreenApp):
     # ------------------------------------------------------------------ #
     # Lifecycle (single-threaded loop owned by AltScreenApp)
     # ------------------------------------------------------------------ #
-    def run(self) -> None:
+    def run(self) -> str | None:
         self._sync_initial_transcript_from_history()
-        super().run()
+        return super().run()
 
     def on_start(self) -> None:
         # Capture the wheel as SGR mouse events so MOUSE_WHEEL_* tokens reach
@@ -989,8 +1011,9 @@ class HeadsupApp(AltScreenApp):
             self._pastes.clear()
             self._clear_prompt_notice()
             self._exit_armed = False
-            if self._handle_query(query) == "exit":
-                self.stop()
+            result = self._handle_query(query)
+            if result in {"exit", "restart"}:
+                self.stop(result)
             return
         if key == "ESC":
             if self._answer_request is not None:
@@ -1606,6 +1629,14 @@ class HeadsupApp(AltScreenApp):
             # A selection replace/delete may have cut through a paste chip; drop
             # any markers no longer present in the buffer.
             self._pastes.prune(str(self.editor.get("buffer", "")))
+        if (
+            changed
+            and self._answer_request is None
+            and str(self.editor.get("buffer", "")).startswith("/")
+        ):
+            # Starting another command dismisses feedback before submission.
+            with self.lock:
+                self._notice = None
         return changed, isinstance(key, TextInput)
 
     def _editor_buffer_cursor(self) -> tuple[str, int]:
@@ -1734,12 +1765,14 @@ class HeadsupApp(AltScreenApp):
         return answer in _COMMAND_CONFIRM_YES
 
     def _run_slash(self, command: str, rest: list[str]) -> str | None:
-        """Run one slash command; returns "exit" when heads-up must stop."""
+        """Run one slash command; return an exit or restart lifecycle request."""
         with self.lock:
             self._follow_latest()
         meta = COMMANDS.get(command.lstrip("/"))
         if meta is not None and rest and not meta.takes_rest:
             self.add_notice(Text(f"{command} does not accept arguments.", style="red"))
+            return None
+        if command == "/undo" and self._undo_queued_queries(rest):
             return None
         if command in _SESSION_CHANGING_SLASH_COMMANDS:
             with self.lock:
@@ -1756,6 +1789,25 @@ class HeadsupApp(AltScreenApp):
                     style="yellow",
                 ))
                 return None
+        if command == "/restart":
+            with self.lock:
+                updating = self._update_task is not None
+                staged = self._update_staged
+            if updating:
+                self.add_notice(Text(
+                    "/restart is unavailable while an update is running. Wait for it to finish, then retry.",
+                    style="yellow",
+                ))
+                return None
+            if staged:
+                # The Windows standalone updater waits for this process to exit.
+                # A waiting relaunch parent would prevent it replacing the binary.
+                self.add_notice(Text(
+                    "An update is staged. Exit jarv, then run it again to finish the update.",
+                    style="yellow",
+                ))
+                return None
+            return "restart"
         if self.incognito:
             if command == "/new":
                 self.session_context = ephemeral_session_context()
@@ -1899,11 +1951,22 @@ class HeadsupApp(AltScreenApp):
         from .session_tree import load_session_tree
 
         history_file = self.session_context.history_file
-        model = load_session_tree(history_file)
-        active = model.active_path
-        if len(active) < 2:
-            return  # the aside is the only exchange — nothing to return to
-        if session_tree.checkout(history_file, leaf_id=active[-2].frame_id):
+        with transaction(history_file):
+            before_checkout = self._history_snapshot(history_file, load_history(history_file))
+            model = load_session_tree(history_file)
+            active = model.active_path
+            if len(active) < 2:
+                return  # the aside is the only exchange — nothing to return to
+            changed = session_tree.checkout(history_file, leaf_id=active[-2].frame_id)
+            history = load_history(history_file) if changed else None
+        if history is not None:
+            # The aside stays visible, but /resume must compare against the
+            # saved continuation. Capture it under the checkout's lock so an
+            # external edit after commit cannot be mistaken for our own save.
+            with self.lock:
+                if before_checkout != self._saved_history_snapshot:
+                    self._history_needs_reload = True
+            self._remember_saved_history(history_file, history)
             self.add_notice(Text("↩ Set aside — kept in /tree, out of the main thread.", style="dim cyan"))
 
     def _run_agent_query(self, query: str, on_complete: Callable | None = None) -> None:
@@ -2012,6 +2075,31 @@ class HeadsupApp(AltScreenApp):
                                      if client is self._turn_client]
         for client in ready:
             close_client(client)
+
+    def _undo_queued_queries(self, rest: list[str]) -> bool:
+        """Unsend pending messages before attempting to undo saved history."""
+        from .undo_commands import _parse_count
+
+        with self.lock:
+            if not self._queued_queries:
+                return False
+            try:
+                count = _parse_count(rest)
+            except ValueError as exc:
+                self.add_notice(Text(f"{exc} Usage: /undo [n]", style="red"))
+                return True
+            # The worker takes the oldest message under this same lock. Undo
+            # removes the newest messages, including their completion hooks,
+            # without touching the active turn or its history.
+            cancelled = [self._queued_queries.pop()[0]
+                         for _ in range(min(count, len(self._queued_queries)))]
+        if len(cancelled) == 1:
+            preview = cancelled[0].strip().replace("\n", " ")[:80]
+            notice = f"Cancelled queued message: {preview!r}"
+        else:
+            notice = f"Cancelled {len(cancelled)} queued messages."
+        self.add_notice(Text(notice, style="yellow"))
+        return True
 
     def _queue_or_start_agent_query(self, query: str, on_complete: Callable | None = None) -> None:
         with self.lock:
@@ -2221,13 +2309,41 @@ class HeadsupApp(AltScreenApp):
     def _sync_after_slash(self, command: str) -> None:
         # Session changes happen before feedback is appended, so neither a
         # history reload nor an empty session can swallow the command's result.
+        resume_target = latest_session_for_directory() if command == "/resume" else None
+        if command == "/resume" and resume_target is None:
+            return
         if command in _HISTORY_SYNC_SLASH_COMMANDS | _SESSION_SWITCHING_SLASH_COMMANDS:
             changed = self._refresh_session_context()
             if changed or command in _HISTORY_SYNC_SLASH_COMMANDS or command == "/new":
                 self._sync_transcript_from_history()
+            elif command == "/resume" and resume_target == self.session_context.session_id:
+                history = load_history(self.session_context.history_file)
+                # Missing/empty history is ineligible for /resume. Leave the
+                # visible conversation intact when no saved chat can be loaded.
+                if history and (self._history_needs_reload or self._history_snapshot(
+                    self.session_context.history_file, history,
+                ) != self._saved_history_snapshot):
+                    self._sync_transcript_from_history(history=history)
 
-    def _sync_transcript_from_history(self) -> None:
-        history = [] if self.incognito else load_history(self.session_context.history_file)
+    @staticmethod
+    def _history_snapshot(history_file: Path, history: list) -> tuple[Path, bytes]:
+        # Content, rather than timestamps, detects same-size edits and avoids
+        # retaining a second full copy of a potentially large conversation.
+        digest = hashlib.sha256()
+        encoder = json.JSONEncoder(ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        for chunk in encoder.iterencode(history):
+            digest.update(chunk.encode("ascii"))
+        return history_file, digest.digest()
+
+    def _remember_saved_history(self, history_file: Path, history: list) -> None:
+        snapshot = self._history_snapshot(history_file, history)
+        with self.lock:
+            self._saved_history_snapshot = snapshot
+
+    def _sync_transcript_from_history(self, *, history: list | None = None) -> None:
+        if history is None:
+            history = [] if self.incognito else load_history(self.session_context.history_file)
+        snapshot = self._history_snapshot(self.session_context.history_file, history)
         entries: list[TranscriptEntry] = [self._initial_notice_entry()]
         for item_index, item in enumerate(history):
             if not isinstance(item, dict):
@@ -2283,6 +2399,8 @@ class HeadsupApp(AltScreenApp):
                 )
         with self.lock:
             self.entries = entries
+            self._saved_history_snapshot = snapshot
+            self._history_needs_reload = False
             self._notice = None
             self._live_tool_index.clear()
             self._follow_latest()
@@ -2444,8 +2562,9 @@ class HeadsupApp(AltScreenApp):
             self._pastes.clear()
             self._clear_prompt_notice()
             self._exit_armed = False
-            if self._handle_query(command) == "exit":
-                self.stop()
+            result = self._handle_query(command)
+            if result in {"exit", "restart"}:
+                self.stop(result)
             return
         initialize_text_editor(self.editor, entry.insert)
         self._clear_prompt_notice()
@@ -3072,4 +3191,9 @@ def run_heads_up_mode(
         handle_slash=handle_slash,
         maybe_command=maybe_command,
     )
-    app.run()
+    if app.run() == "restart":
+        # All terminal modes, confirmation handlers and clients must be released
+        # before the replacement process takes ownership of the terminal.
+        from .restart import restart_heads_up
+
+        raise SystemExit(restart_heads_up(args, app.session_context.session_id))

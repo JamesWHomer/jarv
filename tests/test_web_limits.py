@@ -10,7 +10,7 @@ import httpcore
 import httpx
 import pytest
 
-from jarv import web
+from jarv import search_control, web
 from jarv.artifacts import ArtifactStore
 from jarv.cancellation import CancellationToken, TurnCancelled
 from jarv.config import DEFAULT_CONFIG
@@ -91,19 +91,38 @@ def test_url_cancellation_is_not_reported_as_timeout(slow_server):
         worker.join(timeout=1)
 
 
-def test_url_redirects_share_one_deadline(monkeypatch):
+@pytest.mark.parametrize(
+    "setup_time, expected_paths, expected_timeouts",
+    [
+        (0, ["/", "/redirect/1"], [0.07, 0.03]),
+        (0.04, ["/"], [0.03]),
+    ],
+)
+def test_url_redirects_share_one_deadline(
+    monkeypatch, setup_time, expected_paths, expected_timeouts,
+):
+    now = [0.0]
     requests = []
+    # Advance the budget clock explicitly so scheduler delays cannot change
+    # how many redirects fit. Real timer cancellation is covered separately.
+    monkeypatch.setattr(search_control, "monotonic", lambda: now[0])
+    monkeypatch.setattr(search_control.threading, "Timer", Mock())
 
     def handler(request):
         requests.append(request)
-        time.sleep(0.04)
+        now[0] += 0.04
         return httpx.Response(302, headers={"Location": f"/redirect/{len(requests)}"})
 
-    monkeypatch.setattr(web, "_create_client", lambda timeout: httpx.Client(transport=httpx.MockTransport(handler)))
+    def create_client(timeout):
+        now[0] += setup_time
+        return httpx.Client(transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(web, "_create_client", create_client)
     with pytest.raises(web.WebToolError) as caught:
         web.fetch_web_bytes("https://example.test/", timeout=0.07)
     assert caught.value.kind == "timeout"
-    assert len(requests) == 2
+    assert [request.url.path for request in requests] == expected_paths
+    assert [request.extensions["timeout"]["read"] for request in requests] == pytest.approx(expected_timeouts)
 
 
 def test_url_timeout_does_not_cancel_parent_or_later_requests(monkeypatch):

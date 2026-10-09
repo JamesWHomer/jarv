@@ -37,6 +37,7 @@ class CliOutput:
         self._lock = threading.Lock()
         self.finished = False
         self.config = {}
+        self._pending_usage_lines = []
 
     @contextmanager
     def route_diagnostics(self):
@@ -83,6 +84,25 @@ class CliOutput:
             from .display import console
             console.print(message)
 
+    def show_usage_line(self, renderable):
+        if self.quiet:
+            return
+        # finish() emits the final answer/result before its human-readable stats.
+        self._pending_usage_lines.append(renderable)
+
+    def _write_usage_line(self, renderable):
+        from rich.console import Console
+
+        # Usage is a human diagnostic, including for JSON/JSONL output.
+        # Explicitly target stderr so this callback is safe on its own.
+        Console(file=DiagnosticStream(self.stderr), color_system=None).print(renderable)
+
+    def flush_usage_lines(self):
+        pending, self._pending_usage_lines = self._pending_usage_lines, []
+        if not self.quiet:
+            for renderable in pending:
+                self._write_usage_line(renderable)
+
     def show_error(self, message):
         # The final result carries the error, including in quiet mode.
         pass
@@ -105,5 +125,6 @@ class CliOutput:
         elif text:
             self.stdout.write(safe_terminal_text(text) + ("" if text.endswith("\n") else "\n"))
             self.stdout.flush()
+        self.flush_usage_lines()
         if error:
             print(safe_terminal_text(error), file=self.stderr)

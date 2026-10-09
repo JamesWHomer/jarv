@@ -4,7 +4,8 @@ import queue
 import sys
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from time import perf_counter
 from typing import Any, Iterator
 
 from .history_convert import iter_history_segments, parse_json_arguments, provider_metadata
@@ -27,6 +28,7 @@ from .http_transport import _sleep as _sleep_for_openai_recovery
 @dataclass
 class TextDelta:
     delta: str
+    received_at: float | None = field(default=None, compare=False)
 
 
 @dataclass
@@ -634,7 +636,11 @@ def _stream_chat_completions(
     ):
         if chunk.get("usage"):
             final_chunk["usage"] = chunk["usage"]
-        for key in ("id", "model", "created", "service_tier"):
+        for key in ("x_groq", "timings", "stats"):
+            value = chunk.get(key)
+            if isinstance(value, dict):
+                final_chunk.setdefault(key, {}).update(value)
+        for key in ("id", "model", "created", "service_tier", "eval_count", "eval_duration"):
             if key in chunk:
                 final_chunk[key] = chunk[key]
         choices = chunk.get("choices")
@@ -685,6 +691,11 @@ def _stream_chat_completions(
         cancellation_token.throw_if_cancelled()
     if not finished:
         raise RetryableStreamError("Chat Completions stream ended before finish_reason")
+    groq_usage = final_chunk.get("x_groq", {}).get("usage")
+    if isinstance(groq_usage, dict) and not final_chunk.get("usage"):
+        # Groq can report streaming usage under x_groq. Keep each report's
+        # counts and timings together instead of manufacturing a mixed pair.
+        final_chunk["usage"] = dict(groq_usage)
     yield StreamDone(
         response=final_chunk,
         provider_metadata=(
@@ -892,15 +903,29 @@ def stream_response(
         max_tokens,
         cancellation_token,
     )
+
+    def timestamped_events() -> Iterator:
+        try:
+            for event in direct:
+                if isinstance(event, TextDelta) and event.delta and event.received_at is None:
+                    # Timestamp ingress before Windows queues or rendering delay it.
+                    event.received_at = perf_counter()
+                yield event
+        finally:
+            # Preserve yield-from's prompt close propagation to HTTP resources.
+            close = getattr(direct, "close", None)
+            if callable(close):
+                close()
+
     if sys.platform != "win32" or cancellation_token is None:
-        yield from direct
+        yield from timestamped_events()
         return
 
     events: queue.SimpleQueue[tuple[str, Any]] = queue.SimpleQueue()
 
     def produce() -> None:
         try:
-            for event in direct:
+            for event in timestamped_events():
                 events.put(("event", event))
         except BaseException as exc:
             events.put(("error", exc))

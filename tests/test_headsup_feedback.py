@@ -110,7 +110,7 @@ def test_session_switch_keeps_all_result_lines_in_transcript(command_app):
     app.on_key(TextInput("draft"), 1)
     rendered = screen_text(app, console)
     assert "saved conversation" in rendered
-    assert "Resumed session saved-session" in rendered
+    assert "Resumed chat saved conversation (saved-sessio)" in rendered
     assert "old visible conversation" not in rendered
     assert app._prompt_notice is None
     assert len(history.load_history(context.history_file)) == 1
@@ -218,6 +218,8 @@ def test_command_exception_preserves_feedback_and_restores_console(command_app, 
 
 def test_session_refresh_failure_still_shows_command_output(command_app, monkeypatch):
     app, console, _ = command_app
+    context = history.prepare_session_context(mark_message=True)
+    history.save_history([{"role": "user", "content": "saved conversation"}], context.history_file)
 
     def broken_refresh():
         raise OSError("cannot read session")
@@ -225,7 +227,7 @@ def test_session_refresh_failure_still_shows_command_output(command_app, monkeyp
     monkeypatch.setattr(app, "_refresh_session_context", broken_refresh)
     app._run_slash("/resume", [])
     rendered = screen_text(app, console)
-    assert "No previous session found" in rendered
+    assert "Already in the latest chat for this directory." in rendered
     assert "/resume failed: cannot read session" in rendered
 
 

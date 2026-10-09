@@ -44,11 +44,25 @@ def cmd_resume() -> int:
         console.print("[dim]○ No previous session found in this directory.[/dim]")
         console.print("[dim]Use /sessions to browse all saved sessions.[/dim]")
         return 1
-    set_terminal_session(session_id)
+    if prepare_session_context(persist_metadata=False).session_id == session_id:
+        console.print("[dim]Already in the latest chat for this directory.[/dim]")
+        console.print("[dim]Use /sessions to choose another.[/dim]")
+        return 0
+    from pathlib import Path
     from rich.text import Text
 
-    notice = Text("✓ Resumed session ", style="green")
-    notice.append(session_id, style="bold")
+    from .session_browser_render import conversation_title, first_prompt, fitted, short_session_id
+
+    meta = load_sessions()["sessions"][session_id]
+    saved_title = meta.get("title")
+    snippet = "" if isinstance(saved_title, str) and saved_title.strip() else first_prompt(
+        load_history(Path(meta["history_file"]))
+    )
+    title = safe_terminal_text(conversation_title(meta, snippet))
+    set_terminal_session(session_id)
+    notice = Text("✓ Resumed chat ", style="green")
+    notice.append_text(fitted(Text(title, style="bold"), 60))
+    notice.append(f" ({safe_terminal_text(short_session_id(session_id))})", style="dim")
     console.print(notice)
     return 0
 

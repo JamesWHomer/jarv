@@ -398,6 +398,10 @@ def iter_sse(response) -> Iterator[tuple[str, dict]]:
 
 def _normalized_usage(usage: dict | None) -> dict:
     source = usage if isinstance(usage, dict) else {}
+    if not source:
+        # Missing usage must remain distinguishable from a measured zero so
+        # callers can estimate tokens instead of claiming an empty response.
+        return {}
     uncached = normalized_token_count(source.get("input_tokens"))
     cache_write = normalized_token_count(source.get("cache_creation_input_tokens"))
     cached = normalized_token_count(source.get("cache_read_input_tokens"))

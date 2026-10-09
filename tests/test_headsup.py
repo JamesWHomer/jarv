@@ -2445,7 +2445,7 @@ class HeadsupTests(unittest.TestCase):
             ("/new", []), ("/resume", []), ("/undo", ["2"]), ("/redo", []),
             ("/archive", []), ("/session", []), ("/sessions", []),
             ("/session", ["other"]), ("/sessions", ["other"]),
-            ("/tree", []), ("/uninstall", ["--purge"]),
+            ("/tree", []), ("/uninstall", ["--purge"]), ("/restart", []),
         )
         with (
             patch.object(app, "handle_slash", return_value=(app.config, app.client)) as handler,
@@ -2464,7 +2464,7 @@ class HeadsupTests(unittest.TestCase):
                         self.assertTrue(hook_started.wait(timeout=1.0))
                     for command, rest in commands:
                         with self.subTest(stage=stage, command=command, rest=rest):
-                            app._handle_query(" ".join([command] + rest))
+                            self.assertIsNone(app._handle_query(" ".join([command] + rest)))
                             handler.assert_not_called()
                             tree.assert_not_called()
                             uninstall.assert_not_called()
@@ -2670,7 +2670,7 @@ class HeadsupTests(unittest.TestCase):
         )
         text = self._entry_text(app)
         self.assertIn("Updated to v9.9.9", text)
-        self.assertIn("restart jarv", text)
+        self.assertIn("/restart", text)
 
     def test_managed_update_shows_owner_command_in_transcript(self):
         app, _test_console, _output = self._app()

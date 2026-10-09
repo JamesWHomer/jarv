@@ -291,6 +291,7 @@ def normalize_response(data: dict) -> dict:
             for part in parts
             if isinstance(part, dict) and not part.get("thought")
         ),
+        # Empty usage metadata means unreported counts, not measured zeros.
         "usage": {
             "input_tokens": input_tokens,
             "cached_input_tokens": cached,
@@ -301,7 +302,7 @@ def normalize_response(data: dict) -> dict:
                 usage.get("totalTokenCount") or None,
                 default=input_tokens + output_tokens + reasoning_tokens,
             ),
-        },
+        } if usage else {},
     }
 
 

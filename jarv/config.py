@@ -15,6 +15,7 @@ from .config_schema import (
 )
 from .paths import CONFIG_DIR, CONFIG_FILE
 from .storage import StorageError, read_json, transaction, write_json
+from .turn_summary_settings import migrate_turn_summary_settings
 
 DEFAULT_CONFIG = build_default_config()
 
@@ -73,6 +74,11 @@ def _load_config() -> dict:
     """Initialize or migrate settings while the caller holds the storage lock."""
     config = read_json(CONFIG_FILE, {}, dict)
     changed = config.baseline is None
+    try:
+        changed = migrate_turn_summary_settings(config) or changed
+    except ValueError as error:
+        _console().print(f"[red]{error}[/red]")
+        sys.exit(1)
     if "monochrome" in config:
         config.setdefault("colour", not config.pop("monochrome"))
         changed = True

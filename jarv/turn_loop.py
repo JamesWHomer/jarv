@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from time import perf_counter
 from typing import Any, Callable, Iterable
 
 from .context_budget import trim_turn_input
@@ -29,6 +30,13 @@ class StreamCollection:
     got_text: bool = False
     saw_reasoning: bool = False
     provider_metadata: dict | None = None
+    # Request wall time, including first-token latency but excluding final rendering.
+    elapsed_seconds: float | None = None
+    # Observed text only; final response recovery can contain additional text.
+    streamed_text: str = ""
+    first_text_chunk: str = ""
+    text_chunk_count: int = 0
+    text_stream_seconds: float | None = None
 
 
 def collect_stream_response(
@@ -44,8 +52,24 @@ def collect_stream_response(
     while True:
         result = StreamCollection()
         retry_stream = False
+        first_text_at: float | None = None
         try:
+            started_at = perf_counter()
             for event in make_stream():
+                if isinstance(event, StreamDone):
+                    # Stop at receipt, before completion rendering or cleanup.
+                    result.elapsed_seconds = max(0.0, perf_counter() - started_at)
+                elif isinstance(event, TextDelta) and event.delta:
+                    received_at = event.received_at
+                    if received_at is None:
+                        received_at = perf_counter()
+                    if first_text_at is None:
+                        first_text_at = received_at
+                        result.first_text_chunk = event.delta
+                    else:
+                        result.text_stream_seconds = max(0.0, received_at - first_text_at)
+                    result.streamed_text += event.delta
+                    result.text_chunk_count += 1
                 if on_event is not None:
                     on_event(event, result)
                 if isinstance(event, TextDelta):
@@ -62,6 +86,8 @@ def collect_stream_response(
                     result.final_response = event.response
                     result.provider_metadata = event.provider_metadata
 
+            if result.elapsed_seconds is None:
+                result.elapsed_seconds = max(0.0, perf_counter() - started_at)
             result.final_text = response_output_text(result.final_response)
             if result.final_text and len(result.final_text) >= len(result.reply_text):
                 result.reply_text = result.final_text

@@ -22,7 +22,6 @@ from jarv.agent import (
     _TurnRenderer,
     _terminal_action_display,
     build_input,
-    _format_agent_usage_line,
     response_start_status,
     response_wait_label,
     resolve_tool_call_display,
@@ -1994,7 +1993,7 @@ class AgentInputTests(unittest.TestCase):
             ):
                 run_agent("hello!", DEFAULT_CONFIG, client=object())
 
-        self.assertNotIn("Usage:", console_output.getvalue())
+        self.assertNotIn("Turn:", console_output.getvalue())
 
     def test_run_agent_prints_usage_when_enabled(self):
         with TemporaryDirectory() as tmp:
@@ -2027,18 +2026,19 @@ class AgentInputTests(unittest.TestCase):
             ):
                 run_agent(
                     "hello!",
-                    {**DEFAULT_CONFIG, "print_usage_after_agent": True},
+                    {**DEFAULT_CONFIG, "turn_summary": True, "turn_summary_session": True},
                     client=object(),
                 )
 
         output = console_output.getvalue()
-        self.assertIn("Usage:", output)
-        self.assertIn("1,200 in (200 cached)", output)
+        self.assertEqual(output.count("Turn:"), 1)
+        self.assertIn("1,200 in", output)
+        self.assertIn("200 cached", output)
         self.assertIn("300 out", output)
-        self.assertIn("1,500 last", output)
-        self.assertIn("1,500 session", output)
+        self.assertIn("1,500 total", output)
+        self.assertIn("1,500 session tokens", output)
 
-    def test_run_agent_skips_usage_line_in_heads_up_mode_even_when_enabled(self):
+    def test_run_agent_prints_usage_line_in_heads_up_mode_when_enabled(self):
         with TemporaryDirectory() as tmp:
             history_file = Path(tmp) / "history.json"
             context = SessionContext(
@@ -2088,14 +2088,21 @@ class AgentInputTests(unittest.TestCase):
             ):
                 run_agent(
                     "hello!",
-                    {**DEFAULT_CONFIG, "print_usage_after_agent": True},
+                    {**DEFAULT_CONFIG, "turn_summary": True, "turn_summary_session": True},
                     client=object(),
                     heads_up=True,
                     ui=FakeUI(),
                 )
 
         usage_events = [event for event in events if event[0] == "show_usage_line"]
-        self.assertEqual(usage_events, [])
+        self.assertEqual(len(usage_events), 1)
+        self.assertIn("1,200 in", usage_events[0][1].plain)
+        self.assertIn("200 cached", usage_events[0][1].plain)
+        self.assertIn("300 out", usage_events[0][1].plain)
+        self.assertLess(
+            next(index for index, event in enumerate(events) if event[0] == "finish"),
+            next(index for index, event in enumerate(events) if event[0] == "show_usage_line"),
+        )
 
     def test_run_agent_routes_stream_display_to_ui(self):
         with TemporaryDirectory() as tmp:
@@ -2232,33 +2239,6 @@ class AgentInputTests(unittest.TestCase):
         self.assertTrue(any(event[0] == "complete_tool" for event in events))
         self.assertIn(("finish", "done"), events)
         self.assertIs(dispatch.call_args.kwargs["ui"], ui)
-
-    def test_format_agent_usage_line_marks_estimated_usage(self):
-        line = _format_agent_usage_line(
-            {
-                "totals": {
-                    "total_tokens": 2345,
-                    "estimated_cost_usd": 0.031,
-                },
-                "last_root_request": {
-                    "input_tokens": 1000,
-                    "cached_input_tokens": 0,
-                    "output_tokens": 111,
-                    "total_tokens": 1111,
-                    "estimated": True,
-                },
-            }
-        )
-
-        self.assertIsNotNone(line)
-        plain = line.plain
-        self.assertIn("1,000 in", plain)
-        self.assertIn("111 out", plain)
-        self.assertIn("1,111 last", plain)
-        self.assertIn("2,345 session", plain)
-        self.assertIn("est. $0.03", plain)
-        self.assertIn("usage estimated", plain)
-
 
 if __name__ == "__main__":
     unittest.main()

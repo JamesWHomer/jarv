@@ -12,6 +12,14 @@ def one_line(value: str) -> str:
     return " ".join(value.split())
 
 
+def short_session_id(sid: str) -> str:
+    """Keep a session's descriptive prefix and six trailing hash characters."""
+    parts = sid.rsplit("-", 1)
+    if len(parts) == 2 and len(parts[1]) >= 6:
+        return f"{parts[0]}-{parts[1][:6]}"
+    return sid[:16]
+
+
 def fitted(value: str | Text, width: int, *, pad: bool = False) -> Text:
     """Clip in terminal cells, including wide and combining characters."""
     text = value.copy() if isinstance(value, Text) else Text(value)

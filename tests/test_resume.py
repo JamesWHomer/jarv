@@ -60,7 +60,90 @@ def test_resume_uses_latest_message_in_this_directory_across_terminals(saved_ses
     assert context.session_id == latest.session_id
     assert history.load_history(context.history_file)[0]["content"] == "prompt for latest"
     assert history.load_sessions()["terminals"]["new-terminal"] == latest.session_id
-    assert "Resumed session latest" in output.getvalue()
+    assert "Resumed chat prompt for latest (latest)" in output.getvalue()
+
+
+def test_repeated_resume_of_current_chat_does_not_write_or_select_an_older_chat(saved_sessions, monkeypatch):
+    save, output = saved_sessions
+    older = save("older")
+    latest = save("latest")
+    history.set_terminal_session("latest")
+    paths = (history.SESSIONS_FILE, older.history_file, latest.history_file)
+    before = {path: path.read_bytes() for path in paths}
+
+    def unexpected_write(*_args, **_kwargs):
+        pytest.fail("Resuming the current chat must not write session state")
+
+    monkeypatch.setattr(history, "save_sessions", unexpected_write)
+    monkeypatch.setattr(session_commands, "set_terminal_session", unexpected_write)
+    monkeypatch.setattr(sys, "argv", ["jarv", "/resume"])
+
+    cli.main()
+    cli.main()
+
+    assert history.load_sessions()["terminals"]["terminal"] == "latest"
+    assert {path: path.read_bytes() for path in paths} == before
+    assert output.getvalue().count("Already in the latest chat for this directory.") == 2
+    assert output.getvalue().count("Use /sessions to choose another.") == 2
+    assert "Resumed chat" not in output.getvalue()
+
+
+def test_resume_current_invocation_override_leaves_terminal_and_metadata_unchanged(saved_sessions, monkeypatch):
+    save, output = saved_sessions
+    save("latest")
+    history.set_terminal_session("terminal-session")
+    before = history.SESSIONS_FILE.read_bytes()
+
+    def unexpected_write(*_args, **_kwargs):
+        pytest.fail("Resuming the current invocation must not change its binding")
+
+    monkeypatch.setattr(history, "save_sessions", unexpected_write)
+    monkeypatch.setattr(session_commands, "set_terminal_session", unexpected_write)
+
+    with history.session_override("latest"):
+        assert session_commands.cmd_resume() == 0
+        assert history.prepare_session_context(persist_metadata=False).session_id == "latest"
+
+    assert history.SESSIONS_FILE.read_bytes() == before
+    assert history.load_sessions()["terminals"]["terminal"] == "terminal-session"
+    assert "Already in the latest chat for this directory." in output.getvalue()
+
+
+def test_resume_switch_shows_saved_title_and_short_id(saved_sessions):
+    save, output = saved_sessions
+    session_id = "windows-terminal-0123456789ab"
+    save(session_id)
+    data = history.load_sessions()
+    data["sessions"][session_id]["title"] = "  Review\n  the launch plan  "
+    history.save_sessions(data)
+
+    assert session_commands.cmd_resume() == 0
+
+    assert "Resumed chat Review the launch plan (windows-terminal-012345)" in output.getvalue()
+    assert f"prompt for {session_id}" not in output.getvalue()
+
+
+@pytest.mark.parametrize("source", ["saved_title", "first_prompt"])
+def test_resume_title_is_literal_terminal_safe_and_bounded(saved_sessions, source):
+    save, output = saved_sessions
+    session = save("session-0123456789ab")
+    title = "[bold]Plan[/bold]\n\x1b[31m\x07 " + "界" * 100 + " hidden ending"
+    if source == "saved_title":
+        data = history.load_sessions()
+        data["sessions"][session.session_id]["title"] = title
+        history.save_sessions(data)
+    else:
+        history.save_history([{"role": "user", "content": title}], session.history_file)
+
+    assert session_commands.cmd_resume() == 0
+
+    rendered = output.getvalue()
+    assert "[bold]Plan[/bold] \\x1b[31m\\x07" in rendered
+    assert "\x1b" not in rendered
+    assert "\x07" not in rendered
+    assert "…" in rendered
+    assert "hidden ending" not in rendered
+    assert "(session-012345)" in rendered
 
 
 def test_session_keeps_separate_recency_for_each_directory(saved_sessions, tmp_path, monkeypatch):

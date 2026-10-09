@@ -11,6 +11,30 @@ from .paths import CONFIG_DIR, SESSIONS_DIR, SESSIONS_FILE
 from .unicode_safety import sanitize_json_value
 
 
+_RESTART_TERMINAL_ENV = "_JARV_RESTART_TERMINAL"
+
+
+def _consume_restart_terminal() -> tuple[str, str] | None:
+    """Consume a relaunch identity so it cannot leak into tool subprocesses."""
+    raw = os.environ.pop(_RESTART_TERMINAL_ENV, None)
+    if raw is None:
+        return None
+    import json
+
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(value, list) and len(value) == 2 and all(
+        isinstance(part, str) and part for part in value
+    ):
+        return value[0], value[1]
+    return None
+
+
+_restart_terminal = _consume_restart_terminal()
+
+
 def load_history(path: Path) -> list:
     data = read_json(path, [], list)
     data[:] = sanitize_json_value(data)
@@ -99,6 +123,8 @@ def get_windows_console_id() -> tuple[str, str] | None:
 
 def detect_terminal() -> tuple[str, str]:
     """Return (terminal_id, label) for the current terminal."""
+    if _restart_terminal is not None:
+        return _restart_terminal
     candidates = [
         ("tmux-pane", "|".join([os.environ.get("TMUX", ""), os.environ["TMUX_PANE"]])
          if os.environ.get("TMUX_PANE") else None),

@@ -63,6 +63,14 @@ def cmd_btw(args: list | None = None) -> None:
     )
 
 
+def cmd_restart() -> int:
+    console.print(
+        "[dim]/restart works inside heads-up mode — run [bold]jarv[/bold], "
+        "then [bold]/restart[/bold] to relaunch the jarv process.[/dim]"
+    )
+    return 2
+
+
 def _mask_config_value(key: str, value) -> str:
     if key == "api_key" and value:
         return "[dim]***[/dim]"
@@ -206,7 +214,7 @@ def _help_body() -> Group:
         ],
         _command_help_rows(["new", "resume", "history", "tree", "btw", "undo", "redo", "sessions", "archive"]),
         _command_help_rows(["settings", "config", "set", "unset", "setup"]),
-        _command_help_rows(["usage", "update", "uninstall", "help", "about"])
+        _command_help_rows(["usage", "update", "restart", "uninstall", "help", "about"])
         + [("exit, quit, /exit, /quit", "Leave heads-up mode", "bold cyan")],
     ]
     for group_index, rows in enumerate(groups):
@@ -263,7 +271,7 @@ def _about_body() -> Markdown:
 - `jarv /tree` - Browse the session as a tree; fork, edit, or resume from any earlier prompt.
 - `jarv /usage` - Open the interactive usage screen. `←/→` (or `1-5` / `s t w m a`) switches scope live between Session, Today, Week, Month, and All.
 - `jarv /usage <session|day|week|month|all>` - Open straight to a scope. `day`/`today`, `week`, and `month` are rolling 24h, 7d, and 30d windows; `all` reads the full system-wide history. Without an interactive terminal, usage prints a static view.
-- `jarv /undo [n]` - Unsend the last n exchanges (default 1). The removed exchange is pushed onto a redo stack.
+- `jarv /undo [n]` - Unsend the last n exchanges (default 1). The removed exchange is pushed onto a redo stack. In heads-up mode, if messages are queued, cancel up to n newest queued messages instead and leave the current turn running. This also works in incognito; cancelled queued messages cannot be restored with /redo.
 - `jarv /redo [n]` - Restore the last n undone exchanges (default 1). Sending a new message clears the redo stack.
 - `/btw <question>` (heads-up only) - Ask an aside, then save the successful exchange as a branch and return to the preceding exchange. First exchanges, cancelled turns, and failed turns remain on the active path. `jarv /btw` only prints instructions.
 - `jarv /settings` - Open an interactive settings menu for provider/model, command review, audit, runtime, updates, and how read-only commands display (`fullscreen` or `print`).
@@ -278,6 +286,8 @@ def _about_body() -> Markdown:
 ## Heads-up mode
 
 Run `jarv` with no prompt to start an interactive session. Type a prompt and press Enter to send it. Commands start with `/` (e.g. `/new`, `/history`). During a response, Esc or Ctrl+C stops further work, checkpoints the turn in history/context, and restores its prompt. Use `/undo` to remove that turn. At the prompt, Esc or Ctrl+C clears text and exits when the prompt is already empty. Type `exit`, `quit`, `/exit`, or `/quit` to leave directly.
+
+Use `/restart` with no arguments to relaunch the entire Jarv process and reload code and settings. It keeps the current saved session and launch overrides without applying `--new` again. Incognito starts fresh, and shell state resets. Wait for an active turn or update to finish first. A staged Windows standalone update still requires exiting Jarv and running it again.
 
 `--incognito` skips loading and saving history, artifacts, retained outputs, and usage records. Each incognito heads-up prompt also starts without earlier conversation context. History/session commands and `/usage` are unavailable, and `/btw` runs as an ordinary prompt. Config, catalog/update caches, clipboard files, provider requests, and tool actions are outside this history setting.
 

@@ -230,15 +230,13 @@ class AltScreenApp:
                     if self._running:
                         # Paint before blocking on input so the view appears
                         # immediately; startup failures still run cleanup.
-                        if self._paint():
-                            self._dirty = False
+                        self.paint_now()
                     while self._running:
                         try:
                             progressed = self._pump()
                             self.on_tick()
                             if self._dirty and self._running:
-                                if self._paint():
-                                    self._dirty = False
+                                self.paint_now()
                             if self._running and not progressed:
                                 self._idle_wait()
                         except KeyboardInterrupt:
@@ -343,8 +341,12 @@ class AltScreenApp:
         output) that block the main loop and need the screen updated in place
         before they return.
         """
-        if self._paint():
-            self._dirty = False
+        # Consume the current request before rendering. A worker may invalidate
+        # while Live paints an older snapshot; that request must survive so the
+        # next loop iteration paints the newer state without waiting for input.
+        self._dirty = False
+        if not self._paint():
+            self._dirty = True
 
     # ------------------------------------------------------------------ #
     # Screen / input plumbing (overridable via injection)
