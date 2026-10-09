@@ -23,6 +23,7 @@ from jarv.text_editor import initialize_text_editor
 
 
 class HeadsupTests(unittest.TestCase):
+<<<<<<< HEAD
     def test_pasted_shortcut_names_remain_literal_draft_text(self):
         for literal in (
             "ENTER", "ESC", "CTRL_V", "ALT_V", "CTRL_O", "CTRL_N", "CTRL_END",
@@ -35,6 +36,8 @@ class HeadsupTests(unittest.TestCase):
                 app.on_key(TextInput(literal), 1)
                 self.assertEqual(app.editor["buffer"], "prefix " + literal)
 
+=======
+>>>>>>> codex/jarv-audit-fixes
     def test_pasted_delete_names_do_not_remove_adjacent_paste_chip(self):
         for literal in ("BACKSPACE", "DELETE"):
             with self.subTest(literal=literal):
@@ -1569,7 +1572,7 @@ class HeadsupTests(unittest.TestCase):
 
     def test_pasted_key_names_do_not_trigger_prompt_shortcuts(self):
         for literal in ("ENTER", "ESC", "UP", "DOWN", "TAB", "CTRL_V", "ALT_V", "CTRL_O",
-                        "CTRL_END", "PAGEUP", "SHIFT_PAGEUP", "DELETE", "BACKSPACE"):
+                        "CTRL_END", "CTRL_N", "PAGEUP", "SHIFT_PAGEUP", "DELETE", "BACKSPACE"):
             with self.subTest(literal=literal):
                 app, _, _ = self._app()
                 initialize_text_editor(app.editor, "draft ")

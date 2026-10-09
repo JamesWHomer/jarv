@@ -666,3 +666,13 @@ def test_parallel_safe_batch_runs_mixed_tools_concurrently_and_preserves_order(
     )
     assert completion_order == ["read", "web"]
     assert [result.output for result in results] == ["web:first", "read:second"]
+
+
+@pytest.mark.parametrize("href", [
+    "http://example.test:invalid/", "http://example.test:65536/",
+    "//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.test%3Ainvalid%2F",
+])
+def test_search_skips_result_urls_with_invalid_ports(href):
+    from jarv.web import _decode_search_url
+
+    assert _decode_search_url(href) is None

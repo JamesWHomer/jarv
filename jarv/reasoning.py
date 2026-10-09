@@ -218,6 +218,8 @@ def _anthropic_metadata_capabilities(metadata: dict[str, Any]) -> ReasoningCapab
         efforts = EFFORT_LEVELS
     if supported is False or (efforts is None and native_effort is False):
         efforts = ()
+    elif efforts is None and native_effort is False:
+        efforts = ()
 
     supports_disable = None
     if supported is True and modes is not None:
