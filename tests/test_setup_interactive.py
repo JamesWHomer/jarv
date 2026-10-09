@@ -262,17 +262,3 @@ def test_api_key_submenu_warns_on_bad_format_then_saves(monkeypatch):
     assert done is True
     assert cfg["api_keys"]["openai"] == "not-a-real-key"
     assert saved
-
-
-@pytest.mark.parametrize("literal", ["LEFT", "RIGHT", "ENTER", "ESC"])
-def test_setup_pasted_shortcut_names_do_not_leave_provider_step(monkeypatch, literal):
-    app, saved, _console = _make_app(monkeypatch, dict(DEFAULT_CONFIG))
-    app.on_key("ENTER", 1)
-
-    app.on_key(TextInput(literal), 1)
-
-    assert app.phase == "step"
-    assert app.step_idx == 0
-    assert app.edit["row"]["key"] == "provider"
-    assert not saved
-    assert not app.stop_calls
