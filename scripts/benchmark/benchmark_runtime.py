@@ -248,10 +248,10 @@ def main():
             rng.shuffle(names)
             for name in names:
                 gc.collect()
-                wall, cpu = time.perf_counter_ns(), time.process_time_ns()
+                wall_start, cpu_start = time.perf_counter_ns(), time.process_time_ns()
                 result = cases[name]()
-                cpu_ms = (time.process_time_ns() - cpu) / 1e6
-                ms = (time.perf_counter_ns() - wall) / 1e6
+                cpu_ms = (time.process_time_ns() - cpu_start) / 1e6
+                ms = (time.perf_counter_ns() - wall_start) / 1e6
                 if digest(result) != hashes[name]:
                     raise AssertionError(f"Non-deterministic result: {name}")
                 samples[name].append({"wall_ms": ms, "cpu_ms": cpu_ms})

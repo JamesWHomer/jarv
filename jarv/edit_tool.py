@@ -9,7 +9,7 @@ import stat
 import tempfile
 import threading
 import weakref
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from itertools import chain
 from pathlib import Path
@@ -229,12 +229,15 @@ def _commit_edit(path: Path, loaded: _EditFile, data: bytes,
             try:
                 temporary.unlink(missing_ok=True)
             except PermissionError:
-                if os.name != "nt" or loaded.mode & stat.S_IWRITE:
-                    raise
-                # Staging inherits the original mode. Windows cannot delete a
-                # read-only file; clear that flag on our temporary file only.
-                temporary.chmod(loaded.mode | stat.S_IWRITE)
-                temporary.unlink(missing_ok=True)
+                # Windows cannot remove the staged copy of a read-only file.
+                # Restore write permission on our temporary file only, so the
+                # original write/conflict result survives cleanup.
+                with suppress(OSError):
+                    temporary.chmod(loaded.mode | stat.S_IWRITE)
+                    temporary.unlink(missing_ok=True)
+            except OSError:
+                # Cleanup failure must not replace a write error or cancellation.
+                pass
     return None
 
 

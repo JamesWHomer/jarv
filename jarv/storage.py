@@ -100,7 +100,7 @@ def _read(path, default):
         return json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return copy.deepcopy(default)
-    except (OSError, ValueError, UnicodeError) as exc:
+    except (OSError, ValueError, UnicodeError, RecursionError) as exc:
         raise StorageError(f"Cannot read {path}: {exc}") from exc
 
 
@@ -178,7 +178,7 @@ def transaction(path):
             state.seen.update(observations)
             for snapshot, value in active.snapshots.values():
                 snapshot.baseline = copy.deepcopy(value)
-        except (OSError, TypeError, ValueError) as exc:
+        except (OSError, TypeError, ValueError, RecursionError) as exc:
             raise StorageError(f"Storage transaction failed in {root}: {exc}") from exc
         finally:
             state.active = None

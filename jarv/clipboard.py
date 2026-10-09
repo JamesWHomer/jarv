@@ -62,6 +62,7 @@ _IMAGE_MEDIA_TYPE_SUFFIXES = {
     "image/gif": ".gif",
 }
 _PASTE_SUBPROCESS_TIMEOUT = 15.0
+_COPY_SUBPROCESS_TIMEOUT = 15.0
 
 
 def copy_to_clipboard(text: str, *, write=None) -> bool:
@@ -130,8 +131,9 @@ def _subprocess_copy(cmd: list[str], text: str) -> bool:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
+            timeout=_COPY_SUBPROCESS_TIMEOUT,
         )
-    except (OSError, ValueError):
+    except (OSError, ValueError, subprocess.SubprocessError):
         return False
     return proc.returncode == 0
 
