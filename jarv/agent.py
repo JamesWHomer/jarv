@@ -866,6 +866,10 @@ class _TurnRenderer:
             self.stream_preview.flush(refresh=True)
         self.reply_text = result.reply_text
         self.provider_metadata = getattr(result, "provider_metadata", None)
+        # Cancellation bypasses adopt_stream_result; retain completed events for
+        # the checkpoint even when the overall response did not finish.
+        self.tool_calls = result.tool_calls
+        self.reasoning_items = result.reasoning_items
         if self.spinner_live is not None:
             self.spinner_live.stop()
             self.spinner_live = None
@@ -929,7 +933,7 @@ class TurnCheckpointer:
         self.flush_status_items()
         history = self.persistence.history
         renderer = self.renderer
-        if renderer.reply_text and not renderer.tool_calls and not renderer.response_recorded:
+        if renderer.reply_text and not renderer.response_recorded:
             history.append(
                 {"role": "assistant", "content": renderer.reply_text, **renderer.metadata,
                  **({"provider_metadata": renderer.provider_metadata}

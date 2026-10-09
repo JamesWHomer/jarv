@@ -1,5 +1,5 @@
 import io
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 
@@ -7,6 +7,18 @@ from rich.console import Console
 
 from jarv import setup_interactive, settings_command
 from jarv.config import DEFAULT_CONFIG
+
+
+@pytest.mark.parametrize("provider", ["ollama", "lm_studio", "vllm"])
+def test_connection_probe_closes_local_http_response(monkeypatch, provider):
+    import urllib.request
+
+    response = MagicMock()
+    monkeypatch.setattr(urllib.request, "urlopen", Mock(return_value=response))
+
+    assert setup_interactive.probe_connection({"provider": provider}) == (True, None)
+    response.__enter__.assert_called_once_with()
+    response.__exit__.assert_called_once_with(None, None, None)
 
 
 @pytest.mark.parametrize("provider", ["openai", "groq", "anthropic", "gemini"])

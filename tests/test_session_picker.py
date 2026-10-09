@@ -98,6 +98,36 @@ def test_rename_persists_without_changing_terminal_label_and_can_reset(picker, m
     assert "Fix remote desktop sizing" in render(picker, monkeypatch)
 
 
+@pytest.mark.parametrize("literal", ["ENTER", "ESC"])
+def test_rename_keeps_pasted_key_names_literal(picker, literal):
+    picker.on_key("r", 1)
+    sid = picker.rename_sid
+
+    picker.on_key(TextInput(literal), 1)
+
+    assert picker.rename_sid == sid
+    assert picker.rename_editor["buffer"] == literal
+
+
+@pytest.mark.parametrize("literal", ["ENTER", "ESC", "TAB", "DOWN", "CTRL_F"])
+def test_search_keeps_pasted_key_names_literal(picker, literal):
+    picker.on_key("CTRL_F", 1)
+
+    picker.on_key(TextInput(literal), 1)
+
+    assert picker.search_active
+    assert picker.search_query == literal
+
+
+def test_pasted_text_cannot_trigger_session_actions(picker):
+    original = dict(picker.sessions)
+    picker.on_key(TextInput("d"), 1)
+    picker.on_key(TextInput("d"), 1)
+
+    assert picker.sessions == original
+    assert picker.arm_delete_sids is None
+
+
 def test_rename_cancel_and_failed_save_preserve_existing_title(picker, monkeypatch):
     original = history.SESSIONS_FILE.read_bytes()
     picker.on_key("r", 1)

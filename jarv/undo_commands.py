@@ -1,5 +1,7 @@
 """Undo and redo command handlers."""
 
+from rich.markup import escape
+
 from .display import console
 from .storage import transaction
 from .session_tree import _frame_id, preserve_redo_branches
@@ -65,12 +67,12 @@ def cmd_undo(args: list) -> int | None:
 
     if len(undone) == 1:
         text = _first_user_text(undone[0])
-        console.print(f"[bold yellow]↶[/bold yellow] [bold]Unsent[/bold] [cyan]{text!r}[/cyan]")
+        console.print(f"[bold yellow]↶[/bold yellow] [bold]Unsent[/bold] [cyan]{escape(repr(text))}[/cyan]")
         console.print(f"[dim]  Removed {len(undone[0])} item(s). Run [bold]/redo[/bold] to put it back.[/dim]")
     else:
         console.print(f"[bold yellow]↶[/bold yellow] [bold]Unsent {len(undone)} exchanges:[/bold]")
         for i, frame in enumerate(undone, 1):
-            console.print(f"  [dim]{i}.[/dim] [cyan]{_first_user_text(frame)!r}[/cyan]")
+            console.print(f"  [dim]{i}.[/dim] [cyan]{escape(repr(_first_user_text(frame)))}[/cyan]")
         console.print(f"[dim]  Run [bold]/redo {len(undone)}[/bold] to put them back.[/dim]")
 
 
@@ -109,7 +111,7 @@ def cmd_redo(args: list) -> int | None:
 
     if len(restored) == 1:
         text = _first_user_text(restored[0])
-        console.print(f"[bold cyan]↷[/bold cyan] [bold]Restored[/bold] [cyan]{text!r}[/cyan]")
+        console.print(f"[bold cyan]↷[/bold cyan] [bold]Restored[/bold] [cyan]{escape(repr(text))}[/cyan]")
     else:
         console.print(f"[bold cyan]↷[/bold cyan] [bold]Restored {len(restored)} exchange(s).[/bold]")
 

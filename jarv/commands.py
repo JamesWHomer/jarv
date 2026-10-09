@@ -7,6 +7,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from rich.markup import escape
+
 if TYPE_CHECKING:
     import subprocess
     from rich.console import Group
@@ -76,8 +78,8 @@ def _mask_config_value(key: str, value) -> str:
         return "[dim]***[/dim]"
     if key == "api_keys" and isinstance(value, dict) and value:
         masked = {k: ("***" if v else v) for k, v in value.items()}
-        return f"[green]{repr(masked)}[/green]"
-    return f"[green]{repr(value)}[/green]"
+        return f"[green]{escape(repr(masked))}[/green]"
+    return f"[green]{escape(repr(value))}[/green]"
 
 
 def cmd_set(args: list) -> int:
@@ -91,7 +93,7 @@ def cmd_set(args: list) -> int:
     key, raw = args[0], " ".join(args[1:])
     if key not in DEFAULT_CONFIG:
         console.print(
-            f"[yellow]⚠[/yellow] [yellow]Unknown config key[/yellow] [bold]{key}[/bold] "
+            f"[yellow]⚠[/yellow] [yellow]Unknown config key[/yellow] [bold]{escape(key)}[/bold] "
             f"[dim](known: {', '.join(DEFAULT_CONFIG.keys())})[/dim]"
         )
     config = load_config()
@@ -111,7 +113,7 @@ def cmd_set(args: list) -> int:
     if reset_tier is not None:
         console.print("[yellow]Processing tier reset to standard for this model/endpoint.[/yellow]")
     display = _mask_config_value(key, trial[key])
-    console.print(f"[bold cyan]✓[/bold cyan] [bold cyan]{key}[/bold cyan] [dim]=[/dim] {display}")
+    console.print(f"[bold cyan]✓[/bold cyan] [bold cyan]{escape(key)}[/bold cyan] [dim]=[/dim] {display}")
     return 0
 
 
@@ -124,7 +126,7 @@ def cmd_unset(args: list) -> int:
     key = args[0]
     config = load_config()
     if key not in config:
-        console.print(f"[yellow]○[/yellow] [bold]{key}[/bold] [dim]is not set.[/dim]")
+        console.print(f"[yellow]○[/yellow] [bold]{escape(key)}[/bold] [dim]is not set.[/dim]")
         return 1
     if key in DEFAULT_CONFIG:
         trial = copy.deepcopy(config)
@@ -141,14 +143,14 @@ def cmd_unset(args: list) -> int:
         save_config(trial)
         if reset_tier is not None:
             console.print("[yellow]Processing tier reset to standard for this model/endpoint.[/yellow]")
-        console.print(f"[bold cyan]↺[/bold cyan] [bold cyan]{key}[/bold cyan] [dim]reset to default →[/dim] [green]{repr(DEFAULT_CONFIG[key])}[/green]")
+        console.print(f"[bold cyan]↺[/bold cyan] [bold cyan]{escape(key)}[/bold cyan] [dim]reset to default →[/dim] [green]{escape(repr(DEFAULT_CONFIG[key]))}[/green]")
     else:
         trial = copy.deepcopy(config)
         del trial[key]
         if not validate_config(trial):
             return 2
         save_config(trial)
-        console.print(f"[bold cyan]✓[/bold cyan] [bold cyan]{key}[/bold cyan] [dim]removed.[/dim]")
+        console.print(f"[bold cyan]✓[/bold cyan] [bold cyan]{escape(key)}[/bold cyan] [dim]removed.[/dim]")
     return 0
 
 

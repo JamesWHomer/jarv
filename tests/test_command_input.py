@@ -765,6 +765,58 @@ def test_read_key_with_repeats_does_not_translate_pasted_ctrl_end_text():
     assert not command_input._PENDING_KEYS
 
 
+@pytest.mark.parametrize("first_is_paste", [False, True])
+def test_read_key_with_repeats_keeps_navigation_and_literal_paste_separate(first_is_paste):
+    first = command_input.TextInput("UP") if first_is_paste else "UP"
+    second = "UP" if first_is_paste else command_input.TextInput("UP")
+    command_input._PENDING_KEYS.clear()
+    command_input._PENDING_KEYS.extend([first, second])
+    try:
+        key, repeat = command_input._read_key_with_repeats(text_mode=True, batch_text=True)
+        assert repeat == 1
+        assert isinstance(key, command_input.TextInput) is first_is_paste
+        assert list(command_input._PENDING_KEYS) == [second]
+        key, repeat = command_input._read_key_with_repeats(text_mode=True, batch_text=True)
+        assert repeat == 1
+        assert isinstance(key, command_input.TextInput) is not first_is_paste
+    finally:
+        command_input._PENDING_KEYS.clear()
+
+
+def test_paste_expansion_does_not_expand_markers_inside_original_content():
+    pastes = command_input.PasteRegistry()
+    original = "Discuss [Image #1]\nwithout changing this pasted text"
+    text_marker = pastes.collapse(original)
+    image_marker = pastes.attach("Image", "/saved/image.png")
+
+    assert pastes.expand(f"{text_marker} {image_marker}") == f"{original} /saved/image.png"
+
+
+def test_text_batch_does_not_treat_pasted_enter_as_submission(monkeypatch):
+    keys = deque(["a", command_input.TextInput("ENTER")])
+    monkeypatch.setattr(command_input, "_read_key", lambda **kwargs: keys.popleft())
+    monkeypatch.setattr(command_input, "_key_available", lambda: bool(keys))
+    command_input._PENDING_KEYS.clear()
+    try:
+        assert command_input._read_key_with_repeats(text_mode=True, batch_text=True) == ("a", 1)
+        pending = command_input._PENDING_KEYS.popleft()
+        assert isinstance(pending, command_input.TextInput)
+        assert pending == "ENTER"
+    finally:
+        command_input._PENDING_KEYS.clear()
+
+
+@pytest.mark.parametrize("literal", ["ENTER", "ESC", "LEFT", "RIGHT", "HOME", "END", "DELETE", "BACKSPACE", "OTHER", "RESIZE"])
+def test_read_editable_line_keeps_pasted_key_names_literal(literal):
+    keys = iter([command_input.TextInput(literal), "ENTER"])
+
+    result = command_input.read_editable_line(
+        "> ", initial="draft ", read_key=lambda: next(keys), write=lambda _text: None,
+    )
+
+    assert result == "draft " + literal
+
+
 def test_read_key_with_repeats_batches_queued_text(monkeypatch):
     command_input._PENDING_KEYS.clear()
     keys = [*"openai/gpt-5.5", "ENTER"]

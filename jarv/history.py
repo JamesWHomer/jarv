@@ -56,6 +56,14 @@ def load_sessions() -> dict:
     data.setdefault("sessions", {})
     if not isinstance(data["terminals"], dict) or not isinstance(data["sessions"], dict):
         raise StorageError(f"Invalid sessions metadata: {SESSIONS_FILE}")
+    for terminal_id, session_id in data["terminals"].items():
+        if not isinstance(session_id, str):
+            raise StorageError(f"Invalid terminal mapping {terminal_id!r} in {SESSIONS_FILE}")
+    for session_id, meta in data["sessions"].items():
+        if not isinstance(meta, dict):
+            raise StorageError(f"Invalid session record {session_id!r} in {SESSIONS_FILE}")
+        if "directories" in meta and not isinstance(meta["directories"], dict):
+            raise StorageError(f"Invalid session directories for {session_id!r} in {SESSIONS_FILE}")
     result = SessionMetadata(data)
     result.baseline = raw.baseline
     return result

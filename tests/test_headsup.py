@@ -1543,6 +1543,27 @@ class HeadsupTests(unittest.TestCase):
 
         self.assertEqual(app.editor["buffer"], "hello world")
 
+    def test_pasted_key_names_do_not_trigger_prompt_shortcuts(self):
+        for literal in ("ENTER", "ESC", "UP", "DOWN", "TAB", "CTRL_V", "ALT_V", "CTRL_O",
+                        "CTRL_END", "PAGEUP", "SHIFT_PAGEUP", "DELETE", "BACKSPACE"):
+            with self.subTest(literal=literal):
+                app, _, _ = self._app()
+                initialize_text_editor(app.editor, "draft ")
+                with patch.object(app, "_handle_query") as submit, \
+                     patch.object(app, "_paste_from_system_clipboard") as clipboard, \
+                     patch("jarv.headsup.terminal_size", return_value=(80, 24)):
+                    app.on_key(TextInput(literal), 1)
+                submit.assert_not_called()
+                clipboard.assert_not_called()
+                self.assertEqual(app.editor["buffer"], "draft " + literal)
+
+    def test_direct_answer_keeps_pasted_key_names_literal(self):
+        for literal in ("ENTER", "ESC"):
+            with self.subTest(literal=literal):
+                app, _, _ = self._app()
+                with patch("jarv.headsup._read_key_with_repeats", side_effect=[(TextInput(literal), 1), ("ENTER", 1)]):
+                    self.assertEqual(app._read_answer_direct("> "), literal)
+
     def test_paste_in_answer_modal_is_not_collapsed(self):
         app, _test_console, _output = self._app()
         app._answer_request = {"label": "> ", "answer": None}

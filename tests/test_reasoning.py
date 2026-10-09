@@ -1,4 +1,5 @@
 from conftest import model_facts
+import pytest
 from jarv import model_catalog, settings_command
 from jarv.config import DEFAULT_CONFIG, validate_config
 from jarv.model_catalog import CatalogModel
@@ -10,6 +11,40 @@ from jarv.reasoning import (
     reasoning_effort_error,
     reconcile_reasoning_effort,
 )
+
+
+@pytest.mark.parametrize("native_capabilities", [
+    {},
+    {"thinking": {"supported": True}},
+    {"effort": {"supported": True}},
+])
+def test_partial_anthropic_metadata_preserves_catalog_efforts(
+    tmp_path, monkeypatch, models_dev_catalog, native_capabilities,
+):
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    models_dev_catalog({
+        "anthropic": {
+            "claude-test": model_facts(
+                reasoning=True,
+                reasoning_options=[
+                    {"type": "effort", "values": ["none", "low", "high"]},
+                ],
+            ),
+        },
+    })
+    model_catalog._write_cache("anthropic", [
+        CatalogModel(id="claude-test", metadata={"capabilities": native_capabilities}),
+    ])
+    config = {"provider": "anthropic", "model": "claude-test", "reasoning_effort": "high"}
+
+    capabilities = get_reasoning_capabilities(config)
+
+    assert capabilities.efforts == ("low", "high")
+    assert capabilities.supports_disable is True
+    assert capabilities.sources["efforts"] == "models.dev catalog"
+    assert reasoning_effort_error(config) is None
+    assert reconcile_reasoning_effort(config) is None
+    assert config["reasoning_effort"] == "high"
 
 
 def test_anthropic_native_capabilities_override_catalog_and_policy(

@@ -985,7 +985,8 @@ class HeadsupApp(AltScreenApp):
         enable_mouse_wheel_reporting()
 
     def on_key(self, key: str, repeat: int) -> None:
-        if key == "ENTER":
+        is_text = isinstance(key, TextInput)
+        if not is_text and key == "ENTER":
             if self._answer_request is not None:
                 self._complete_answer()
                 return
@@ -1015,7 +1016,7 @@ class HeadsupApp(AltScreenApp):
             if result in {"exit", "restart"}:
                 self.stop(result)
             return
-        if key == "ESC":
+        if not is_text and key == "ESC":
             if self._answer_request is not None:
                 self._cancel_answer()
                 return
@@ -1028,24 +1029,24 @@ class HeadsupApp(AltScreenApp):
             if self._handle_prompt_dismiss():
                 self.stop()
             return
-        if key in ("CTRL_V", "ALT_V"):
+        if not is_text and key in ("CTRL_V", "ALT_V"):
             self._paste_from_system_clipboard()
             return
-        if key == "CTRL_O":
+        if not is_text and key == "CTRL_O":
             self._toggle_tool_expansion()
             return
-        if key == "CTRL_END" and not isinstance(key, TextInput):
+        if not is_text and key == "CTRL_END":
             with self.lock:
                 self._follow_latest()
             return
-        if key in {"SHIFT_PAGEUP", "SHIFT_PAGEDOWN"}:
+        if not is_text and key in {"SHIFT_PAGEUP", "SHIFT_PAGEDOWN"}:
             self._jump_to_user_message(backward=key == "SHIFT_PAGEUP", repeat=repeat)
             return
-        scroll_delta = scroll_key_delta(key, repeat)
+        scroll_delta = None if is_text else scroll_key_delta(key, repeat)
         if scroll_delta is not None:
             self._scroll_transcript(scroll_delta)
             return
-        if key in {"UP", "DOWN", "TAB"}:
+        if not is_text and key in {"UP", "DOWN", "TAB"}:
             # The autocomplete menu owns these keys whenever it is open, taking
             # priority over prompt-history navigation (a "/se" draft is a single
             # line, so history nav would otherwise capture the arrows).
@@ -1064,7 +1065,7 @@ class HeadsupApp(AltScreenApp):
                 self.refresh()
                 return
         if (
-            key in {"UP", "DOWN"}
+            not is_text and key in {"UP", "DOWN"}
             and self._answer_request is None
             and not self._prompt_has_multiline_draft()
         ):
@@ -1417,12 +1418,12 @@ class HeadsupApp(AltScreenApp):
                     text_mode=True,
                     batch_text=True,
                 )
-                if key == "ENTER":
+                if not isinstance(key, TextInput) and key == "ENTER":
                     answer = str(self.editor.get("buffer", "")).strip()
                     if echo_answer:
                         self.add_notice(Text(safe_terminal_text(f"{label}{answer}"), style="dim"))
                     return answer
-                if key == "ESC":
+                if not isinstance(key, TextInput) and key == "ESC":
                     if self._cancel_token is not None:
                         self._cancel_token.cancel()
                         raise TurnCancelled

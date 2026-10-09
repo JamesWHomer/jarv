@@ -157,6 +157,27 @@ def test_load_sessions_wrong_typed_keys_raise(tmp_path, monkeypatch):
         history.load_sessions()
 
 
+@pytest.mark.parametrize("data", [
+    {"terminals": {"terminal": []}, "sessions": {}},
+    {"terminals": {}, "sessions": {"session": None}},
+    {"terminals": {}, "sessions": {"session": []}},
+    {"terminals": {}, "sessions": {"session": {"directories": None}}},
+    {"terminals": {}, "sessions": {"session": {"directories": []}}},
+])
+def test_invalid_session_records_raise_storage_errors_without_rewriting(
+    tmp_path, monkeypatch, data,
+):
+    sessions_file = tmp_path / "sessions.json"
+    original = json.dumps(data)
+    sessions_file.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(history, "SESSIONS_FILE", sessions_file)
+
+    with pytest.raises(StorageError, match="Invalid"):
+        history.load_sessions()
+
+    assert sessions_file.read_text(encoding="utf-8") == original
+
+
 def test_save_then_load_sessions_round_trips(tmp_path, monkeypatch):
     sessions_file = tmp_path / "sessions.json"
     monkeypatch.setattr(history, "SESSIONS_FILE", sessions_file)

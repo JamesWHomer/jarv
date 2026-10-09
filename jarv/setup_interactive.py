@@ -142,9 +142,10 @@ def probe_connection(config: dict) -> tuple[bool, str | None]:
             health_url = base_url.rstrip("/")
             if "/v1" in health_url:
                 health_url = health_url.rsplit("/v1", 1)[0]
-            urllib.request.urlopen(
+            with urllib.request.urlopen(
                 urllib.request.Request(health_url, method="GET"), timeout=5
-            )
+            ):
+                pass
         elif backend in ("responses", "openai_compat", "anthropic", "gemini"):
             if backend == "anthropic":
                 from .anthropic_http import build_payload, create_message

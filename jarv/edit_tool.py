@@ -226,7 +226,15 @@ def _commit_edit(path: Path, loaded: _EditFile, data: bytes,
         return f"[edit error: could not write file: {exc}]"
     finally:
         if temporary is not None:
-            temporary.unlink(missing_ok=True)
+            try:
+                temporary.unlink(missing_ok=True)
+            except PermissionError:
+                if os.name != "nt" or loaded.mode & stat.S_IWRITE:
+                    raise
+                # Staging inherits the original mode. Windows cannot delete a
+                # read-only file; clear that flag on our temporary file only.
+                temporary.chmod(loaded.mode | stat.S_IWRITE)
+                temporary.unlink(missing_ok=True)
     return None
 
 
