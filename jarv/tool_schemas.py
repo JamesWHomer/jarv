@@ -30,8 +30,23 @@ def _openai_strict_schema(schema: Any) -> Any:
     if not isinstance(schema, dict):
         return deepcopy(schema)
 
-    out = deepcopy(schema)
-    typ = out.get("type")
+    typ = schema.get("type")
+    # Recursive schema fields are copied by normalization below. Copying the
+    # entire subtree here would copy those descendants again at every level.
+    recursive_keys = {
+        key for key in ("anyOf", "oneOf", "allOf")
+        if isinstance(schema.get(key), list)
+    }
+    if typ == "array" or "items" in schema:
+        recursive_keys.add("items")
+    if typ == "object" or "properties" in schema:
+        recursive_keys.update(("properties", "required", "additionalProperties"))
+    if not recursive_keys:
+        return deepcopy(schema)
+    out = dict(schema)
+    out.update(deepcopy({
+        key: value for key, value in schema.items() if key not in recursive_keys
+    }))
 
     for key in ("anyOf", "oneOf", "allOf"):
         variants = out.get(key)

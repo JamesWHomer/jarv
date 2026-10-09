@@ -119,6 +119,9 @@ def _format_byte_size(count: int) -> str:
     return f"{count / (1024 * 1024):.1f} MB"
 
 
+_READ_HEADER_END_RE = re.compile(r"\r?\n\r?\n")
+
+
 def _read_result_summary(output: str) -> str:
     """Condense a [READ RESULT] header into one line, e.g. '4,096 of 45,120 chars · more available'.
 
@@ -127,9 +130,13 @@ def _read_result_summary(output: str) -> str:
     """
     if not output.startswith("[READ RESULT]"):
         return ""
+    # Tool cards summarize this header on every paint. Avoid sanitizing and
+    # splitting the read body (up to 200,000 characters) just to discard it.
+    boundary = _READ_HEADER_END_RE.search(output)
+    header = output[:boundary.start()] if boundary is not None else output
     returned = total = image_bytes = None
     eof = media_type = ""
-    for line in safe_terminal_text(output).splitlines():
+    for line in safe_terminal_text(header).splitlines():
         if not line.strip():
             break
         for label, target in (

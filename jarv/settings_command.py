@@ -512,7 +512,6 @@ def _settings_multiline_editor_lines(
         Text(_clip_text(f"  {_settings_multiline_status(edit)}", inner_width), style="dim"),
         Text(""),
     ]
-    body, _cursor_idx = _settings_multiline_visual_lines(edit, inner_width)
     tail: list[Text] = []
     if edit.get("discard_armed"):
         tail.append(_settings_discard_warning(inner_width))
@@ -527,6 +526,7 @@ def _settings_multiline_editor_lines(
     )
 
     if max_lines is None:
+        body, _cursor_idx = _settings_multiline_visual_lines(edit, inner_width)
         return intro + body + tail
 
     body_budget = max(1, max_lines - len(intro) - len(tail))

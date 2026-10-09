@@ -9,7 +9,10 @@ import pytest
 from jarv.anthropic_http import stream_message
 from jarv.cancellation import TurnCancelled
 from jarv.gemini_http import stream_content
-from jarv.provider import RetryableStreamError, StreamDone, TextDelta
+from jarv.provider import (
+    RetryableStreamError, StreamDone, TextDelta, ToolCallDone, ToolCallStarted,
+    _stream_chat_completions,
+)
 from jarv.tool_schemas import strict_openai_tools
 from jarv.turn_loop import collect_stream_response
 
@@ -234,3 +237,77 @@ def test_strict_tools_keep_shared_required_and_optional_schemas_independent():
     properties["optional"]["properties"]["required"]["enum"].append("three")
     assert properties["required"]["properties"]["required"]["enum"] == ["one", "two"]
     assert tool == original
+
+
+def test_chat_fragmented_tool_arguments_preserve_order_ids_and_partial_json(monkeypatch):
+    def chunk(*calls, finish=None):
+        return {"choices": [{"delta": {"tool_calls": list(calls)}, "finish_reason": finish}]}
+
+    chunks = [
+        chunk({"index": 2, "function": {"name": "rea", "arguments": '{"input":'}}),
+        chunk({"index": 0, "id": "first", "function": {"name": "ed", "arguments": ""}}),
+        chunk({"index": 2, "id": "second", "function": {"name": "d", "arguments": '"cut'}}),
+        chunk({"index": 0, "id": "updated", "function": {"name": "it", "arguments": None}},
+              {"index": 2, "function": None}),
+        chunk({"index": 0, "function": {"arguments": '{"text":"'}}),
+        *[chunk({"index": 0, "function": {"arguments": "x" * 32}}) for _ in range(2000)],
+        chunk({"index": 0, "function": {"arguments": '"}'}}),
+        chunk(finish="tool_calls"),
+        {"usage": {"completion_tokens": 123}, "choices": []},
+    ]
+    original = deepcopy(chunks)
+    monkeypatch.setattr("jarv.openai_http.stream_chat", lambda *args, **kwargs: iter(chunks))
+    events = list(_stream_chat_completions(None, "model", "system", [], []))
+    assert events[:-1] == [
+        ToolCallStarted(id="chat_tool_2", call_id="chat_tool_2", name="rea"),
+        ToolCallStarted(id="first", call_id="first", name="ed"),
+        ToolCallDone(id="updated", call_id="updated", name="edit",
+                     arguments='{"text":"' + "x" * 64000 + '"}'),
+        ToolCallDone(id="second", call_id="second", name="read", arguments='{"input":"cut'),
+    ]
+    assert events[-1].response == {
+        "finish_reason": "tool_calls", "usage": {"completion_tokens": 123},
+    }
+    assert chunks == original
+
+
+def test_strict_schema_variants_arrays_annotations_and_key_order_are_preserved():
+    leaf = {"description": "choice", "type": "string", "enum": ["a", "b"]}
+    parameters = {
+        "description": "schema", "type": "object", "required": ["alternatives"],
+        "properties": {
+            "alternatives": {"oneOf": [leaf, {"type": "array", "items": leaf}]},
+            "optional": {"anyOf": [leaf, {"type": "null"}]},
+            "array": {"type": "array", "items": {"properties": {"value": leaf}}},
+        },
+        "additionalProperties": {"type": "number"},
+        "examples": [{"extra": [1, 2]}],
+    }
+    tools = [{"type": "function", "function": {
+        "name": "inspect", "input_examples": [{"one": 1}], "parameters": parameters,
+    }}]
+    original = deepcopy(tools)
+    converted = strict_openai_tools(tools)[0]["function"]
+    schema = converted["parameters"]
+    assert list(schema) == list(parameters)
+    assert schema["required"] == ["alternatives", "optional", "array"]
+    assert schema["additionalProperties"] is False
+    assert converted["strict"] is True
+    assert "input_examples" not in converted
+    properties = schema["properties"]
+    assert properties["alternatives"] == {
+        "oneOf": [leaf, {"type": "array", "items": leaf}],
+    }
+    assert properties["optional"] == {"anyOf": [leaf, {"type": "null"}]}
+    assert properties["array"] == {
+        "type": ["array", "null"],
+        "items": {
+            "properties": {"value": {**leaf, "type": ["string", "null"]}},
+            "required": ["value"], "additionalProperties": False,
+        },
+    }
+    properties["alternatives"]["oneOf"][0]["enum"].append("changed")
+    assert properties["alternatives"]["oneOf"][1]["items"]["enum"] == ["a", "b"]
+    assert properties["optional"]["anyOf"][0]["enum"] == ["a", "b"]
+    schema["examples"][0]["extra"].append(3)
+    assert tools == original

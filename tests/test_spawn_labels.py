@@ -209,3 +209,22 @@ def test_artifact_store_rejects_overwrites():
         store.put("report", "replacement", "new summary", "different owner")
 
     assert store.get("report") == original
+
+
+@pytest.mark.parametrize("saved,reserved", [("alpha", "zeta"), ("zeta", "alpha")])
+def test_reservations_report_first_conflict_across_saved_and_active_labels(saved, reserved):
+    store = ArtifactStore()
+    store.put(saved, "saved report", "summary", "owner")
+    store.reserve_labels({reserved})
+
+    with pytest.raises(ValueError) as error:
+        store.reserve_labels({saved, reserved, "fresh"})
+
+    assert str(error.value) == (
+        "child label 'alpha' is already used in this session; choose a new label"
+    )
+    # Failed batches must leave every new label available, even when their
+    # conflicts span both persisted artifacts and still-running children.
+    store.reserve_labels({"fresh"})
+    store.reserve_labels(set())
+    assert store.get(saved).longform == "saved report"

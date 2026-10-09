@@ -2949,30 +2949,54 @@ class HeadsupApp(AltScreenApp):
         for entry in self._transcript_entries(reverse=True):
             entry_index = None if index == len(self.entries) else index
             lines = entry.rendered_lines(width) or [Text("")]
-            if entry.spacer_before:
-                lines = [Text(""), *lines]
-            chunks.append((entry_index, lines))
-            count += len(lines)
+            spacer = bool(entry.spacer_before)
+            line_count = len(lines) + spacer
+            chunks.append((entry_index, lines, spacer))
+            count += line_count
             if anchor is not None and entry_index == anchor[0]:
                 # Keep the same row, even within a response that is still growing.
                 # Proportional scaling here would move the reader on every delta.
-                scroll_offset = count - min(anchor[1], len(lines) - 1) - 1
+                scroll_offset = count - min(anchor[1], line_count - 1) - 1
                 needed = rows + scroll_offset
                 anchor_found = True
             if anchor_found and count >= needed:
                 break
             index -= 1
-        transcript = [line for _, chunk in reversed(chunks) for line in chunk]
-        visible, offset = window_transcript(transcript or [Text("")], rows, scroll_offset)
+        # A single cached entry may contain thousands of wrapped rows. Slice
+        # only the visible pieces instead of copying the entire entry on each
+        # repaint, including when its leading spacer is present.
+        if not chunks:
+            return window_transcript([Text("")], rows, scroll_offset)
+        offset = max(0, min(scroll_offset, max(0, count - rows)))
+        remaining = max(0, rows)
+        skipped = offset
+        visible_chunks = []
+        for _, lines, spacer in chunks:
+            line_count = len(lines) + spacer
+            if skipped >= line_count:
+                skipped -= line_count
+                continue
+            end = line_count - skipped
+            start = max(0, end - remaining)
+            piece = lines[max(0, start - spacer):max(0, end - spacer)]
+            if spacer and start == 0 and end > 0:
+                piece.insert(0, Text(""))
+            visible_chunks.append(piece)
+            remaining -= end - start
+            if remaining <= 0:
+                break
+            skipped = 0
+        visible = [line for piece in reversed(visible_chunks) for line in piece]
         if not self._following_latest:
             # Retain detached state even if shrinking content clamps offset to 0.
             # Only user navigation may resume following new output.
             remaining = offset
-            for entry_index, lines in chunks:
-                if remaining < len(lines):
-                    self._scroll_anchor = (entry_index, len(lines) - remaining - 1)
+            for entry_index, lines, spacer in chunks:
+                line_count = len(lines) + spacer
+                if remaining < line_count:
+                    self._scroll_anchor = (entry_index, line_count - remaining - 1)
                     break
-                remaining -= len(lines)
+                remaining -= line_count
         return visible, offset
 
     def _prompt_label(self) -> str:

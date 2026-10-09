@@ -363,7 +363,7 @@ def _flush_tool_calls(accumulators: dict[int, dict]) -> Iterator[ToolCallDone]:
             id=call_id,
             call_id=call_id,
             name=acc["name"],
-            arguments=acc["arguments"],
+            arguments="".join(acc["arguments"]),
         )
     accumulators.clear()
 
@@ -644,15 +644,17 @@ def _stream_chat_completions(
                 if not isinstance(tc_delta, dict):
                     continue
                 idx = int(tc_delta.get("index") or 0)
-                acc = accumulators.setdefault(
-                    idx, {"id": "", "name": "", "arguments": ""}
-                )
+                acc = accumulators.get(idx)
+                if acc is None:
+                    acc = accumulators[idx] = {"id": "", "name": "", "arguments": []}
                 if tc_delta.get("id"):
                     acc["id"] = str(tc_delta["id"])
                 function = tc_delta.get("function")
                 if isinstance(function, dict):
                     acc["name"] += str(function.get("name") or "")
-                    acc["arguments"] += str(function.get("arguments") or "")
+                    # Arguments may contain a large edit streamed in tiny
+                    # pieces; join once when the call completes.
+                    acc["arguments"].append(str(function.get("arguments") or ""))
                 if idx not in started_tool_indices:
                     started_tool_indices.add(idx)
                     call_id = acc["id"] or f"chat_tool_{idx}"

@@ -66,7 +66,7 @@ def make_cases(home):
     from jarv.provider import _to_chat_messages, _to_chat_tools
     from jarv.read_tool import dispatch_read_tool
     from jarv.retained_outputs import RetainedOutputStore
-    from jarv.session_render import _history_visual_lines
+    from jarv.session_render import _history_visual_lines, _read_result_summary
     from jarv.session_browser import SessionBrowserScreen
     from jarv.session_tree import build_tree
     from jarv.text_editor import render_visual_line_window
@@ -176,6 +176,32 @@ def make_cases(home):
     cases["config load"] = lambda: dict(load_config())
     cases["model catalog cold"] = lambda: (models_dev.clear_cache(), len(models_dev.catalog()))
     cases["model catalog warm"] = lambda: len(models_dev.catalog())
+    lookup_catalog = models_dev.catalog()
+
+    def exact_lookup():
+        models_dev._INDEXES.clear()
+        return models_dev._find(lookup_catalog, "openrouter", "openai", "openai/gpt-5.5")
+
+    cases["model exact lookup cold index"] = exact_lookup
+    read_result = (
+        "[READ RESULT]\nReturned size: 200000\nTotal size: 400000\nEOF: false\n\n"
+        + "read body\n" * 20000
+    )
+    cases["read card summary 200k chars"] = lambda: _read_result_summary(read_result)
+    label_store = ArtifactStore()
+    label_store.reserve_labels({f"saved-{i}" for i in range(10000)})
+    batches = [{f"new-{i}"} for i in range(100)]
+
+    def reserve_labels():
+        try:
+            for batch in batches:
+                label_store.reserve_labels(batch)
+            return len(label_store._reserved_labels)
+        finally:
+            for batch in batches:
+                label_store._reserved_labels.difference_update(batch)
+
+    cases["reserve 100 batches after 10000 labels"] = reserve_labels
     cases["project context non-git"] = lambda: build_project_context(config, cwd=home)
     html = ("<html><title>Sample</title><body>" + "<p>Paragraph with <b>bold</b> text.</p>" * 2000 + "</body></html>").encode()
     cases["web HTML 2000 paragraphs"] = lambda: web_content_from_bytes("https://example.test", "https://example.test", "text/html", html).text

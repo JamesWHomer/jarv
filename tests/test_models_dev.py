@@ -88,6 +88,37 @@ def test_lookup_indexes_stay_with_their_catalog_snapshot(monkeypatch):
     ]
 
 
+def test_exact_lookup_defers_fuzzy_indexes_and_preserves_match_order(monkeypatch):
+    data = {"anthropic": {"models": {
+        "Claude-Opus-4-8": model_facts(),
+        "claude-opus-4-8": model_facts(),
+        "claude-opus-4-8-20260528": model_facts(),
+    }}}
+    monkeypatch.setattr(models_dev, "catalog", lambda: data)
+    monkeypatch.setattr(models_dev, "_INDEXES", {})
+    normalize = models_dev.canonical_model_id
+    normalized = []
+
+    def record_normalization(value):
+        normalized.append(value)
+        return normalize(value)
+
+    monkeypatch.setattr(models_dev, "canonical_model_id", record_normalization)
+
+    assert models_dev.lookup("anthropic", "claude-opus-4-8").id == "Claude-Opus-4-8"
+    assert models_dev.lookup("anthropic", "claude-opus-4-8-20260528").id == "claude-opus-4-8-20260528"
+    assert models_dev.lookup("anthropic", "claude-opus-4-8-20260601").id == "Claude-Opus-4-8"
+    assert normalized == []
+
+    # The duplicate case-insensitive IDs remain ambiguous for fuzzy matches;
+    # an exact snapshot still wins after the fuzzy index has been built.
+    assert models_dev.lookup("anthropic", "claude_opus_4_8") is None
+    assert normalized
+    normalized.clear()
+    assert models_dev.lookup("anthropic", "claude-opus-4-8-20260528").id == "claude-opus-4-8-20260528"
+    assert normalized == []
+
+
 def test_lookup_puts_the_openrouter_namespace_back_on(models_dev_catalog):
     models_dev_catalog({
         "openrouter": {"openai/gpt-5.5": model_facts(cost={"input": 5, "output": 30})},

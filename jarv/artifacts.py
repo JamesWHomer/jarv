@@ -26,7 +26,12 @@ class ArtifactStore:
         Persisted artifacts also block reuse when a session is loaded again.
         """
         with self._lock:
-            conflicts = labels & (self._reserved_labels | self._items.keys())
+            # Check only this batch; copying every prior label makes successive
+            # spawn batches progressively more expensive in long sessions.
+            conflicts = {
+                label for label in labels
+                if label in self._reserved_labels or label in self._items
+            }
             if conflicts:
                 label = min(conflicts)
                 raise ValueError(

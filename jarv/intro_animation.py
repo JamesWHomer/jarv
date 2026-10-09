@@ -281,26 +281,26 @@ def _draw_logo(chars, colors, top: int, t: float, width: int, reveal: float) -> 
     for gi, letter in enumerate(_LOGO_ORDER):
         glyph = _LOGO[letter]
         gx = gi * (_GLYPH_W + _GLYPH_GAP)
-        for ry in range(_LOGO_H):
-            row = glyph[ry]
-            for cx in range(_GLYPH_W):
-                if row[cx] == " ":
-                    continue
-                abs_cx = gx + cx
-                dist = wipe_pos - abs_cx
-                if dist <= 0:
-                    continue
-                # Smooth, slowly drifting gradient across the width.
-                hue = (abs_cx / _LOGO_W) * 0.74 + 0.55 + t * 0.045
-                rgb = _hsv_rgb(hue, 0.8, 0.92)
-                lead = max(0.0, 1.0 - dist / _WIPE_EDGE)
-                if lead > 0:
-                    rgb = _mix(rgb, _WHITE, lead * 0.9)
-                elif settled:
-                    s = 1.0 - abs(abs_cx - sheen) / 3.5
-                    if s > 0:
-                        rgb = _mix(rgb, _WHITE, s * 0.45)
-                _place(chars, colors, top + ry, col_start + abs_cx, "█", _hex(*rgb))
+        for cx in range(_GLYPH_W):
+            abs_cx = gx + cx
+            dist = wipe_pos - abs_cx
+            if dist <= 0:
+                continue
+            # The gradient and sheen depend only on the column. Reuse its
+            # color across the glyph's rows rather than recomputing per cell.
+            hue = (abs_cx / _LOGO_W) * 0.74 + 0.55 + t * 0.045
+            rgb = _hsv_rgb(hue, 0.8, 0.92)
+            lead = max(0.0, 1.0 - dist / _WIPE_EDGE)
+            if lead > 0:
+                rgb = _mix(rgb, _WHITE, lead * 0.9)
+            elif settled:
+                s = 1.0 - abs(abs_cx - sheen) / 3.5
+                if s > 0:
+                    rgb = _mix(rgb, _WHITE, s * 0.45)
+            color = _hex(*rgb)
+            for ry in range(_LOGO_H):
+                if glyph[ry][cx] != " ":
+                    _place(chars, colors, top + ry, col_start + abs_cx, "█", color)
 
 
 def _draw_wave(chars, colors, y: int, t: float, width: int, grow: float) -> None:

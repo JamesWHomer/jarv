@@ -226,25 +226,29 @@ def clear_cache() -> None:
 # Lookup
 # ---------------------------------------------------------------------------
 
-def _index(provider_id: str, models: dict[str, Any]) -> dict[str, dict[str, list[str]]]:
+def _index(
+    provider_id: str, models: dict[str, Any], *, fuzzy: bool = False,
+) -> dict[str, dict[str, list[str]]]:
     with _LOCK:
         cached = _INDEXES.get(provider_id)
-        if cached is not None and cached[0] is models:
+        if (cached is not None and cached[0] is models
+                and (not fuzzy or "family" in cached[1])):
             return cached[1]
 
-    built: dict[str, dict[str, list[str]]] = {
-        "exact": {},
-        "canonical": {},
-        "basename": {},
-        "family": {},
-    }
+    # Most configured IDs match exactly, including case and snapshot aliases.
+    # Defer the much more expensive regex-based indexes until a lookup needs
+    # them. Build a new mapping so concurrent readers keep a complete index.
+    built: dict[str, dict[str, list[str]]] = {"exact": {}}
     for model_id in models:
         built["exact"].setdefault(model_id.lower(), []).append(model_id)
-        built["canonical"].setdefault(canonical_model_id(model_id), []).append(model_id)
-        built["basename"].setdefault(
-            canonical_model_id(model_basename(without_snapshot(model_id))), []
-        ).append(model_id)
-        built["family"].setdefault(model_family_key(model_id), []).append(model_id)
+    if fuzzy:
+        built.update(canonical={}, basename={}, family={})
+        for model_id in models:
+            built["canonical"].setdefault(canonical_model_id(model_id), []).append(model_id)
+            built["basename"].setdefault(
+                canonical_model_id(model_basename(without_snapshot(model_id))), []
+            ).append(model_id)
+            built["family"].setdefault(model_family_key(model_id), []).append(model_id)
 
     with _LOCK:
         # In-flight lookups may still hold a catalog from before a refresh.
@@ -299,6 +303,7 @@ def _find(
         found = index["exact"].get(candidate.lower())
         if found:
             return found[0]
+    index = _index(provider_id, models, fuzzy=True)
     for bucket in ("canonical", "basename", "family"):
         for candidate in candidates:
             match = _preferred(index[bucket].get(_probe(bucket, candidate), []))
