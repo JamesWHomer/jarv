@@ -330,7 +330,8 @@ class AgentInputTests(unittest.TestCase):
         renderer.on_stream_event(ReasoningStarted(id="r1"), None)
         renderer.on_stream_event(TextDelta("go north"), None)
         result = SimpleNamespace(
-            final_text="go north", reply_text="go north", got_text=True
+            final_text="go north", reply_text="go north", got_text=True,
+            tool_calls=[], reasoning_items=[],
         )
         renderer.on_stream_attempt_end(result, False)
 

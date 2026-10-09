@@ -32,6 +32,20 @@ def test_set_preserves_text_settings(set_config, key, raw):
     assert config == before
 
 
+def test_set_preserves_and_displays_literal_markup(set_config, monkeypatch):
+    from conftest import make_console
+
+    _, saved = set_config
+    console, output = make_console()
+    monkeypatch.setattr(commands, "console", console)
+    prompt = "Print [red]text[/red] and [/green] literally"
+
+    assert commands.cmd_set(["system_prompt", prompt]) == 0
+
+    assert saved[0]["system_prompt"] == prompt
+    assert repr(prompt) in output.getvalue()
+
+
 @pytest.mark.parametrize("key,raw,expected", [
     ("audit", "true", True),
     ("audit", "FALSE", False),

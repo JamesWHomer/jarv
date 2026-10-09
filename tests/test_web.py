@@ -53,6 +53,41 @@ def _mock_client(handler):
     )
 
 
+@pytest.mark.parametrize("href", [
+    "https://[broken/",
+    "https://duckduckgo.com/l/?uddg=https%3A%2F%2F%5Bbroken%2F",
+])
+def test_search_skips_malformed_links_without_losing_valid_results(href):
+    parser = _DuckDuckGoHTMLParser()
+    parser.feed(
+        f'<a class="result__a" href="{href}">Broken</a>'
+        '<a class="result__a" href="https://example.test/good">Good</a>'
+        '<a class="result__snippet" href="https://example.test/good">Useful</a>'
+    )
+    assert parser.results == [
+        {"title": "Good", "url": "https://example.test/good", "snippet": "Useful"},
+    ]
+
+
+def test_readable_html_keeps_text_around_malformed_links():
+    content = web_content_from_bytes(
+        "https://example.test/", "https://example.test/", "text/html",
+        b'<p>Before <a href="https://[broken/">broken link</a> after.</p>'
+        b'<p><a href="/good">Good link</a></p>',
+    )
+    assert content.text == (
+        "Before broken link after.\n\nGood link <https://example.test/good>"
+    )
+
+
+def test_malformed_redirect_is_a_web_error(monkeypatch):
+    monkeypatch.setattr("jarv.web._create_client", lambda timeout: _mock_client(
+        lambda request: httpx.Response(302, headers={"location": "https://[broken/"}),
+    ))
+    with pytest.raises(WebToolError, match="invalid URL"):
+        _request_bytes("https://example.test/", timeout=5)
+
+
 @pytest.mark.parametrize("encoding", ["gzip", "deflate", "raw-deflate", "identity"])
 def test_fetch_decodes_supported_compression_with_bounded_chunks(monkeypatch, encoding):
     body = bytes(range(256)) * 500

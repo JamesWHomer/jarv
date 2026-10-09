@@ -1,5 +1,6 @@
 import codecs
 import os
+import stat
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -467,6 +468,32 @@ def test_edit_reports_write_failure(workdir, monkeypatch):
     assert output.startswith("[edit error: could not write file:")
     assert target.read_bytes() == b"alpha\n"
     assert list(workdir.iterdir()) == [target]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows read-only file semantics")
+@pytest.mark.parametrize("cancel", [False, True])
+def test_read_only_edit_cleans_staging_file_and_preserves_failure(workdir, monkeypatch, cancel):
+    from jarv.cancellation import CancellationToken, TurnCancelled
+
+    target = workdir / "file.txt"
+    target.write_bytes(b"alpha\n")
+    target.chmod(stat.S_IREAD)
+    token = CancellationToken()
+    if cancel:
+        monkeypatch.setattr(edit_tool.os, "fsync", lambda fd: token.cancel())
+    try:
+        if cancel:
+            with pytest.raises(TurnCancelled):
+                dispatch_edit_tool(_args(target), config=NO_PROMPT_CONFIG, cancellation_token=token)
+        else:
+            output = _edit(_args(target))
+            assert output.startswith("[edit error: could not write file:")
+        assert target.read_bytes() == b"alpha\n"
+        assert not target.stat().st_mode & stat.S_IWRITE
+        assert list(workdir.iterdir()) == [target]
+    finally:
+        for path in workdir.iterdir():
+            path.chmod(stat.S_IWRITE)
 
 
 @pytest.mark.parametrize("change", ["write", "delete", "replace", "same_stat"])

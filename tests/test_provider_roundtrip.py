@@ -264,6 +264,64 @@ def test_cancel_checkpoint_preserves_provider_metadata_on_reasoning_and_calls():
     assert "provider_metadata" not in calls[1]
 
 
+def test_cancelled_stream_checkpoints_completed_reasoning_and_pending_call():
+    from jarv.cancellation import TurnCancelled
+
+    reasoning = ReasoningDone(
+        "thinking_0", [],
+        provider_content=[{"type": "thinking", "thinking": "native", "signature": "sig"}],
+        provider_metadata={"provider": "anthropic"},
+    )
+    call = ToolCallDone("fc_pending", "call_pending", "read", '{"input":"file.txt"}')
+    renderer = agent._TurnRenderer(ui=None, interactive=False, status_items=[], metadata={})
+
+    def interrupted_stream():
+        yield reasoning
+        yield call
+        raise TurnCancelled
+
+    with pytest.raises(TurnCancelled):
+        collect_stream_response(
+            interrupted_stream,
+            on_event=renderer.on_stream_event,
+            on_attempt_end=renderer.on_stream_attempt_end,
+        )
+
+    persistence = agent.SessionPersistence(incognito=True)
+    checkpointer = agent.TurnCheckpointer(persistence=persistence, renderer=renderer, status_items=[])
+    checkpointer.checkpoint_cancelled_turn()
+    saved_reasoning = [item for item in persistence.history if item.get("type") == "reasoning"]
+    assert len(saved_reasoning) == 1
+    assert saved_reasoning[0]["provider_content"] == reasoning.provider_content
+    assert saved_reasoning[0]["provider_metadata"] == {"provider": "anthropic"}
+    calls = [item for item in persistence.history if item.get("type") == "function_call"]
+    outputs = [item for item in persistence.history if item.get("type") == "function_call_output"]
+    assert len(calls) == len(outputs) == 1
+    assert calls[0]["call_id"] == outputs[0]["call_id"] == "call_pending"
+    assert "before execution" in outputs[0]["output"]
+
+
+def test_failed_stream_still_checkpoints_partial_text_after_completed_call():
+    renderer = agent._TurnRenderer(ui=None, interactive=False, status_items=[], metadata={})
+
+    def interrupted_stream():
+        yield TextDelta("partial response")
+        yield ToolCallDone("fc_pending", "call_pending", "read", "{}")
+        raise ProviderError("stream failed")
+
+    with pytest.raises(ProviderError):
+        collect_stream_response(
+            interrupted_stream,
+            on_event=renderer.on_stream_event,
+            on_attempt_end=renderer.on_stream_attempt_end,
+        )
+
+    persistence = agent.SessionPersistence(incognito=True)
+    checkpointer = agent.TurnCheckpointer(persistence=persistence, renderer=renderer, status_items=[])
+    checkpointer.flush_error_state()
+    assert persistence.history == [{"role": "assistant", "content": "partial response"}]
+
+
 def test_interactive_continuation_replays_deepseek_metadata(monkeypatch):
     from jarv.cancellation import CancellationToken
     from jarv.orchestrator import PendingRunCommand, RunCommandPrepared

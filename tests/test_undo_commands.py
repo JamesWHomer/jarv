@@ -67,6 +67,32 @@ def test_redo_with_empty_stack_prints_nothing_to_redo(tmp_path, monkeypatch):
     assert "Nothing to redo" in output.getvalue()
 
 
+def test_undo_redo_preserve_literal_prompt_markup(tmp_path, monkeypatch):
+    prompt = "Show [red]text[/red] and [/cyan] literally"
+    history = [{"role": "user", "content": prompt, "id": "literal-prompt"}]
+    history_file, output = _setup(tmp_path, monkeypatch, history)
+
+    undo_commands.cmd_undo([])
+    undo_commands.cmd_redo([])
+
+    assert load_history(history_file) == history
+    assert output.getvalue().count(repr(prompt)) == 2
+
+
+def test_multi_undo_preserves_literal_prompt_markup(tmp_path, monkeypatch):
+    prompt = "Show [/cyan] literally"
+    history = [
+        {"role": "user", "content": prompt},
+        {"role": "user", "content": "second"},
+    ]
+    history_file, output = _setup(tmp_path, monkeypatch, history)
+
+    undo_commands.cmd_undo(["2"])
+
+    assert load_history(history_file) == []
+    assert repr(prompt) in output.getvalue()
+
+
 def test_parse_count_rejects_garbage_and_zero():
     import pytest
     assert undo_commands._parse_count([]) == 1

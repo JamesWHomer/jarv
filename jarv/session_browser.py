@@ -11,7 +11,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from .command_input import _key_available, _read_key_with_repeats
+from .command_input import TextInput, _key_available, _read_key_with_repeats
 from .display import console, jarv_panel, terminal_size
 from .tui_app import AltScreenApp
 from .history import (
@@ -1593,10 +1593,10 @@ class SessionBrowserScreen(AltScreenApp):
             self.selected_sid = visible[0]["sid"]
 
     def _on_key_rename(self, key: str, repeat: int) -> None:
-        if key == "ESC":
+        if not isinstance(key, TextInput) and key == "ESC":
             self.rename_sid = None
             return
-        if key == "ENTER":
+        if not isinstance(key, TextInput) and key == "ENTER":
             meta = self.sessions.get(self.rename_sid)
             if meta is not None:
                 previous = dict(meta)
@@ -1627,6 +1627,11 @@ class SessionBrowserScreen(AltScreenApp):
     def on_key(self, key: str, repeat: int) -> None:
         repeat_count = repeat
 
+        if isinstance(key, TextInput) and not (
+            self.rename_sid is not None or (self.search_active and self.preview_sid is None)
+        ):
+            self.arm_delete_sids = None
+            return
         if self.rename_sid is not None:
             self._on_key_rename(key, repeat)
             return
@@ -1775,16 +1780,16 @@ class SessionBrowserScreen(AltScreenApp):
                 self._notify("Nothing to undo.", "dim")
 
     def _on_key_search(self, key: str, repeat: int = 1) -> None:
-        if key == "ESC":
+        if not isinstance(key, TextInput) and key == "ESC":
             self.search_active = False
             self.search_query = ""
             self.offset = 0
             self.ghost_sids.clear()
             self._clear_selection()
-        elif key == "TAB":
+        elif not isinstance(key, TextInput) and key == "TAB":
             self.search_active = False
             self._cycle_view()
-        elif key in ("ENTER", "DOWN", "CTRL_F"):
+        elif not isinstance(key, TextInput) and key in ("ENTER", "DOWN", "CTRL_F"):
             self.search_active = False
             visible = self._visible_rows_list()
             if visible and not any(r["sid"] == self.selected_sid for r in visible):

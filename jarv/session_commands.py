@@ -100,6 +100,7 @@ def cmd_history() -> None:
     from rich.text import Text
 
     from .display import flatten_headings, jarv_panel, section_rule, terminal_size
+    from .tool_outputs import flatten_content_text
     from .session_render import (
         _history_visual_lines_and_anchors,
         _status_renderable,
@@ -131,6 +132,8 @@ def cmd_history() -> None:
             pending_tool_parts.clear()
 
         for item_index, m in enumerate(history):
+            if not isinstance(m, dict):
+                continue
             role = m.get("role")
             if role == "user":
                 if pending_tool_parts:
@@ -139,10 +142,10 @@ def cmd_history() -> None:
                 line.append("▌ ", style="bold cyan")
                 line.append("You", style="bold cyan")
                 parts.append(line)
-                parts.append(Text(safe_terminal_text(f"  {m.get('content', '')}")))
+                parts.append(Text(safe_terminal_text(f"  {flatten_content_text(m.get('content', ''))}")))
                 parts.append(Text(""))
             elif role == "assistant":
-                content = m.get("content", "")
+                content = flatten_content_text(m.get("content", ""))
                 if content:
                     _append_jarv_parts()
                     parts.append(markdown_renderable(flatten_headings(content)))

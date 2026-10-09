@@ -199,12 +199,19 @@ def catalog() -> dict[str, dict[str, Any]]:
             return _CATALOG
 
     merged: dict[str, dict[str, Any]] = {}
-    for provider_id, entry in _providers_of(_read_json(SNAPSHOT_PATH)).items():
-        if isinstance(entry, dict) and isinstance(entry.get("models"), dict):
-            merged[provider_id] = entry
-    for provider_id, entry in _providers_of(_read_json(CACHE_PATH)).items():
-        if isinstance(entry, dict) and entry.get("models"):
-            merged[provider_id] = entry
+    for path in (SNAPSHOT_PATH, CACHE_PATH):
+        for provider_id, entry in _providers_of(_read_json(path)).items():
+            models = entry.get("models") if isinstance(entry, dict) else None
+            if not isinstance(models, dict):
+                continue
+            usable = {
+                model_id: model for model_id, model in models.items()
+                if isinstance(model_id, str) and isinstance(model, dict)
+            }
+            # A broken disposable cache must not replace working bundled facts
+            # or reach the lookup index as a non-object model record.
+            if usable:
+                merged[provider_id] = {**entry, "models": usable}
 
     with _LOCK:
         _CATALOG = merged

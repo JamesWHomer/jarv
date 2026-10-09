@@ -42,6 +42,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
 CHILD = r'''
 import os, sys
 mode = sys.argv.pop(1)
@@ -130,9 +131,11 @@ CASES = [
     ("archive", "exit", ["/archive"]),
     ("undo", "exit", ["/undo"]),
     ("redo", "exit", ["/redo"]),
+    ("resume", "exit", ["/resume"]),
     ("set", "exit", ["/set", "command_timeout", "30"]),
     ("unset", "exit", ["/unset", "command_timeout"]),
     ("btw CLI notice", "exit", ["/btw", "Reply with OK."]),
+    ("restart CLI notice", "exit", ["/restart"]),
     ("setup piped refusal", "exit", ["/setup"]),
     ("update pre-network", "update-ready", ["/update"]),
     ("uninstall instructions", "exit", ["/uninstall"]),
@@ -321,7 +324,9 @@ def main():
                                [interpreter, "-c", CHILD, mode, *cli_args])
                     result, started, ended, first_print = run_child(
                         command, env=sample_env)
-                    expected_status = 130 if case_name == "setup piped refusal" else 0
+                    expected_status = {
+                        "setup piped refusal": 130, "restart CLI notice": 2,
+                    }.get(case_name, 0)
                     if result.returncode != expected_status:
                         raise RuntimeError(f"{name}: exit {result.returncode}\n{result.stderr[-2000:]}")
                     expected_text = {"new": "New session starts", "archive": "Session archived",

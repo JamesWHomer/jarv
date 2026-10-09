@@ -36,14 +36,22 @@ def _positive_int(value: Any) -> int | None:
     return parsed if parsed > 0 else None
 
 
-def _supported_children(value: Any, names: tuple[str, ...]) -> tuple[str, ...]:
+def _supported_children(value: Any, names: tuple[str, ...]) -> tuple[str, ...] | None:
     if not isinstance(value, dict):
-        return ()
+        return None
+    # Absent declarations are unknown, not an explicit denial of every option.
+    # Keep catalog fallbacks when a provider returns only partial capabilities.
+    advertised = tuple(
+        name for name in names
+        if isinstance(value.get(name), dict)
+        and _bool(value[name].get("supported")) is not None
+    )
+    if not advertised:
+        return None
     return tuple(
         name
-        for name in names
-        if isinstance(value.get(name), dict)
-        and value[name].get("supported") is True
+        for name in advertised
+        if value[name]["supported"] is True
     )
 
 
@@ -207,18 +215,20 @@ def _anthropic_metadata_capabilities(metadata: dict[str, Any]) -> ReasoningCapab
     effort = effort if isinstance(effort, dict) else {}
     native_effort = _bool(effort.get("supported"))
     efforts = _supported_children(effort, EFFORT_LEVELS)
-    if supported and not efforts and "enabled" in modes:
+    if supported and not efforts and "enabled" in (modes or ()):
         efforts = EFFORT_LEVELS
+    if supported is False:
+        efforts = ()
 
     supports_disable = None
-    if supported is True:
+    if supported is True and modes is not None:
         supports_disable = "enabled" in modes
 
     max_output = _positive_int(metadata.get("max_tokens"))
     source = "Anthropic Models API"
     return ReasoningCapabilities(
         supported=supported,
-        efforts=efforts if supported else (),
+        efforts=efforts,
         modes=modes or None,
         supports_disable=supports_disable,
         returns_reasoning=supported,
@@ -228,7 +238,7 @@ def _anthropic_metadata_capabilities(metadata: dict[str, Any]) -> ReasoningCapab
             key: source
             for key, value in (
                 ("supported", supported),
-                ("efforts", efforts if supported else ()),
+                ("efforts", efforts),
                 ("modes", modes or None),
                 ("supports_disable", supports_disable),
                 ("native_effort", native_effort),

@@ -157,10 +157,20 @@ class PasteRegistry:
 
     def expand(self, text: str) -> str:
         """Restore any placeholder markers in ``text`` to their pasted content."""
-        for marker, original in self._pastes.items():
-            if marker in text:
+        if len(self._pastes) <= 1:
+            for marker, original in self._pastes.items():
                 text = text.replace(marker, original)
-        return text
+            return text
+        # Match only the draft, never text inserted by an earlier expansion:
+        # a paste can literally contain the spelling of another live chip.
+        parts = []
+        offset = 0
+        for start, end in self.marker_spans(text):
+            parts.append(text[offset:start])
+            parts.append(self._pastes[text[start:end]])
+            offset = end
+        parts.append(text[offset:])
+        return "".join(parts)
 
     def clear(self) -> None:
         """Forget every stored paste (call when the draft is sent or cleared)."""
@@ -1215,7 +1225,7 @@ def _read_key_with_repeats(
             if _is_batched_text_key(next_key):
                 inserted.append(next_key)
                 continue
-            if next_key == "ENTER":
+            if next_key == "ENTER" and not isinstance(next_key, TextInput):
                 if _await_more_input(
                     len(inserted) >= 2,
                     timeout=_PASTE_RESUME_GAP_SECONDS,
@@ -1235,13 +1245,13 @@ def _read_key_with_repeats(
         return TextInput(text), 1
 
     repeatable_keys = frozenset(repeatable)
-    if key not in repeatable_keys or max_count <= 1:
+    if isinstance(key, TextInput) or key not in repeatable_keys or max_count <= 1:
         return key, 1
 
     count = 1
     while count < max_count and _key_available():
         next_key = read_key()
-        if next_key != key:
+        if isinstance(next_key, TextInput) or next_key != key:
             _PENDING_KEYS.appendleft(next_key)
             break
         count += 1
@@ -1563,10 +1573,24 @@ def read_editable_line(
                         continue
                     raise
 
-                if key == "ENTER":
+                if isinstance(key, TextInput):
+                    text = strip_sgr_mouse_sequences(str(key))
+                    span = pastes.duplicate_span("".join(chars), cursor, text)
+                    if span is not None:
+                        # The same block pasted again next to its box: unbox it
+                        # to one plain (flattened) copy instead of a second box.
+                        start, end = span
+                        flattened = [ch for ch in text.replace("\n", " ") if ch >= " "]
+                        chars[start:end] = flattened
+                        cursor = start + len(flattened)
+                        pastes.prune("".join(chars))
+                    else:
+                        marker = pastes.collapse(text)
+                        insert(marker if marker is not None else text.replace("\n", " "))
+                elif key == "ENTER":
                     write("\n")
                     return pastes.expand("".join(chars))
-                if key == "LEFT":
+                elif key == "LEFT":
                     cursor = max(0, cursor - 1)
                 elif key == "RIGHT":
                     cursor = min(len(chars), cursor + 1)
@@ -1587,20 +1611,6 @@ def read_editable_line(
                         del chars[cursor]
                 elif key in ("RESIZE", "OTHER", "ESC"):
                     continue
-                elif isinstance(key, TextInput):
-                    text = strip_sgr_mouse_sequences(str(key))
-                    span = pastes.duplicate_span("".join(chars), cursor, text)
-                    if span is not None:
-                        # The same block pasted again next to its box: unbox it
-                        # to one plain (flattened) copy instead of a second box.
-                        start, end = span
-                        flattened = [ch for ch in text.replace("\n", " ") if ch >= " "]
-                        chars[start:end] = flattened
-                        cursor = start + len(flattened)
-                        pastes.prune("".join(chars))
-                    else:
-                        marker = pastes.collapse(text)
-                        insert(marker if marker is not None else text.replace("\n", " "))
                 elif len(key) == 1 and key >= " ":
                     inserted = [key]
                     while key_available():

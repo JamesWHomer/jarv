@@ -156,15 +156,18 @@ def _attr(attrs: list[tuple[str, str | None]], name: str) -> str:
 
 
 def _decode_search_url(href: str) -> str | None:
-    absolute = urljoin("https://duckduckgo.com/", href)
-    parsed = urlsplit(absolute)
     duckduckgo_hosts = {"duckduckgo.com", "www.duckduckgo.com"}
-    if parsed.hostname in duckduckgo_hosts and parsed.path == "/l/":
-        destination = parse_qs(parsed.query).get("uddg", [""])[0]
-        if not destination:
-            return None
-        absolute = destination
+    try:
+        absolute = urljoin("https://duckduckgo.com/", href)
         parsed = urlsplit(absolute)
+        if parsed.hostname in duckduckgo_hosts and parsed.path == "/l/":
+            destination = parse_qs(parsed.query).get("uddg", [""])[0]
+            if not destination:
+                return None
+            absolute = destination
+            parsed = urlsplit(absolute)
+    except ValueError:
+        return None
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         return None
     if parsed.hostname in duckduckgo_hosts:
@@ -464,8 +467,8 @@ class _ReadableHTMLParser(HTMLParser):
 def _readable_link_url(base_url: str, href: str) -> str | None:
     if not href:
         return None
-    absolute = urljoin(base_url, href)
     try:
+        absolute = urljoin(base_url, href)
         parsed = urlsplit(absolute)
         parsed.port
     except ValueError:
@@ -686,7 +689,10 @@ def _request_response_with_budget(
                         )
                     if redirect_count >= MAX_REDIRECTS:
                         raise WebToolError(f"too many redirects (maximum {MAX_REDIRECTS})")
-                    current_url = _validated_url(urljoin(str(response.url), location))
+                    try:
+                        current_url = _validated_url(urljoin(str(response.url), location))
+                    except ValueError as exc:
+                        raise WebToolError(f"invalid URL: {exc}") from exc
                     if response.status_code == 303 or (
                         response.status_code in {301, 302} and method == "POST"
                     ):

@@ -23,6 +23,30 @@ def _render(renderable, width: int = 200) -> str:
     return stream.getvalue()
 
 
+@pytest.mark.parametrize("include_non_message", [False, True])
+def test_plain_history_renders_structured_content_and_skips_non_messages(monkeypatch, include_non_message):
+    from types import SimpleNamespace
+    from jarv import session_commands
+
+    history = [
+        {"role": "user", "content": [{"type": "input_text", "text": "question text"}]},
+        {"role": "assistant", "content": [{"type": "output_text", "text": "answer text"}]},
+    ]
+    if include_non_message:
+        history.insert(0, None)
+    stream = io.StringIO()
+    console = Console(file=stream, force_terminal=False, color_system=None, width=100)
+    monkeypatch.setattr(session_commands, "console", console)
+    monkeypatch.setattr(session_commands, "prepare_session_context", lambda: SimpleNamespace(history_file=None))
+    monkeypatch.setattr(session_commands, "load_history", lambda _path: history)
+
+    session_commands.cmd_history()
+
+    rendered = stream.getvalue()
+    assert "question text" in rendered and "answer text" in rendered
+    assert "input_text" not in rendered and "output_text" not in rendered
+
+
 def _long_command_card() -> ToolCallCard:
     command = "\n".join(f"print({number})  # script line" for number in range(40))
     return tool_call_card_from_args("run_command", {"command": command})

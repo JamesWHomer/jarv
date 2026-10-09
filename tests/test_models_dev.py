@@ -60,6 +60,32 @@ def test_prune_survives_malformed_entries():
     assert set(pruned["groq"]["models"]) == {"good"}
 
 
+@pytest.mark.parametrize("models", ["invalid", ["invalid"], {"broken": None}])
+def test_invalid_cached_models_preserve_bundled_facts(models_dev_catalog, models):
+    models_dev_catalog({"openai": {"bundled-model": model_facts()}})
+    models_dev.CACHE_PATH.write_text(json.dumps({
+        "providers": {"openai": {"models": models}},
+    }), encoding="utf-8")
+    models_dev.clear_cache()
+
+    assert models_dev.lookup("openai", "bundled-model") is not None
+    assert [fact.id for fact in models_dev.models_for("openai")] == ["bundled-model"]
+
+
+def test_invalid_cached_model_records_do_not_crash_lookup(models_dev_catalog):
+    models_dev_catalog({})
+    models_dev.CACHE_PATH.write_text(json.dumps({
+        "providers": {"openai": {"models": {
+            "valid-model": model_facts(), "broken-model": ["invalid"],
+        }}},
+    }), encoding="utf-8")
+    models_dev.clear_cache()
+
+    assert models_dev.lookup("openai", "valid-model") is not None
+    assert models_dev.lookup("openai", "broken-model") is None
+    assert [fact.id for fact in models_dev.models_for("openai")] == ["valid-model"]
+
+
 def test_lookup_matches_exact_case_and_snapshot_variants(models_dev_catalog):
     models_dev_catalog({
         "anthropic": {"claude-opus-4-8": model_facts()},
