@@ -1780,16 +1780,17 @@ class SessionBrowserScreen(AltScreenApp):
                 self._notify("Nothing to undo.", "dim")
 
     def _on_key_search(self, key: str, repeat: int = 1) -> None:
-        if not isinstance(key, TextInput) and key == "ESC":
+        shortcut = "" if isinstance(key, TextInput) else key
+        if shortcut == "ESC":
             self.search_active = False
             self.search_query = ""
             self.offset = 0
             self.ghost_sids.clear()
             self._clear_selection()
-        elif not isinstance(key, TextInput) and key == "TAB":
+        elif shortcut == "TAB":
             self.search_active = False
             self._cycle_view()
-        elif not isinstance(key, TextInput) and key in ("ENTER", "DOWN", "CTRL_F"):
+        elif shortcut in ("ENTER", "DOWN", "CTRL_F"):
             self.search_active = False
             visible = self._visible_rows_list()
             if visible and not any(r["sid"] == self.selected_sid for r in visible):

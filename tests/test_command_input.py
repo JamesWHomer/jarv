@@ -1375,6 +1375,23 @@ def test_read_editable_line_inserts_single_line_paste_inline():
     assert result == "hello world"
 
 
+@pytest.mark.parametrize(
+    "literal",
+    ["ENTER", "LEFT", "RIGHT", "HOME", "END", "BACKSPACE", "DELETE", "RESIZE", "OTHER", "ESC"],
+)
+def test_read_editable_line_inserts_pasted_shortcut_names_literally(literal):
+    keys = iter([command_input.TextInput(literal), "!", "ENTER"])
+
+    result = command_input.read_editable_line(
+        "jarv> ",
+        initial="prefix ",
+        read_key=lambda: next(keys),
+        write=lambda _text: None,
+    )
+
+    assert result == f"prefix {literal}!"
+
+
 def test_read_editable_line_backspace_removes_whole_paste_marker():
     # The chip is the only thing in the line; one Backspace clears it entirely.
     keys = iter([command_input.TextInput("first\nsecond\nthird"), "BACKSPACE", "ENTER"])

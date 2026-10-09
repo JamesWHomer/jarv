@@ -1574,6 +1574,7 @@ def read_editable_line(
                     raise
 
                 if isinstance(key, TextInput):
+                    # Literal pasted text can itself spell a shortcut token.
                     text = strip_sgr_mouse_sequences(str(key))
                     span = pastes.duplicate_span("".join(chars), cursor, text)
                     if span is not None:

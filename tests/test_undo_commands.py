@@ -100,3 +100,29 @@ def test_parse_count_rejects_garbage_and_zero():
         with pytest.raises(ValueError):
             undo_commands._parse_count(invalid)
     assert undo_commands._parse_count(["3"]) == 3
+
+
+def test_undo_redo_render_prompt_markup_literally(tmp_path, monkeypatch):
+    prompt = "Explain [bold]text[/bold] and [/missing]"
+    history = [{"role": "user", "content": prompt, "id": "markup"}]
+    history_file, output = _setup(tmp_path, monkeypatch, history)
+
+    undo_commands.cmd_undo([])
+    undo_commands.cmd_redo([])
+
+    assert output.getvalue().count(repr(prompt)) == 2
+    assert load_history(history_file) == history
+
+
+def test_multi_undo_renders_prompt_markup_literally(tmp_path, monkeypatch):
+    prompt = "Explain [bold]text[/bold] and [/missing]"
+    history = [
+        {"role": "user", "content": prompt, "id": "first"},
+        {"role": "user", "content": prompt, "id": "second"},
+    ]
+    history_file, output = _setup(tmp_path, monkeypatch, history)
+
+    undo_commands.cmd_undo(["2"])
+
+    assert output.getvalue().count(repr(prompt)) == 2
+    assert load_history(history_file) == []

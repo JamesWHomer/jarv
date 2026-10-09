@@ -1,5 +1,6 @@
-from conftest import model_facts
 import pytest
+
+from conftest import model_facts
 from jarv import model_catalog, settings_command
 from jarv.config import DEFAULT_CONFIG, validate_config
 from jarv.model_catalog import CatalogModel
@@ -169,6 +170,84 @@ def test_anthropic_manual_thinking_exposes_budget_levels_without_native_effort(
     )
     assert capabilities.modes == ("enabled",)
     assert capabilities.native_effort is False
+
+
+@pytest.mark.parametrize("native_capabilities", [
+    {},
+    {"image_input": {"supported": True}},
+    {"thinking": {"supported": True}},
+    {"thinking": {"supported": True, "types": {"adaptive": {"supported": True}}}},
+])
+def test_partial_anthropic_metadata_preserves_catalog_efforts_without_disable(
+    tmp_path, monkeypatch, models_dev_catalog, native_capabilities,
+):
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    models_dev_catalog({"anthropic": {"claude-test": model_facts(
+        reasoning=True,
+        reasoning_options=[{"type": "effort", "values": ["low", "high"]}],
+    )}})
+    model_catalog._write_cache("anthropic", [CatalogModel(
+        id="claude-test", metadata={"capabilities": native_capabilities},
+    )])
+    config = {"provider": "anthropic", "model": "claude-test", "reasoning_effort": "high"}
+
+    capabilities = get_reasoning_capabilities(config)
+
+    assert capabilities.efforts == ("low", "high")
+    assert capabilities.sources["efforts"] == "models.dev catalog"
+    assert reconcile_reasoning_effort(config) is None
+    assert config["reasoning_effort"] == "high"
+
+
+def test_partial_anthropic_metadata_preserves_catalog_disable_support(
+    tmp_path, monkeypatch, models_dev_catalog,
+):
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    models_dev_catalog({"anthropic": {"claude-test": model_facts(
+        reasoning=True,
+        reasoning_options=[{"type": "budget_tokens", "min": 1024}],
+    )}})
+    model_catalog._write_cache("anthropic", [CatalogModel(
+        id="claude-test", metadata={"capabilities": {"thinking": {"supported": True}}},
+    )])
+    config = {"provider": "anthropic", "model": "claude-test", "reasoning_effort": "none"}
+
+    assert get_reasoning_capabilities(config).supports_disable is True
+    assert reconcile_reasoning_effort(config) is None
+
+
+def test_anthropic_output_limit_does_not_require_reasoning_capabilities(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    model_catalog._write_cache("anthropic", [CatalogModel(
+        id="claude-test", metadata={"max_tokens": 12345},
+    )])
+
+    capabilities = get_reasoning_capabilities({"provider": "anthropic", "model": "claude-test"})
+
+    assert capabilities.max_output_tokens == 12345
+    assert capabilities.sources["max_output_tokens"] == "Anthropic Models API"
+
+
+def test_explicitly_unsupported_anthropic_effort_overrides_catalog(
+    tmp_path, monkeypatch, models_dev_catalog,
+):
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    models_dev_catalog({"anthropic": {"claude-test": model_facts(
+        reasoning=True,
+        reasoning_options=[{"type": "effort", "values": ["low", "high"]}],
+    )}})
+    model_catalog._write_cache("anthropic", [CatalogModel(
+        id="claude-test", metadata={"capabilities": {
+            "thinking": {"supported": True, "types": {"adaptive": {"supported": True}}},
+            "effort": {"supported": False},
+        }},
+    )])
+    config = {"provider": "anthropic", "model": "claude-test", "reasoning_effort": "high"}
+
+    assert get_reasoning_capabilities(config).efforts == ()
+    assert reconcile_reasoning_effort(config) == "high"
 
 
 def test_gemini_models_metadata_can_disable_reasoning_controls(

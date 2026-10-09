@@ -166,6 +166,7 @@ def _decode_search_url(href: str) -> str | None:
                 return None
             absolute = destination
             parsed = urlsplit(absolute)
+        parsed.port
     except ValueError:
         return None
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:

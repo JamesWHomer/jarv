@@ -7,6 +7,7 @@ from rich.console import Console
 
 from jarv import setup_interactive, settings_command
 from jarv.config import DEFAULT_CONFIG
+from jarv.command_input import TextInput
 
 
 @pytest.mark.parametrize("provider", ["ollama", "lm_studio", "vllm"])
@@ -87,6 +88,20 @@ def _render(app, console) -> str:
 def test_setup_step_rows_cloud_provider():
     rows = setup_interactive._setup_step_rows({**DEFAULT_CONFIG, "provider": "openai"})
     assert [row["key"] for row in rows] == ["provider", "api_key", "model"]
+
+
+@pytest.mark.parametrize("literal", ["LEFT", "RIGHT", "ENTER", "ESC"])
+def test_setup_pasted_shortcut_names_do_not_leave_provider_step(monkeypatch, literal):
+    app, saved, _console = _make_app(monkeypatch, dict(DEFAULT_CONFIG))
+    app.on_key("ENTER", 1)
+
+    app.on_key(TextInput(literal), 1)
+
+    assert app.phase == "step"
+    assert app.step_idx == 0
+    assert app.edit["row"]["key"] == "provider"
+    assert not saved
+    assert not app.stop_calls
 
 
 def test_setup_step_rows_local_provider():

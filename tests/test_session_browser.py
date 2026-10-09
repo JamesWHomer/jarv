@@ -5,10 +5,35 @@ from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from conftest import SnapshotLive, neutralize_tui_modes
 from rich.console import Console
 
 from jarv import session_browser
+from jarv.command_input import TextInput
+from jarv.text_editor import initialize_text_editor
+
+
+@pytest.mark.parametrize("mode", ["rename", "search"])
+@pytest.mark.parametrize("literal", ["ENTER", "ESC", "TAB", "DOWN", "CTRL_F"])
+def test_pasted_shortcut_names_stay_in_session_editor(mode, literal):
+    screen = session_browser.SessionBrowserScreen(
+        data={}, sessions={}, terminals={}, rows=[], current_session_id=None, background=False,
+    )
+    if mode == "rename":
+        screen.rename_sid = "session-id"
+        initialize_text_editor(screen.rename_editor, "")
+    else:
+        screen.search_active = True
+
+    screen.on_key(TextInput(literal), 1)
+
+    if mode == "rename":
+        assert screen.rename_sid == "session-id"
+        assert screen.rename_editor["buffer"] == literal
+    else:
+        assert screen.search_active
+        assert screen.search_query == literal
 
 
 # Sessions in the order the browser sorts them (newest last_used_at first).

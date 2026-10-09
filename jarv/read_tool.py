@@ -163,7 +163,7 @@ def _validate_args(args: dict, config: dict) -> tuple[str, int, int] | str:
     if offset < 0:
         return "[tool argument error: offset must be a non-negative integer]"
 
-    size = args.get("size", _default_size(config))
+    size = args.get("size")
     if size is None:
         size = _default_size(config)
     if isinstance(size, bool) or not isinstance(size, int):

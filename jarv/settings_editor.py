@@ -25,6 +25,7 @@ from rich.console import Group
 from rich.panel import Panel
 from rich.text import Text
 
+from .command_input import TextInput
 from .text_editor import apply_text_editor_key
 from .tui_panel import MenuPanel, menu_border_enabled, menu_frame_rows, menu_inner_width
 from .settings_command import (
@@ -132,15 +133,16 @@ def apply_editor_key(
     """
     row = edit["row"]
     key_name = row["key"]
+    shortcut = "" if isinstance(key, TextInput) else key
 
     if row.get("multiline"):
-        if key == "ESC":
+        if shortcut == "ESC":
             dirty = _settings_edit_is_dirty(edit, config)
             if dirty and not edit.get("discard_armed"):
                 edit["discard_armed"] = True
                 return config, _continue()
             return config, _cancelled(f"{row['label']} unchanged")
-        if key == "CTRL_S":
+        if shortcut == "CTRL_S":
             config, message, style, done = _settings_commit_edit(edit, config)
             if done:
                 return config, _committed(message, style)
@@ -149,20 +151,20 @@ def apply_editor_key(
         _settings_multiline_apply_key(edit, key, repeat, inner_width=inner_width)
         return config, _continue()
 
-    if key == "ESC" and edit.get("model_validation_warning"):
+    if shortcut == "ESC" and edit.get("model_validation_warning"):
         edit.pop("model_validation_warning", None)
         edit.pop("model_validation_suggestion", None)
         edit.pop("model_warning_actions", None)
         edit.pop("model_warning_selection", None)
         return config, _continue(clear_flash=True)
 
-    if key == "ESC":
+    if shortcut == "ESC":
         if _settings_edit_is_dirty(edit, config) and not edit.get("discard_armed"):
             edit["discard_armed"] = True
             return config, _continue(clear_flash=True)
         return config, _cancelled(f"{row['label']} unchanged")
 
-    if key_name == "provider" and key in ("UP", "DOWN", "HOME", "END"):
+    if key_name == "provider" and shortcut in ("UP", "DOWN", "HOME", "END"):
         edit["discard_armed"] = False
         provider_keys = _settings_provider_keys()
         current_provider = edit.get("selected_provider", config.get("provider", "openai"))
@@ -192,7 +194,7 @@ def apply_editor_key(
         edit["discard_armed"] = False
         return config, _continue(clear_flash=True)
 
-    if key == "ENTER":
+    if shortcut == "ENTER":
         config, message, style, done = _settings_commit_edit(edit, config)
         if done:
             return config, _committed(message, style)
@@ -207,7 +209,7 @@ def apply_editor_key(
     if (
         key_name == "api_key"
         and edit.get("placeholder_active")
-        and key in ("BACKSPACE", "DELETE")
+        and shortcut in ("BACKSPACE", "DELETE")
     ):
         edit["placeholder_active"] = False
         edit["cleared"] = True

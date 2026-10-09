@@ -985,8 +985,8 @@ class HeadsupApp(AltScreenApp):
         enable_mouse_wheel_reporting()
 
     def on_key(self, key: str, repeat: int) -> None:
-        is_text = isinstance(key, TextInput)
-        if not is_text and key == "ENTER":
+        shortcut = "" if isinstance(key, TextInput) else key
+        if shortcut == "ENTER":
             if self._answer_request is not None:
                 self._complete_answer()
                 return
@@ -1016,7 +1016,7 @@ class HeadsupApp(AltScreenApp):
             if result in {"exit", "restart"}:
                 self.stop(result)
             return
-        if not is_text and key == "ESC":
+        if shortcut == "ESC":
             if self._answer_request is not None:
                 self._cancel_answer()
                 return
@@ -1029,24 +1029,24 @@ class HeadsupApp(AltScreenApp):
             if self._handle_prompt_dismiss():
                 self.stop()
             return
-        if not is_text and key in ("CTRL_V", "ALT_V"):
+        if shortcut in ("CTRL_V", "ALT_V"):
             self._paste_from_system_clipboard()
             return
-        if not is_text and key == "CTRL_O":
+        if shortcut == "CTRL_O":
             self._toggle_tool_expansion()
             return
-        if not is_text and key == "CTRL_END":
+        if shortcut == "CTRL_END":
             with self.lock:
                 self._follow_latest()
             return
-        if not is_text and key in {"SHIFT_PAGEUP", "SHIFT_PAGEDOWN"}:
+        if shortcut in {"SHIFT_PAGEUP", "SHIFT_PAGEDOWN"}:
             self._jump_to_user_message(backward=key == "SHIFT_PAGEUP", repeat=repeat)
             return
-        scroll_delta = None if is_text else scroll_key_delta(key, repeat)
+        scroll_delta = scroll_key_delta(shortcut, repeat)
         if scroll_delta is not None:
             self._scroll_transcript(scroll_delta)
             return
-        if not is_text and key in {"UP", "DOWN", "TAB"}:
+        if shortcut in {"UP", "DOWN", "TAB"}:
             # The autocomplete menu owns these keys whenever it is open, taking
             # priority over prompt-history navigation (a "/se" draft is a single
             # line, so history nav would otherwise capture the arrows).
@@ -1065,7 +1065,7 @@ class HeadsupApp(AltScreenApp):
                 self.refresh()
                 return
         if (
-            not is_text and key in {"UP", "DOWN"}
+            shortcut in {"UP", "DOWN"}
             and self._answer_request is None
             and not self._prompt_has_multiline_draft()
         ):
@@ -1597,7 +1597,7 @@ class HeadsupApp(AltScreenApp):
                 return stripped != existing_tail, bool(stripped)
 
         key = _sanitize_editor_key(key)
-        if key == "CTRL_N":
+        if not isinstance(key, TextInput) and key == "CTRL_N":
             key = "ENTER"
         has_selection = self._editor_selection_span() is not None
         # An active selection takes priority over the paste-chip shortcuts: a
@@ -1605,6 +1605,7 @@ class HeadsupApp(AltScreenApp):
         # re-paste replaces it rather than unboxing an adjacent chip.
         if (
             key in ("BACKSPACE", "DELETE")
+            and not isinstance(key, TextInput)
             and not has_selection
             and self._delete_adjacent_paste(key)
         ):

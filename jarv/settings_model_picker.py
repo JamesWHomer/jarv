@@ -181,25 +181,26 @@ def _settings_model_apply_key(
     repeat_count: int = 1,
 ) -> bool:
     """Handle model picker navigation and activation of custom input."""
+    shortcut = "" if isinstance(key, TextInput) else key
     if edit.get("model_validation_warning"):
         actions = edit.get("model_warning_actions") or []
         selected = max(
             0,
             min(int(edit.get("model_warning_selection", 0)), len(actions) - 1),
         )
-        if key in ("LEFT", "UP", "HOME"):
+        if shortcut in ("LEFT", "UP", "HOME"):
             edit["model_warning_selection"] = (
                 0 if key == "HOME" else max(0, selected - repeat_count)
             )
             return True
-        if key in ("RIGHT", "DOWN", "END"):
+        if shortcut in ("RIGHT", "DOWN", "END"):
             edit["model_warning_selection"] = (
                 max(0, len(actions) - 1)
                 if key == "END"
                 else min(max(0, len(actions) - 1), selected + repeat_count)
             )
             return True
-        return key not in ("ENTER", "ESC")
+        return shortcut not in ("ENTER", "ESC")
 
     models = edit.get("model_choices")
     if not isinstance(models, list) or not models:
@@ -209,7 +210,7 @@ def _settings_model_apply_key(
         0,
         min(int(edit.get("selected_model_index", 0)), len(models) - 1),
     )
-    if key in ("UP", "DOWN", "HOME", "END"):
+    if shortcut in ("UP", "DOWN", "HOME", "END"):
         input_active = bool(edit.get("model_input_active"))
         if key == "UP":
             if input_active:
@@ -245,7 +246,7 @@ def _settings_model_apply_key(
     ):
         if not edit.get("model_input_active"):
             edit["model_input_active"] = True
-    elif key in ("ENTER", "ESC"):
+    elif shortcut in ("ENTER", "ESC"):
         return False
 
     if edit.get("model_input_active"):
