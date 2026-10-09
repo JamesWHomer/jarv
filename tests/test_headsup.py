@@ -23,6 +23,18 @@ from jarv.text_editor import initialize_text_editor
 
 
 class HeadsupTests(unittest.TestCase):
+    def test_pasted_delete_names_do_not_remove_adjacent_paste_chip(self):
+        for literal in ("BACKSPACE", "DELETE"):
+            with self.subTest(literal=literal):
+                app, _console, _output = self._app()
+                app.on_key(TextInput("first\nsecond"), 1)
+                marker = app.editor["buffer"]
+                if literal == "DELETE":
+                    app.editor["cursor"] = 0
+                app.on_key(TextInput(literal), 1)
+                expected = marker + literal if literal == "BACKSPACE" else literal + marker
+                self.assertEqual(app.editor["buffer"], expected)
+
     def _app(self, *, width=50, args=None, config=None):
         ready = threading.Event()
         ready.set()
@@ -1545,7 +1557,7 @@ class HeadsupTests(unittest.TestCase):
 
     def test_pasted_key_names_do_not_trigger_prompt_shortcuts(self):
         for literal in ("ENTER", "ESC", "UP", "DOWN", "TAB", "CTRL_V", "ALT_V", "CTRL_O",
-                        "CTRL_END", "PAGEUP", "SHIFT_PAGEUP", "DELETE", "BACKSPACE"):
+                        "CTRL_END", "CTRL_N", "PAGEUP", "SHIFT_PAGEUP", "DELETE", "BACKSPACE"):
             with self.subTest(literal=literal):
                 app, _, _ = self._app()
                 initialize_text_editor(app.editor, "draft ")

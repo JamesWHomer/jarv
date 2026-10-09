@@ -28,6 +28,7 @@ from rich.console import Group, RenderableType
 from rich.panel import Panel
 from rich.text import Text
 
+from .command_input import TextInput
 from .config import save_config
 from .display import console, terminal_size
 from .intro_animation import render_intro
@@ -298,7 +299,7 @@ class SetupApp(AltScreenApp):
         self.edit = self._begin_step(0)
 
     def _on_step_key(self, key: str, repeat: int) -> None:
-        if not _editor_wants_horizontal(self.edit):
+        if not isinstance(key, TextInput) and not _editor_wants_horizontal(self.edit):
             if key == "LEFT":
                 self._go_to_prev_step()
                 return

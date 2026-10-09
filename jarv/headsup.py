@@ -1597,7 +1597,7 @@ class HeadsupApp(AltScreenApp):
                 return stripped != existing_tail, bool(stripped)
 
         key = _sanitize_editor_key(key)
-        if key == "CTRL_N":
+        if not isinstance(key, TextInput) and key == "CTRL_N":
             key = "ENTER"
         has_selection = self._editor_selection_span() is not None
         # An active selection takes priority over the paste-chip shortcuts: a
@@ -1605,6 +1605,7 @@ class HeadsupApp(AltScreenApp):
         # re-paste replaces it rather than unboxing an adjacent chip.
         if (
             key in ("BACKSPACE", "DELETE")
+            and not isinstance(key, TextInput)
             and not has_selection
             and self._delete_adjacent_paste(key)
         ):

@@ -1,8 +1,10 @@
 import io
 
+import pytest
 from rich.console import Console
 
 from jarv import settings_interactive
+from jarv.command_input import TextInput
 from jarv.config import DEFAULT_CONFIG
 from jarv.tui_frame import panel_width
 
@@ -117,6 +119,24 @@ def test_settings_dirty_multiline_editor_requires_second_esc(monkeypatch):
 
     assert app.edit is not None
     assert "Esc again to discard" in _render(app, console)
+
+
+@pytest.mark.parametrize("setting", ["base_url", "api_key", "system_prompt", "model"])
+@pytest.mark.parametrize("literal", ["ENTER", "ESC", "CTRL_S", "UP", "HOME", "BACKSPACE", "DELETE", "MOUSE_WHEEL_DOWN"])
+def test_settings_pasted_shortcut_names_stay_in_editor(monkeypatch, setting, literal):
+    config = {**DEFAULT_CONFIG, "api_keys": {"openai": "saved-key"}}
+    app, _console = _make_app(monkeypatch, config)
+    app.selected = _row_index(config, setting)
+    app.on_key("ENTER", 1)
+    before = app.edit["buffer"]
+
+    app.on_key(TextInput(literal), 1)
+
+    assert app.edit is not None
+    assert app.edit["buffer"] == before + literal
+    assert not app.edit.get("discard_armed")
+    if setting == "api_key":
+        assert not app.edit.get("placeholder_active")
 
 
 def test_settings_esc_returns_from_readonly_api_key_editor(monkeypatch):

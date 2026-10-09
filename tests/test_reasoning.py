@@ -577,3 +577,37 @@ def test_bundled_catalog_fixes_the_drift_the_name_patterns_had(
     assert opus5.native_effort is True
     assert opus5.supports_disable is False
     assert "minimal" not in opus5.efforts
+
+
+def test_anthropic_output_limit_does_not_require_reasoning_capabilities(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    model_catalog._write_cache("anthropic", [CatalogModel(
+        id="claude-test", metadata={"max_tokens": 12345},
+    )])
+
+    capabilities = get_reasoning_capabilities({"provider": "anthropic", "model": "claude-test"})
+
+    assert capabilities.max_output_tokens == 12345
+    assert capabilities.sources["max_output_tokens"] == "Anthropic Models API"
+
+
+def test_explicitly_unsupported_anthropic_effort_overrides_catalog(
+    tmp_path, monkeypatch, models_dev_catalog,
+):
+    monkeypatch.setattr(model_catalog, "CACHE_DIR", tmp_path)
+    models_dev_catalog({"anthropic": {"claude-test": model_facts(
+        reasoning=True,
+        reasoning_options=[{"type": "effort", "values": ["low", "high"]}],
+    )}})
+    model_catalog._write_cache("anthropic", [CatalogModel(
+        id="claude-test", metadata={"capabilities": {
+            "thinking": {"supported": True, "types": {"adaptive": {"supported": True}}},
+            "effort": {"supported": False},
+        }},
+    )])
+    config = {"provider": "anthropic", "model": "claude-test", "reasoning_effort": "high"}
+
+    assert get_reasoning_capabilities(config).efforts == ()
+    assert reconcile_reasoning_effort(config) == "high"

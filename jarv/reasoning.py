@@ -200,8 +200,7 @@ def _openrouter_metadata_capabilities(metadata: dict[str, Any]) -> ReasoningCapa
 
 def _anthropic_metadata_capabilities(metadata: dict[str, Any]) -> ReasoningCapabilities:
     capabilities = metadata.get("capabilities")
-    if not isinstance(capabilities, dict):
-        return ReasoningCapabilities()
+    capabilities = capabilities if isinstance(capabilities, dict) else {}
 
     thinking = capabilities.get("thinking")
     thinking = thinking if isinstance(thinking, dict) else {}
@@ -218,6 +217,8 @@ def _anthropic_metadata_capabilities(metadata: dict[str, Any]) -> ReasoningCapab
     if supported and not efforts and "enabled" in (modes or ()):
         efforts = EFFORT_LEVELS
     if supported is False:
+        efforts = ()
+    elif efforts is None and native_effort is False:
         efforts = ()
 
     supports_disable = None

@@ -25,6 +25,7 @@ from rich.console import Group, RenderableType
 from rich.panel import Panel
 from rich.text import Text
 
+from .command_input import TextInput
 from .config import CONFIG_FILE, save_config
 from .display import console, terminal_size
 from .settings_editor import apply_catalog_refresh, apply_editor_key, render_editor_panel
@@ -143,7 +144,8 @@ class SettingsApp(AltScreenApp):
     # Key handling
     # ------------------------------------------------------------------ #
     def on_key(self, key: str, repeat: int) -> None:
-        key = _WHEEL_NAV_KEYS.get(key, key)
+        if not isinstance(key, TextInput):
+            key = _WHEEL_NAV_KEYS.get(key, key)
         # Serialize every state mutation against the catalog refresher thread
         # (which also takes ``self.lock``) so a repaint never observes a
         # half-applied change.
