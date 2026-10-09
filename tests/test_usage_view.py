@@ -41,6 +41,39 @@ def test_parse_usage_scope_rejects_bad_input(args):
     assert error
 
 
+@pytest.mark.parametrize("unit", ["h", "d"])
+@pytest.mark.parametrize("amount", [10**30, 10_000_000])
+def test_parse_usage_scope_rejects_unrepresentable_periods(monkeypatch, unit, amount):
+    now = datetime(2026, 10, 10, 12, tzinfo=timezone.utc)
+    monkeypatch.setattr(usage_view, "utc_now", lambda: now)
+
+    scope_key, error = usage_view.parse_usage_scope(["--all", "--since", f"{amount}{unit}"])
+
+    assert scope_key is None
+    assert error == usage_view._SINCE_ERROR
+
+
+@pytest.mark.parametrize("unit,step", [("h", timedelta(hours=1)), ("d", timedelta(days=1))])
+def test_parse_usage_scope_preserves_representable_period_boundary(monkeypatch, unit, step):
+    now = datetime(2026, 10, 10, 12, tzinfo=timezone.utc)
+    monkeypatch.setattr(usage_view, "utc_now", lambda: now)
+    earliest = datetime.min.replace(tzinfo=timezone.utc)
+    maximum = (now - earliest) // (step * 2)
+
+    for amount in (1, 7, 24, maximum):
+        raw = f"{amount}{unit}"
+        scope_key, error = usage_view.parse_usage_scope(["--all", f"--since={raw}"])
+        assert scope_key == f"since:{raw}"
+        assert error is None
+        window = usage_view.resolve_scope(scope_key).window
+        assert window == step * amount
+        assert usage_view._split_windows([], window, now) == ([], [])
+
+    scope_key, error = usage_view.parse_usage_scope(["--all", f"--since={maximum + 1}{unit}"])
+    assert scope_key is None
+    assert error == usage_view._SINCE_ERROR
+
+
 def test_resolve_scope_canonical_and_adhoc():
     assert usage_view.resolve_scope("week").window == timedelta(days=7)
     adhoc = usage_view.resolve_scope("since:24h")

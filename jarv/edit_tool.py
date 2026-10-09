@@ -9,7 +9,7 @@ import stat
 import tempfile
 import threading
 import weakref
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from itertools import chain
 from pathlib import Path
@@ -226,7 +226,18 @@ def _commit_edit(path: Path, loaded: _EditFile, data: bytes,
         return f"[edit error: could not write file: {exc}]"
     finally:
         if temporary is not None:
-            temporary.unlink(missing_ok=True)
+            try:
+                temporary.unlink(missing_ok=True)
+            except PermissionError:
+                # Windows cannot remove the staged copy of a read-only file.
+                # Restore write permission on our temporary file only, so the
+                # original write/conflict result survives cleanup.
+                with suppress(OSError):
+                    temporary.chmod(loaded.mode | stat.S_IWRITE)
+                    temporary.unlink(missing_ok=True)
+            except OSError:
+                # Cleanup failure must not replace a write error or cancellation.
+                pass
     return None
 
 

@@ -1,5 +1,6 @@
 import codecs
 import os
+import stat
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -17,6 +18,63 @@ from jarv.safety import prompt_confirmation
 
 
 NO_PROMPT_CONFIG = {**DEFAULT_CONFIG, "command_safety": "none"}
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows forbids replacing read-only files")
+def test_readonly_edit_returns_failure_and_cleans_staging_file(tmp_path):
+    target = tmp_path / "readonly.txt"
+    target.write_text("alpha", encoding="utf-8")
+    target.chmod(stat.S_IREAD)
+    try:
+        result = dispatch_edit_tool(
+            {"path": str(target), "old_text": "alpha", "new_text": "beta"},
+            config=NO_PROMPT_CONFIG,
+        )
+        assert result.startswith("[edit error: could not write file:")
+        assert target.read_text(encoding="utf-8") == "alpha"
+        assert not target.stat().st_mode & stat.S_IWRITE
+        assert not list(tmp_path.glob(".jarv-edit-*"))
+    finally:
+        # Also clean up a leaked staging file if this regression fails.
+        for path in tmp_path.iterdir():
+            path.chmod(stat.S_IREAD | stat.S_IWRITE)
+
+
+@pytest.mark.parametrize("cleanup_failure", ["chmod", "unlink"])
+def test_edit_cleanup_failure_preserves_original_write_error(tmp_path, monkeypatch, cleanup_failure):
+    target = tmp_path / "file.txt"
+    target.write_text("alpha", encoding="utf-8")
+    unlink = Path.unlink
+    chmod = Path.chmod
+    cleanup_started = False
+
+    def fail_replace(*args):
+        raise OSError("original write error")
+
+    def fail_unlink(path, *args, **kwargs):
+        nonlocal cleanup_started
+        if path.name.startswith(".jarv-edit-"):
+            cleanup_started = True
+            raise PermissionError("cleanup unlink failed")
+        return unlink(path, *args, **kwargs)
+
+    def fail_chmod(path, *args, **kwargs):
+        if cleanup_started and cleanup_failure == "chmod":
+            raise PermissionError("cleanup chmod failed")
+        return chmod(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(edit_tool.os, "replace", fail_replace)
+        patch.setattr(Path, "unlink", fail_unlink)
+        patch.setattr(Path, "chmod", fail_chmod)
+        result = dispatch_edit_tool(
+            {"path": str(target), "old_text": "alpha", "new_text": "beta"},
+            config=NO_PROMPT_CONFIG,
+        )
+
+    assert result == "[edit error: could not write file: original write error]"
+    assert cleanup_started
+    assert target.read_text(encoding="utf-8") == "alpha"
 
 
 def test_replace_all_rejects_growth_before_allocating_replacement():

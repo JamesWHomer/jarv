@@ -517,10 +517,9 @@ def stream_message(
                     if raw:
                         try:
                             block["input"] = json.loads(raw)
-                        except json.JSONDecodeError:
-                            # Truncated/dirty tool JSON (e.g. max_tokens cut):
-                            # forward the raw string so the orchestrator's
-                            # salvage parse gets a chance at it.
+                        except (ValueError, RecursionError):
+                            # Invalid or decoder-limited tool JSON should reach
+                            # the orchestrator's normal argument-error handling.
                             block["input"] = {}
                             arguments = raw
                         else:

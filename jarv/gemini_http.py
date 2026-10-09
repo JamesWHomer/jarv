@@ -85,7 +85,7 @@ def _json_value(value: Any) -> Any:
         return value if value is not None else {}
     try:
         return json.loads(value or "{}")
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
         return {"result": value}
 
 

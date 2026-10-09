@@ -35,6 +35,18 @@ def test_copy_falls_back_to_osc52_when_native_unavailable():
     assert _decode_osc52("".join(captured)) == "hello"
 
 
+def test_copy_falls_back_to_osc52_when_native_helper_times_out():
+    captured = []
+    with patch.object(clipboard.sys, "platform", "darwin"), patch.object(
+        clipboard.subprocess,
+        "run",
+        side_effect=clipboard.subprocess.TimeoutExpired(["pbcopy"], 15),
+    ) as run:
+        assert copy_to_clipboard("hello", write=captured.append) is True
+    assert run.call_args.kwargs["timeout"] == clipboard._COPY_SUBPROCESS_TIMEOUT
+    assert _decode_osc52("".join(captured)) == "hello"
+
+
 def test_empty_text_is_a_noop_success():
     captured = []
     with patch.object(clipboard, "_native_copy") as native:

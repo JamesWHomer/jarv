@@ -112,11 +112,19 @@ def _parse_since_value(value: str) -> timedelta | None:
         return None
     if amount <= 0:
         return None
-    if unit == "h":
-        return timedelta(hours=amount)
-    if unit == "d":
-        return timedelta(days=amount)
-    return None
+    try:
+        if unit == "h":
+            window = timedelta(hours=amount)
+        elif unit == "d":
+            window = timedelta(days=amount)
+        else:
+            return None
+        # Usage loads both this period and the preceding comparison period.
+        # Validate their cutoff before accepting a window the view cannot use.
+        utc_now() - window * 2
+    except OverflowError:
+        return None
+    return window
 
 
 def _since_scope(raw: str) -> tuple[str | None, str | None]:

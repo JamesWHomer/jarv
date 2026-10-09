@@ -9,6 +9,21 @@ from jarv import storage
 from jarv.history import load_history, save_history, load_sessions, save_sessions
 
 
+def test_deeply_nested_document_reports_storage_error_and_releases_lock(tmp_path):
+    path = tmp_path / "history.json"
+    depth = sys.getrecursionlimit() + 100
+    original = "[" * depth + "0" + "]" * depth
+    path.write_text(original, encoding="utf-8")
+
+    with pytest.raises(storage.StorageError, match="recursion"):
+        storage.read_json(path, [], list)
+
+    assert path.read_text(encoding="utf-8") == original
+    assert storage._state().active is None
+    path.write_text("[]", encoding="utf-8")
+    assert storage.read_json(path, [], list) == []
+
+
 def test_failure_before_commit_preserves_original(tmp_path, monkeypatch):
     path = tmp_path / "history.json"
     save_history(["old"], path)

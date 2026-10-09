@@ -52,7 +52,7 @@ def parse_json_arguments(value: Any, *, fallback: Any = None) -> Any:
         return value if value is not None else ({} if fallback is None else fallback)
     try:
         return json.loads(value or "{}")
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
         return {} if fallback is None else fallback
 
 
