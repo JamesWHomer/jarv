@@ -1149,6 +1149,16 @@ def test_read_key_maps_posix_ctrl_v_and_alt_v(monkeypatch):
     assert stdin.remaining == ""
 
 
+def test_read_key_maps_ctrl_z_and_ctrl_y(monkeypatch):
+    for sequence, expected in {"\x1a": "CTRL_Z", "\x19": "CTRL_Y"}.items():
+        stdin = _install_posix_input(monkeypatch, sequence)
+        assert command_input._read_key(text_mode=True) == expected
+        assert stdin.remaining == ""
+        assert command_input._windows_key_from_virtual_key(
+            0x5A if expected == "CTRL_Z" else 0x59, sequence, text_mode=True,
+        ) == expected
+
+
 def test_read_key_maps_posix_ctrl_o(monkeypatch):
     stdin = _install_posix_input(monkeypatch, "\x0f")
     assert command_input._read_key(text_mode=True) == "CTRL_O"
@@ -1519,13 +1529,6 @@ def test_read_editable_line_ctrl_c_exits_when_empty():
         pass
     else:
         raise AssertionError("empty Ctrl+C should exit the line editor")
-
-
-def test_requeue_key_returns_key_to_pending_queue():
-    command_input._PENDING_KEYS.clear()
-    command_input.requeue_key("ENTER")
-    assert command_input._read_key() == "ENTER"
-    assert not command_input._PENDING_KEYS
 
 
 def test_posix_lone_escape_and_incomplete_csi_return_without_another_key(monkeypatch):

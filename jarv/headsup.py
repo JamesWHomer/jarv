@@ -19,7 +19,6 @@ from rich.cells import cell_len
 from rich.console import Console, Group, NewLine, RenderableType
 from rich.control import Control
 from rich.live import Live
-from rich.markup import escape
 from rich.panel import Panel
 from rich.text import Text
 
@@ -45,10 +44,7 @@ from .ui_status import (
     tool_activity_label,
     tool_complete_indicator,
 )
-from .response_wait import (
-    _THINKING_FRAMES,
-    response_wait_label,
-)
+from .response_wait import response_wait_label, spinner_frame
 from .config import get_setting
 from .display import (
     configure_monochrome,
@@ -65,7 +61,12 @@ from .history import (
 )
 from .intro_animation import intro_footer_rows, render_intro
 from .model_catalog import get_image_output_capability
-from .safety import ConfirmRequest, clear_confirm_handler, set_confirm_handler
+from .safety import (
+    ConfirmRequest,
+    auditor_status_line,
+    clear_confirm_handler,
+    set_confirm_handler,
+)
 from .session_render import (
     _history_content_to_str,
     _status_renderable,
@@ -75,9 +76,15 @@ from .session_render import (
 from .storage import transaction
 from .text_editor import (
     apply_text_editor_key,
+    buffer_and_cursor,
+    edit_kind,
+    edit_snapshot,
     initialize_text_editor,
+    record_edit,
+    redo_edit,
     render_visual_line_window,
     selection_bounds,
+    undo_edit,
 )
 from .tui_app import AltScreenApp
 from .tui_frame import (
@@ -230,6 +237,13 @@ _PASTE_MARKER_STYLE = "dim cyan"
 # selected run reads clearly against the white draft text, while the reverse
 # cursor cell at the moving edge stays visible on top of it.
 _SELECTION_STYLE = "black on cyan"
+
+
+def _spinner_text(label: str, started_at: float) -> Text:
+    """A wait-status line: spinner, label and whole seconds since ``started_at``."""
+    now = time.perf_counter()
+    elapsed = int(max(0.0, now - started_at))
+    return Text(f"{spinner_frame(now)}  {label}\u2026  {elapsed}s")
 
 
 def _sanitize_editor_key(key: str) -> str:
@@ -489,12 +503,7 @@ class HeadsupAgentUI:
         self._flush_stream()
         live_key = getattr(renderable, "live_key", None)
         if live_key is not None:
-            if renderable.finished:
-                self.app.replace_live_tool(live_key, renderable)
-                self._animated_live_tool_keys.discard(live_key)
-            else:
-                self.app.upsert_live_tool(live_key, renderable)
-                self._animated_live_tool_keys.add(live_key)
+            self._show_live_card(live_key, renderable, finished=renderable.finished)
             return
         live_kind = type(renderable).__name__
         if live_kind == "InteractiveCommandCard":
@@ -502,32 +511,33 @@ class HeadsupAgentUI:
             # upsert the same card (animating its footer) while it runs, then
             # finalize on exit so a later command opens a fresh slot rather than
             # overwriting this finished transcript.
-            if getattr(renderable, "exited", False):
-                self.app.replace_live_tool(live_kind, renderable)
-                self._animated_live_tool_keys.discard(live_kind)
-            else:
-                self.app.upsert_live_tool(live_kind, renderable)
-                self._animated_live_tool_keys.add(live_kind)
+            self._show_live_card(
+                live_kind, renderable, finished=getattr(renderable, "exited", False)
+            )
             return
         if live_kind == "RunningCommandCard":
-            self.app.upsert_live_tool(live_kind, renderable)
+            self._show_live_card(live_kind, renderable, finished=False)
             self._tool_live_kind = live_kind
-            self._animated_live_tool_keys.add(live_kind)
             return
         if live_kind == "SpawnPanel":
-            if getattr(renderable, "finished", False):
-                self.app.replace_live_tool(live_kind, renderable)
-                self._animated_live_tool_keys.discard(live_kind)
-            else:
-                self.app.upsert_live_tool(live_kind, renderable)
-                self._animated_live_tool_keys.add(live_kind)
+            self._show_live_card(
+                live_kind, renderable, finished=getattr(renderable, "finished", False)
+            )
             return
         if self._tool_live_kind is not None:
-            self.app.replace_live_tool(self._tool_live_kind, renderable)
-            self._animated_live_tool_keys.discard(self._tool_live_kind)
+            self._show_live_card(self._tool_live_kind, renderable, finished=True)
             self._tool_live_kind = None
             return
         self.app.add_tool(renderable)
+
+    def _show_live_card(self, key: str, renderable: RenderableType, *, finished: bool) -> None:
+        """Animate a live card in its slot, or finalize the slot once finished."""
+        if finished:
+            self.app.replace_live_tool(key, renderable)
+            self._animated_live_tool_keys.discard(key)
+        else:
+            self.app.upsert_live_tool(key, renderable)
+            self._animated_live_tool_keys.add(key)
 
     def show_error(self, message: str) -> None:
         self.app.add_notice(Text(message, style="bold red"))
@@ -576,20 +586,17 @@ class HeadsupAgentUI:
         self.app.unbind_cancel_token()
 
     def _response_wait_text(self) -> Text:
-        elapsed = int(max(0.0, time.perf_counter() - self._response_started_at))
-        frame = _THINKING_FRAMES[int(time.perf_counter() * 10) % len(_THINKING_FRAMES)]
-        label = response_wait_label(self._has_reasoning)
-        return Text(f"{frame}  {label}\u2026  {elapsed}s")
+        return _spinner_text(
+            response_wait_label(self._has_reasoning), self._response_started_at
+        )
 
     def _tool_wait_text(self) -> Text:
-        elapsed = int(max(0.0, time.perf_counter() - self._tool_started_at))
-        frame = _THINKING_FRAMES[int(time.perf_counter() * 10) % len(_THINKING_FRAMES)]
         label = (
             tool_activity_label(self._tool_names)
             if self._tool_names
             else "Preparing action"
         )
-        return Text(f"{frame}  {label}\u2026  {elapsed}s")
+        return _spinner_text(label, self._tool_started_at)
 
     def has_active_animation(self) -> bool:
         """Whether a spinner or live tool card still needs periodic repaints.
@@ -660,21 +667,7 @@ class SafetyConfirmCard:
         state = self.request.audit_state
         if state is None:
             return None
-        if state.get("done"):
-            reason = escape(safe_terminal_text(str(state.get("reason", ""))))
-            if state.get("allow"):
-                return Text.from_markup(
-                    f"[green]✓  auditor[/green]  [dim]{reason}[/dim]"
-                )
-            return Text.from_markup(
-                f"[yellow]⚠  auditor[/yellow]  [dim]{reason}[/dim]"
-            )
-        now = time.perf_counter()
-        elapsed = int(now - self.started_at)
-        frame = _THINKING_FRAMES[int(now * 10) % len(_THINKING_FRAMES)]
-        return Text.from_markup(
-            f"[green]{frame}  auditor[/green]  [dim]checking…  {elapsed}s[/dim]"
-        )
+        return auditor_status_line(state, self.started_at)
 
     def __rich__(self):
         parts: list[RenderableType] = [self.request.body]
@@ -695,6 +688,16 @@ class SafetyConfirmCard:
             status_style=style,
             display_mode="fullscreen",
         )
+
+
+def _answer_request(label: str, previous: dict, echo_answer: bool) -> dict:
+    return {
+        "label": label,
+        "answer": None,
+        "cancelled": False,
+        "previous": previous,
+        "echo_answer": echo_answer,
+    }
 
 
 def _update_outcome_lines(outcome) -> tuple[Text, list[Text]]:
@@ -773,11 +776,8 @@ class _UpdateTask:
         with self.app.lock:
             if self.done:
                 return
-            elapsed = int(max(0.0, time.perf_counter() - self._stage_started_at))
-            frame = _THINKING_FRAMES[int(time.perf_counter() * 10) % len(_THINKING_FRAMES)]
             self._status_index = self.app.upsert_status(
-                self._status_index,
-                Text(f"{frame}  {self._stage}…  {elapsed}s"),
+                self._status_index, _spinner_text(self._stage, self._stage_started_at)
             )
 
     def _finish(self, outcome) -> None:
@@ -971,8 +971,10 @@ class HeadsupApp(AltScreenApp):
         # so the escape hatch survives: with nothing selected it still dismisses.
         if self._copy_selection_to_clipboard():
             return
+        before = self._draft_snapshot()
         if self._handle_prompt_dismiss():
             self.stop()
+        record_edit(self.editor, before)
 
     @contextmanager
     def suspended(self):
@@ -986,6 +988,46 @@ class HeadsupApp(AltScreenApp):
 
     def on_key(self, key: str, repeat: int) -> None:
         shortcut = "" if isinstance(key, TextInput) else key
+        if shortcut in ("CTRL_Z", "CTRL_Y"):
+            self._undo_draft_edit(redo=shortcut == "CTRL_Y")
+            return
+        # Every draft change below -- typing, chip deletes, pastes, completions,
+        # Esc clearing the draft -- becomes one undo step (or extends a typing
+        # run). Submitting starts a new draft, which record_edit skips.
+        before = self._draft_snapshot()
+        self._dispatch_key(key, shortcut, repeat)
+        record_edit(self.editor, before, edit_kind(key))
+
+    def _clear_submitted_draft(self) -> None:
+        initialize_text_editor(self.editor, "")
+        self._pastes.clear()
+        self._clear_prompt_notice()
+        self._exit_armed = False
+
+    def _submit_query(self, query: str) -> None:
+        """Send ``query`` from the input box and act on any lifecycle request."""
+        self._record_prompt_history(query)
+        self._clear_submitted_draft()
+        result = self._handle_query(query)
+        if result in {"exit", "restart"}:
+            self.stop(result)
+
+    def _draft_snapshot(self):
+        return edit_snapshot(self.editor, self._pastes.snapshot())
+
+    def _undo_draft_edit(self, *, redo: bool) -> None:
+        """Ctrl+Z / Ctrl+Y: step the draft (and its paste chips) back or forward."""
+        current = self._pastes.snapshot()
+        snapshot = redo_edit(self.editor, current) if redo else undo_edit(self.editor, current)
+        if snapshot is None:
+            self.set_prompt_notice(
+                Text("Nothing to redo." if redo else "Nothing to undo.", style="dim")
+            )
+            return
+        self._pastes.restore(snapshot.extra or {})
+        self._after_clipboard_paste()
+
+    def _dispatch_key(self, key: str, shortcut: str, repeat: int) -> None:
         if shortcut == "ENTER":
             if self._answer_request is not None:
                 self._complete_answer()
@@ -1001,20 +1043,10 @@ class HeadsupApp(AltScreenApp):
                 return
             raw_query = self._pastes.expand(str(self.editor.get("buffer", "")))
             query = raw_query.strip("\r\n")
-            if not query.strip():
-                initialize_text_editor(self.editor, "")
-                self._pastes.clear()
-                self._clear_prompt_notice()
-                self._exit_armed = False
-                return
-            self._record_prompt_history(query)
-            initialize_text_editor(self.editor, "")
-            self._pastes.clear()
-            self._clear_prompt_notice()
-            self._exit_armed = False
-            result = self._handle_query(query)
-            if result in {"exit", "restart"}:
-                self.stop(result)
+            if query.strip():
+                self._submit_query(query)
+            else:
+                self._clear_submitted_draft()
             return
         if shortcut == "ESC":
             if self._answer_request is not None:
@@ -1176,24 +1208,20 @@ class HeadsupApp(AltScreenApp):
         # as the popup opens.
         intro = None
         if show_intro:
+            exit_progress = 0.0
+        elif outro_started_at:
+            exit_progress = (time.perf_counter() - outro_started_at) / _OUTRO_DURATION
+        else:
+            exit_progress = 1.0
+        if exit_progress < 1.0:
             intro = render_intro(
                 inner_width,
                 rows,
                 time.perf_counter() - self._idle_anim_started_at,
+                exit=exit_progress,
                 show_logo=get_setting(self.config, "headsup_intro_logo"),
                 show_stars=get_setting(self.config, "headsup_intro_stars"),
             )
-        elif outro_started_at:
-            exit_progress = (time.perf_counter() - outro_started_at) / _OUTRO_DURATION
-            if exit_progress < 1.0:
-                intro = render_intro(
-                    inner_width,
-                    rows,
-                    time.perf_counter() - self._idle_anim_started_at,
-                    exit=exit_progress,
-                    show_logo=get_setting(self.config, "headsup_intro_logo"),
-                    show_stars=get_setting(self.config, "headsup_intro_stars"),
-                )
         if intro is not None:
             visible = intro + [Text("")] * max(0, rows - len(intro))
             if notice_lines:
@@ -1386,25 +1414,23 @@ class HeadsupApp(AltScreenApp):
         # working). _read_answer_direct is the defensive fallback for the
         # degenerate case where read_answer is invoked on the loop thread itself
         # (routing that to the foreground path would deadlock the loop).
-        token_args = {"cancellation_token": cancellation_token} if cancellation_token is not None else {}
-        if self._foreground_input_active:
-            if self._foreground_input_thread is threading.current_thread():
-                return self._read_answer_direct(label, echo_answer=echo_answer, **token_args)
-            return self._read_answer_from_foreground(label, echo_answer=echo_answer, **token_args)
-        return self._read_answer_direct(label, echo_answer=echo_answer, **token_args)
+        if (
+            self._foreground_input_active
+            and self._foreground_input_thread is not threading.current_thread()
+        ):
+            return self._read_answer_from_foreground(
+                label, echo_answer=echo_answer, cancellation_token=cancellation_token
+            )
+        return self._read_answer_direct(
+            label, echo_answer=echo_answer, cancellation_token=cancellation_token
+        )
 
     def _read_answer_direct(self, label: str, *, echo_answer: bool = True,
                             cancellation_token: CancellationToken | None = None) -> str:
         previous = dict(self.editor)
         initialize_text_editor(self.editor, "")
         with self.lock:
-            self._answer_request = {
-                "label": label,
-                "answer": None,
-                "cancelled": False,
-                "previous": previous,
-                "echo_answer": echo_answer,
-            }
+            self._answer_request = _answer_request(label, previous, echo_answer)
         try:
             while True:
                 if cancellation_token is not None:
@@ -1471,8 +1497,7 @@ class HeadsupApp(AltScreenApp):
                     return True
             answer = self.read_answer(
                 f"{request.question} [y/N] > ", echo_answer=False,
-                **({"cancellation_token": request.cancellation_token}
-                   if request.cancellation_token is not None else {}),
+                cancellation_token=request.cancellation_token,
             )
             if request.cancellation_token is not None:
                 request.cancellation_token.throw_if_cancelled()
@@ -1583,8 +1608,7 @@ class HeadsupApp(AltScreenApp):
 
     def _apply_editor_key(self, key: str, repeat: int) -> tuple[bool, bool]:
         if isinstance(key, TextInput):
-            value = str(self.editor.get("buffer", ""))
-            cursor = max(0, min(int(self.editor.get("cursor", len(value))), len(value)))
+            value, cursor = self._editor_buffer_cursor()
             start = max(0, cursor - _SGR_MOUSE_TEXT_LOOKBACK)
             existing_tail = value[start:cursor]
             combined = existing_tail + str(key)
@@ -1623,6 +1647,7 @@ class HeadsupApp(AltScreenApp):
             repeat,
             content_width=self._current_prompt_edit_width(),
             allow_newlines=True,
+            history=False,  # on_key records every draft change, not just these.
         )
         if changed and has_selection:
             # A selection replace/delete may have cut through a paste chip; drop
@@ -1639,9 +1664,7 @@ class HeadsupApp(AltScreenApp):
         return changed, isinstance(key, TextInput)
 
     def _editor_buffer_cursor(self) -> tuple[str, int]:
-        buffer = str(self.editor.get("buffer", ""))
-        cursor = max(0, min(int(self.editor.get("cursor", len(buffer))), len(buffer)))
-        return buffer, cursor
+        return buffer_and_cursor(self.editor)
 
     def _delete_adjacent_paste(self, key: str) -> bool:
         """Erase a whole ``[Pasted text]`` chip in one Backspace/Delete."""
@@ -1691,10 +1714,10 @@ class HeadsupApp(AltScreenApp):
 
     def _handle_prompt_dismiss(self) -> bool:
         if str(self.editor.get("buffer", "")):
-            initialize_text_editor(self.editor, "")
+            initialize_text_editor(self.editor, "", keep_history=True)
             self._pastes.clear()
             self._reset_prompt_history_navigation()
-            self.set_prompt_notice(Text("Draft cleared.", style="dim"))
+            self.set_prompt_notice(Text("Draft cleared. Ctrl+Z restores it.", style="dim"))
             return False
         if self._cancel_active_turn():
             self.set_prompt_notice(Text("Cancelling current turn.", style="yellow"))
@@ -1726,7 +1749,7 @@ class HeadsupApp(AltScreenApp):
                 return "exit"
             return self._run_slash(command, parts[1:])
 
-        alias = self._command_alias(parts[0], parts[1:])
+        alias = parse_command_alias(parts[0], parts[1:])
         if alias is not None:
             command, rest = alias
             if self._confirm_command_alias(command, rest, query):
@@ -1741,9 +1764,6 @@ class HeadsupApp(AltScreenApp):
 
         self._run_agent_query(query)
         return None
-
-    def _command_alias(self, first_word: str, rest: list[str]) -> tuple[str, list[str]] | None:
-        return parse_command_alias(first_word, rest)
 
     def _confirm_command_alias(self, command: str, rest: list[str], full_input: str) -> bool:
         command_text = " ".join([command] + rest)
@@ -2196,13 +2216,7 @@ class HeadsupApp(AltScreenApp):
         previous = dict(self.editor)
         with self._answer_condition:
             initialize_text_editor(self.editor, "")
-            self._answer_request = {
-                "label": label,
-                "answer": None,
-                "cancelled": False,
-                "previous": previous,
-                "echo_answer": echo_answer,
-            }
+            self._answer_request = _answer_request(label, previous, echo_answer)
             self._reset_prompt_history_navigation()
         self.refresh()
 
@@ -2229,16 +2243,9 @@ class HeadsupApp(AltScreenApp):
             if request.get("echo_answer", True):
                 label = request.get("label", "answer> ")
                 self.add_notice(Text(safe_terminal_text(f"{label}{answer}"), style="dim"))
-            previous = dict(request.get("previous") or {})
-            if previous:
-                self.editor = previous
-            else:
-                initialize_text_editor(self.editor, "")
             request["answer"] = answer
             request["cancelled"] = False
-            self._answer_request_completed = request
-            self._answer_request = None
-            self._answer_condition.notify_all()
+            self._resolve_answer_request(request)
         self.refresh()
 
     def _cancel_answer(self, *, cancel_turn: bool = True) -> None:
@@ -2246,19 +2253,26 @@ class HeadsupApp(AltScreenApp):
             request = self._answer_request
             if request is None:
                 return
-            previous = dict(request.get("previous") or {})
-            if previous:
-                self.editor = previous
-            else:
-                initialize_text_editor(self.editor, "")
             token = self._cancel_token
             if cancel_turn and token is not None:
                 token.cancel()
             request["cancelled"] = True
-            self._answer_request_completed = request
-            self._answer_request = None
-            self._answer_condition.notify_all()
+            self._resolve_answer_request(request)
         self.refresh()
+
+    def _resolve_answer_request(self, request: dict) -> None:
+        """Restore the draft the answer box replaced and wake the waiting reader.
+
+        Called with ``_answer_condition`` held.
+        """
+        previous = dict(request.get("previous") or {})
+        if previous:
+            self.editor = previous
+        else:
+            initialize_text_editor(self.editor, "")
+        self._answer_request_completed = request
+        self._answer_request = None
+        self._answer_condition.notify_all()
 
     @contextmanager
     def _command_output(self, *, passthrough: bool = False):
@@ -2557,17 +2571,9 @@ class HeadsupApp(AltScreenApp):
         self._slash_menu_index = 0
         self._slash_menu_scroll = 0
         if run and entry.runs_on_enter:
-            command = entry.insert.strip()
-            self._record_prompt_history(command)
-            initialize_text_editor(self.editor, "")
-            self._pastes.clear()
-            self._clear_prompt_notice()
-            self._exit_armed = False
-            result = self._handle_query(command)
-            if result in {"exit", "restart"}:
-                self.stop(result)
+            self._submit_query(entry.insert.strip())
             return
-        initialize_text_editor(self.editor, entry.insert)
+        initialize_text_editor(self.editor, entry.insert, keep_history=True)
         self._clear_prompt_notice()
         self._exit_armed = False
         self.refresh()
@@ -2759,22 +2765,10 @@ class HeadsupApp(AltScreenApp):
 
     def _jump_to_user_message(self, *, backward: bool, repeat: int) -> None:
         """Align the nearest sent prompt in the requested direction to the top."""
-        term_w, term_h = terminal_size(console=self.console)
-        layout = compute_layout(
-            term_w, term_h, border=get_setting(self.config, "headsup_border")
-        )
         with self.lock:
-            menu_open = bool(self._slash_menu_box(layout.inner_width, layout))
-            prompt_lines = self._prompt_lines(
-                layout.inner_width, max_lines=layout.max_prompt_rows, menu_open=menu_open
-            )
-            rows = _transcript_rows_for(
-                layout.body_height, len(prompt_lines) + int(menu_open)
-            )
-            _, self.scroll_offset = self._transcript_window(
-                layout.inner_width, rows, self.scroll_offset
-            )
-            counts = self._entry_line_counts(layout.inner_width)
+            width, rows = self._transcript_geometry()
+            _, self.scroll_offset = self._transcript_window(width, rows, self.scroll_offset)
+            counts = self._entry_line_counts(width)
             total = sum(counts)
             max_scroll = max(0, total - rows)
             current = min(max_scroll, max(0, self.scroll_offset))
@@ -2797,7 +2791,7 @@ class HeadsupApp(AltScreenApp):
             )
             self._following_latest = self.scroll_offset == 0
             self._scroll_anchor = None
-            self._transcript_window(layout.inner_width, rows, self.scroll_offset)
+            self._transcript_window(width, rows, self.scroll_offset)
 
     def _entry_line_counts(self, width: int) -> list[int]:
         """Per-entry visual line counts, mirroring ``_transcript_lines`` exactly
@@ -2819,12 +2813,8 @@ class HeadsupApp(AltScreenApp):
         stays put as cards elsewhere in the history grow or shrink; pinned to
         the bottom it simply stays pinned.
         """
-        term_w, term_h = terminal_size(console=self.console)
-        width = compute_layout(
-            term_w, term_h, border=get_setting(self.config, "headsup_border")
-        ).inner_width
         with self.lock:
-            _, rows = self._transcript_geometry()
+            width, rows = self._transcript_geometry()
             _, self.scroll_offset = self._transcript_window(width, rows, self.scroll_offset)
             target = not self.tool_cards_expanded
             expandable_entries = [

@@ -307,7 +307,7 @@ class HeadsupTests(unittest.TestCase):
         copy.assert_not_called()
         # Existing dismiss behavior: the draft is cleared on the first press.
         self.assertEqual(app.editor["buffer"], "")
-        self.assertEqual(app._prompt_notice.plain, "Draft cleared.")
+        self.assertEqual(app._prompt_notice.plain, "Draft cleared. Ctrl+Z restores it.")
 
     def test_ctrl_c_after_copy_clears_selection_so_dismiss_resumes(self):
         app, _test_console, _output = self._app()
@@ -321,7 +321,7 @@ class HeadsupTests(unittest.TestCase):
 
         copy.assert_called_once()
         self.assertEqual(app.editor["buffer"], "")
-        self.assertEqual(app._prompt_notice.plain, "Draft cleared.")
+        self.assertEqual(app._prompt_notice.plain, "Draft cleared. Ctrl+Z restores it.")
 
     def test_ctrl_c_copies_expanded_paste_marker(self):
         app, _test_console, _output = self._app()
@@ -1419,7 +1419,7 @@ class HeadsupTests(unittest.TestCase):
         self.assertFalse(app._handle_prompt_dismiss())
         self.assertEqual(app.editor["buffer"], "")
         self.assertFalse(app._exit_armed)
-        self.assertEqual(app._prompt_notice.plain, "Draft cleared.")
+        self.assertEqual(app._prompt_notice.plain, "Draft cleared. Ctrl+Z restores it.")
         self.assertFalse(app._handle_prompt_dismiss())
         self.assertTrue(app._exit_armed)
         self.assertEqual(app._prompt_notice.plain, "Press Esc or Ctrl+C again to exit.")
@@ -1434,9 +1434,9 @@ class HeadsupTests(unittest.TestCase):
 
         self.assertEqual(app.editor["buffer"], "")
         self.assertTrue(app._exit_armed)
-        self.assertEqual(app._prompt_notice.plain, "Draft cleared.")
+        self.assertEqual(app._prompt_notice.plain, "Draft cleared. Ctrl+Z restores it.")
         notices = [entry.renderable.plain for entry in app.entries if entry.kind == "notice"]
-        self.assertNotIn("Draft cleared.", notices)
+        self.assertNotIn("Draft cleared. Ctrl+Z restores it.", notices)
 
     def test_exit_prompt_notice_is_not_transcript_history(self):
         app, _test_console, _output = self._app()
@@ -1690,6 +1690,55 @@ class HeadsupTests(unittest.TestCase):
 
         self.assertEqual(calls, [f"look: [attached image: {image.path}]"])
         self.assertEqual(app.editor["buffer"], "")
+
+    def test_ctrl_z_restores_deleted_paste_chip_with_its_content(self):
+        app, _test_console, _output = self._app()
+        calls: list[str] = []
+        app._run_agent_query = calls.append
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)):
+            for char in "see ":
+                app.on_key(TextInput(char), 1)
+            app.on_key(TextInput("first\nsecond"), 1)
+            marker = app.editor["buffer"][len("see "):]
+            app.on_key("BACKSPACE", 1)
+            self.assertEqual(app.editor["buffer"], "see ")
+            app.on_key("CTRL_Z", 1)
+            self.assertEqual(app.editor["buffer"], "see " + marker)
+            app.on_key("CTRL_Z", 1)
+            self.assertEqual(app.editor["buffer"], "see ")
+            app.on_key("CTRL_Y", 1)
+            app.on_key("ENTER", 1)
+
+        self.assertEqual(calls, ["see first\nsecond"])
+
+    def test_ctrl_z_restores_draft_cleared_by_esc_or_ctrl_c(self):
+        for clear in ("ESC", "CTRL_C"):
+            with self.subTest(clear=clear):
+                app, _test_console, _output = self._app()
+                with patch("jarv.headsup.terminal_size", return_value=(80, 24)):
+                    for char in "keep me":
+                        app.on_key(TextInput(char), 1)
+                    if clear == "ESC":
+                        app.on_key("ESC", 1)
+                    else:
+                        app.on_interrupt()
+                    self.assertEqual(app.editor["buffer"], "")
+                    self.assertIn("Ctrl+Z", app._prompt_notice.plain)
+                    app.on_key("CTRL_Z", 1)
+                self.assertEqual(app.editor["buffer"], "keep me")
+                self.assertFalse(app._exit_armed)
+
+    def test_ctrl_z_does_not_reach_back_past_a_submitted_prompt(self):
+        app, _test_console, _output = self._app()
+        app._run_agent_query = lambda _query: None
+        with patch("jarv.headsup.terminal_size", return_value=(80, 24)):
+            for char in "sent":
+                app.on_key(TextInput(char), 1)
+            app.on_key("ENTER", 1)
+            app.on_key("CTRL_Z", 1)
+
+        self.assertEqual(app.editor["buffer"], "")
+        self.assertIn("Nothing to undo", app._prompt_notice.plain)
 
     def test_ctrl_v_image_chip_deletes_atomically(self):
         app, _test_console, _output = self._app()

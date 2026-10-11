@@ -176,6 +176,13 @@ class PasteRegistry:
         """Forget every stored paste (call when the draft is sent or cleared)."""
         self._pastes.clear()
 
+    def snapshot(self) -> dict[str, str]:
+        """Copy the live chips so an undone edit can bring them back."""
+        return dict(self._pastes)
+
+    def restore(self, pastes: dict[str, str]) -> None:
+        self._pastes = dict(pastes)
+
     def prune(self, text: str) -> None:
         """Forget markers that no longer appear in ``text`` (call after an edit)."""
         if not self._pastes:
@@ -420,6 +427,41 @@ def raw_input_mode():
 
 
 @contextmanager
+def _windows_input_mode(transform):
+    """Apply ``transform`` to the Windows console input mode for the block.
+
+    No-op off win32, without ctypes, or when stdin is not a console; the
+    original mode is restored on exit only if it was actually changed.
+    """
+    if sys.platform != "win32":
+        yield
+        return
+
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+    except (ImportError, AttributeError):
+        yield
+        return
+
+    handle = kernel32.GetStdHandle(-10)
+    mode = ctypes.c_uint()
+    if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+        yield
+        return
+
+    original_mode = mode.value
+    new_mode = transform(original_mode)
+    changed = new_mode != original_mode and bool(
+        kernel32.SetConsoleMode(handle, new_mode)
+    )
+    try:
+        yield
+    finally:
+        if changed:
+            kernel32.SetConsoleMode(handle, original_mode)
+
+
 def windows_vt_input():
     """Enable VT input on Windows so pastes arrive as one bracketed-paste block.
 
@@ -431,45 +473,12 @@ def windows_vt_input():
     in :func:`_read_key` returns it atomically. No-op off win32 / without ctypes;
     only the keyboard layer is touched (mouse capture is handled separately).
     """
-    if sys.platform != "win32":
-        yield
-        return
-
-    try:
-        import ctypes
-    except ImportError:
-        yield
-        return
-
-    try:
-        kernel32 = ctypes.windll.kernel32
-    except AttributeError:
-        yield
-        return
-
-    handle = kernel32.GetStdHandle(-10)
-    mode = ctypes.c_uint()
-    if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
-        yield
-        return
-
-    original_mode = mode.value
-    enabled_mode = (
-        original_mode | _WINDOWS_ENABLE_VIRTUAL_TERMINAL_INPUT
-    ) & ~(
-        _WINDOWS_ENABLE_LINE_INPUT | _WINDOWS_ENABLE_ECHO_INPUT
+    return _windows_input_mode(
+        lambda mode: (mode | _WINDOWS_ENABLE_VIRTUAL_TERMINAL_INPUT)
+        & ~(_WINDOWS_ENABLE_LINE_INPUT | _WINDOWS_ENABLE_ECHO_INPUT)
     )
-    changed = enabled_mode != original_mode and bool(
-        kernel32.SetConsoleMode(handle, enabled_mode)
-    )
-    try:
-        yield
-    finally:
-        if changed:
-            kernel32.SetConsoleMode(handle, original_mode)
 
 
-@contextmanager
 def windows_vt_input_suspended():
     r"""Temporarily clear VT input so a nested console view reads key records.
 
@@ -485,38 +494,7 @@ def windows_vt_input_suspended():
     original mode (VT input back on) is restored on exit. No-op off win32 /
     without ctypes / when VT input wasn't enabled.
     """
-    if sys.platform != "win32":
-        yield
-        return
-
-    try:
-        import ctypes
-    except ImportError:
-        yield
-        return
-
-    try:
-        kernel32 = ctypes.windll.kernel32
-    except AttributeError:
-        yield
-        return
-
-    handle = kernel32.GetStdHandle(-10)
-    mode = ctypes.c_uint()
-    if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
-        yield
-        return
-
-    original_mode = mode.value
-    cleared_mode = original_mode & ~_WINDOWS_ENABLE_VIRTUAL_TERMINAL_INPUT
-    changed = cleared_mode != original_mode and bool(
-        kernel32.SetConsoleMode(handle, cleared_mode)
-    )
-    try:
-        yield
-    finally:
-        if changed:
-            kernel32.SetConsoleMode(handle, original_mode)
+    return _windows_input_mode(lambda mode: mode & ~_WINDOWS_ENABLE_VIRTUAL_TERMINAL_INPUT)
 
 
 @contextmanager
@@ -667,6 +645,34 @@ def _windows_escape_sequence_timeout() -> float:
     return _WINDOWS_ESCAPE_SEQUENCE_TIMEOUT
 
 
+_CONTROL_CHAR_TOKENS = {
+    "\r": "ENTER",
+    "\n": "CTRL_N",
+    "\t": "TAB",
+    "\x1b": "ESC",
+    "\x06": "CTRL_F",
+    "\x0f": "CTRL_O",
+    "\x13": "CTRL_S",
+    "\x16": "CTRL_V",
+    "\x19": "CTRL_Y",
+    "\x1a": "CTRL_Z",
+    "\x08": "BACKSPACE",
+    "\x7f": "BACKSPACE",
+}
+
+
+def _control_char_token(ch: str, *, text_mode: bool) -> str | None:
+    """Token for a control character (or q/Q outside text mode), else None.
+
+    Raises KeyboardInterrupt on Ctrl-C.
+    """
+    if ch == "\x03":
+        raise KeyboardInterrupt
+    if not text_mode and ch in ("q", "Q"):
+        return "ESC"
+    return _CONTROL_CHAR_TOKENS.get(ch)
+
+
 def _windows_key_from_virtual_key(
     virtual_key: int,
     char: str,
@@ -674,28 +680,9 @@ def _windows_key_from_virtual_key(
     text_mode: bool,
     control_key_state: int = 0,
 ) -> str | None:
-    if char == "\r":
-        return "ENTER"
-    if char == "\n":
-        return "CTRL_N"
-    if char == "\t":
-        return "TAB"
-    if char == "\x1b":
-        return "ESC"
-    if not text_mode and char in ("q", "Q"):
-        return "ESC"
-    if char == "\x06":
-        return "CTRL_F"
-    if char == "\x0f":
-        return "CTRL_O"
-    if char == "\x13":
-        return "CTRL_S"
-    if char == "\x16":
-        return "CTRL_V"
-    if char in ("\x08", "\x7f"):
-        return "BACKSPACE"
-    if char == "\x03":
-        raise KeyboardInterrupt
+    token = _control_char_token(char, text_mode=text_mode)
+    if token is not None:
+        return token
 
     if virtual_key == 0x23 and control_key_state & _WINDOWS_CTRL_PRESSED:
         return "CTRL_END"
@@ -920,16 +907,8 @@ def _parse_sgr_mouse(sequence: str, *, translate_wheel: bool = True) -> str:
 
     wheel = button & 3
     if not translate_wheel:
-        return _MOUSE_WHEEL_KEYS.get(wheel, "OTHER")
-    if wheel == 0:
-        return "UP"
-    if wheel == 1:
-        return "DOWN"
-    if wheel == 2:
-        return "PAGEUP"
-    if wheel == 3:
-        return "PAGEDOWN"
-    return "OTHER"
+        return _MOUSE_WHEEL_KEYS[wheel]
+    return ("UP", "DOWN", "PAGEUP", "PAGEDOWN")[wheel]
 
 
 # Final byte -> token for the common letter-terminated CSI navigation keys
@@ -1108,22 +1087,12 @@ def _key_available() -> bool:
         return True
     try:
         if sys.platform == "win32":
-            if _WINDOWS_MOUSE_CAPTURE_DEPTH:
-                pending = _windows_actionable_key_pending()
-                if pending is not None:
-                    return pending
-            import msvcrt
-            return bool(msvcrt.kbhit())
+            return _windows_key_available()
         import select
         reader = _posix_reader()
         return bool(reader.chars or select.select([reader.fd], [], [], 0)[0])
     except (ImportError, OSError, TypeError, ValueError):
         return False
-
-
-def requeue_key(key: str) -> None:
-    """Return a key read out-of-band to the foreground input loop."""
-    _PENDING_KEYS.appendleft(key)
 
 
 def strip_sgr_mouse_sequences(text: str) -> str:
@@ -1297,12 +1266,6 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
                 "G": "HOME", "O": "END", "\x75": "CTRL_END",
                 "I": "PAGEUP", "Q": "PAGEDOWN", "S": "DELETE",
             }.get(second, "OTHER")
-        if ch == "\r":
-            return "ENTER"
-        if ch == "\n":
-            return "CTRL_N"
-        if ch == "\t":
-            return "TAB"
         if ch == "\x1b":
             sequence_timeout = _windows_escape_sequence_timeout()
             ch2 = _read_windows_available_char(
@@ -1339,11 +1302,7 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
                             msvcrt, ch3, sequence_timeout
                         )
                         return _csi_token(params, final)
-                    return {
-                        "A": "UP", "B": "DOWN", "D": "LEFT", "C": "RIGHT",
-                        "H": "HOME", "F": "END",
-                        "5": "PAGEUP", "6": "PAGEDOWN", "3": "DELETE",
-                    }.get(ch3, "OTHER")
+                    return _CSI_LETTER_TOKENS.get(ch3, "OTHER")
                 if ch2 in ("v", "V"):
                     # Alt+V (ESC-prefixed under VT input): the image-paste
                     # fallback for terminals whose own paste binding swallows
@@ -1363,21 +1322,7 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
                 )
             if ch2 is not None:
                 _PENDING_KEYS.appendleft(ch2)
-        if not text_mode and ch in ("q", "Q"):
-            return "ESC"
-        if ch == "\x06":
-            return "CTRL_F"
-        if ch == "\x0f":
-            return "CTRL_O"
-        if ch == "\x13":
-            return "CTRL_S"
-        if ch == "\x16":
-            return "CTRL_V"
-        if ch in ("\x08", "\x7f"):
-            return "BACKSPACE"
-        if ch == "\x03":
-            raise KeyboardInterrupt
-        return ch
+        return _control_char_token(ch, text_mode=text_mode) or ch
     else:
         import tty
         import termios
@@ -1413,38 +1358,14 @@ def _read_key(text_mode: bool = False, *, translate_mouse_wheel: bool = True) ->
                                 )
                             )
                         return _csi_token(params, final)
-                    return {
-                        "A": "UP", "B": "DOWN", "D": "LEFT", "C": "RIGHT",
-                        "H": "HOME", "F": "END",
-                        "5": "PAGEUP", "6": "PAGEDOWN", "3": "DELETE",
-                    }.get(ch3, "OTHER")
+                    return _CSI_LETTER_TOKENS.get(ch3, "OTHER")
                 if ch2 in ("v", "V"):
                     # Alt+V (ESC-prefixed): image-paste fallback binding.
                     return "ALT_V"
                 if ch2:
                     _posix_reader().chars.appendleft(ch2)
                 return "ESC"
-            if ch == "\r":
-                return "ENTER"
-            if ch == "\n":
-                return "CTRL_N"
-            if ch == "\t":
-                return "TAB"
-            if not text_mode and ch in ("q", "Q"):
-                return "ESC"
-            if ch == "\x06":
-                return "CTRL_F"
-            if ch == "\x0f":
-                return "CTRL_O"
-            if ch == "\x13":
-                return "CTRL_S"
-            if ch == "\x16":
-                return "CTRL_V"
-            if ch in ("\x7f", "\x08"):
-                return "BACKSPACE"
-            if ch == "\x03":
-                raise KeyboardInterrupt
-            return ch
+            return _control_char_token(ch, text_mode=text_mode) or ch
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
 

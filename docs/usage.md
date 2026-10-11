@@ -35,6 +35,7 @@ jarv> /new
 - Ctrl+V (or Alt+V if your terminal owns Ctrl+V, e.g. Windows Terminal) attaches a copied image or image file as an `[Image #N]` chip for image-capable models.
 - During a response, Esc or Ctrl+C stops further work, checkpoints the turn in history/context, and restores the prompt for editing. Use `/undo` to remove the turn.
 - At the prompt, Esc or Ctrl+C clears existing text; press either again on an empty prompt to exit.
+- Ctrl+Z undoes prompt edits a word at a time, including a cleared draft; Ctrl+Y redoes. Both also work in other text fields, such as settings and session search.
 - You can also exit with `exit`, `quit`, `/exit`, or `/quit`.
 
 See the [CLI reference](cli.md) for invocation flags and machine-readable output, and [slash commands](commands.md) for interactive controls.

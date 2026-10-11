@@ -1,9 +1,15 @@
 """Reusable cursor-aware text editing primitives for terminal views."""
 
+from dataclasses import dataclass, field
+from typing import Any
+
 from rich.text import Text
 from rich.cells import cell_len, get_character_cell_size
 
 from .command_input import TextInput
+
+# Ctrl+Z steps back through at most this many edits per draft.
+_UNDO_LIMIT = 200
 
 
 def initialize_text_editor(
@@ -11,6 +17,7 @@ def initialize_text_editor(
     value: str,
     *,
     multiline: bool = False,
+    keep_history: bool = False,
 ) -> None:
     state.update(
         buffer=value,
@@ -22,6 +29,129 @@ def initialize_text_editor(
         # selected range is the span between this anchor and the cursor.
         selection_anchor=None,
     )
+    if not keep_history:
+        # A fresh value starts a fresh draft; Ctrl+Z never reaches across it.
+        state["history"] = EditHistory()
+
+
+@dataclass(frozen=True)
+class EditSnapshot:
+    """A restorable editor state, plus caller-owned data (e.g. paste chips)."""
+
+    buffer: str
+    cursor: int
+    selection_anchor: int | None
+    extra: Any = None
+    history: "EditHistory | None" = field(default=None, compare=False, repr=False)
+
+
+@dataclass
+class EditHistory:
+    undo: list[EditSnapshot] = field(default_factory=list)
+    redo: list[EditSnapshot] = field(default_factory=list)
+    # (kind, cursor) of the newest undo entry while consecutive same-kind
+    # edits keep extending it; any other edit or cursor move breaks the run.
+    group: tuple[str, int] | None = None
+
+
+def buffer_and_cursor(state: dict) -> tuple[str, int]:
+    """The editor buffer and its cursor, clamped into the buffer."""
+    value = str(state.get("buffer", ""))
+    return value, max(0, min(int(state.get("cursor", len(value))), len(value)))
+
+
+def _history(state: dict) -> EditHistory:
+    history = state.get("history")
+    if not isinstance(history, EditHistory):
+        history = state["history"] = EditHistory()
+    return history
+
+
+def edit_snapshot(state: dict, extra: Any = None) -> EditSnapshot:
+    value, cursor = buffer_and_cursor(state)
+    anchor = state.get("selection_anchor")
+    return EditSnapshot(
+        buffer=value,
+        cursor=cursor,
+        selection_anchor=None if anchor is None else int(anchor),
+        extra=extra,
+        history=_history(state),
+    )
+
+
+def edit_kind(key: str) -> str | None:
+    """How an edit made by ``key`` groups with its neighbours for undo.
+
+    Typed characters and Backspace/Delete runs coalesce, so one Ctrl+Z removes a
+    word or a burst of deletions; everything else (pastes, cuts, completions) is
+    its own step.
+    """
+    if isinstance(key, str) and len(key) == 1 and key.isprintable():
+        return "insert"
+    if not isinstance(key, TextInput) and key in ("BACKSPACE", "DELETE"):
+        return "delete"
+    return None
+
+
+def record_edit(state: dict, before: EditSnapshot, kind: str | None = None) -> bool:
+    """Push ``before`` onto the undo stack if the buffer has since changed.
+
+    Edits made after the draft was re-initialised (a submit, a recalled history
+    entry) are skipped: ``before`` belongs to a draft that no longer exists.
+    """
+    history = _history(state)
+    value = str(state.get("buffer", ""))
+    if before.history is not history or value == before.buffer:
+        return False
+    history.redo.clear()
+    cursor = int(state.get("cursor", len(value)))
+    group = history.group
+    extends = (
+        kind is not None
+        and history.undo
+        and group == (kind, before.cursor)
+    )
+    if extends and kind == "insert":
+        # Start a new step at each word: typing "a b" undoes "b", then "a ".
+        typed = value[before.cursor:cursor]
+        previous = before.buffer[before.cursor - 1:before.cursor]
+        extends = not (previous.isspace() and typed[:1] and not typed[:1].isspace())
+    if not extends:
+        history.undo.append(before)
+        del history.undo[:-_UNDO_LIMIT]
+    history.group = (kind, cursor) if kind is not None else None
+    return True
+
+
+def _restore(state: dict, snapshot: EditSnapshot) -> None:
+    state["buffer"] = snapshot.buffer
+    state["cursor"] = snapshot.cursor
+    state["selection_anchor"] = snapshot.selection_anchor
+    state["preferred_visual_column"] = None
+
+
+def undo_edit(state: dict, extra: Any = None) -> EditSnapshot | None:
+    """Restore the previous draft; returns it (with its ``extra``) or None."""
+    history = _history(state)
+    if not history.undo:
+        return None
+    history.redo.append(edit_snapshot(state, extra))
+    snapshot = history.undo.pop()
+    _restore(state, snapshot)
+    history.group = None
+    return snapshot
+
+
+def redo_edit(state: dict, extra: Any = None) -> EditSnapshot | None:
+    """Re-apply the most recently undone edit; returns it or None."""
+    history = _history(state)
+    if not history.redo:
+        return None
+    history.undo.append(edit_snapshot(state, extra))
+    snapshot = history.redo.pop()
+    _restore(state, snapshot)
+    history.group = None
+    return snapshot
 
 
 def visual_rows(value: str, content_width: int) -> list[tuple[int, int]]:
@@ -180,9 +310,8 @@ def render_visual_line_window(
     selection_span: tuple[int, int] | None = None,
     selection_style: str = "",
 ) -> tuple[list[Text], int, int]:
-    value = str(state.get("buffer", ""))
+    value, cursor = buffer_and_cursor(state)
     display = _display_value(value, masked=masked, width=max(1, content_width))
-    cursor = max(0, min(int(state.get("cursor", len(value))), len(value)))
     rows = visual_rows(display, content_width)
     active_row = cursor_row_index(rows, cursor)
     visible_count = len(rows) if max_lines is None else max(1, max_lines)
@@ -222,9 +351,8 @@ def render_single_line(
     cursor_style: str = "reverse",
     cursor_visible: bool = True,
 ) -> Text:
-    value = str(state.get("buffer", ""))
+    value, cursor = buffer_and_cursor(state)
     display = _display_value(value, masked=masked, width=max(1, width)).replace("\n", " ")
-    cursor = max(0, min(int(state.get("cursor", len(value))), len(value)))
     width = max(1, width)
 
     start = cursor
@@ -254,8 +382,7 @@ def _move_vertical(
     content_width: int,
     count: int,
 ) -> None:
-    value = str(state.get("buffer", ""))
-    cursor = max(0, min(int(state.get("cursor", len(value))), len(value)))
+    value, cursor = buffer_and_cursor(state)
     rows = visual_rows(value, content_width)
     current_idx = cursor_row_index(rows, cursor)
     current_start, _current_end = rows[current_idx]
@@ -311,8 +438,7 @@ def selection_bounds(state: dict) -> tuple[int, int] | None:
     anchor = state.get("selection_anchor")
     if anchor is None:
         return None
-    value = str(state.get("buffer", ""))
-    cursor = max(0, min(int(state.get("cursor", len(value))), len(value)))
+    value, cursor = buffer_and_cursor(state)
     anchor = max(0, min(int(anchor), len(value)))
     lo, hi = (anchor, cursor) if anchor <= cursor else (cursor, anchor)
     if lo == hi:
@@ -334,9 +460,52 @@ def apply_text_editor_key(
     *,
     content_width: int = 80,
     allow_newlines: bool = False,
+    history: bool = True,
 ) -> bool:
-    value = str(state.get("buffer", ""))
-    cursor = max(0, min(int(state.get("cursor", len(value))), len(value)))
+    """Apply one key to the editor; True when the buffer changed.
+
+    With ``history`` the editor owns Ctrl+Z / Ctrl+Y and records its own edits.
+    Views that also edit the buffer themselves pass ``history=False`` and drive
+    :func:`record_edit` / :func:`undo_edit` around all of their edits instead.
+    """
+    if not history:
+        return _apply_key(
+            state, key, repeat_count,
+            content_width=content_width, allow_newlines=allow_newlines,
+        )
+    if not isinstance(key, TextInput):
+        if key == "CTRL_Z":
+            return undo_edit(state) is not None
+        if key == "CTRL_Y":
+            return redo_edit(state) is not None
+    before = edit_snapshot(state)
+    changed = _apply_key(
+        state, key, repeat_count,
+        content_width=content_width, allow_newlines=allow_newlines,
+    )
+    record_edit(state, before, edit_kind(key))
+    return changed
+
+
+def _replace_selection(
+    state: dict, value: str, cursor: int, selection: tuple[int, int] | None, text: str
+) -> None:
+    """Replace the selection (or insert at the cursor) with ``text``."""
+    lo, hi = selection if selection is not None else (cursor, cursor)
+    state["buffer"] = value[:lo] + text + value[hi:]
+    state["cursor"] = lo + len(text)
+    state["selection_anchor"] = None
+
+
+def _apply_key(
+    state: dict,
+    key: str,
+    repeat_count: int,
+    *,
+    content_width: int,
+    allow_newlines: bool,
+) -> bool:
+    value, cursor = buffer_and_cursor(state)
     repeat = max(1, repeat_count)
     selection = selection_bounds(state)
     changed = False
@@ -347,11 +516,8 @@ def apply_text_editor_key(
         inserted = str(key).replace("\r\n", "\n").replace("\r", "\n")
         if not allow_newlines:
             inserted = inserted.replace("\n", " ")
-        if inserted and all(char == "\n" or char == "\t" or char.isprintable() for char in inserted):
-            lo, hi = selection if selection is not None else (cursor, cursor)
-            state["buffer"] = value[:lo] + inserted + value[hi:]
-            state["cursor"] = lo + len(inserted)
-            state["selection_anchor"] = None
+        if inserted and all(char in ("\n", "\t") or char.isprintable() for char in inserted):
+            _replace_selection(state, value, cursor, selection, inserted)
             state["preferred_visual_column"] = None
             return True
         return False
@@ -376,13 +542,8 @@ def apply_text_editor_key(
         return False
 
     # --- Word-wise motion (Ctrl + arrow): move and drop any selection. ---
-    if key == "CTRL_LEFT":
-        state["cursor"] = _word_jump(value, cursor, forward=False, count=repeat)
-        state["selection_anchor"] = None
-        state["preferred_visual_column"] = None
-        return False
-    if key == "CTRL_RIGHT":
-        state["cursor"] = _word_jump(value, cursor, forward=True, count=repeat)
+    if key in ("CTRL_LEFT", "CTRL_RIGHT"):
+        state["cursor"] = _word_jump(value, cursor, forward=key == "CTRL_RIGHT", count=repeat)
         state["selection_anchor"] = None
         state["preferred_visual_column"] = None
         return False
@@ -396,64 +557,37 @@ def apply_text_editor_key(
         state["cursor"] = selection[1] if selection else min(len(value), cursor + repeat)
         state["selection_anchor"] = None
         state["preferred_visual_column"] = None
-    elif key == "HOME":
+    elif key in ("HOME", "END"):
         if allow_newlines:
             rows = visual_rows(value, content_width)
-            state["cursor"] = rows[cursor_row_index(rows, cursor)][0]
+            row_start, row_end = rows[cursor_row_index(rows, cursor)]
+            state["cursor"] = row_start if key == "HOME" else row_end
         else:
-            state["cursor"] = 0
+            state["cursor"] = 0 if key == "HOME" else len(value)
         state["selection_anchor"] = None
         state["preferred_visual_column"] = None
-    elif key == "END":
-        if allow_newlines:
-            rows = visual_rows(value, content_width)
-            state["cursor"] = rows[cursor_row_index(rows, cursor)][1]
-        else:
-            state["cursor"] = len(value)
-        state["selection_anchor"] = None
-        state["preferred_visual_column"] = None
-    elif allow_newlines and key == "UP":
+    elif allow_newlines and key in ("UP", "DOWN"):
         _move_vertical(
             state,
-            -1,
+            -1 if key == "UP" else 1,
             content_width=content_width,
             count=repeat,
         )
         state["selection_anchor"] = None
-    elif allow_newlines and key == "DOWN":
-        _move_vertical(
-            state,
-            1,
-            content_width=content_width,
-            count=repeat,
-        )
-        state["selection_anchor"] = None
+    elif key in ("BACKSPACE", "DELETE") and selection is not None:
+        _replace_selection(state, value, cursor, selection, "")
+        changed = True
     elif key == "BACKSPACE":
-        if selection is not None:
-            lo, hi = selection
-            state["buffer"] = value[:lo] + value[hi:]
-            state["cursor"] = lo
-            state["selection_anchor"] = None
-            changed = True
-        elif cursor:
+        if cursor:
             state["buffer"] = value[: cursor - 1] + value[cursor:]
             state["cursor"] = cursor - 1
             changed = True
     elif key == "DELETE":
-        if selection is not None:
-            lo, hi = selection
-            state["buffer"] = value[:lo] + value[hi:]
-            state["cursor"] = lo
-            state["selection_anchor"] = None
-            changed = True
-        elif cursor < len(value):
+        if cursor < len(value):
             state["buffer"] = value[:cursor] + value[cursor + 1 :]
             changed = True
     elif allow_newlines and key == "ENTER":
-        lo, hi = selection if selection is not None else (cursor, cursor)
-        state["buffer"] = value[:lo] + "\n" + value[hi:]
-        state["cursor"] = lo + 1
-        state["selection_anchor"] = None
+        _replace_selection(state, value, cursor, selection, "\n")
         changed = True
     elif (
         isinstance(key, str)
@@ -461,10 +595,7 @@ def apply_text_editor_key(
         and len(key) == 1
         and key.isprintable()
     ):
-        lo, hi = selection if selection is not None else (cursor, cursor)
-        state["buffer"] = value[:lo] + key + value[hi:]
-        state["cursor"] = lo + len(key)
-        state["selection_anchor"] = None
+        _replace_selection(state, value, cursor, selection, key)
         changed = True
 
     if changed:

@@ -325,3 +325,59 @@ def test_visual_line_window_keeps_cursor_visible():
     assert [line.plain for line in lines] == ["b", "c "]
     assert cursor_line == 1
     assert start == 1
+
+
+def _type(state, text):
+    for char in text:
+        apply_text_editor_key(state, TextInput(char))
+
+
+def test_ctrl_z_undoes_typing_a_word_at_a_time_and_ctrl_y_redoes():
+    state = {}
+    initialize_text_editor(state, "")
+    _type(state, "hello big world")
+    assert apply_text_editor_key(state, "CTRL_Z")
+    assert (state["buffer"], state["cursor"]) == ("hello big ", 10)
+    assert apply_text_editor_key(state, "CTRL_Z")
+    assert state["buffer"] == "hello "
+    assert apply_text_editor_key(state, "CTRL_Y")
+    assert state["buffer"] == "hello big "
+    assert apply_text_editor_key(state, "CTRL_Y")
+    assert state["buffer"] == "hello big world"
+    assert not apply_text_editor_key(state, "CTRL_Y")
+
+
+def test_ctrl_z_groups_backspace_runs_and_breaks_on_cursor_moves():
+    state = {}
+    initialize_text_editor(state, "abcdef")
+    apply_text_editor_key(state, "BACKSPACE")
+    apply_text_editor_key(state, "BACKSPACE")
+    apply_text_editor_key(state, "BACKSPACE")
+    apply_text_editor_key(state, "HOME")
+    apply_text_editor_key(state, "DELETE")
+    assert state["buffer"] == "bc"
+    apply_text_editor_key(state, "CTRL_Z")
+    assert (state["buffer"], state["cursor"]) == ("abc", 0)
+    apply_text_editor_key(state, "CTRL_Z")
+    assert (state["buffer"], state["cursor"]) == ("abcdef", 6)
+    assert not apply_text_editor_key(state, "CTRL_Z")
+
+
+def test_new_edit_discards_redo_and_reinitializing_discards_history():
+    state = {}
+    initialize_text_editor(state, "")
+    _type(state, "one")
+    apply_text_editor_key(state, "CTRL_Z")
+    _type(state, "two")
+    assert not apply_text_editor_key(state, "CTRL_Y")
+    initialize_text_editor(state, "fresh")
+    assert not apply_text_editor_key(state, "CTRL_Z")
+    assert state["buffer"] == "fresh"
+
+
+def test_editor_without_history_leaves_ctrl_z_to_the_caller():
+    state = {}
+    initialize_text_editor(state, "")
+    apply_text_editor_key(state, TextInput("x"), history=False)
+    assert not apply_text_editor_key(state, "CTRL_Z", history=False)
+    assert state["buffer"] == "x"
