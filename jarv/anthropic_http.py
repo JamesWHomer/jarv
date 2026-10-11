@@ -217,12 +217,13 @@ def _apply_prompt_caching(payload: dict) -> None:
     messages = payload.get("messages")
     if not isinstance(messages, list) or not messages:
         return
-    target = messages[-2] if len(messages) >= 2 else messages[0]
+    index = -2 if len(messages) >= 2 else 0
+    target = messages[index]
     if not isinstance(target, dict):
         return
     target = dict(target)
     target["content"] = _mark_last_block_cached(target.get("content"))
-    messages[-2 if len(messages) >= 2 else 0] = target
+    messages[index] = target
 
 
 def _apply_reasoning(
@@ -514,25 +515,19 @@ def stream_message(
                 block_type = block.get("type")
                 if block_type == "tool_use":
                     raw = str(block.pop("_partial_json", "") or "")
+                    arguments = None
+                    tool_input = block.get("input") if block.get("input") is not None else {}
                     if raw:
                         try:
-                            block["input"] = json.loads(raw)
+                            block["input"] = tool_input = json.loads(raw)
                         except (ValueError, RecursionError):
                             # Invalid or decoder-limited tool JSON should reach
                             # the orchestrator's normal argument-error handling.
                             block["input"] = {}
                             arguments = raw
-                        else:
-                            arguments = json.dumps(
-                                block["input"],
-                                ensure_ascii=False,
-                                separators=(",", ":"),
-                            )
-                    else:
+                    if arguments is None:
                         arguments = json.dumps(
-                            block.get("input") if block.get("input") is not None else {},
-                            ensure_ascii=False,
-                            separators=(",", ":"),
+                            tool_input, ensure_ascii=False, separators=(",", ":")
                         )
                     yield {
                         "type": "tool_call",

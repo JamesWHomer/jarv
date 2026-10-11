@@ -11,7 +11,7 @@ from rich.text import Text
 from .cancellation import TurnCancelled
 from .config import get_setting
 from .display import console, track_live_display
-from .response_wait import _THINKING_FRAMES
+from .response_wait import spinner_frame
 from .session_render import ToolCallCard, _tool_call_renderable
 from .tool_outputs import ToolOutput, summarize_tool_output, tool_outcome, with_tool_outcome
 
@@ -34,7 +34,7 @@ class LiveToolCallCard(ToolCallCard):
         elif self.state == "running":
             now = time.perf_counter()
             elapsed = int(max(0, now - self.started_at))
-            frame = _THINKING_FRAMES[int(now * 10) % len(_THINKING_FRAMES)]
+            frame = spinner_frame(now)
             status = (f"{frame} running {elapsed}s", "blue")
         else:
             outcome = tool_outcome(self.output)

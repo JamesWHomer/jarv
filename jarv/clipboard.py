@@ -629,9 +629,8 @@ def _mac_clipboard_image(save_dir: Path) -> ClipboardImage | None:
         ["osascript", "-e", "POSIX path of (the clipboard as «class furl»)"]
     )
     if proc is not None and proc.returncode == 0:
-        image = _image_file_reference(proc.stdout.decode("utf-8", errors="replace"))
-        # A non-image file was copied; there is no bitmap behind it.
-        return image
+        # A non-image file was copied (None); there is no bitmap behind it.
+        return _image_file_reference(proc.stdout.decode("utf-8", errors="replace"))
 
     target = _image_target(save_dir)
     proc = _run_paste(["pngpaste", str(target)])

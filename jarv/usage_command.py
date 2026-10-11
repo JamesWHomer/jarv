@@ -37,6 +37,7 @@ from .tui_overlay import (
     scroll_position_hint,
 )
 from .usage import (
+    _BREAKDOWN_KEYS,
     format_cost,
     format_int,
     format_tokens_compact,
@@ -55,7 +56,6 @@ from .usage_view import (
 )
 
 
-_BREAKDOWN_KEYS = ("system", "tools", "history", "tool_io", "reasoning")
 _BREAKDOWN_LABELS = {
     "system": "System",
     "tools": "Tools",
@@ -633,23 +633,24 @@ def _tokens_block(view: UsageView) -> Group | None:
     return _kv_block("Tokens", rows)
 
 
+def _stacked(blocks: list) -> Group:
+    """Blocks one above another, separated by a blank line."""
+    parts: list = []
+    for index, block in enumerate(blocks):
+        if index:
+            parts.append(Text(""))
+        parts.append(block)
+    return Group(*parts)
+
+
 def _two_columns(blocks: list) -> Table:
     """Lay a list of breakdown blocks out in two side-by-side columns."""
     mid = (len(blocks) + 1) // 2
-
-    def column(items: list) -> Group:
-        parts: list = []
-        for index, block in enumerate(items):
-            if index:
-                parts.append(Text(""))
-            parts.append(block)
-        return Group(*parts)
-
     table = Table(box=None, show_header=False, padding=(0, 4), pad_edge=False)
     table.add_column()
     table.add_column()
     right = blocks[mid:]
-    table.add_row(column(blocks[:mid]), column(right) if right else Text(""))
+    table.add_row(_stacked(blocks[:mid]), _stacked(right) if right else Text(""))
     return table
 
 
@@ -671,12 +672,7 @@ def _breakdowns(view: UsageView, width: int = 0):
         return None
     if width >= _VERY_WIDE and len(blocks) > 1:
         return _two_columns(blocks)
-    stacked: list = []
-    for index, block in enumerate(blocks):
-        if index:
-            stacked.append(Text(""))
-        stacked.append(block)
-    return Group(*stacked)
+    return _stacked(blocks)
 
 
 def _context_detail(view: UsageView, width: int = 0) -> Group | None:

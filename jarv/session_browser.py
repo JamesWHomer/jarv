@@ -66,17 +66,31 @@ def _session_time_label(ts, now) -> str:
     return ts.strftime("%b %d")
 
 
-def _sessions_plain(sessions: dict, terminals: dict) -> None:
-    """Non-interactive fallback session list (used when stdout is not a tty)."""
-    terminal_id, _ = detect_terminal()
-    current_session_id = terminals.get(terminal_id)
-    now = utc_now()
+def _file_stamp(path) -> tuple:
+    """(path, mtime_ns, size) identifying one version of a history file."""
+    try:
+        stat = Path(path).stat() if path else None
+    except OSError:
+        stat = None
+    return (path, stat.st_mtime_ns if stat else None, stat.st_size if stat else None)
+
+
+def _sessions_by_recency(sessions: dict) -> list[str]:
+    """Session ids, most recently active first."""
 
     def sort_key(sid: str) -> str:
         meta = sessions[sid]
         return meta.get("last_message_at") or meta.get("last_used_at") or ""
 
-    sorted_sessions = sorted(sessions.keys(), key=sort_key, reverse=True)[:5]
+    return sorted(sessions.keys(), key=sort_key, reverse=True)
+
+
+def _sessions_plain(sessions: dict, terminals: dict) -> None:
+    """Non-interactive fallback session list (used when stdout is not a tty)."""
+    terminal_id, _ = detect_terminal()
+    current_session_id = terminals.get(terminal_id)
+    now = utc_now()
+    sorted_sessions = _sessions_by_recency(sessions)[:5]
 
     table = Table(box=box.SIMPLE_HEAD, show_header=True, padding=(0, 2), header_style="bold cyan", pad_edge=False)
     table.add_column("", no_wrap=True, width=1)
@@ -179,12 +193,7 @@ def cmd_sessions(args: list | None = None) -> int | None:
     terminal_id, _ = detect_terminal()
     current_session_id = terminals.get(terminal_id)
     now = utc_now()
-
-    def sort_key(sid: str) -> str:
-        meta = sessions[sid]
-        return meta.get("last_message_at") or meta.get("last_used_at") or ""
-
-    sorted_sessions = sorted(sessions.keys(), key=sort_key, reverse=True)
+    sorted_sessions = _sessions_by_recency(sessions)
 
     # Full indexing stays on the worker. Prepare visible names separately.
     from .history import SESSIONS_FILE
@@ -434,19 +443,16 @@ class SessionBrowserScreen(AltScreenApp):
 
     def _read_document(self, path):
         """Load once for indexing and previewing, off the input thread."""
-        try:
-            stat = Path(path).stat() if path else None
-        except OSError:
-            stat = None
-        stamp = (path, stat.st_mtime_ns if stat else None, stat.st_size if stat else None)
+        stamp = _file_stamp(path)
         cached = self.history_cache.get(path)
         if cached is not None and cached[0] == stamp:
             self.history_cache.move_to_end(path)
             return cached
+        exists = stamp[1] is not None
         error = ""
         try:
-            history = load_history(Path(path)) if stat else []
-            if not stat:
+            history = load_history(Path(path)) if exists else []
+            if not exists:
                 error = "History file is unavailable."
         except Exception:
             history, error = [], "Couldn't read this conversation."
@@ -571,12 +577,6 @@ class SessionBrowserScreen(AltScreenApp):
         self.flash = (one_line(message), style)
         self.flash_until = time.monotonic() + (8.0 if style in ("red", "yellow") else 4.0)
 
-    def _truncate(self, value: str, width: int) -> str:
-        return fitted(value, width).plain
-
-    def _max_vis(self, has_status: bool = False) -> int:
-        return self._last_list_capacity
-
     def _fast_search_text(self, r: dict) -> str:
         # Cheap fields available without disk I/O — exact short id, full sid,
         # the user's first-message snippet, and the session label.
@@ -584,16 +584,23 @@ class SessionBrowserScreen(AltScreenApp):
         label = meta.get("label", "") if isinstance(meta.get("label"), str) else ""
         return f"{r['short_id']} {r['sid']} {r.get('snippet', '')} {label} {meta.get('title', '')}".lower()
 
-    def _first_user_snippet(self, meta: dict, width: int = 240) -> str:
+    @staticmethod
+    def _load_meta_history(meta: dict) -> list | None:
+        """The session's history, or None when it is missing or unreadable."""
         hp_str = meta.get("history_file")
         if not hp_str:
-            return ""
+            return None
         hp = Path(hp_str)
         if not hp.exists():
-            return ""
+            return None
         try:
-            history = load_history(hp)
+            return load_history(hp)
         except Exception:
+            return None
+
+    def _first_user_snippet(self, meta: dict, width: int = 240) -> str:
+        history = self._load_meta_history(meta)
+        if history is None:
             return ""
         return first_prompt(history)[:width]
 
@@ -613,21 +620,12 @@ class SessionBrowserScreen(AltScreenApp):
             r["snippet_loaded"] = True
 
     def _build_search_text(self, sid: str) -> str:
-        meta = self.sessions.get(sid, {})
-        hp_str = meta.get("history_file")
-        chunks: list[str] = []
-        if hp_str:
-            hp = Path(hp_str)
-            if hp.exists():
-                try:
-                    history = load_history(hp)
-                except Exception:
-                    history = []
-                for item in history:
-                    if not isinstance(item, dict):
-                        continue
-                    chunks.append(flatten_content_text(item.get("content", "")))
-        return "\n".join(chunks)
+        history = self._load_meta_history(self.sessions.get(sid, {})) or []
+        return "\n".join(
+            flatten_content_text(item.get("content", ""))
+            for item in history
+            if isinstance(item, dict)
+        )
 
     def _search_text(self, sid: str) -> str:
         cached = self.search_text_cache.get(sid)
@@ -731,7 +729,7 @@ class SessionBrowserScreen(AltScreenApp):
             repeat_count,
             selected=sel,
             total=len(visible),
-            page=self._max_vis(),
+            page=self._last_list_capacity,
         )
         if nav is None:
             return
@@ -805,12 +803,7 @@ class SessionBrowserScreen(AltScreenApp):
             self._request_preview(sid, width)
             cached = self.preview_cache.get((sid, width))
             return cached[1] if cached else [Text("Loading preview…", style="dim")]
-        path = self.sessions.get(sid, {}).get("history_file")
-        try:
-            stat = Path(path).stat() if path else None
-        except OSError:
-            stat = None
-        stamp = (path, stat.st_mtime_ns if stat else None, stat.st_size if stat else None)
+        stamp = _file_stamp(self.sessions.get(sid, {}).get("history_file"))
         key = (sid, width)
         cached = self.preview_cache.get(key)
         if cached is None or cached[0] != stamp:
@@ -1032,7 +1025,7 @@ class SessionBrowserScreen(AltScreenApp):
         targets = self._target_rows(visible)
         if self.arm_delete_sids and self.arm_delete_sids == {r["sid"] for r in targets}:
             if len(targets) == 1:
-                name = self._truncate(self._title(targets[0]), max(1, width - 24))
+                name = fitted(self._title(targets[0]), max(1, width - 24)).plain
                 question = f'Delete "{name}" permanently?'
             else:
                 question = f"Delete {len(targets)} sessions permanently?"
@@ -1286,17 +1279,11 @@ class SessionBrowserScreen(AltScreenApp):
             self._finalize_action(action)
         self.undo_actions.clear()
 
-    def _start_undo(self, action: dict) -> None:
-        self.undo_actions.append(action)
-
-    def _take_last_action(self) -> dict | None:
-        return self.undo_actions.pop() if self.undo_actions else None
-
     def _do_undo(self) -> tuple[tuple[str, str], list[str]] | None:
         """Returns ((flash_msg, flash_style), restored_sids) or None."""
-        action = self._take_last_action()
-        if action is None:
+        if not self.undo_actions:
             return None
+        action = self.undo_actions.pop()
         kind = action["kind"]
         if kind in ("did_archive", "did_unarchive"):
             restored: list[str] = []
@@ -1469,7 +1456,7 @@ class SessionBrowserScreen(AltScreenApp):
 
         verb = "restore" if unarchiving else "archive"
         if moved:
-            self._start_undo({"kind": "did_unarchive" if unarchiving else "did_archive", "sids": moved,
+            self.undo_actions.append({"kind": "did_unarchive" if unarchiving else "did_archive", "sids": moved,
                               "terminal_bindings": terminal_bindings, "current_sids": current_sids})
             self._reconcile_action_selection(previous, moved)
         if failed:
@@ -1529,7 +1516,7 @@ class SessionBrowserScreen(AltScreenApp):
             self.selected_sid = None
         self._notify(f"✓ deleted {label}", "green")
         self.arm_delete_sids = None
-        self._start_undo({"kind": "did_delete", "entries": entries})
+        self.undo_actions.append({"kind": "did_delete", "entries": entries})
 
     # ------------------------------------------------------------------ #
     # Key handling
@@ -1581,6 +1568,11 @@ class SessionBrowserScreen(AltScreenApp):
         self.preview_positions[self._preview_key(sid, target_width)] = mapped
         self.preview_roundtrip = (sid, source_width, target_width, offset, mapped)
 
+    def _select_first_visible_if_hidden(self) -> None:
+        visible = self._visible_rows_list()
+        if visible and not any(row["sid"] == self.selected_sid for row in visible):
+            self.selected_sid = visible[0]["sid"]
+
     def _cycle_view(self) -> None:
         index = self.VIEW_MODES.index(self.view_mode)
         self.view_mode = self.VIEW_MODES[(index + 1) % len(self.VIEW_MODES)]
@@ -1588,9 +1580,7 @@ class SessionBrowserScreen(AltScreenApp):
         self.pane_focus = "sessions"
         self.ghost_sids.clear()
         self._clear_selection()
-        visible = self._visible_rows_list()
-        if visible and not any(row["sid"] == self.selected_sid for row in visible):
-            self.selected_sid = visible[0]["sid"]
+        self._select_first_visible_if_hidden()
 
     def _on_key_rename(self, key: str, repeat: int) -> None:
         if not isinstance(key, TextInput) and key == "ESC":
@@ -1625,8 +1615,6 @@ class SessionBrowserScreen(AltScreenApp):
             self.rename_editor["cursor"] = min(self.rename_editor["cursor"], 240)
 
     def on_key(self, key: str, repeat: int) -> None:
-        repeat_count = repeat
-
         if isinstance(key, TextInput) and not (
             self.rename_sid is not None or (self.search_active and self.preview_sid is None)
         ):
@@ -1650,7 +1638,7 @@ class SessionBrowserScreen(AltScreenApp):
 
         # Preview mode intercepts most keys.
         if self.preview_sid is not None:
-            self._on_key_preview(key, repeat_count)
+            self._on_key_preview(key, repeat)
             return
 
         if key == "ESC" and self.arm_delete_sids is not None:
@@ -1674,7 +1662,7 @@ class SessionBrowserScreen(AltScreenApp):
                 if cur is not None:
                     width = layout["right_width"]
                     height = self._detail_body_height(cur, width, layout["body_height"] - 1)
-                    self._scroll_preview(cur["sid"], width, height, key, repeat_count)
+                    self._scroll_preview(cur["sid"], width, height, key, repeat)
                 return
             # Row-management shortcuts belong to the sessions pane. Global
             # search, view, help, resume, expand, and undo remain available.
@@ -1692,7 +1680,7 @@ class SessionBrowserScreen(AltScreenApp):
 
         if key in SHIFT_SELECTION_KEYS:
             self.preview_direction = -1 if key == "SHIFT_UP" else 1
-            self._extend_selection(key, repeat_count, visible)
+            self._extend_selection(key, repeat, visible)
             return
 
         nav_key = {
@@ -1703,7 +1691,7 @@ class SessionBrowserScreen(AltScreenApp):
         }.get(key, key)
         if nav_key in SELECTION_KEYS:
             nav = apply_selection_keys(
-                nav_key, repeat_count, selected=sel, total=n_vis, page=self._max_vis()
+                nav_key, repeat, selected=sel, total=n_vis, page=self._last_list_capacity
             )
             if nav is not None:
                 if nav != sel:
@@ -1792,18 +1780,13 @@ class SessionBrowserScreen(AltScreenApp):
             self._cycle_view()
         elif shortcut in ("ENTER", "DOWN", "CTRL_F"):
             self.search_active = False
-            visible = self._visible_rows_list()
-            if visible and not any(r["sid"] == self.selected_sid for r in visible):
-                self.selected_sid = visible[0]["sid"]
+            self._select_first_visible_if_hidden()
             self.offset = 0
-        else:
-            if apply_text_editor_key(self.search_editor, key, repeat):
-                self.search_query = self.search_editor["buffer"]
-                self.offset = 0
-                self._clear_selection()
-                visible = self._visible_rows_list()
-                if visible and not any(r["sid"] == self.selected_sid for r in visible):
-                    self.selected_sid = visible[0]["sid"]
+        elif apply_text_editor_key(self.search_editor, key, repeat):
+            self.search_query = self.search_editor["buffer"]
+            self.offset = 0
+            self._clear_selection()
+            self._select_first_visible_if_hidden()
 
     def _on_key_preview(self, key: str, repeat_count: int) -> None:
         if key in ("p", "ESC", "LEFT"):

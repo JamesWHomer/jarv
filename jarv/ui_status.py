@@ -12,15 +12,14 @@ _TOOL_ACTIVITY_LABELS = {
     "ask_user": ("Writing question", "Wrote question"),
     "web_search": ("Writing web search", "Wrote web search"),
 }
+_DEFAULT_TOOL_ACTIVITY_LABELS = ("Preparing action", "Prepared action")
 
 
 def tool_activity_label(tool_names: tuple[str, ...]) -> str:
     """Return the live activity label for tool-call serialization."""
     if len(tool_names) != 1:
         return f"Preparing {len(tool_names)} actions"
-    return _TOOL_ACTIVITY_LABELS.get(
-        tool_names[0], ("Preparing action", "Prepared action"),
-    )[0]
+    return _TOOL_ACTIVITY_LABELS.get(tool_names[0], _DEFAULT_TOOL_ACTIVITY_LABELS)[0]
 
 
 def thought_complete_indicator(text: str) -> Text:

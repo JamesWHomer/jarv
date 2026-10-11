@@ -213,9 +213,7 @@ def config_about_lines(config: dict | None = None) -> list[str]:
         if not field.about:
             continue
         default = config.get(field.key, field.default)
-        if field.key == "model":
-            default_repr = f"`{default}`"
-        elif isinstance(default, str) and default:
+        if field.key == "model" or isinstance(default, str) and default:
             default_repr = f"`{default}`"
         elif isinstance(default, bool):
             default_repr = "`true`" if default else "`false`"

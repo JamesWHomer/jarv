@@ -191,18 +191,11 @@ def run_scroll_live(
     close_keys: frozenset[str] = DEFAULT_CLOSE_KEYS,
     console_ref: Any | None = None,
     live_cls: type | None = None,
-    refresh_on_resize_fn: Callable[..., Any] | None = None,
-    mouse_capture_fn: Callable[..., Any] | None = None,
     read_key_fn: Callable[[], tuple[str, int]] | None = None,
     key_available_fn: Callable[[], bool] | None = None,
     terminal_size_fn: Callable[..., tuple[int, int]] | None = None,
 ) -> None:
-    """Run a fullscreen read-only scroll overlay on the shared AltScreenApp loop.
-
-    ``refresh_on_resize_fn`` and ``mouse_capture_fn`` are accepted for backward
-    compatibility but no longer used: the loop polls ``terminal_size`` for resize
-    and manages mouse capture itself.
-    """
+    """Run a fullscreen read-only scroll overlay on the shared AltScreenApp loop."""
     scroll_state = state or ScrollOverlayState()
 
     def _make_live(get_renderable, console):
@@ -245,8 +238,6 @@ def scroll_overlay(
     console_ref: Any | None = None,
     live_cls: type | None = None,
     terminal_size_fn: Callable[..., tuple[int, int]] | None = None,
-    refresh_on_resize_fn: Callable[..., Any] | None = None,
-    mouse_capture_fn: Callable[..., Any] | None = None,
     read_key_fn: Callable[[], tuple[str, int]] | None = None,
     key_available_fn: Callable[[], bool] | None = None,
 ) -> None:
@@ -342,8 +333,6 @@ def scroll_overlay(
         close_keys=close_keys,
         console_ref=console_ref,
         live_cls=live_cls,
-        refresh_on_resize_fn=refresh_on_resize_fn,
-        mouse_capture_fn=mouse_capture_fn,
         read_key_fn=read_key_fn,
         key_available_fn=key_available_fn,
         terminal_size_fn=terminal_size_fn,

@@ -12,7 +12,6 @@ from jarv.config import DEFAULT_CONFIG
 from jarv.edit_tool import classify_edit
 from jarv.orchestrator import AgentNode, dispatch_tool, execute_tool_calls, run_subagent_loop
 from jarv.provider import StreamDone, ToolCallDone
-from jarv.read_tool import dispatch_read_batch
 from jarv.retained_outputs import RetainedOutputStore
 from jarv.shell import ShellState, execute_command
 
@@ -55,19 +54,6 @@ def test_cd_then_parallel_reads_and_edit_use_agent_directory(projects):
     assert "[EDIT RESULT]" in outputs[3]
     assert (target / "same.txt").read_text() == "edited"
     assert (original / "same.txt").read_text() == "original"
-    assert Path.cwd() == original
-
-
-@pytest.mark.parametrize("count", [1, 2])
-def test_read_batch_forwards_explicit_directory(projects, count):
-    original, target = projects
-    results = dispatch_read_batch(
-        [{"input": "same.txt"}] * count,
-        cwd=target, visible_labels=set(), artifact_store=ArtifactStore(),
-        retained_store=RetainedOutputStore(), config=DEFAULT_CONFIG,
-    )
-    assert len(results) == count
-    assert all("\n\ntarget" in output for output in results)
     assert Path.cwd() == original
 
 

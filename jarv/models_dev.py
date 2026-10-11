@@ -25,6 +25,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from .jsonutil import write_json_atomic
 from .paths import CONFIG_DIR
 from .provider_catalog import models_dev_provider, models_dev_provider_ids
 
@@ -528,7 +529,6 @@ def _cached_etag(source: str = DEFAULT_URL) -> str:
 
 
 def _write_cache(providers: dict[str, Any], etag: str, source: str) -> bool:
-    import tempfile
     from datetime import datetime, timezone
 
     payload = {
@@ -537,24 +537,8 @@ def _write_cache(providers: dict[str, Any], etag: str, source: str) -> bool:
         "etag": etag,
         "providers": providers,
     }
-    temporary = None
-    try:
-        CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=CACHE_PATH.parent,
-            prefix=".jarv-models-", delete=False,
-        ) as stream:
-            temporary = Path(stream.name)
-            json.dump(payload, stream)
-        temporary.replace(CACHE_PATH)
-    except OSError:
+    if not write_json_atomic(CACHE_PATH, payload):
         return False
-    finally:
-        if temporary is not None:
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
     clear_cache()
     return True
 

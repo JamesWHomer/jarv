@@ -88,7 +88,6 @@ class UsageView:
     trend: list[TrendBucket]
     request_count: int
     is_empty: bool
-    last_request: dict | None
     last_root: dict | None
     # ``"hour"`` or ``"day"``: the granularity of ``trend`` (empty for session).
     trend_unit: str = "day"
@@ -288,30 +287,36 @@ def _previous_spend(records: list[dict] | None) -> float | None:
     return float(usage_cost_summary(totals).get("total_usd") or 0.0)
 
 
-def _session_view(scope: Scope, ctx) -> UsageView:
-    ctx = ctx or prepare_session_context()
-    usage_path = usage_file_for(ctx.history_file)
-    usage = load_usage(usage_path, ctx.session_id)
+def _view_from_usage(scope: Scope, usage: dict, source_path, **extra) -> UsageView:
+    """Build a :class:`UsageView` from an aggregated usage dict.
+
+    ``extra`` supplies the scope-specific fields (context, trend, comparisons).
+    """
     totals = _dict(usage.get("totals"))
-    last_root = _dict_or_none(usage.get("last_root_request"))
     request_count = int(totals.get("request_count") or 0)
     return UsageView(
         scope_key=scope.key,
         window_label=scope.window_label,
-        source_path=str(usage_path),
+        source_path=str(source_path),
         totals=totals,
         cost=usage_cost_summary(totals),
         models=_sorted_models(_dict(usage.get("models"))),
         providers=_dict(usage.get("providers")),
         tiers=_dict(usage.get("tiers")),
         sources=_dict(usage.get("sources")),
-        context=_session_context(last_root),
-        trend=[],
         request_count=request_count,
         is_empty=request_count <= 0,
-        last_request=_dict_or_none(usage.get("last_request")),
-        last_root=last_root,
+        last_root=_dict_or_none(usage.get("last_root_request")),
+        **extra,
     )
+
+
+def _session_view(scope: Scope, ctx) -> UsageView:
+    ctx = ctx or prepare_session_context()
+    usage_path = usage_file_for(ctx.history_file)
+    usage = load_usage(usage_path, ctx.session_id)
+    last_root = _dict_or_none(usage.get("last_root_request"))
+    return _view_from_usage(scope, usage, usage_path, context=_session_context(last_root), trend=[])
 
 
 def _window_view_from_records(
@@ -325,25 +330,12 @@ def _window_view_from_records(
     ``previous`` holds the records from the equally long window just before it,
     for the hero's period-over-period spend comparison.
     """
-    usage = aggregate_usage_records(records)
-    totals = _dict(usage.get("totals"))
-    request_count = int(totals.get("request_count") or 0)
-    return UsageView(
-        scope_key=scope.key,
-        window_label=scope.window_label,
-        source_path=str(global_usage_jsonl_file()),
-        totals=totals,
-        cost=usage_cost_summary(totals),
-        models=_sorted_models(_dict(usage.get("models"))),
-        providers=_dict(usage.get("providers")),
-        tiers=_dict(usage.get("tiers")),
-        sources=_dict(usage.get("sources")),
+    return _view_from_usage(
+        scope,
+        aggregate_usage_records(records),
+        global_usage_jsonl_file(),
         context=None,
         trend=_bucket_trend(records, scope, now),
-        request_count=request_count,
-        is_empty=request_count <= 0,
-        last_request=_dict_or_none(usage.get("last_request")),
-        last_root=_dict_or_none(usage.get("last_root_request")),
         trend_unit=_trend_unit(scope),
         previous_spend=_previous_spend(previous),
         previous_label=_window_short_label(scope.window) if scope.window is not None else "",
@@ -378,35 +370,6 @@ def _window_view(scope: Scope, now: datetime) -> UsageView:
     records = load_global_usage_records(since=since, now=now, warn=True)
     current, previous = _split_windows(records, scope.window, now)
     return _window_view_from_records(scope, current, now, previous)
-
-
-def _filter_records(
-    records: list[dict],
-    since: timedelta | None,
-    now: datetime,
-    *,
-    until: datetime | None = None,
-) -> list[dict]:
-    """In-memory equivalent of the ``since`` cutoff in ``load_global_usage_records``.
-
-    ``until`` (exclusive) additionally drops records at or after that moment.
-    """
-    if since is None and until is None:
-        return list(records)
-    cutoff = now - since if since is not None else None
-    out: list[dict] = []
-    for record in records:
-        if not isinstance(record, dict):
-            continue
-        created_at = parse_timestamp(str(record.get("created_at") or ""))
-        if created_at is None:
-            continue
-        if cutoff is not None and created_at < cutoff:
-            continue
-        if until is not None and created_at >= until:
-            continue
-        out.append(record)
-    return out
 
 
 def build_window_views(now: datetime | None = None, *, warn: bool = False) -> dict[str, UsageView]:

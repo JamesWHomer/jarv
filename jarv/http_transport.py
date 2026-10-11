@@ -108,6 +108,10 @@ def _sleep(delay: float, cancellation_token: CancellationToken | None) -> None:
         time.sleep(min(remaining, 0.05))
 
 
+def _backoff_delay(attempt: int) -> float:
+    return min(0.5 * (2 ** attempt), 4.0)
+
+
 def _retry_delay(response, attempt: int) -> float:
     retry_after = response.headers.get("retry-after")
     if retry_after:
@@ -117,7 +121,7 @@ def _retry_delay(response, attempt: int) -> float:
                 return min(max(delay, 0.0), 30.0)
         except ValueError:
             pass
-    return min(0.5 * (2 ** attempt), 4.0)
+    return _backoff_delay(attempt)
 
 
 def send_with_retries(
@@ -149,7 +153,7 @@ def send_with_retries(
                 cancellation_token.throw_if_cancelled()
             if attempt >= max_retries:
                 raise
-            _sleep(min(0.5 * (2 ** attempt), 4.0), cancellation_token)
+            _sleep(_backoff_delay(attempt), cancellation_token)
             continue
         except BaseException:
             if response is not None:

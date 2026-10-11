@@ -102,9 +102,8 @@ def build_git_block(cwd: Path) -> str:
     lines = []
     if branch:
         lines.append(f"branch: {branch}")
-    elif branch is not None:
-        if sha:
-            lines.append(f"branch: detached HEAD at {sha}")
+    elif branch is not None and sha:
+        lines.append(f"branch: detached HEAD at {sha}")
     if status is not None:
         changed = sum(1 for line in status.splitlines() if line.strip())
         if changed == 0:

@@ -258,6 +258,24 @@ class PowerShellWorker:
         if time.monotonic() >= deadline:
             raise subprocess.TimeoutExpired('PowerShell worker', 0)
 
+    def _abort_if_closed(self, release, deadline, token):
+        """Under the close lock: undo a startup step that raced close()."""
+        if self.closed:
+            release()
+            self._check(deadline, token)
+            raise WorkerUnavailable('Worker closed during startup')
+
+    def _wait_for_pipe(self, path, mode, deadline, startup_deadline, token, failure):
+        """Open one end of a worker pipe once PowerShell has created it."""
+        while True:
+            self._check(deadline, token)
+            if self.proc.poll() is not None or time.monotonic() >= startup_deadline:
+                raise WorkerUnavailable(failure)
+            try:
+                return open(path, mode, buffering=0)
+            except OSError:
+                time.sleep(0.02)
+
     def start(self, state, deadline, token):
         name = 'jarv-' + uuid.uuid4().hex
         script = base64.b64encode(_SCRIPT.replace('__PIPE__', name).encode('utf-16le')).decode('ascii')
@@ -271,10 +289,7 @@ class PowerShellWorker:
             )
             # Cancellation can race with Popen before the process is published.
             with self._close_lock:
-                if self.closed:
-                    _kill_process_tree(proc)
-                    self._check(deadline, token)
-                    raise WorkerUnavailable('Worker closed during startup')
+                self._abort_if_closed(lambda: _kill_process_tree(proc), deadline, token)
                 self.proc = proc
                 self.job = WindowsJob(proc)
                 for index, stream in enumerate((self.proc.stdout, self.proc.stderr)):
@@ -282,44 +297,23 @@ class PowerShellWorker:
                     thread.start()
                     self.threads.append(thread)
             startup_deadline = min(deadline, time.monotonic() + 5)
-            while True:
-                self._check(deadline, token)
-                if self.proc.poll() is not None or time.monotonic() >= startup_deadline:
-                    raise WorkerUnavailable('PowerShell worker did not start')
-                try:
-                    pipe = open('\\\\.\\pipe\\' + name, 'wb', buffering=0)
-                except OSError:
-                    time.sleep(0.02)
-                    continue
-                with self._close_lock:
-                    if self.closed:
-                        pipe.close()
-                        self._check(deadline, token)
-                        raise WorkerUnavailable('Worker closed during startup')
-                    self.pipe = pipe
-                break
+            pipe_path = '\\\\.\\pipe\\' + name
+            pipe = self._wait_for_pipe(pipe_path, 'wb', deadline, startup_deadline, token,
+                                       'PowerShell worker did not start')
+            with self._close_lock:
+                self._abort_if_closed(pipe.close, deadline, token)
+                self.pipe = pipe
             # A client can open the first pipe before PowerShell has even
             # constructed the second one. Do not reopen the connected request
             # pipe while waiting for the reply endpoint to appear.
-            while True:
-                self._check(deadline, token)
-                if self.proc.poll() is not None or time.monotonic() >= startup_deadline:
-                    raise WorkerUnavailable('PowerShell reply pipe did not start')
-                try:
-                    reply_pipe = open('\\\\.\\pipe\\' + name + '-reply', 'rb', buffering=0)
-                except OSError:
-                    time.sleep(0.02)
-                    continue
-                with self._close_lock:
-                    if self.closed:
-                        reply_pipe.close()
-                        self._check(deadline, token)
-                        raise WorkerUnavailable('Worker closed during startup')
-                    self.reply_pipe = reply_pipe
-                    thread = threading.Thread(target=_read_replies, args=(self.reply_pipe, self.replies), daemon=True)
-                    thread.start()
-                    self.threads.append(thread)
-                break
+            reply_pipe = self._wait_for_pipe(pipe_path + '-reply', 'rb', deadline, startup_deadline,
+                                             token, 'PowerShell reply pipe did not start')
+            with self._close_lock:
+                self._abort_if_closed(reply_pipe.close, deadline, token)
+                self.reply_pipe = reply_pipe
+                thread = threading.Thread(target=_read_replies, args=(self.reply_pipe, self.replies), daemon=True)
+                thread.start()
+                self.threads.append(thread)
             while True:
                 self._check(deadline, token)
                 try:

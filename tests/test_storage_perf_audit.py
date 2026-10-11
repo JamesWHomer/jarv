@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from jarv import storage, usage, usage_view
+from jarv.history import parse_timestamp
 
 
 @pytest.mark.parametrize("with_snapshot", [False, True])
@@ -70,6 +71,35 @@ def test_usage_totals_match_full_aggregation_and_record_normalization():
     assert usage.aggregate_usage_totals([]) == usage.aggregate_usage_records([])["totals"]
 
 
+def _reference_filter(
+    records: list[dict],
+    since: timedelta | None,
+    now: datetime,
+    *,
+    until: datetime | None = None,
+) -> list[dict]:
+    """Reference per-window filter that ``_split_windows`` must reproduce in one pass.
+
+    ``until`` (exclusive) additionally drops records at or after that moment.
+    """
+    if since is None and until is None:
+        return list(records)
+    cutoff = now - since if since is not None else None
+    out: list[dict] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        created_at = parse_timestamp(str(record.get("created_at") or ""))
+        if created_at is None:
+            continue
+        if cutoff is not None and created_at < cutoff:
+            continue
+        if until is not None and created_at >= until:
+            continue
+        out.append(record)
+    return out
+
+
 @pytest.mark.parametrize("window", [None, timedelta(hours=1), timedelta(days=7)])
 def test_usage_window_split_preserves_boundaries_order_and_invalid_records(window, monkeypatch):
     now = datetime(2026, 10, 10, 12, tzinfo=timezone.utc)
@@ -83,8 +113,8 @@ def test_usage_window_split_preserves_boundaries_order_and_invalid_records(windo
     ])
     expected = (
         (list(records), None) if window is None else (
-            usage_view._filter_records(records, window, now),
-            usage_view._filter_records(records, window * 2, now, until=now - window),
+            _reference_filter(records, window, now),
+            _reference_filter(records, window * 2, now, until=now - window),
         )
     )
     parsed = 0

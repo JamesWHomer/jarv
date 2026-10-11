@@ -73,17 +73,38 @@ def cmd_restart() -> int:
     return 2
 
 
+def _masked_api_keys(value: dict) -> dict:
+    return {provider: ("***" if key else key) for provider, key in value.items()}
+
+
 def _mask_config_value(key: str, value) -> str:
     if key == "api_key" and value:
         return "[dim]***[/dim]"
     if key == "api_keys" and isinstance(value, dict) and value:
-        masked = {k: ("***" if v else v) for k, v in value.items()}
-        return f"[green]{escape(repr(masked))}[/green]"
+        return f"[green]{escape(repr(_masked_api_keys(value)))}[/green]"
     return f"[green]{escape(repr(value))}[/green]"
 
 
+def _save_config_change(trial: dict, key: str) -> bool:
+    """Reconcile settings that depend on ``key``, then validate and save ``trial``."""
+    from .config import save_config, validate_config
+    from .provider_catalog import reconcile_service_tier
+
+    reset_tier = reconcile_service_tier(trial) if key in ("model", "provider", "base_url") else None
+    if key in ("model", "provider"):
+        from .reasoning import reconcile_reasoning_effort
+
+        reconcile_reasoning_effort(trial)
+    if not validate_config(trial):
+        return False
+    save_config(trial)
+    if reset_tier is not None:
+        console.print("[yellow]Processing tier reset to standard for this model/endpoint.[/yellow]")
+    return True
+
+
 def cmd_set(args: list) -> int:
-    from .config import DEFAULT_CONFIG, load_config, save_config, validate_config
+    from .config import DEFAULT_CONFIG, load_config
     from .config_schema import parse_config_value
 
     if len(args) < 2:
@@ -100,18 +121,8 @@ def cmd_set(args: list) -> int:
     value = parse_config_value(key, raw)
     trial = copy.deepcopy(config)
     trial[key] = value
-    from .provider_catalog import reconcile_service_tier
-
-    reset_tier = reconcile_service_tier(trial) if key in ("model", "provider", "base_url") else None
-    if key in ("model", "provider"):
-        from .reasoning import reconcile_reasoning_effort
-
-        reconcile_reasoning_effort(trial)
-    if not validate_config(trial):
+    if not _save_config_change(trial, key):
         return 2
-    save_config(trial)
-    if reset_tier is not None:
-        console.print("[yellow]Processing tier reset to standard for this model/endpoint.[/yellow]")
     display = _mask_config_value(key, trial[key])
     console.print(f"[bold cyan]✓[/bold cyan] [bold cyan]{escape(key)}[/bold cyan] [dim]=[/dim] {display}")
     return 0
@@ -128,24 +139,13 @@ def cmd_unset(args: list) -> int:
     if key not in config:
         console.print(f"[yellow]○[/yellow] [bold]{escape(key)}[/bold] [dim]is not set.[/dim]")
         return 1
+    trial = copy.deepcopy(config)
     if key in DEFAULT_CONFIG:
-        trial = copy.deepcopy(config)
         trial[key] = DEFAULT_CONFIG[key]
-        from .provider_catalog import reconcile_service_tier
-
-        reset_tier = reconcile_service_tier(trial) if key in ("model", "provider", "base_url") else None
-        if key in ("model", "provider"):
-            from .reasoning import reconcile_reasoning_effort
-
-            reconcile_reasoning_effort(trial)
-        if not validate_config(trial):
+        if not _save_config_change(trial, key):
             return 2
-        save_config(trial)
-        if reset_tier is not None:
-            console.print("[yellow]Processing tier reset to standard for this model/endpoint.[/yellow]")
         console.print(f"[bold cyan]↺[/bold cyan] [bold cyan]{escape(key)}[/bold cyan] [dim]reset to default →[/dim] [green]{escape(repr(DEFAULT_CONFIG[key]))}[/green]")
     else:
-        trial = copy.deepcopy(config)
         del trial[key]
         if not validate_config(trial):
             return 2
@@ -685,8 +685,7 @@ def cmd_config() -> None:
         if k == "api_key" and v:
             val = Text("***", style="dim")
         elif k == "api_keys" and isinstance(v, dict) and v:
-            masked = {pk: ("***" if pv else pv) for pk, pv in v.items()}
-            val = Text(repr(masked), style="green")
+            val = Text(repr(_masked_api_keys(v)), style="green")
         elif isinstance(v, bool):
             val = Text(repr(v), style="bold magenta")
         elif isinstance(v, (int, float)):

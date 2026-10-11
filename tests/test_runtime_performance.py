@@ -55,8 +55,7 @@ def test_compaction_preserves_exact_context_across_budgets():
         for target in (-1, 0, 100, 1000, context_budget.estimate_history_tokens("test", history), 100000):
             expected, actual = copy.deepcopy(history), copy.deepcopy(history)
             expected_changed = _original_compaction(expected, target)
-            changed = context_budget.compact_oldest_turns(actual, model="test", config={},
-                                                         instructions="unchanged", tools=[], target_tokens=target)
+            changed = context_budget.compact_oldest_turns(actual, model="test", target_tokens=target)
             assert changed == expected_changed
             assert actual == expected
         assert history == original
@@ -74,7 +73,7 @@ def test_compaction_token_work_is_linear(monkeypatch):
         return original(model, item)
 
     monkeypatch.setattr(context_budget, "estimate_item_tokens", count)
-    context_budget.compact_oldest_turns(history, model="test", config={}, instructions="", tools=[], target_tokens=1)
+    context_budget.compact_oldest_turns(history, model="test", target_tokens=1)
     assert counted < 3 * 400
 
 

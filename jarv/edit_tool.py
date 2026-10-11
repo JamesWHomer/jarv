@@ -391,11 +391,12 @@ def classify_edit(resolved: Path, *, cwd: str | Path | None = None) -> tuple[boo
             return True, "system path"
 
     name = resolved.name.lower()
-    if name == ".env" or name.startswith(".env."):
-        return True, "sensitive file (secrets/keys)"
-    if resolved.suffix.lower() in _SENSITIVE_SUFFIXES:
-        return True, "sensitive file (secrets/keys)"
-    if name in _SENSITIVE_NAMES:
+    if (
+        name == ".env"
+        or name.startswith(".env.")
+        or name in _SENSITIVE_NAMES
+        or resolved.suffix.lower() in _SENSITIVE_SUFFIXES
+    ):
         return True, "sensitive file (secrets/keys)"
 
     parts = {part.lower() for part in resolved.parts[1:]}

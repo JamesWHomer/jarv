@@ -8,7 +8,6 @@ import sys
 from rich.console import Group
 from rich.table import Table
 from rich.text import Text
-from rich import box
 
 from .config import (
     CONFIG_FILE,
@@ -19,12 +18,7 @@ from .config import (
     validate_config,
 )
 from .display import configure_monochrome, console, jarv_panel, section_rule
-from .settings_schema import (
-    settings_rows,
-    settings_service_tier_choices,
-    settings_service_tier_description,
-)
-from .tui_layout import clip_text
+from .settings_schema import settings_rows
 from .tui_panel import configure_menu_border, menu_border_enabled, menu_frame_rows
 from .text_editor import (
     apply_text_editor_key,
@@ -42,7 +36,6 @@ from .settings_helpers import (
     _settings_choice_label,
 )
 from .settings_model_picker import (
-    _settings_choice_grid_lines,
     _settings_column_layout,
     _settings_default_model,
     _settings_default_model_for_provider,
@@ -50,17 +43,12 @@ from .settings_model_picker import (
     _settings_model_choice_lines,
     _settings_model_choices,
     _settings_model_choices_for_key,
-    _settings_model_choices_with_current,
     _settings_model_suggestion,
     _settings_model_update_notice,
     _settings_provider_choice_lines,
-    _settings_provider_choices,
-    _settings_provider_display_label,
     _settings_provider_keys,
-    _settings_provider_note,
     _settings_resolve_auditor_model,
     _settings_resolve_model,
-    _settings_resolve_provider,
 )
 
 
@@ -89,18 +77,10 @@ def _settings_is_model_picker_key(key: str) -> bool:
     return key in {"model", "auditor_model"}
 
 
-def _settings_service_tier_choices(config: dict) -> tuple[tuple[str, str], ...]:
-    return settings_service_tier_choices(config)
-
-
 def _settings_service_tier(config: dict) -> str:
     from .provider_catalog import configured_service_tier
 
     return configured_service_tier(config)
-
-
-def _settings_service_tier_description(config: dict) -> str:
-    return settings_service_tier_description(config)
 
 
 def _settings_set_service_tier(config: dict, tier: str) -> None:
@@ -111,6 +91,30 @@ def _settings_set_service_tier(config: dict, tier: str) -> None:
     config["service_tiers"] = configured
 
 
+def _settings_disabled_tools(config: dict) -> list:
+    """A mutable copy of ``disabled_tools``, treating a malformed value as empty."""
+    raw_disabled = config.get("disabled_tools", [])
+    return list(raw_disabled) if isinstance(raw_disabled, list) else []
+
+
+def _settings_reset_notes(reset_effort, reset_tier) -> str:
+    """Suffixes for a save that also reset dependent settings to their defaults."""
+    notes = ""
+    if reset_effort is not None:
+        notes += " (reasoning effort reset to default)"
+    if reset_tier is not None:
+        notes += " (processing tier reset to standard)"
+    return notes
+
+
+def _settings_clear_model_warning(edit: dict) -> None:
+    for key in (
+        "model_validation_warning",
+        "model_validation_suggestion",
+        "model_warning_actions",
+        "model_warning_selection",
+    ):
+        edit.pop(key, None)
 
 
 def _settings_has_api_key(config: dict) -> tuple[bool, str]:
@@ -207,8 +211,7 @@ def _settings_apply_quick(row: dict, config: dict) -> tuple[dict, str] | None:
 
     if kind == "tool_bool":
         name = row["tool_name"]
-        raw_disabled = config.get("disabled_tools", [])
-        disabled = list(raw_disabled) if isinstance(raw_disabled, list) else []
+        disabled = _settings_disabled_tools(config)
         if name in disabled:
             disabled.remove(name)
             state = "on"
@@ -263,8 +266,7 @@ def _settings_reset_row(row: dict, config: dict) -> tuple[dict, str]:
     key = row["key"]
     if row["kind"] == "tool_bool":
         name = row["tool_name"]
-        raw_disabled = config.get("disabled_tools", [])
-        disabled = list(raw_disabled) if isinstance(raw_disabled, list) else []
+        disabled = _settings_disabled_tools(config)
         if name in disabled:
             disabled.remove(name)
             config["disabled_tools"] = disabled
@@ -301,12 +303,7 @@ def _settings_reset_row(row: dict, config: dict) -> tuple[dict, str]:
     reset_tier = reconcile_service_tier(config) if key in ("model", "provider", "base_url") else None
     if not _settings_save_validated(original, config):
         return original, "config validation failed"
-    message = f"reset {row['label']}"
-    if reset_effort is not None:
-        message += " (reasoning effort reset to default)"
-    if reset_tier is not None:
-        message += " (processing tier reset to standard)"
-    return original, message
+    return original, f"reset {row['label']}{_settings_reset_notes(reset_effort, reset_tier)}"
 
 
 def _settings_reset_action_bar(
@@ -324,8 +321,7 @@ def _settings_reset_action_bar(
         current = _settings_value_text(row, config).plain
         default_config = dict(config)
         if row["kind"] == "tool_bool":
-            raw_disabled = config.get("disabled_tools", [])
-            disabled = list(raw_disabled) if isinstance(raw_disabled, list) else []
+            disabled = _settings_disabled_tools(config)
             if row["tool_name"] in disabled:
                 disabled.remove(row["tool_name"])
             default_config["disabled_tools"] = disabled
@@ -591,7 +587,6 @@ def _settings_editor_lines(
 
     if key == "provider":
         intro.append(Text(_clip_text("  Up/Down choose", inner_width), style="dim"))
-        choice_items = []
         prompt = ""
     elif _settings_is_model_picker_key(key):
         models = edit.get("model_choices")
@@ -605,7 +600,6 @@ def _settings_editor_lines(
             notice = str(edit.get("catalog_notice") or "")
             if notice:
                 intro.append(Text(_clip_text(f"  {notice}", inner_width), style="green"))
-            choice_items = []
             prompt = (
                 "Auditor model number, name, or custom model"
                 if key == "auditor_model"
@@ -613,7 +607,6 @@ def _settings_editor_lines(
             )
         else:
             intro.append(Text(_clip_text(f"  default for {provider_label}: {_settings_default_model(config)}", inner_width), style="dim"))
-            choice_items = []
             prompt = "Model name"
     elif key == "api_key":
         if edit.get("readonly"):
@@ -639,20 +632,15 @@ def _settings_editor_lines(
         else:
             intro.append(Text(_clip_text(f"  provider: {provider_label}   env: {env_key}", inner_width), style="dim"))
             intro.append(Text(_clip_text("  type a new key, or type clear to remove the stored key", inner_width), style="dim"))
-        choice_items = []
         prompt = "API key"
     elif row["kind"] == "int":
-        choice_items = []
         prompt = "Value"
     else:
         empty_label = row.get("empty", "empty")
         intro.append(Text(_clip_text(f"  type clear for {empty_label}", inner_width), style="dim"))
-        choice_items = []
         prompt = row["label"]
 
-    if key == "provider":
-        pass
-    else:
+    if key != "provider":
         line = Text(no_wrap=True, overflow="crop")
         warning_active = bool(edit.get("model_validation_warning"))
         input_active = (
@@ -822,10 +810,7 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
         message = f"saved Provider: {_settings_value_text(row, config).plain}"
         if config.get("model") != old_model:
             message += f" (model: {config.get('model')})"
-        if reset_effort is not None:
-            message += " (reasoning effort reset to default)"
-        if reset_tier is not None:
-            message += " (processing tier reset to standard)"
+        message += _settings_reset_notes(reset_effort, reset_tier)
         return original, message, "green", True
 
     if key == "api_key":
@@ -870,17 +855,10 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
                 ),
             )
             action = actions[selected]["value"] if actions else "edit"
+            _settings_clear_model_warning(edit)
             if action == "edit":
-                edit.pop("model_validation_warning", None)
-                edit.pop("model_validation_suggestion", None)
-                edit.pop("model_warning_actions", None)
-                edit.pop("model_warning_selection", None)
                 return original, "Continue editing the model name.", "dim", False
             model = warning_model if action == "continue" else str(action)
-            edit.pop("model_validation_warning", None)
-            edit.pop("model_validation_suggestion", None)
-            edit.pop("model_warning_actions", None)
-            edit.pop("model_warning_selection", None)
         else:
             models = edit.get("model_choices")
             input_active = bool(edit.get("model_input_active"))
@@ -958,12 +936,8 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
         if not _settings_save_validated(original, config):
             edit["error"] = "Model change failed validation."
             return original, edit["error"], "red", False
-        display = model if model else AUDITOR_DEFAULT_MODEL_CHOICE
-        message = f"saved {row['label']}: {display}"
-        if reset_effort is not None:
-            message += " (reasoning effort reset to default)"
-        if reset_tier is not None:
-            message += " (processing tier reset to standard)"
+        display = model or AUDITOR_DEFAULT_MODEL_CHOICE
+        message = f"saved {row['label']}: {display}{_settings_reset_notes(reset_effort, reset_tier)}"
         return original, message, "yellow" if warning_model else "green", True
 
     if key == "system_prompt":
@@ -991,10 +965,8 @@ def _settings_commit_edit(edit: dict, config: dict) -> tuple[dict, str, str, boo
     if not _settings_save_validated(original, config):
         edit["error"] = "Invalid value for this setting."
         return original, edit["error"], "red", False
-    display = value if value else row.get("empty", "empty")
-    message = f"saved {row['label']}: {display}"
-    if reset_tier is not None:
-        message += " (processing tier reset to standard)"
+    display = value or row.get("empty", "empty")
+    message = f"saved {row['label']}: {display}{_settings_reset_notes(None, reset_tier)}"
     return original, message, "green", True
 
 

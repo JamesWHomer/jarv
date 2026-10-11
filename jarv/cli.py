@@ -75,6 +75,22 @@ def _print_pending_results(*, quiet: bool = False) -> None:
         _print_previous_uninstall_result()
 
 
+def _print_unknown_command(command: str, help_command: str | None) -> None:
+    console = _console()
+    console.print(f"[red]Unknown command:[/red] {command}")
+    _print_command_suggestions(command)
+    if help_command is not None:
+        console.print(f"[dim]Run [bold]{help_command}[/bold] for a list of commands.[/dim]")
+
+
+def _is_command_query(query_parts: list[str]) -> bool:
+    """A slash command, or the permanent "jarv help" alias (help as the sole word)."""
+    return bool(query_parts) and (
+        query_parts[0].startswith("/")
+        or (len(query_parts) == 1 and query_parts[0].lower() == "help")
+    )
+
+
 def _dispatch_command_query(query_parts: list[str]) -> None:
     if len(query_parts) == 1 and query_parts[0].lower() == "help":
         from .commands import print_help
@@ -83,10 +99,7 @@ def _dispatch_command_query(query_parts: list[str]) -> None:
         return
     command = query_parts[0].lower()
     if not _run_slash_command(command, query_parts[1:], exit_on_error=True):
-        console = _console()
-        console.print(f"[red]Unknown command:[/red] {command}")
-        _print_command_suggestions(command)
-        console.print("[dim]Run [bold]jarv /help[/bold] for a list of commands.[/dim]")
+        _print_unknown_command(command, "jarv /help")
         raise SystemExit(2)
 
 
@@ -246,11 +259,7 @@ def _handle_heads_up_slash_command(
 
     handled = _run_slash_command(command, rest)
     if not handled:
-        console = _console()
-        console.print(f"[red]Unknown command:[/red] {command}")
-        _print_command_suggestions(command)
-        if unknown_help_hint:
-            console.print("[dim]Run [bold]/help[/bold] for a list of commands.[/dim]")
+        _print_unknown_command(command, "/help" if unknown_help_hint else None)
         return config, client
     if args is not None and command in CONFIG_MUTATING_COMMANDS:
         return _reload_heads_up_runtime(config, client, args)
@@ -286,7 +295,7 @@ def _maybe_command(first_word: str, rest: list[str]) -> tuple[bool, str, list[st
     if not takes_rest and rest:
         return None
 
-    full_input = " ".join([first_word] + rest) if rest else first_word
+    full_input = " ".join([first_word, *rest])
     console = _console()
     console.print(f"\n[yellow]Did you mean the command [bold]/{name}[/bold] or a message to jarv?[/yellow]")
     console.print(f"  [bold]1.[/bold] Run command [cyan]/{name}[/cyan]")
@@ -454,11 +463,9 @@ def _compose_query(query_parts: list[str], stdin_text: str = "", stdin_truncated
         return query
 
     stdin_body = stdin_text.rstrip("\n")
-    if query:
-        suffix = "\n\n[stdin truncated because it exceeded max_stdin_chars]" if stdin_truncated else ""
-        return f"{query}\n\n{STDIN_LABEL}:\n```text\n{stdin_body}{suffix}\n```"
-
     suffix = "\n\n[stdin truncated because it exceeded max_stdin_chars]" if stdin_truncated else ""
+    if query:
+        return f"{query}\n\n{STDIN_LABEL}:\n```text\n{stdin_body}{suffix}\n```"
     return f"{stdin_body}{suffix}".strip()
 
 
@@ -476,10 +483,7 @@ def main() -> None:
         raise SystemExit(0)
 
     query_parts = sys.argv[1:]
-    if query_parts and (
-        query_parts[0].startswith("/") or
-        (len(query_parts) == 1 and query_parts[0].lower() == "help")
-    ) and not any(value.startswith("-") for value in query_parts):
+    if _is_command_query(query_parts) and not any(value.startswith("-") for value in query_parts):
         # With no option-looking words argparse would only copy positionals.
         # Mixed options still take its full validation/diagnostic path.
         _command_entry(query_parts)
@@ -498,7 +502,7 @@ def main() -> None:
         parser.error("--prompt-file cannot be combined with a positional prompt")
     if args.session is not None and (not args.session.strip() or len(args.session) > 128):
         parser.error("--session must contain 1–128 characters and cannot be blank")
-    if args.query and (args.query[0].startswith("/") or (len(args.query) == 1 and args.query[0].lower() == "help")):
+    if _is_command_query(args.query):
         _reject_command_flags(parser, args)
 
     output = None
@@ -571,13 +575,8 @@ def _main(parser, args, output=None) -> None:
     console = _console()
     _print_pending_results(quiet=args.quiet)
 
-    # "jarv help" permanent alias (only when help is the sole argument)
-    if args.prompt_file is None and len(query_parts) == 1 and query_parts[0].lower() == "help":
-        _dispatch_command_query(query_parts)
-        return
-
     # Prompt-file content is always a prompt, even if it begins with a slash.
-    if query_parts and query_parts[0].startswith("/") and args.prompt_file is None:
+    if args.prompt_file is None and _is_command_query(query_parts):
         _dispatch_command_query(query_parts)
         return
 
@@ -608,9 +607,7 @@ def _main(parser, args, output=None) -> None:
         result = cmd_setup()
         if not isinstance(result, dict) or not is_setup_complete(result):
             sys.exit(result if type(result) is int else 1)
-        config = result
-
-        config = _apply_cli_overrides(config, args)
+        config = _apply_cli_overrides(result, args)
 
     if not validate_config(config):
         sys.exit(1)

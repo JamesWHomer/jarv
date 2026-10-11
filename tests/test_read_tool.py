@@ -1,3 +1,4 @@
+import json
 import subprocess
 import sys
 import textwrap
@@ -11,9 +12,10 @@ from jarv.artifacts import ArtifactStore
 from jarv.cancellation import CancellationToken, TurnCancelled
 from jarv.config import DEFAULT_CONFIG
 from jarv.model_catalog import ModelImageCapability
+from jarv.orchestrator import AgentNode, dispatch_parallel_safe_tool_batch
+from jarv.provider import ToolCallDone
 from jarv.read_tool import (
     READ_TOOL,
-    dispatch_read_batch,
     dispatch_read_tool,
     read_tool_for_config,
     retain_command_output,
@@ -24,6 +26,24 @@ from jarv.retained_outputs import (
     save_retained_output_store,
 )
 from jarv.web import FetchedWebBytes
+
+
+def _read_batch(args_list, *, cancellation_token=None):
+    """Run reads through the agent's parallel-safe tool batch."""
+    calls = [
+        ToolCallDone(id=str(i), call_id=str(i), name="read", arguments=json.dumps(args))
+        for i, args in enumerate(args_list)
+    ]
+    results = dispatch_parallel_safe_tool_batch(
+        calls,
+        node=AgentNode("root", 0, None, "test", False),
+        store=ArtifactStore(),
+        client=None,
+        config=DEFAULT_CONFIG,
+        retained_store=RetainedOutputStore(),
+        cancellation_token=cancellation_token,
+    )
+    return [result.output for result in results]
 
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\npngdata"
@@ -463,12 +483,8 @@ def test_read_batch_handles_concurrent_pdf_reads_in_order(tmp_path):
     first.write_bytes(_minimal_pdf(["First batch PDF"]))
     second.write_bytes(_minimal_pdf(["Second batch PDF"]))
 
-    outputs = dispatch_read_batch(
-        [{"input": str(first), "size": 1000}, {"input": str(second), "size": 1000}],
-        visible_labels=set(),
-        artifact_store=ArtifactStore(),
-        retained_store=RetainedOutputStore(),
-        config=DEFAULT_CONFIG,
+    outputs = _read_batch(
+        [{"input": str(first), "size": 1000}, {"input": str(second), "size": 1000}]
     )
 
     assert "First batch PDF" in outputs[0]
@@ -708,14 +724,8 @@ def test_read_batch_runs_concurrently_and_preserves_order(monkeypatch):
             second_finished.set()
         return label
 
-    monkeypatch.setattr("jarv.read_tool.dispatch_read_tool", fake_dispatch)
-    outputs = dispatch_read_batch(
-        [{"input": "first"}, {"input": "second"}],
-        visible_labels=set(),
-        artifact_store=ArtifactStore(),
-        retained_store=RetainedOutputStore(),
-        config=DEFAULT_CONFIG,
-    )
+    monkeypatch.setattr("jarv.orchestrator.dispatch_read_tool", fake_dispatch)
+    outputs = _read_batch([{"input": "first"}, {"input": "second"}])
     assert completion_order == ["second", "first"]
     assert outputs == ["first", "second"]
 
@@ -725,11 +735,6 @@ def test_read_batch_propagates_cancellation():
     token.cancel()
 
     with pytest.raises(TurnCancelled):
-        dispatch_read_batch(
-            [{"input": "missing"}, {"input": "missing"}],
-            visible_labels=set(),
-            artifact_store=ArtifactStore(),
-            retained_store=RetainedOutputStore(),
-            config=DEFAULT_CONFIG,
-            cancellation_token=token,
+        _read_batch(
+            [{"input": "missing"}, {"input": "missing"}], cancellation_token=token
         )

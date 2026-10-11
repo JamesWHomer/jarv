@@ -69,24 +69,8 @@ def _frame_prompt(frame: list) -> str:
     for item in frame:
         if _is_user(item):
             # Collapse whitespace so a multi-line prompt stays a single row in
-            # the tree view (mirrors _frame_response, which flattens too).
+            # the tree view.
             return " ".join(_history_content_to_str(item.get("content", "")).split())
-    return ""
-
-
-def _frame_response(frame: list) -> str:
-    for item in frame:
-        if isinstance(item, dict) and str(item.get("role", "")).lower() == "assistant":
-            text = _history_content_to_str(item.get("content", "")).strip()
-            if text:
-                return text.replace("\n", " ")
-    tools = [
-        item.get("name", "tool")
-        for item in frame
-        if isinstance(item, dict) and item.get("type") == "function_call"
-    ]
-    if tools:
-        return "↳ " + ", ".join(dict.fromkeys(tools))
     return ""
 
 
@@ -98,7 +82,6 @@ class TreeNode:
     frame_id: str
     items: list
     prompt_text: str
-    response_preview: str
     depth: int
     parent: "TreeNode | None" = None
     children: list["TreeNode"] = field(default_factory=list)
@@ -168,7 +151,6 @@ def build_tree(history: list, branches: list[dict]) -> TreeModel:
             frame_id=_frame_id(frame, f"a{i}"),
             items=frame,
             prompt_text=_frame_prompt(frame),
-            response_preview=_frame_response(frame),
             depth=0,
             parent=prev,
             on_active_path=True,
@@ -192,7 +174,6 @@ def build_tree(history: list, branches: list[dict]) -> TreeModel:
             frame_id=_frame_id(items, f"b{i}"),
             items=items,
             prompt_text=_frame_prompt(items),
-            response_preview=_frame_response(items),
             depth=0,
             on_active_path=False,
         )

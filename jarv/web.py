@@ -31,7 +31,7 @@ from .tool_outputs import with_tool_outcome
 
 DUCKDUCKGO_HTML_URL = "https://html.duckduckgo.com/html/"
 SEARCH_ENGINE_LABEL = "DuckDuckGo"
-from .pdf_extract import PDF_MAGIC, is_pdf_bytes, is_pdf_media_type
+from .pdf_extract import PDF_MAGIC, is_pdf_media_type
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_REDIRECTS = 5
 FRAGMENT_MIN_CHARS = 200
@@ -743,8 +743,7 @@ def _request_response_with_budget(
                 size = 0
                 prefix = b""
                 for chunk in _limited_response_bytes(response, effective_max_bytes, cancellation_token):
-                    if cancellation_token is not None:
-                        cancellation_token.throw_if_cancelled()
+                    cancellation_token.throw_if_cancelled()
                     size += len(chunk)
                     if size > effective_max_bytes:
                         raise WebToolError(
@@ -768,26 +767,22 @@ def _request_response_with_budget(
                 )
         raise WebToolError(f"too many redirects (maximum {MAX_REDIRECTS})")
     except httpx.TimeoutException as exc:
-        if cancellation_token is not None:
-            cancellation_token.throw_if_cancelled()
+        cancellation_token.throw_if_cancelled()
         raise WebToolError(
             f"request timed out after {timeout:g} seconds", kind="timeout", retryable=True,
         ) from exc
     except httpx.HTTPError as exc:
-        if cancellation_token is not None:
-            cancellation_token.throw_if_cancelled()
+        cancellation_token.throw_if_cancelled()
         raise WebToolError(
             f"request failed: {exc}",
             retryable=isinstance(exc, (httpx.NetworkError, httpx.RemoteProtocolError)),
         ) from exc
     except (httpx.InvalidURL, UnicodeError) as exc:
-        if cancellation_token is not None:
-            cancellation_token.throw_if_cancelled()
+        cancellation_token.throw_if_cancelled()
         raise WebToolError(f"invalid URL: {exc}") from exc
     except RuntimeError:
         # Closing a client at cancellation/deadline can race with stream setup.
-        if cancellation_token is not None:
-            cancellation_token.throw_if_cancelled()
+        cancellation_token.throw_if_cancelled()
         raise
     finally:
         unregister()
@@ -818,8 +813,7 @@ def _is_textual_media_type(media_type: str) -> bool:
             "application/atom+xml",
             "application/xhtml+xml",
         }
-        or media_type.endswith("+json")
-        or media_type.endswith("+xml")
+        or media_type.endswith(("+json", "+xml"))
     )
 
 
@@ -1192,31 +1186,6 @@ def fragment_note(content: FetchedWebContent) -> str | None:
     if content.fragment_applied:
         return f"Fragment: #{content.fragment} (section extracted)"
     return f"Fragment: #{content.fragment} not found; returning full page"
-
-
-def fetch_web(
-    url: str,
-    *,
-    timeout: float,
-    cancellation_token: CancellationToken | None = None,
-) -> str:
-    content = fetch_web_content(
-        url,
-        timeout=timeout,
-        cancellation_token=cancellation_token,
-    )
-    lines = [
-        f"Requested URL: {content.requested_url}",
-        f"Final URL: {content.final_url}",
-        f"Content-Type: {content.media_type or 'unknown'}",
-    ]
-    if content.title:
-        lines.append(f"Title: {content.title}")
-    note = fragment_note(content)
-    if note:
-        lines.append(note)
-    lines.extend(["", content.text])
-    return "\n".join(lines)
 
 
 def web_timeout(config: dict) -> float:

@@ -15,9 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from .cancellation import CancellationToken, TurnCancelled
-from .display import console
 from .jsonutil import iter_json_objects, salvage_json_object
-from .provider import resolve_api_key, PROVIDERS, LOCAL_PROVIDERS
+from .provider import PROVIDERS
 from .provider_catalog import configured_service_tier
 from .tool_outputs import tool_output_failed
 from .usage import estimate_context_breakdown, record_response_usage
@@ -157,39 +156,19 @@ def audit_command(
     provider = config.get("provider", "openai")
     info = PROVIDERS.get(provider, {})
     backend = info.get("backend", "openai_compat")
+    options = dict(
+        usage_path=usage_path,
+        session_id=session_id,
+        global_usage_path=global_usage_path,
+        cancellation_token=cancellation_token,
+    )
 
     try:
         if backend == "anthropic":
-            return _call_anthropic(
-                config,
-                model,
-                user_message,
-                usage_path=usage_path,
-                session_id=session_id,
-                global_usage_path=global_usage_path,
-                cancellation_token=cancellation_token,
-            )
-        elif backend == "gemini":
-            return _call_gemini(
-                config,
-                model,
-                user_message,
-                usage_path=usage_path,
-                session_id=session_id,
-                global_usage_path=global_usage_path,
-                cancellation_token=cancellation_token,
-            )
-        else:
-            return _call_openai_compat(
-                config,
-                model,
-                user_message,
-                info,
-                usage_path=usage_path,
-                session_id=session_id,
-                global_usage_path=global_usage_path,
-                cancellation_token=cancellation_token,
-            )
+            return _call_anthropic(config, model, user_message, **options)
+        if backend == "gemini":
+            return _call_gemini(config, model, user_message, **options)
+        return _call_openai_compat(config, model, user_message, info, **options)
     except TurnCancelled:
         raise
     except Exception as e:
@@ -252,25 +231,50 @@ def _call_openai_compat(
     if configured_service_tier(config) == "ultrafast":
         config = {**config, "service_tiers": {**config.get("service_tiers", {}), "openai": "standard"}}
     client = _get_auditor_client("openai_compat", config, info)
+    if cancellation_token is not None:
+        cancellation_token.throw_if_cancelled()
 
-    try:
+    def send(messages):
+        response = create_chat(
+            client,
+            build_chat_payload(**_openai_compat_kwargs(config, model, info, messages), stream=False),
+            cancellation_token=cancellation_token,
+        )
         if cancellation_token is not None:
             cancellation_token.throw_if_cancelled()
+        return response
+
+    return _audit_with_retry(
+        send,
+        config=config,
+        model=model,
+        user_message=user_message,
+        usage_path=usage_path,
+        session_id=session_id,
+        global_usage_path=global_usage_path,
+        cancellation_token=cancellation_token,
+    )
+
+
+def _audit_with_retry(
+    send,
+    *,
+    config: dict,
+    model: str,
+    user_message: str,
+    usage_path: Path | None,
+    session_id: str | None,
+    global_usage_path: Path | None,
+    cancellation_token: CancellationToken | None,
+) -> tuple[bool, str]:
+    """Ask the auditor, re-asking once with a stricter prompt if unparseable.
+
+    ``send(messages)`` performs one provider request and returns its response.
+    """
+    try:
         for retry in (False, True):
             messages = _auditor_messages(user_message, retry=retry)
-            kwargs = _openai_compat_kwargs(
-                config,
-                model,
-                info,
-                messages,
-            )
-            response = create_chat(
-                client,
-                build_chat_payload(**kwargs, stream=False),
-                cancellation_token=cancellation_token,
-            )
-            if cancellation_token is not None:
-                cancellation_token.throw_if_cancelled()
+            response = send(messages)
             content = _response_text(response)
             _record_auditor_response(
                 usage_path,
@@ -407,39 +411,32 @@ def _call_anthropic(
     from .anthropic_http import build_payload, create_message
 
     client = _get_auditor_client("anthropic", config)
-    try:
-        for retry in (False, True):
-            messages = _auditor_messages(user_message, retry=retry)
-            response = create_message(
-                client,
-                build_payload(
-                    config,
-                    model,
-                    messages[0]["content"],
-                    [],
-                    [messages[1]],
-                    max_tokens=100,
-                ),
-                cancellation_token=cancellation_token,
-                max_retries=int(config.get("anthropic_max_retries", 2)),
-            )
-            content = _response_text(response)
-            _record_auditor_response(
-                usage_path,
-                session_id,
+
+    def send(messages):
+        return create_message(
+            client,
+            build_payload(
+                config,
                 model,
-                response,
-                messages,
-                content,
-                config=config,
-                global_usage_path=global_usage_path,
-            )
-            parsed = _parse_response(content)
-            if retry or not _is_parse_failure(parsed):
-                return parsed
-    finally:
-        if cancellation_token is not None:
-            cancellation_token.throw_if_cancelled()
+                messages[0]["content"],
+                [],
+                [messages[1]],
+                max_tokens=100,
+            ),
+            cancellation_token=cancellation_token,
+            max_retries=int(config.get("anthropic_max_retries", 2)),
+        )
+
+    return _audit_with_retry(
+        send,
+        config=config,
+        model=model,
+        user_message=user_message,
+        usage_path=usage_path,
+        session_id=session_id,
+        global_usage_path=global_usage_path,
+        cancellation_token=cancellation_token,
+    )
 
 
 def _call_gemini(
@@ -455,40 +452,33 @@ def _call_gemini(
     from .gemini_http import build_payload, generate_content
 
     client = _get_auditor_client("gemini", config)
-    try:
-        for retry in (False, True):
-            messages = _auditor_messages(user_message, retry=retry)
-            response = generate_content(
-                client,
+
+    def send(messages):
+        return generate_content(
+            client,
+            model,
+            build_payload(
+                config,
                 model,
-                build_payload(
-                    config,
-                    model,
-                    messages[0]["content"],
-                    [],
-                    [messages[1]],
-                    max_output_tokens=100,
-                ),
-                cancellation_token=cancellation_token,
-                max_retries=int(config.get("gemini_max_retries", 2)),
-            )
-            content = _response_text(response)
-            _record_auditor_response(
-                usage_path,
-                session_id,
-                model,
-                response,
-                messages,
-                content,
-                config=config,
-                global_usage_path=global_usage_path,
-            )
-            parsed = _parse_response(content)
-            if retry or not _is_parse_failure(parsed):
-                return parsed
-    finally:
-        if cancellation_token is not None:
-            cancellation_token.throw_if_cancelled()
+                messages[0]["content"],
+                [],
+                [messages[1]],
+                max_output_tokens=100,
+            ),
+            cancellation_token=cancellation_token,
+            max_retries=int(config.get("gemini_max_retries", 2)),
+        )
+
+    return _audit_with_retry(
+        send,
+        config=config,
+        model=model,
+        user_message=user_message,
+        usage_path=usage_path,
+        session_id=session_id,
+        global_usage_path=global_usage_path,
+        cancellation_token=cancellation_token,
+    )
 
 
 def _is_parse_failure(parsed: tuple[bool, str]) -> bool:

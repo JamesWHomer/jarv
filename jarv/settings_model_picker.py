@@ -110,36 +110,6 @@ def _settings_provider_keys() -> list[str]:
     return [key for key, _label, _model in _settings_provider_choices()]
 
 
-def _settings_resolve_provider(choice: str) -> str | None:
-    raw = choice.strip()
-    if not raw:
-        return None
-    choices = _settings_provider_choices()
-    try:
-        idx = int(raw)
-        if 1 <= idx <= len(choices):
-            return choices[idx - 1][0]
-        return None
-    except ValueError:
-        pass
-
-    lowered = raw.lower()
-    for key, label, _model in choices:
-        compact_label = label.split("(", 1)[0].strip().lower()
-        if lowered in (key.lower(), label.lower(), compact_label):
-            return key
-    # Fuzzy fallback for the setup wizard's free-typed input ("op" -> openai):
-    # match on normalized substrings and key prefixes. Exact/number matches above
-    # win first, so this only fires when nothing precise was typed.
-    needle = lowered.replace(" ", "").replace("_", "")
-    for key, label, _model in choices:
-        key_norm = key.lower().replace("_", "")
-        label_norm = label.lower().replace(" ", "").replace("_", "")
-        if needle in key_norm or needle in label_norm or key_norm.startswith(needle):
-            return key
-    return None
-
-
 def _settings_resolve_model(
     config: dict,
     choice: str,
@@ -321,103 +291,6 @@ def _settings_column_layout(inner_width: int) -> tuple[int, int, int, int]:
     value_start = prefix_width + label_width + 2
     description_start = value_start + value_width + 2
     return label_width, value_width, value_start, description_start
-
-
-def _settings_choice_grid_lines(
-    items: list[tuple[int, str, str]],
-    inner_width: int,
-    *,
-    max_lines: int | None = None,
-    max_columns: int = 1,
-    more_hint: str = "type a number/name",
-    align_descriptions: bool = False,
-) -> list[Text]:
-    if not items:
-        return []
-    if max_lines is not None and max_lines <= 0:
-        return []
-
-    indent = "  "
-    gap = "  "
-    usable_width = max(1, inner_width - len(indent))
-    if max_columns >= 3 and usable_width >= 96:
-        columns = 3
-    elif max_columns >= 2 and usable_width >= 58:
-        columns = 2
-    else:
-        columns = 1
-    columns = max(1, min(columns, max_columns, len(items)))
-    row_count = (len(items) + columns - 1) // columns
-    cell_width = max(8, (usable_width - (columns - 1) * len(gap)) // columns)
-    single_column_primary_width = min(
-        max(len(primary) for _idx, primary, _secondary in items),
-        max(1, cell_width // 2),
-    )
-    _label_width, _value_width, _value_start, description_start = (
-        _settings_column_layout(inner_width)
-    )
-
-    def _cell(idx: int, primary: str, secondary: str) -> str:
-        marker = f"{idx:>2}. "
-        body_width = max(1, cell_width - len(marker))
-        if not secondary or body_width < 18:
-            return marker + _clip_text(primary or secondary, body_width)
-        if columns == 1:
-            if align_descriptions:
-                secondary_column = max(
-                    len(indent) + len(marker) + 3,
-                    description_start,
-                )
-                primary_width = max(
-                    1,
-                    secondary_column - len(indent) - len(marker) - 2,
-                )
-                remaining = max(0, inner_width - secondary_column)
-                cell = marker + f"{_clip_text(primary, primary_width):<{primary_width}}"
-                if remaining:
-                    cell += "  " + _clip_text(secondary, remaining)
-                return cell
-            primary_width = min(single_column_primary_width, body_width)
-            remaining = max(0, body_width - primary_width - 2)
-            cell = marker + f"{_clip_text(primary, primary_width):<{primary_width}}"
-            if remaining:
-                cell += "  " + _clip_text(secondary, remaining)
-            return cell
-
-        secondary_width = min(18, max(8, body_width // 3))
-        primary_width = max(1, body_width - secondary_width - 1)
-        if primary_width < 10:
-            return marker + _clip_text(primary, body_width)
-        return (
-            marker
-            + f"{_clip_text(primary, primary_width):<{primary_width}}"
-            + " "
-            + _clip_text(secondary, secondary_width)
-        )
-
-    rows: list[list[str]] = []
-    for row_idx in range(row_count):
-        cells: list[str] = []
-        for col_idx in range(columns):
-            item_idx = row_idx + col_idx * row_count
-            if item_idx < len(items):
-                cells.append(_cell(*items[item_idx]))
-        rows.append(cells)
-
-    hidden = 0
-    if max_lines is not None and len(rows) > max_lines:
-        visible_rows = max(0, max_lines - 1)
-        hidden = sum(len(row) for row in rows[visible_rows:])
-        rows = rows[:visible_rows]
-
-    lines = [
-        Text(_clip_text(indent + gap.join(cells), inner_width), style="dim", no_wrap=True, overflow="crop")
-        for cells in rows
-    ]
-    if hidden:
-        label = "option" if hidden == 1 else "options"
-        lines.append(Text(_clip_text(f"  ... {hidden} more {label}; {more_hint}", inner_width), style="dim"))
-    return lines
 
 
 def _settings_model_update_notice(
@@ -662,26 +535,14 @@ def _settings_model_choice_lines(
             f"{_clip_text(name, model_width):<{model_width}}",
             style="bold bright_white" if is_bright else "dim",
         )
-        line.append(gap, style="dim")
-        line.append(
+        for cell in (
             f"{input_price:>{input_width}}",
-            style="white" if is_bright else "dim",
-        )
-        line.append(gap, style="dim")
-        line.append(
             f"{cached_price:>{cached_width}}",
-            style="white" if is_bright else "dim",
-        )
-        line.append(gap, style="dim")
-        line.append(
             f"{output_price:>{output_width}}",
-            style="white" if is_bright else "dim",
-        )
-        line.append(gap, style="dim")
-        line.append(
             f"{_clip_text(tier, tier_width):<{tier_width}}",
-            style="white" if is_bright else "dim",
-        )
+        ):
+            line.append(gap, style="dim")
+            line.append(cell, style="white" if is_bright else "dim")
         rows.append(line)
 
     if hidden_count:

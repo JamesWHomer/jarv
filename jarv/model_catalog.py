@@ -6,9 +6,7 @@ import hashlib
 import json
 import re
 import threading
-import tempfile
 import time
-from contextlib import suppress
 from functools import lru_cache
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -16,6 +14,7 @@ from typing import Any, Callable
 from urllib.parse import urlsplit, urlunsplit
 
 from . import models_dev
+from .jsonutil import write_json_atomic
 from .paths import CONFIG_DIR
 from .provider_auth import resolve_api_key
 from .provider_catalog import FALLBACK_PROVIDER_MODELS, LOCAL_PROVIDERS, PROVIDERS
@@ -79,6 +78,10 @@ def catalog_cache_key(config: dict) -> str:
     return f"{provider}|{_catalog_endpoint(config)}"
 
 
+def _cache_key_digest(config: dict) -> str:
+    return hashlib.sha256(catalog_cache_key(config).encode("utf-8")).hexdigest()
+
+
 def _legacy_cache_path(provider: str) -> Path:
     safe_provider = re.sub(r"[^a-zA-Z0-9_.-]+", "_", provider)
     return CACHE_DIR / f"{safe_provider}.json"
@@ -87,7 +90,7 @@ def _legacy_cache_path(provider: str) -> Path:
 def _cache_path(config: dict | str) -> Path:
     config = _catalog_config(config)
     provider = str(config.get("provider", "openai"))
-    digest = hashlib.sha256(catalog_cache_key(config).encode("utf-8")).hexdigest()[:24]
+    digest = _cache_key_digest(config)[:24]
     legacy = _legacy_cache_path(provider)
     return legacy.with_name(f"{legacy.stem}-{digest}.json")
 
@@ -99,28 +102,14 @@ def _openrouter_endpoints_path(model: str) -> Path:
 
 def _write_cache(config: dict | str, models: list[CatalogModel]) -> None:
     config = _catalog_config(config)
-    temporary = None
-    try:
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "provider": str(config.get("provider", "openai")),
-            "cache_key": hashlib.sha256(catalog_cache_key(config).encode("utf-8")).hexdigest(),
-            "fetched_at": time.time(),
-            "models": [asdict(model) for model in models],
-        }
-        path = _cache_path(config)
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=CACHE_DIR,
-                                         suffix=".tmp", delete=False) as stream:
-            temporary = Path(stream.name)
-            json.dump(payload, stream, indent=2)
-        temporary.replace(path)
+    payload = {
+        "provider": str(config.get("provider", "openai")),
+        "cache_key": _cache_key_digest(config),
+        "fetched_at": time.time(),
+        "models": [asdict(model) for model in models],
+    }
+    if write_json_atomic(_cache_path(config), payload, indent=2):
         model_pricing_values.cache_clear()
-    except OSError:
-        pass
-    finally:
-        if temporary is not None:
-            with suppress(OSError):
-                temporary.unlink(missing_ok=True)
 
 
 def _read_cache(config: dict | str) -> list[CatalogModel]:
@@ -136,8 +125,7 @@ def _read_cache(config: dict | str) -> list[CatalogModel]:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return []
     items = payload.get("models") if isinstance(payload, dict) else None
-    expected_key = hashlib.sha256(catalog_cache_key(config).encode("utf-8")).hexdigest()
-    if isinstance(payload, dict) and payload.get("cache_key") != expected_key:
+    if isinstance(payload, dict) and payload.get("cache_key") != _cache_key_digest(config):
         return []
     if not isinstance(items, list):
         return []
@@ -167,7 +155,13 @@ def _timestamp(value: Any) -> float:
     return 0
 
 
-def _normalize_openai_models(payload: dict) -> list[CatalogModel]:
+def _normalize_data_models(
+    payload: dict,
+    *,
+    created_key: str,
+    name_key: str,
+    metadata_keys: tuple[str, ...],
+) -> list[CatalogModel]:
     data = payload.get("data")
     if not isinstance(data, list):
         return []
@@ -177,50 +171,38 @@ def _normalize_openai_models(payload: dict) -> list[CatalogModel]:
             continue
         result.append(CatalogModel(
             id=item["id"],
-            created=_timestamp(item.get("created")),
-            display_name=str(item.get("name") or ""),
-            metadata={
-                key: item[key]
-                for key in (
-                    "architecture",
-                    "context_length",
-                    "canonical_slug",
-                    "default_parameters",
-                    "expiration_date",
-                    "pricing",
-                    "supported_parameters",
-                    "top_provider",
-                )
-                if key in item
-            },
+            created=_timestamp(item.get(created_key)),
+            display_name=str(item.get(name_key) or ""),
+            metadata={key: item[key] for key in metadata_keys if key in item},
         ))
     return result
+
+
+def _normalize_openai_models(payload: dict) -> list[CatalogModel]:
+    return _normalize_data_models(
+        payload,
+        created_key="created",
+        name_key="name",
+        metadata_keys=(
+            "architecture",
+            "context_length",
+            "canonical_slug",
+            "default_parameters",
+            "expiration_date",
+            "pricing",
+            "supported_parameters",
+            "top_provider",
+        ),
+    )
 
 
 def _normalize_anthropic_models(payload: dict) -> list[CatalogModel]:
-    data = payload.get("data")
-    if not isinstance(data, list):
-        return []
-    result = []
-    for item in data:
-        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
-            continue
-        result.append(CatalogModel(
-            id=item["id"],
-            created=_timestamp(item.get("created_at")),
-            display_name=str(item.get("display_name") or ""),
-            metadata={
-                key: item[key]
-                for key in (
-                    "capabilities",
-                    "max_input_tokens",
-                    "max_tokens",
-                    "type",
-                )
-                if key in item
-            },
-        ))
-    return result
+    return _normalize_data_models(
+        payload,
+        created_key="created_at",
+        name_key="display_name",
+        metadata_keys=("capabilities", "max_input_tokens", "max_tokens", "type"),
+    )
 
 
 def _normalize_gemini_models(payload: dict) -> list[CatalogModel]:
@@ -310,27 +292,11 @@ def discover_openrouter_endpoints(
 
 
 def _write_openrouter_endpoints(model: str, endpoints: list[dict]) -> None:
-    temporary = None
-    try:
-        path = _openrouter_endpoints_path(model)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "model": model,
-            "fetched_at": time.time(),
-            "endpoints": endpoints,
-        }
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=path.parent, suffix=".tmp", delete=False,
-        ) as stream:
-            temporary = Path(stream.name)
-            json.dump(payload, stream, indent=2)
-        temporary.replace(path)
-    except OSError:
-        pass
-    finally:
-        if temporary is not None:
-            with suppress(OSError):
-                temporary.unlink(missing_ok=True)
+    write_json_atomic(
+        _openrouter_endpoints_path(model),
+        {"model": model, "fetched_at": time.time(), "endpoints": endpoints},
+        indent=2,
+    )
 
 
 def cached_openrouter_endpoints(model: str | None) -> list[dict[str, Any]]:
@@ -371,7 +337,6 @@ def cached_provider_model(
     model: str | None = None,
 ) -> CatalogModel | None:
     """Return an exact model entry from the active provider cache."""
-    provider = str(config.get("provider", "openai"))
     target = str(model or config.get("model") or "").strip().lower()
     if not target:
         return None
@@ -409,9 +374,7 @@ def _metadata_image_input_supported(metadata: dict[str, Any]) -> bool | None:
         modality = architecture.get("modality")
         if isinstance(modality, str) and modality.strip():
             input_side = modality.split("->", 1)[0].lower()
-            if "image" in re.split(r"[^a-z0-9]+", input_side):
-                return True
-            return False
+            return "image" in re.split(r"[^a-z0-9]+", input_side)
 
     capabilities = metadata.get("capabilities")
     if isinstance(capabilities, dict):
@@ -573,21 +536,6 @@ def model_pricing_values(
         cached,
         _format_price_rate(prices["output"]),
     )
-
-
-def model_pricing_summary(provider: str | None, model: str | None) -> str:
-    """Return compact catalog pricing for a model picker row."""
-    return " / ".join(model_pricing_values(provider, model))
-
-
-def model_choice_description(
-    provider: str | None,
-    model: str,
-    description: str,
-) -> str:
-    """Combine a recommendation label with its catalog pricing."""
-    pricing = model_pricing_summary(provider, model)
-    return f"{pricing} | {description}" if description else pricing
 
 
 def _version_key(*parts: str | None) -> tuple[int, ...]:
@@ -830,6 +778,14 @@ def _openrouter_choices(models: list[CatalogModel]) -> list[tuple[str, str]]:
             [r"^nvidia/nemotron-3-ultra-550b-a55b:free$"],
         ),
     ]
+    return _policy_choices(policies, models)
+
+
+def _policy_choices(
+    policies: list[tuple[str, str, list[str]]],
+    models: list[CatalogModel],
+) -> list[tuple[str, str]]:
+    """The newest model for each ``(tier, label, patterns)`` policy, without repeats."""
     result = []
     seen: set[str] = set()
     for tier, label, patterns in policies:
@@ -887,21 +843,6 @@ _DEFAULT_TIERS = {
 }
 
 
-def _family_policy_choices(
-    provider: str,
-    models: list[CatalogModel],
-) -> list[tuple[str, str]]:
-    result = []
-    seen: set[str] = set()
-    for tier, label, patterns in _FAMILY_POLICIES.get(provider, []):
-        selected = _latest_matching(models, patterns)
-        if selected is None or selected.id in seen:
-            continue
-        seen.add(selected.id)
-        result.append((selected.id, f"{tier} - {label}"))
-    return result
-
-
 def recommend_models(provider: str, models: list[CatalogModel]) -> list[tuple[str, str]]:
     """Reduce a provider catalog to the models Jarv users are likely to want."""
     policies: dict[str, Callable[[list[CatalogModel]], list[tuple[str, str]]]] = {
@@ -915,7 +856,7 @@ def recommend_models(provider: str, models: list[CatalogModel]) -> list[tuple[st
         return [(model.id, "Installed model") for model in sorted(models, key=lambda item: item.id.lower())]
     if provider in policies:
         return policies[provider](models)
-    return _family_policy_choices(provider, models)
+    return _policy_choices(_FAMILY_POLICIES.get(provider, []), models)
 
 
 def _catalog_models(provider: str) -> list[CatalogModel]:
@@ -973,16 +914,11 @@ def cached_provider_has_model(config: dict, model: str | None) -> bool:
     """Return whether a model is present in the active provider's cached catalog."""
     if not model:
         return False
-    target = str(model).strip().lower()
-    if not target:
-        return False
-    provider = str(config.get("provider", "openai"))
-    return any(item.id.lower() == target for item in _read_cache(config))
+    return cached_provider_model(config, model) is not None
 
 
 def cached_provider_model_ids(config: dict) -> list[str]:
     """Return model IDs from the active provider's cached catalog."""
-    provider = str(config.get("provider", "openai"))
     return [item.id for item in _read_cache(config)]
 
 

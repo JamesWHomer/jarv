@@ -51,7 +51,6 @@ def digest(value):
 def make_cases(home):
     from rich.console import Console
     from rich.markdown import Markdown
-    from rich.text import Text
     from jarv import anthropic_http, gemini_http, models_dev, openai_http
     from jarv.agent import build_agent_tools
     from jarv.agent_ui import StreamingMarkdownPreview
@@ -124,7 +123,7 @@ def make_cases(home):
     cases["transcript first frame 1000"] = lambda: frame(True)
     cases["transcript warm frame 1000"] = frame
     cases["history render 100 turns"] = lambda: _history_visual_lines(history[:400], 96)
-    cases["session tree 1000 turns"] = lambda: [(n.frame_id, n.depth, n.prompt_text, n.response_preview) for n in build_tree(history, []).nodes]
+    cases["session tree 1000 turns"] = lambda: [(n.frame_id, n.depth, n.prompt_text) for n in build_tree(history, []).nodes]
     browser = SessionBrowserScreen.__new__(SessionBrowserScreen)
     browser.background = False
     browser.sessions = {"bench": {"history_file": str(history_path), "label": "benchmark"}}

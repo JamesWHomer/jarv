@@ -522,16 +522,3 @@ def _history_visual_lines(history: list, width: int, *, cancelled=None) -> list[
     lines, _ = _history_visual_lines_and_anchors(history, width, cancelled=cancelled)
     return lines
 
-
-def _session_row_widths(width: int) -> tuple[int, int, int]:
-    """Allocate session, date, and message columns within a row."""
-    date_width = min(7, max(0, width))
-    if width <= date_width:
-        return (0, date_width, 0)
-
-    gutter_width = 2
-    message_min_width = 16
-    fixed_width = date_width + (2 * gutter_width)
-    session_width = min(28, max(0, width - fixed_width - message_min_width))
-    message_width = max(0, width - session_width - fixed_width)
-    return (session_width, date_width, message_width)

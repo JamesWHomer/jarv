@@ -477,6 +477,13 @@ def _attach_interactive_output_item(pending, history: list) -> None:
             break
 
 
+def _sync_output_item(pending) -> None:
+    """Rewrite the stored tool record from the interleaved transcript."""
+    output_item = getattr(pending, "output_item", None)
+    if isinstance(output_item, dict):
+        output_item["output"] = "\n".join(pending.transcript_segments)
+
+
 def _record_interactive_input(
     pending,
     action: str,
@@ -494,9 +501,7 @@ def _record_interactive_input(
     pending.transcript_segments.append(marker)
     if output_delta and output_delta.strip() and output_delta.strip() != "(no output)":
         pending.transcript_segments.append(output_delta)
-    output_item = getattr(pending, "output_item", None)
-    if isinstance(output_item, dict):
-        output_item["output"] = "\n".join(pending.transcript_segments)
+    _sync_output_item(pending)
 
 
 # Consecutive replies that couldn't be applied (unparseable text, empty
@@ -527,9 +532,7 @@ def _record_rejected_reply(pending, marker: str) -> None:
     makes the failure diagnosable after the fact.
     """
     pending.transcript_segments.append(marker)
-    output_item = getattr(pending, "output_item", None)
-    if isinstance(output_item, dict):
-        output_item["output"] = "\n".join(pending.transcript_segments)
+    _sync_output_item(pending)
 
 
 def _finalize_interactive_record(pending, final_output: str) -> None:

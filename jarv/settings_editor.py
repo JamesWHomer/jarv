@@ -29,6 +29,7 @@ from .command_input import TextInput
 from .text_editor import apply_text_editor_key
 from .tui_panel import MenuPanel, menu_border_enabled, menu_frame_rows, menu_inner_width
 from .settings_command import (
+    _settings_clear_model_warning,
     _settings_commit_edit,
     _settings_edit_is_dirty,
     _settings_editor_lines,
@@ -152,10 +153,7 @@ def apply_editor_key(
         return config, _continue()
 
     if shortcut == "ESC" and edit.get("model_validation_warning"):
-        edit.pop("model_validation_warning", None)
-        edit.pop("model_validation_suggestion", None)
-        edit.pop("model_warning_actions", None)
-        edit.pop("model_warning_selection", None)
+        _settings_clear_model_warning(edit)
         return config, _continue(clear_flash=True)
 
     if shortcut == "ESC":
@@ -225,6 +223,8 @@ def apply_editor_key(
         repeat,
         content_width=1,
         allow_newlines=False,
+        # Undo could restore an empty buffer without the stored-key stand-in.
+        history=key_name != "api_key",
     )
     # Typing over the masked stand-in replaces the stored key.
     if key_name == "api_key" and str(edit.get("buffer", "")) != before:

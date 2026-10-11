@@ -29,7 +29,7 @@ from jarv.web import (
     _decode_search_url,
     _request_bytes,
     dispatch_web_tool,
-    fetch_web,
+    fetch_web_content,
     fragment_note,
     search_web,
     url_fragment,
@@ -427,16 +427,16 @@ def test_fetch_web_follows_redirect_and_extracts_html(monkeypatch):
         lambda _timeout: _mock_client(handler),
     )
 
-    output = fetch_web("http://localhost:8123/start", timeout=5)
+    content = fetch_web_content("http://localhost:8123/start", timeout=5)
 
     assert seen == [
         "http://localhost:8123/start",
         "http://localhost:8123/final",
     ]
-    assert "Requested URL: http://localhost:8123/start" in output
-    assert "Final URL: http://localhost:8123/final" in output
-    assert "Title: Test" in output
-    assert output.endswith("Heading\n\nBody")
+    assert content.requested_url == "http://localhost:8123/start"
+    assert content.final_url == "http://localhost:8123/final"
+    assert content.title == "Test"
+    assert content.text.endswith("Heading\n\nBody")
 
 
 def test_fetch_web_formats_json(monkeypatch):
@@ -452,9 +452,9 @@ def test_fetch_web_formats_json(monkeypatch):
         lambda _timeout: _mock_client(handler),
     )
 
-    output = fetch_web("https://example.test/data", timeout=5)
+    content = fetch_web_content("https://example.test/data", timeout=5)
 
-    assert '"ok": true' in output
+    assert '"ok": true' in content.text
 
 
 def test_fetch_web_rejects_credentials_and_non_http():
@@ -500,7 +500,7 @@ def test_fetch_web_rejects_binary_and_oversized_responses(monkeypatch):
     )
 
     with pytest.raises(WebToolError, match="unsupported non-text"):
-        fetch_web("https://example.test/file.bin", timeout=5)
+        fetch_web_content("https://example.test/file.bin", timeout=5)
     assert "exceeds" in dispatch_read_tool(
         {"input": "https://example.test/large"},
         visible_labels=set(),

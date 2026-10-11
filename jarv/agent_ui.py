@@ -43,13 +43,14 @@ from .tool_outputs import with_tool_outcome
 from .turn_summary_settings import enabled_turn_summary_fields
 from .usage import load_usage
 from .response_wait import (
-    _THINKING_FRAMES,
     ResponseWaitIndicator,
     response_wait_label,
+    spinner_frame,
     start_response_wait,
 )
 from .ui_status import (
     STREAM_PREVIEW_REFRESH_INTERVAL,
+    _DEFAULT_TOOL_ACTIVITY_LABELS,
     _TOOL_ACTIVITY_LABELS,
     thought_complete_indicator,
     tool_activity_label,
@@ -64,6 +65,14 @@ def _ui_call(ui, method: str, *args, **kwargs):
     if handler is None:
         return None
     return handler(*args, **kwargs)
+
+
+def _show_tool_error(ui, message: str) -> None:
+    """Report a tool argument/validation error in the active display."""
+    if ui is not None:
+        _ui_call(ui, "show_error", message)
+    else:
+        console.print(f"[red]{message}[/red]")
 
 
 def print_mode_spacer(config: dict, *, mode: str | None = None) -> None:
@@ -123,7 +132,7 @@ class ToolActivityIndicator:
     def __rich_console__(self, console, options):
         now = time.perf_counter()
         elapsed = now - self._start
-        frame = _THINKING_FRAMES[int(now * 10) % len(_THINKING_FRAMES)]
+        frame = spinner_frame(now)
         label = tool_activity_label(tuple(self._tool_names.values()))
         yield Text(f"{frame}  {label}\u2026  {int(elapsed)}s")
 
@@ -249,7 +258,7 @@ class InteractiveCommandCard:
             return Text(f"Running… {elapsed}s", style="dim")
         if self._state == "thinking":
             now = time.perf_counter()
-            frame = _THINKING_FRAMES[int(now * 10) % len(_THINKING_FRAMES)]
+            frame = spinner_frame(now)
             elapsed = int(max(0.0, now - (self._think_start or now)))
             return Text(f"{frame}  deciding next input…  {elapsed}s", style="yellow")
         if self._state == "waiting":
@@ -535,10 +544,7 @@ def tool_activity_complete_status(seconds: float, tool_names: tuple[str, ...]) -
     duration = format_thought_duration(seconds)
     if len(tool_names) != 1:
         return f"Prepared {len(tool_names)} actions in {duration}."
-    completed = _TOOL_ACTIVITY_LABELS.get(
-        tool_names[0],
-        ("Preparing action", "Prepared action"),
-    )[1]
+    completed = _TOOL_ACTIVITY_LABELS.get(tool_names[0], _DEFAULT_TOOL_ACTIVITY_LABELS)[1]
     return f"{completed} in {duration}."
 
 
@@ -660,10 +666,7 @@ def _dispatch_ask_user(args: dict, config: dict | None = None, ui=None) -> str:
     question = args.get("question")
     if not isinstance(question, str) or not question.strip():
         msg = "[tool argument error: question must be a non-empty string]"
-        if ui is not None:
-            _ui_call(ui, "show_error", msg)
-        else:
-            console.print(f"[red]{msg}[/red]")
+        _show_tool_error(ui, msg)
         return with_tool_outcome(msg, "failed")
     if ui is not None:
         answer = _ui_call(ui, "ask_user", question, config or DEFAULT_CONFIG)
@@ -681,30 +684,18 @@ def _dispatch_ask_user(args: dict, config: dict | None = None, ui=None) -> str:
         from rich.markdown import Markdown
 
         question_renderable = Markdown(flatten_headings(safe_terminal_text(question)))
-        if display_mode == "print":
-            console.print(
-                tool_card(
-                    "ask_user",
-                    question_renderable,
-                    status="waiting",
-                    status_style="blue",
-                    display_mode="print",
-                )
-            )
-        else:
-            waiting_card = tool_card(
-                "ask_user",
-                question_renderable,
-                status="waiting",
-                status_style="blue",
-                display_mode="fullscreen",
-            )
+        waiting_card = tool_card(
+            "ask_user",
+            question_renderable,
+            status="waiting",
+            status_style="blue",
+            display_mode="print" if display_mode == "print" else "fullscreen",
+        )
+        if display_mode != "print":
             waiting_height = len(
                 console.render_lines(waiting_card, console.options, pad=False)
             )
-            console.print(
-                waiting_card
-            )
+        console.print(waiting_card)
         try:
             prompt, prompt_text_style = _ask_user_prompt(display_mode)
             control = config.get("_run_control")
@@ -747,10 +738,7 @@ def _dispatch_spawn_with_ui(
 ) -> str:
     children_raw = parse_spawn_children(args)
     if isinstance(children_raw, str):
-        if ui is not None:
-            _ui_call(ui, "show_error", children_raw)
-        else:
-            console.print(f"[red]{children_raw}[/red]")
+        _show_tool_error(ui, children_raw)
         return children_raw
 
     top_labels = [c.get("label", "?") for c in children_raw if isinstance(c, dict)]
@@ -797,8 +785,7 @@ def _dispatch_spawn_with_ui(
                 )
 
         def __rich_console__(self, con, options):
-            now = time.perf_counter()
-            frame = _THINKING_FRAMES[int(now * 10) % len(_THINKING_FRAMES)]
+            frame = spinner_frame()
             with lock:
                 # DFS in insertion order to display children directly under
                 # their parent, indented one level per depth.
@@ -841,6 +828,16 @@ def _dispatch_spawn_with_ui(
                 display_mode=get_setting(config, "tool_call_display"),
             )
 
+    def _mark_running_cancelled() -> None:
+        with lock:
+            for state in states.values():
+                if state["status"] == "running":
+                    state["status"] = "cancelled"
+                    state["reason"] = "cancelled"
+
+    def _is_error(output: str) -> bool:
+        return output.startswith(("[error:", "[tool argument error:"))
+
     def _run_spawn() -> str:
         return spawn_tool_output(
             root_node,
@@ -858,14 +855,10 @@ def _dispatch_spawn_with_ui(
         try:
             output = _run_spawn()
         except (KeyboardInterrupt, TurnCancelled):
-            with lock:
-                for state in states.values():
-                    if state["status"] == "running":
-                        state["status"] = "cancelled"
-                        state["reason"] = "cancelled"
+            _mark_running_cancelled()
             _push_spawn_panel()
             raise
-        if output.startswith("[error:") or output.startswith("[tool argument error:"):
+        if _is_error(output):
             _ui_call(ui, "show_error", output)
             return output
         _push_spawn_panel()
@@ -882,14 +875,10 @@ def _dispatch_spawn_with_ui(
         try:
             output = _run_spawn()
         except (KeyboardInterrupt, TurnCancelled):
-            with lock:
-                for state in states.values():
-                    if state["status"] == "running":
-                        state["status"] = "cancelled"
-                        state["reason"] = "cancelled"
+            _mark_running_cancelled()
             live.update(SpawnPanel())
             raise
-        if output.startswith("[error:") or output.startswith("[tool argument error:"):
+        if _is_error(output):
             live.update(Text(safe_terminal_text(output), style="red"))
             return output
         live.update(SpawnPanel())

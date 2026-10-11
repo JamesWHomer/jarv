@@ -515,7 +515,6 @@ def _view_with_previous(previous_spend):
         trend=[],
         request_count=2,
         is_empty=False,
-        last_request=None,
         last_root=None,
         previous_spend=previous_spend,
         previous_label="7d",
@@ -551,7 +550,6 @@ def _trend_view(trend, unit):
         trend=trend,
         request_count=1,
         is_empty=False,
-        last_request=None,
         last_root=None,
         trend_unit=unit,
     )
@@ -736,7 +734,6 @@ def test_usage_static_fallback_prints_scoped_panel(monkeypatch):
         trend=[],
         request_count=2,
         is_empty=False,
-        last_request=None,
         last_root=None,
     )
     monkeypatch.setattr(usage_command, "build_usage_view", lambda scope_key: view)

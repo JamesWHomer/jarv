@@ -8,6 +8,13 @@ from rich.text import Text
 _THINKING_FRAMES = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"]
 
 
+def spinner_frame(now: float | None = None) -> str:
+    """The braille spinner glyph for ``now`` (default: the current clock), at 10 fps."""
+    if now is None:
+        now = time.perf_counter()
+    return _THINKING_FRAMES[int(now * 10) % len(_THINKING_FRAMES)]
+
+
 def response_wait_label(has_reasoning: bool) -> str:
     return "Thinking" if has_reasoning else "Waiting"
 
@@ -21,7 +28,7 @@ class ResponseWaitIndicator:
 
     def __rich_console__(self, console, options):
         now = time.perf_counter()
-        frame = _THINKING_FRAMES[int(now * 10) % len(_THINKING_FRAMES)]
+        frame = spinner_frame(now)
         label = response_wait_label(self.has_reasoning)
         yield Text(f"{frame}  {label}\u2026  {int(now - self._start)}s")
 

@@ -167,11 +167,9 @@ class SettingsApp(AltScreenApp):
             catalog=self.catalog,
             inner_width=menu_inner_width(term_w, self.config),
         )
-        if outcome.kind == "committed":
-            self.rows = _settings_rows(self.config)
-            self.edit = None
-            self.flash = (outcome.message, outcome.style)
-        elif outcome.kind == "cancelled":
+        if outcome.kind in ("committed", "cancelled"):
+            if outcome.kind == "committed":
+                self.rows = _settings_rows(self.config)
             self.edit = None
             self.flash = (outcome.message, outcome.style)
         elif outcome.clear_flash:

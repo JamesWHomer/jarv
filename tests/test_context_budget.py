@@ -187,8 +187,7 @@ class ContextBudgetTests(unittest.TestCase):
                 {"role": "assistant", "content": label + " x" * 1000},
             ])
         latest = history[-2:]
-        kwargs = dict(model="unknown-model", config=self._tiny_config(),
-                      instructions="", tools=[], target_tokens=1)
+        kwargs = dict(model="unknown-model", target_tokens=1)
         compact_oldest_turns(history, **kwargs)
         self.assertEqual(len(history), 4)
         self.assertIn("User: first", history[0]["content"])
@@ -264,7 +263,6 @@ class ContextBudgetTests(unittest.TestCase):
         self.assertLess(tokens, 100)
 
     def test_compact_oldest_turns_replaces_prefix_with_summary(self):
-        config = self._tiny_config()
         model = "unknown-model"
         history = [
             {"role": "user", "content": "first"},
@@ -274,14 +272,7 @@ class ContextBudgetTests(unittest.TestCase):
         ]
         original = [dict(item) for item in history]
 
-        modified = compact_oldest_turns(
-            history,
-            model=model,
-            config=config,
-            instructions="",
-            tools=[],
-            target_tokens=1,
-        )
+        modified = compact_oldest_turns(history, model=model, target_tokens=1)
 
         self.assertTrue(modified)
         self.assertEqual(len(history), 3)
@@ -292,7 +283,6 @@ class ContextBudgetTests(unittest.TestCase):
         })
 
     def test_compact_history_view_does_not_mutate_stored_history(self):
-        config = self._tiny_config()
         model = "unknown-model"
         history = [
             {"role": "user", "content": "first"},
@@ -302,14 +292,7 @@ class ContextBudgetTests(unittest.TestCase):
         ]
         original = [dict(item) for item in history]
 
-        view = compact_history_view(
-            history,
-            model=model,
-            config=config,
-            instructions="",
-            tools=[],
-            target_tokens=1,
-        )
+        view = compact_history_view(history, model=model, target_tokens=1)
 
         self.assertEqual(history, original)
         self.assertEqual(len(view), 3)

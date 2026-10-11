@@ -24,7 +24,6 @@ from .storage import transaction
 _SESSION_RENDER_EXPORTS = {
     "_history_visual_lines",
     "_history_visual_lines_and_anchors",
-    "_session_row_widths",
     "_status_renderable",
     "_tool_call_output",
     "_tool_call_renderable",

@@ -1,4 +1,4 @@
-"""Tolerant JSON extraction from model output.
+"""JSON helpers: tolerant extraction from model output, and atomic cache writes.
 
 Local and chat-completions models frequently wrap tool arguments or verdicts
 in markdown fences or surround them with prose despite being prompted for
@@ -10,9 +10,34 @@ from __future__ import annotations
 
 import json
 import re
+import tempfile
 from collections.abc import Iterator
+from contextlib import suppress
+from pathlib import Path
 
 _FENCED_BLOCK_RE = re.compile(r"```[A-Za-z0-9_-]*\s*\n(.*?)```", re.DOTALL)
+
+
+def write_json_atomic(path: Path, payload, *, indent: int | None = None) -> bool:
+    """Replace ``path`` with ``payload`` via a same-directory temporary file.
+
+    Returns False on OS errors, leaving any previous file in place.
+    """
+    temporary = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix=".jarv-", suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(payload, stream, indent=indent)
+        temporary.replace(path)
+        return True
+    except OSError:
+        return False
+    finally:
+        if temporary is not None:
+            with suppress(OSError):
+                temporary.unlink(missing_ok=True)
 
 
 def iter_json_objects(text: str) -> Iterator[object]:

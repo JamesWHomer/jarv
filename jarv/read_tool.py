@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import concurrent.futures
 import copy
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from .artifacts import ArtifactStore
-from .cancellation import CancellationToken, TurnCancelled
+from .cancellation import CancellationToken
 from .config import DEFAULT_CONFIG, get_setting
 from .model_catalog import get_image_output_capability
 from .pdf_extract import PdfExtractionError, extract_pdf_text, is_pdf_bytes, is_pdf_media_type
@@ -260,6 +259,14 @@ def _unsupported_image_media_type(label: str, media_type: str) -> str:
     return f"[read error: unsupported image media type for '{label}': {media_type}]"
 
 
+def _web_metadata(requested_url: str, final_url: str, media_type: str) -> list[str]:
+    return [
+        f"Requested URL: {requested_url}",
+        f"Final URL: {final_url}",
+        f"Content-Type: {media_type or 'unknown'}",
+    ]
+
+
 def _resolve_source(
     value: str,
     *,
@@ -303,11 +310,9 @@ def _resolve_source(
             return with_tool_outcome(
                 f"[read error: {exc}]", "timed_out" if exc.kind == "timeout" else "failed",
             )
-        web_metadata = (
-            f"Requested URL: {web_bytes.requested_url}",
-            f"Final URL: {web_bytes.final_url}",
-            f"Content-Type: {web_bytes.media_type or 'unknown'}",
-        )
+        web_metadata = tuple(_web_metadata(
+            web_bytes.requested_url, web_bytes.final_url, web_bytes.media_type,
+        ))
         if is_pdf_media_type(web_bytes.media_type) or is_pdf_bytes(web_bytes.body):
             if len(web_bytes.body) > MAX_RESPONSE_BYTES:
                 return f"[read error: response exceeds {MAX_RESPONSE_BYTES} byte limit]"
@@ -348,11 +353,7 @@ def _resolve_source(
             )
         except WebToolError as exc:
             return f"[read error: {exc}]"
-        metadata = [
-            f"Requested URL: {web.requested_url}",
-            f"Final URL: {web.final_url}",
-            f"Content-Type: {web.media_type or 'unknown'}",
-        ]
+        metadata = _web_metadata(web.requested_url, web.final_url, web.media_type)
         if web.title:
             metadata.append(f"Title: {web.title}")
         note = fragment_note(web)
@@ -542,64 +543,3 @@ def dispatch_read_tool(
         "failed" if offset > total_size else "success",
     )
 
-
-def dispatch_read_batch(
-    args_list: list[dict],
-    *,
-    visible_labels: set[str],
-    artifact_store: ArtifactStore,
-    retained_store: RetainedOutputStore,
-    config: dict,
-    cancellation_token: CancellationToken | None = None,
-    cwd: str | Path | None = None,
-) -> list[ToolOutput]:
-    if not args_list:
-        return []
-    if len(args_list) == 1:
-        return [
-            dispatch_read_tool(
-                args_list[0],
-                visible_labels=visible_labels,
-                artifact_store=artifact_store,
-                retained_store=retained_store,
-                config=config,
-                cancellation_token=cancellation_token,
-                cwd=cwd,
-            )
-        ]
-
-    results = [""] * len(args_list)
-    executor = concurrent.futures.ThreadPoolExecutor(
-        max_workers=min(8, len(args_list))
-    )
-    futures = {
-        executor.submit(
-            dispatch_read_tool,
-            args,
-            visible_labels=visible_labels,
-            artifact_store=artifact_store,
-            retained_store=retained_store,
-            config=config,
-            cancellation_token=cancellation_token,
-            cwd=cwd,
-        ): index
-        for index, args in enumerate(args_list)
-    }
-    try:
-        for future in concurrent.futures.as_completed(futures):
-            results[futures[future]] = future.result()
-    except (KeyboardInterrupt, TurnCancelled):
-        if cancellation_token is not None:
-            cancellation_token.cancel()
-        for future in futures:
-            future.cancel()
-        executor.shutdown(wait=False, cancel_futures=True)
-        raise
-    except Exception:
-        for future in futures:
-            future.cancel()
-        executor.shutdown(wait=True, cancel_futures=True)
-        raise
-    else:
-        executor.shutdown(wait=True)
-    return results

@@ -17,7 +17,6 @@ from typing import Callable
 from .artifacts import ArtifactStore
 from .cancellation import CancellationToken, TurnCancelled
 from .config import DEFAULT_CONFIG, TOOL_NAMES, get_setting
-from .context_budget import trim_turn_input
 from .edit_tool import EDIT_TOOL, dispatch_edit_tool
 from .jsonutil import salvage_json_object
 from .safety import check_command
@@ -47,12 +46,8 @@ from .tool_outputs import (
     ToolOutcome, ToolOutput, preserve_tool_outcome, summarize_tool_output,
     with_tool_outcome,
 )
-from .turn_loop import collect_stream_response, run_tool_execution_round
-from .turn_records import (
-    append_reasoning_input_items,
-    append_tool_result_input_items,
-    stream_usage_output_text,
-)
+from .turn_loop import collect_stream_response, request_kwargs, run_tool_execution_round
+from .turn_records import stream_usage_output_text
 from .usage import estimate_context_breakdown, record_response_usage
 from .web import WEB_SEARCH_TOOL, dispatch_web_tool
 
@@ -382,14 +377,13 @@ def check_run_command(
     session_id: str | None = None,
     cancellation_token: CancellationToken | None = None,
     incognito: bool = False,
+    check=None,
 ) -> tuple[bool, str]:
     """Run command-safety checks. Returns (allowed, denial_message)."""
-    safety_level = config.get("command_safety", "risky")
-    audit = config.get("audit", True)
-    return check_command(
+    return (check or check_command)(
         prepared.cmd,
-        safety_level,
-        audit=audit,
+        config.get("command_safety", "risky"),
+        audit=config.get("audit", True),
         config=config,
         history=safety_history,
         usage_path=None if incognito else usage_path,
@@ -796,15 +790,11 @@ def dispatch_tool(
     return with_tool_outcome(f"[unknown tool: {name}]", "failed")
 
 
-def _max_tool_output_chars(config: dict) -> int:
-    return int(get_setting(config, "max_tool_output_chars"))
-
-
 def _maybe_truncate_tool_output(name: str, output: ToolOutput, config: dict) -> ToolOutput:
     if name in {"run_command", "read"}:
         return output
     return preserve_tool_outcome(
-        truncate_model_output(output, _max_tool_output_chars(config)), output,
+        truncate_model_output(output, int(get_setting(config, "max_tool_output_chars"))), output,
     )
 
 
@@ -874,10 +864,13 @@ def execute_tool_calls(
                 output = batch_result.output
                 # Progress receives pre-nudge output; this instruction is only
                 # for the model. Results still enter its input in call order.
-                if safe_item.name == "web_search" and batch_result.args is not None:
-                    if not result.web_search_read_nudge_sent:
-                        output = append_web_search_read_nudge(output)
-                        result.web_search_read_nudge_sent = True
+                if (
+                    safe_item.name == "web_search"
+                    and batch_result.args is not None
+                    and not result.web_search_read_nudge_sent
+                ):
+                    output = append_web_search_read_nudge(output)
+                    result.web_search_read_nudge_sent = True
                 output = _maybe_truncate_tool_output(safe_item.name, output, config)
                 append_tool_result(safe_item, output)
                 if hooks.on_tool_recorded is not None:
@@ -945,9 +938,12 @@ def execute_tool_calls(
                 retained_store=retained_store,
             )
 
-        if hooks.on_tool_error is not None and isinstance(output, str):
-            if output.startswith("[unknown tool:") or output.startswith("[tool argument error:"):
-                hooks.on_tool_error(output)
+        if (
+            hooks.on_tool_error is not None
+            and isinstance(output, str)
+            and output.startswith(("[unknown tool:", "[tool argument error:"))
+        ):
+            hooks.on_tool_error(output)
 
         output = _maybe_truncate_tool_output(item.name, output, config)
         append_tool_result(item, output)
@@ -1020,7 +1016,7 @@ def _run_subagent_loop(
     Returns (longform, tldr) on success, (None, reason) on failure.
     """
     retained_store = retained_store or RetainedOutputStore()
-    instructions = (
+    base_instructions = (
         "You are a subagent in a recursive orchestration system. "
         "Complete your task, then call finish(longform, tldr) to terminate — this is mandatory. "
         "Any text you write outside a tool call is invisible to the parent and will be discarded. "
@@ -1030,7 +1026,6 @@ def _run_subagent_loop(
     from .agent_ui import get_system_info
     from .project_context import build_project_context
 
-    base_instructions = instructions
     instructions_cwd = node.shell_state.cwd
 
     def contextual_instructions(cwd: str) -> str:
@@ -1042,17 +1037,7 @@ def _run_subagent_loop(
 
     instructions = contextual_instructions(instructions_cwd)
     tools = build_subagent_tools(node.sterile, config)
-    input_items: list[dict] = [{"role": "user", "content": node.task}]
-
-    kwargs = dict(
-        model=config["model"],
-        instructions=instructions,
-        tools=tools,
-        input=input_items,
-    )
-    effort = config.get("reasoning_effort")
-    if effort:
-        kwargs["reasoning"] = {"effort": effort}
+    kwargs = request_kwargs(config, instructions, tools, [{"role": "user", "content": node.task}])
 
     max_tokens = _subagent_max_tokens(config)
     finish_nudge_sent = False
@@ -1091,7 +1076,6 @@ def _run_subagent_loop(
             if control is not None:
                 control.check()
             tool_calls = stream_result.tool_calls
-            reasoning_items = stream_result.reasoning_items
             final_response = stream_result.final_response
             if not node.incognito:
                 record_response_usage(
@@ -1130,11 +1114,14 @@ def _run_subagent_loop(
             # Same parse (salvage included) as execution will attempt, so the
             # truncation nudge fires only for args that are truly unusable.
             _finish_args, finish_error = _parse_tool_args(item.arguments)
-            if finish_error is not None:
-                if stop_reason == "max_tokens" and not finish_truncation_nudge_sent:
-                    finish_truncation_nudge_sent = True
-                    truncated_finish = True
-                    break
+            if (
+                finish_error is not None
+                and stop_reason == "max_tokens"
+                and not finish_truncation_nudge_sent
+            ):
+                finish_truncation_nudge_sent = True
+                truncated_finish = True
+                break
 
         if truncated_finish:
             kwargs["input"] = kwargs["input"] + [{"role": "user", "content": _FINISH_TRUNCATION_NUDGE}]
@@ -1379,16 +1366,12 @@ def spawn_batch(
                 child_token.cancel()
         for unregister in parent_unregisters:
             unregister()
-        if (
-            not completed
-            or (cancellation_token is not None and cancellation_token.cancelled)
-            or timed_out_futures
-        ):
+        abandon_all = not completed or (
+            cancellation_token is not None and cancellation_token.cancelled
+        )
+        if abandon_all or timed_out_futures:
             for future in future_to_node:
-                if not completed or (
-                    cancellation_token is not None
-                    and cancellation_token.cancelled
-                ) or future in timed_out_futures:
+                if abandon_all or future in timed_out_futures:
                     future.cancel()
             ex.shutdown(wait=False, cancel_futures=True)
         else:

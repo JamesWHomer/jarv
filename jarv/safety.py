@@ -19,9 +19,6 @@ from .display import (
     tool_card,
 )
 
-SAFETY_LEVELS = ("all", "risky", "none")
-DEFAULT_SAFETY_LEVEL = "risky"
-
 # Serialize interactive approval/audit prompts across concurrent subagent workers.
 _APPROVAL_LOCK = threading.Lock()
 
@@ -437,7 +434,20 @@ def _check_command_locked(
     return True, ""
 
 
-_AUDITOR_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+def auditor_status_line(audit_state: dict, started_at: float) -> Text:
+    """The auditor's verdict, or its animated "checking" line while it runs."""
+    if audit_state.get("done"):
+        reason = escape(safe_terminal_text(str(audit_state.get("reason", ""))))
+        if audit_state.get("allow"):
+            return Text.from_markup(f"[green]✓  auditor[/green]  [dim]{reason}[/dim]")
+        return Text.from_markup(f"[yellow]⚠  auditor[/yellow]  [dim]{reason}[/dim]")
+    from .response_wait import spinner_frame
+
+    now = time.perf_counter()
+    return Text.from_markup(
+        f"[green]{spinner_frame(now)}  auditor[/green]  "
+        f"[dim]checking…  {int(now - started_at)}s[/dim]"
+    )
 
 
 class _AuditPanel:
@@ -455,23 +465,7 @@ class _AuditPanel:
         parts = [self.body]
         if self.show_auditor:
             parts.append(Text(""))
-            if self.audit_state["done"]:
-                reason = escape(safe_terminal_text(self.audit_state["reason"]))
-                if self.audit_state["allow"]:
-                    parts.append(Text.from_markup(
-                        f"[green]✓  auditor[/green]  [dim]{reason}[/dim]"
-                    ))
-                else:
-                    parts.append(Text.from_markup(
-                        f"[yellow]⚠  auditor[/yellow]  [dim]{reason}[/dim]"
-                    ))
-            else:
-                now = time.perf_counter()
-                elapsed = int(now - self.start)
-                frame = _AUDITOR_FRAMES[int(now * 10) % len(_AUDITOR_FRAMES)]
-                parts.append(Text.from_markup(
-                    f"[green]{frame}  auditor[/green]  [dim]checking…  {elapsed}s[/dim]"
-                ))
+            parts.append(auditor_status_line(self.audit_state, self.start))
 
         panel = _safety_card(Group(*parts))
         buf_str = escape("".join(self.buf))
@@ -508,6 +502,18 @@ def _audit_gate(
     from .auditor import audit_command
 
     body = _build_confirmation_body(command, reason)
+
+    def run_audit() -> tuple[bool, str]:
+        return audit_command(
+            command,
+            reason,
+            config or {},
+            history,
+            usage_path=usage_path,
+            session_id=session_id,
+            cancellation_token=cancellation_token,
+        )
+
     auto_approve = (
         not require_manual_approval
         and (config or {}).get("auditor_auto_approve", True)
@@ -519,15 +525,7 @@ def _audit_gate(
         if not (config or {}).get("_quiet"):
             console.print()
             console.print(_safety_card(body))
-        allow, auditor_reason = audit_command(
-            command,
-            reason,
-            config or {},
-            history,
-            usage_path=usage_path,
-            session_id=session_id,
-            cancellation_token=cancellation_token,
-        )
+        allow, auditor_reason = run_audit()
         if allow:
             if not (config or {}).get("_quiet"):
                 console.print(f"[green]  ✓ auditor:[/green] [dim]{auditor_reason}[/dim]")
@@ -546,15 +544,7 @@ def _audit_gate(
 
     def _run_auditor():
         try:
-            a, r = audit_command(
-                command,
-                reason,
-                config or {},
-                history,
-                usage_path=usage_path,
-                session_id=session_id,
-                cancellation_token=cancellation_token,
-            )
+            a, r = run_audit()
             audit_state["allow"] = a
             audit_state["reason"] = r
         except TurnCancelled:

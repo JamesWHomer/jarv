@@ -117,6 +117,20 @@ def collect_stream_response(
             on_retry()
 
 
+def request_kwargs(config: dict, instructions: str, tools: list, input_items: list) -> dict:
+    """The per-turn request arguments shared by root and subagent loops."""
+    kwargs = dict(
+        model=config["model"],
+        instructions=instructions,
+        tools=tools,
+        input=input_items,
+    )
+    effort = config.get("reasoning_effort")
+    if effort:
+        kwargs["reasoning"] = {"effort": effort}
+    return kwargs
+
+
 def run_tool_execution_round(
     input_items: list,
     stream_result: StreamCollection,

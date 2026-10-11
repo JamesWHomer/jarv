@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Any, Iterator
 
-from .history_convert import iter_history_segments, parse_json_arguments, provider_metadata
+from .history_convert import iter_history_segments, provider_metadata
 from .provider_catalog import KEY_PATTERNS, LOCAL_PROVIDERS, PROVIDERS
 from .provider_auth import resolve_api_key
 from .provider_registry import ProviderError, create_client, get_backend
@@ -203,6 +203,11 @@ def _response_event_has_reasoning_started(event: Any) -> bool:
     if typ == "response.content_part.added":
         return _value(_value(event, "part"), "type") == "reasoning_text"
     return False
+
+
+def _event_item(event: dict) -> dict:
+    item = event.get("item")
+    return item if isinstance(item, dict) else {}
 
 
 def _response_output_items(response: Any) -> list:
@@ -501,12 +506,11 @@ def _stream_responses_api(
                 continue
             if not reasoning_started and _response_event_has_reasoning_started(event):
                 reasoning_started = True
-                item = event.get("item") if isinstance(event.get("item"), dict) else {}
-                yield ReasoningStarted(id=str(item.get("id") or ""))
+                yield ReasoningStarted(id=str(_event_item(event).get("id") or ""))
             if event_type == "response.output_text.delta":
                 yield TextDelta(str(event.get("delta") or ""))
             elif event_type == "response.output_item.added":
-                item = event.get("item") if isinstance(event.get("item"), dict) else {}
+                item = _event_item(event)
                 if item.get("type") == "function_call":
                     item_id = str(item.get("id") or "")
                     call_id = str(item.get("call_id") or item_id)
@@ -526,7 +530,7 @@ def _stream_responses_api(
                         name="",
                     )
             elif event_type == "response.output_item.done":
-                item = event.get("item") if isinstance(event.get("item"), dict) else {}
+                item = _event_item(event)
                 if item.get("type") == "function_call":
                     item_id = str(item.get("id") or "")
                     call_id = str(item.get("call_id") or "")

@@ -28,23 +28,16 @@ def fixed_context_tokens(model: str, instructions: str, tools: list) -> int:
 
 
 def input_token_budget(model: str, config: dict, instructions: str, tools: list) -> int:
-    """Maximum estimated input tokens for system, tools, and conversation."""
+    """Maximum estimated input tokens for conversation, after system and tools.
+
+    Stored history and in-turn ``kwargs['input']`` growth share this budget.
+    """
     window = resolve_context_window(model, config)
     budget_ratio = _config_ratio(config, "context_budget_ratio")
     output_reserve = _config_ratio(config, "context_output_reserve_ratio")
     fixed = fixed_context_tokens(model, instructions, tools)
     budget = int(window * budget_ratio) - int(window * output_reserve) - fixed
     return max(budget, 256)
-
-
-def history_token_budget(model: str, config: dict, instructions: str, tools: list) -> int:
-    """Token budget reserved for stored conversation history."""
-    return input_token_budget(model, config, instructions, tools)
-
-
-def turn_input_token_budget(model: str, config: dict, instructions: str, tools: list) -> int:
-    """Token budget for kwargs['input'] within an active turn."""
-    return input_token_budget(model, config, instructions, tools)
 
 
 def _to_api_item(stored_item: dict) -> dict | None:
@@ -128,21 +121,15 @@ def build_input(
 ) -> list[dict]:
     """Convert stored history to Responses API input within the token budget."""
     tools = tools or []
+    budget = input_token_budget(model, config, instructions, tools)
     source = history
     if _should_compact_history(model, config, instructions, tools, history):
-        target_tokens = int(
-            history_token_budget(model, config, instructions, tools) * _COMPACTION_TARGET_RATIO
-        )
         source = compact_history_view(
             history,
             model=model,
-            config=config,
-            instructions=instructions,
-            tools=tools,
-            target_tokens=target_tokens,
+            target_tokens=int(budget * _COMPACTION_TARGET_RATIO),
         )
     api_items = history_to_api_items(source)
-    budget = history_token_budget(model, config, instructions, tools)
     return _trim_with_retained_outputs(api_items, model, budget, retained_store)
 
 
@@ -198,7 +185,7 @@ def trim_turn_input(
     retained_store: RetainedOutputStore | None = None,
 ) -> list[dict]:
     """Trim in-turn ``kwargs['input']`` growth to the active token budget."""
-    budget = turn_input_token_budget(model, config, instructions, tools)
+    budget = input_token_budget(model, config, instructions, tools)
     return _trim_with_retained_outputs(
         [item for item in input_items if isinstance(item, dict)],
         model,
@@ -254,15 +241,7 @@ def summarize_turn_items(turn_items: list[dict], *, max_chars_per_item: int = 40
     return "\n".join(lines)
 
 
-def compact_oldest_turns(
-    history: list,
-    *,
-    model: str,
-    config: dict,
-    instructions: str,
-    tools: list,
-    target_tokens: int,
-) -> bool:
+def compact_oldest_turns(history: list, *, model: str, target_tokens: int) -> bool:
     """Replace the oldest complete turn with a compact summary until under budget.
 
     Mutates ``history`` in place. Callers should pass a copy when the original
@@ -297,25 +276,10 @@ def compact_oldest_turns(
     return True
 
 
-def compact_history_view(
-    history: list,
-    *,
-    model: str,
-    config: dict,
-    instructions: str,
-    tools: list,
-    target_tokens: int,
-) -> list:
+def compact_history_view(history: list, *, model: str, target_tokens: int) -> list:
     """Return a compacted copy of ``history`` for API input without mutating storage."""
     view = list(history)
-    compact_oldest_turns(
-        view,
-        model=model,
-        config=config,
-        instructions=instructions,
-        tools=tools,
-        target_tokens=target_tokens,
-    )
+    compact_oldest_turns(view, model=model, target_tokens=target_tokens)
     return view
 
 
@@ -345,7 +309,7 @@ def context_budget_status(
     window = resolve_context_window(model, config)
     fixed = fixed_context_tokens(model, instructions, tools)
     history_tokens = estimate_history_tokens(model, history)
-    budget = history_token_budget(model, config, instructions, tools)
+    budget = input_token_budget(model, config, instructions, tools)
     fill = estimated_context_fill_ratio(model, config, instructions, tools, history)
     return {
         "context_window": window,

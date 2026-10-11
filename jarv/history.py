@@ -6,7 +6,6 @@ from pathlib import Path
 from contextlib import contextmanager
 
 from .storage import read_json, write_json, transaction, delete_json, StorageError, JsonList
-from .display import console
 from .paths import CONFIG_DIR, SESSIONS_DIR, SESSIONS_FILE
 from .unicode_safety import sanitize_json_value
 
@@ -239,13 +238,6 @@ def artifact_file_for(history_path: Path) -> Path:
 
 def reads_file_for(history_path: Path) -> Path:
     return history_path.with_name(history_path.name.replace("history", "reads", 1))
-
-
-def last_user_message(history: list) -> dict | None:
-    for item in reversed(history):
-        if isinstance(item, dict) and item.get("role") == "user":
-            return item
-    return None
 
 
 @dataclass

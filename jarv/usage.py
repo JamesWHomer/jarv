@@ -15,19 +15,16 @@ from .tool_outputs import summarize_tool_output
 _BREAKDOWN_KEYS = ("system", "tools", "history", "tool_io", "reasoning")
 
 
-def _estimated_token_count(text: str) -> int:
+def _token_count(text: str) -> int:
+    """Estimate tokens with the len//4 heuristic (any text counts at least 1)."""
     if not text:
         return 0
     return max(1, len(text) // 4)
 
 
-def _token_count(_model: str, text: str) -> int:
-    return _estimated_token_count(text)
-
-
 def estimate_item_tokens(model: str, item: dict) -> int:
     """Estimate tokens for one API input item using the len//4 heuristic."""
-    return _token_count(model, _item_text(item)) + _token_count(model, _item_reasoning_text(item))
+    return _token_count(_item_text(item)) + _token_count(_item_reasoning_text(item))
 
 
 def _item_reasoning_text(item: dict) -> str:
@@ -58,19 +55,15 @@ def estimate_context_breakdown(
     instructions: str,
     tools: list,
     input_items: list,
-    *,
-    precise: bool = False,
 ) -> dict:
     """Estimate token counts split by context category.
 
     Returns a dict with keys: system, tools, history, tool_io, reasoning.
-    Uses a cheap character-based heuristic. ``precise`` remains accepted for
-    API compatibility but no longer imports a provider SDK.
+    Uses a cheap character-based heuristic.
     """
-    count_tokens = _token_count
     try:
-        system_tokens = count_tokens(model, instructions)
-        tools_tokens = count_tokens(model, json.dumps(tools))
+        system_tokens = _token_count(instructions)
+        tools_tokens = _token_count(json.dumps(tools))
 
         history_tokens = 0
         tool_io_tokens = 0
@@ -81,8 +74,8 @@ def estimate_context_breakdown(
                 continue
             role = item.get("role")
             typ = item.get("type")
-            count = count_tokens(model, _item_text(item))
-            reasoning_tokens += count_tokens(model, _item_reasoning_text(item))
+            count = _token_count(_item_text(item))
+            reasoning_tokens += _token_count(_item_reasoning_text(item))
             if role in ("user", "assistant"):
                 history_tokens += count
             elif typ in ("function_call", "function_call_output"):
@@ -100,7 +93,7 @@ def estimate_context_breakdown(
             "reasoning": reasoning_tokens,
         }
     except Exception:
-        return {k: 0 for k in _BREAKDOWN_KEYS}
+        return dict.fromkeys(_BREAKDOWN_KEYS, 0)
 
 USAGE_VERSION = 2
 RECENT_REQUEST_LIMIT = 50
@@ -169,7 +162,7 @@ def load_usage(path: Path, session_id: str | None = None, warn: bool = True) -> 
     return data
 
 
-def save_usage(data: dict, path: Path, warn: bool = True) -> None:
+def save_usage(data: dict, path: Path) -> None:
     write_json(path, data, snapshot=data if hasattr(data, "baseline") else None)
 
 
@@ -193,11 +186,6 @@ def load_global_usage(path: Path | None = None, warn: bool = True) -> dict:
         for record in data["records"]:
             _normalize_token_bucket(record, include_request_count=False)
     return data
-
-
-def save_global_usage(data: dict, path: Path | None = None, warn: bool = True) -> None:
-    path = path or global_usage_file()
-    write_json(path, data, snapshot=data if hasattr(data, "baseline") else None)
 
 
 def _value(obj: Any, key: str) -> Any:
@@ -310,7 +298,7 @@ def estimated_usage_from_context(
     input_tokens = 0
     if isinstance(context_breakdown, dict):
         input_tokens = sum(int(context_breakdown.get(k) or 0) for k in _BREAKDOWN_KEYS)
-    output_tokens = _token_count(model, output_text or "")
+    output_tokens = _token_count(output_text or "")
 
     if input_tokens <= 0 and output_tokens <= 0:
         return None
@@ -336,14 +324,9 @@ def _add_tokens(bucket: dict, record: dict) -> None:
         "total_tokens",
     ):
         bucket[key] = int(bucket.get(key, 0)) + int(record.get(key, 0))
-    if "estimated_cost_usd" in record:
-        bucket["estimated_cost_usd"] = float(bucket.get("estimated_cost_usd", 0.0)) + float(
-            record.get("estimated_cost_usd", 0.0)
-        )
-    if "provider_cost_usd" in record:
-        bucket["provider_cost_usd"] = float(bucket.get("provider_cost_usd", 0.0)) + float(
-            record.get("provider_cost_usd", 0.0)
-        )
+    for key in ("estimated_cost_usd", "provider_cost_usd"):
+        if key in record:
+            bucket[key] = float(bucket.get(key, 0.0)) + float(record.get(key, 0.0))
     status = _cost_status(record)
     bucket[f"cost_{status}_request_count"] = (
         int(bucket.get(f"cost_{status}_request_count", 0)) + 1
@@ -409,17 +392,14 @@ def _normalize_usage_data(data: dict) -> None:
                     _normalize_cost_bucket(bucket)
         else:
             data[section] = {}
-    for key in ("last_request", "last_root_request"):
-        record = data.get(key)
+    recent = data.get("recent_requests")
+    records = [data.get("last_request"), data.get("last_root_request")]
+    if isinstance(recent, list):
+        records.extend(recent)
+    for record in records:
         if isinstance(record, dict):
             _normalize_token_bucket(record)
             _normalize_cost_bucket(record, record=True)
-    recent = data.get("recent_requests")
-    if isinstance(recent, list):
-        for record in recent:
-            if isinstance(record, dict):
-                _normalize_token_bucket(record)
-                _normalize_cost_bucket(record, record=True)
 
 
 def _append_global_usage_record_unlocked(
@@ -499,30 +479,39 @@ def aggregate_usage_totals(records: list[dict]) -> dict:
     return totals
 
 
+def _add_record_to_buckets(
+    data: dict, record: dict, *, source: str, provider: str, model: str, tier: str,
+) -> None:
+    """Fold one request record into the totals and every per-dimension bucket."""
+    _add_tokens(data.setdefault("totals", {}), record)
+    _add_tokens(data.setdefault("sources", {}).setdefault(source, {}), record)
+    _add_tokens(data.setdefault("providers", {}).setdefault(provider, {}), record)
+    _add_tokens(data.setdefault("models", {}).setdefault(model, {}), record)
+    _add_tokens(data.setdefault("tiers", {}).setdefault(tier, {}), record)
+    data["last_request"] = record
+    if source == "root":
+        data["last_root_request"] = record
+
+
 def aggregate_usage_records(records: list[dict]) -> dict:
     aggregate = _empty_usage(None)
-    aggregate["session_id"] = None
     for record in records:
         if not isinstance(record, dict):
             continue
         _normalize_token_bucket(record, include_request_count=False)
-        source = str(record.get("source") or "unknown")
-        provider = str(record.get("provider") or "unknown")
-        model = str(record.get("model") or "unknown")
-        tier = str(
-            record.get("served_service_tier")
-            or record.get("requested_service_tier")
-            or record.get("service_tier")
-            or "standard"
+        _add_record_to_buckets(
+            aggregate,
+            record,
+            source=str(record.get("source") or "unknown"),
+            provider=str(record.get("provider") or "unknown"),
+            model=str(record.get("model") or "unknown"),
+            tier=str(
+                record.get("served_service_tier")
+                or record.get("requested_service_tier")
+                or record.get("service_tier")
+                or "standard"
+            ),
         )
-        _add_tokens(aggregate.setdefault("totals", {}), record)
-        _add_tokens(aggregate.setdefault("sources", {}).setdefault(source, {}), record)
-        _add_tokens(aggregate.setdefault("providers", {}).setdefault(provider, {}), record)
-        _add_tokens(aggregate.setdefault("models", {}).setdefault(model, {}), record)
-        _add_tokens(aggregate.setdefault("tiers", {}).setdefault(tier, {}), record)
-        aggregate["last_request"] = record
-        if source == "root":
-            aggregate["last_root_request"] = record
     return aggregate
 
 
@@ -533,7 +522,7 @@ def _context_window_from_catalog(model: str, config: dict) -> int | None:
     suffix = model.split("/", 1)[-1] if model else ""
     for catalog_model in _read_cache(config):
         model_id = catalog_model.id
-        if model_id != model and model_id != suffix and not model_id.endswith(f"/{suffix}"):
+        if model_id not in (model, suffix) and not model_id.endswith(f"/{suffix}"):
             continue
         metadata = catalog_model.metadata if isinstance(catalog_model.metadata, dict) else {}
         for key in ("context_length", "inputTokenLimit", "max_input_tokens"):
@@ -679,14 +668,11 @@ def estimate_token_cost_usd(
     cached_cost = cached_input_tokens * (cached_input_price or 0.0)
     output_cost = output_tokens * prices["output"]
 
-    if provider == "gemini" and tier == "flex":
-        # Gemini Flex leaves cached-input pricing at the Standard rate.
-        input_cost *= multiplier
-        output_cost *= multiplier
-    else:
-        input_cost *= multiplier
+    input_cost *= multiplier
+    output_cost *= multiplier
+    # Gemini Flex leaves cached-input pricing at the Standard rate.
+    if not (provider == "gemini" and tier == "flex"):
         cached_cost *= multiplier
-        output_cost *= multiplier
 
     return (input_cost + cached_cost + output_cost) / TOKENS_PER_MILLION
 
@@ -742,23 +728,16 @@ def record_response_usage(
         requested_model = model
         served_model = _value(response, "model")
         provider_name = str(provider or "").lower()
-        if (
-            provider_name == "openrouter"
-            and isinstance(served_model, str)
-            and served_model.strip()
-        ):
-            model = served_model.strip()
-        elif (
-            provider_name == "anthropic"
-            and isinstance(served_model, str)
-            and served_model.strip()
-        ):
-            # A safety-classifier refusal fallback bills at the fallback
-            # model's own rates, so attribute the turn to the serving model.
-            from .anthropic_http import served_by_fallback
-
-            if served_by_fallback(response):
+        if isinstance(served_model, str) and served_model.strip():
+            if provider_name == "openrouter":
                 model = served_model.strip()
+            elif provider_name == "anthropic":
+                # A safety-classifier refusal fallback bills at the fallback
+                # model's own rates, so attribute the turn to the serving model.
+                from .anthropic_http import served_by_fallback
+
+                if served_by_fallback(response):
+                    model = served_model.strip()
 
         token_usage = usage_from_response(response)
         if token_usage is None:
@@ -796,7 +775,7 @@ def record_response_usage(
             _float_value(response, "cost"),
         )
         openrouter_zero_provider_cost = (
-            str(provider or "").lower() == "openrouter"
+            provider_name == "openrouter"
             and provider_cost is not None
             and provider_cost == 0
         )
@@ -834,32 +813,25 @@ def record_response_usage(
                 data["session_id"] = data.get("session_id") or session_id
                 data["updated_at"] = record["created_at"]
 
-                _add_tokens(data.setdefault("totals", {}), record)
-                _add_tokens(data.setdefault("sources", {}).setdefault(source, {}), record)
-                _add_tokens(
-                    data.setdefault("providers", {}).setdefault(
-                        str(record.get("provider") or "unknown"), {}
-                    ),
+                _add_record_to_buckets(
+                    data,
                     record,
+                    source=source,
+                    provider=str(record.get("provider") or "unknown"),
+                    model=model,
+                    tier=str(
+                        record.get("served_service_tier")
+                        or record.get("requested_service_tier")
+                        or "standard"
+                    ),
                 )
-                _add_tokens(data.setdefault("models", {}).setdefault(model, {}), record)
-                tier_key = str(
-                    record.get("served_service_tier")
-                    or record.get("requested_service_tier")
-                    or "standard"
-                )
-                _add_tokens(data.setdefault("tiers", {}).setdefault(tier_key, {}), record)
-
-                data["last_request"] = record
-                if source == "root":
-                    data["last_root_request"] = record
 
                 recent = data.setdefault("recent_requests", [])
                 if isinstance(recent, list):
                     recent.append(record)
                     del recent[:-RECENT_REQUEST_LIMIT]
 
-                save_usage(data, usage_path, warn=False)
+                save_usage(data, usage_path)
             if record_global:
                 _append_global_usage_record_unlocked(record, global_usage_path, warn=False)
     except StorageError:

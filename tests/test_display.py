@@ -8,8 +8,6 @@ from rich.text import Text
 from jarv import display
 from jarv.display import (
     clip_middle,
-    clip_tail,
-    display_output,
     hidden_lines_hint,
     output_display_line_limit,
     output_display_split,
@@ -123,7 +121,7 @@ def test_display_output_shows_head_tail_and_omitted_middle(monkeypatch):
     monkeypatch.setattr(display, "terminal_size", lambda **_kwargs: (120, 24))
     output = "\n".join(f"Line {number}" for number in range(1, 41))
 
-    display_output(output)
+    display.console.print(display.output_renderable(output))
 
     rendered = stream.getvalue()
     assert "Line 1\n" in rendered
@@ -145,7 +143,7 @@ def test_display_output_does_not_truncate_output_within_screen_budget(monkeypatc
     monkeypatch.setattr(display, "terminal_size", lambda **_kwargs: (120, 24))
     output = "\n".join(f"Line {number}" for number in range(1, 9))
 
-    display_output(output)
+    display.console.print(display.output_renderable(output))
 
     rendered = stream.getvalue()
     assert rendered.count("Line ") == 8
@@ -186,16 +184,6 @@ def test_clip_middle_keeps_both_ends():
     assert tail == lines[-2:]
     assert hidden == 33
     assert clip_middle(lines, 40) == (lines, [], 0)
-
-
-def test_clip_tail_keeps_newest_lines():
-    lines = [f"Line {n}" for n in range(1, 11)]
-
-    tail, hidden = clip_tail(lines, 4)
-
-    assert tail == lines[-4:]
-    assert hidden == 6
-    assert clip_tail(lines, 10) == (lines, 0)
 
 
 def _render_plain(renderable, width: int = 120) -> str:

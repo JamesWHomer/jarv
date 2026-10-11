@@ -12,10 +12,6 @@ import time
 from dataclasses import dataclass, field
 
 from .cancellation import CancellationToken, TurnCancelled
-from rich.console import Group
-from rich.text import Text
-
-from .display import output_renderable, console
 
 
 COMMAND_OUTPUT_UNSET = object()
@@ -549,14 +545,10 @@ class InteractiveCommandProcess:
             if self.proc.poll() is not None:
                 # Bounded drain window so output the process wrote just before
                 # exiting still lands in the final snapshot.
-                deadline = time.monotonic() + 2.0
-                for thread in (self._stdout_thread, self._stderr_thread):
-                    thread.join(timeout=max(0.0, deadline - time.monotonic()))
+                self._join_readers(2.0)
                 if self._stdout_thread.is_alive() or self._stderr_thread.is_alive():
                     _kill_process_tree(self.proc)
-                    deadline = time.monotonic() + PROCESS_KILL_GRACE
-                    for thread in (self._stdout_thread, self._stderr_thread):
-                        thread.join(timeout=max(0.0, deadline - time.monotonic()))
+                    self._join_readers(PROCESS_KILL_GRACE)
                 self._finalize_shell_state()
                 return self.snapshot(consume=True)
             now = time.monotonic()
@@ -644,6 +636,12 @@ class InteractiveCommandProcess:
         if capture is not None:
             capture.cleanup()
 
+    def _join_readers(self, timeout: float) -> None:
+        """Give both reader threads up to ``timeout`` seconds in total to drain."""
+        deadline = time.monotonic() + timeout
+        for thread in (self._stdout_thread, self._stderr_thread):
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+
     def _finalize_shell_state(self) -> None:
         """Apply and discard the state capture once the process has exited."""
         capture, self._capture = self._capture, None
@@ -654,16 +652,20 @@ class InteractiveCommandProcess:
         capture.cleanup()
 
 
+def _char_limit(max_chars) -> int:
+    """``max_chars`` as an int, treating ``None`` or unparseable values as 0."""
+    try:
+        return int(max_chars) if max_chars is not None else 0
+    except (TypeError, ValueError):
+        return 0
+
+
 def resolve_command_output_window(
     head_chars: object,
     tail_chars: object,
     max_chars: int | None,
 ) -> tuple[int, int]:
-    try:
-        limit = int(max_chars) if max_chars is not None else 0
-    except (TypeError, ValueError):
-        limit = 0
-    limit = max(0, limit)
+    limit = max(0, _char_limit(max_chars))
 
     defaults = {
         "head_chars": limit // 2,
@@ -730,10 +732,7 @@ def truncate_command_output(
 
 
 def truncate_model_output(output: str, max_chars: int | None, label: str = "tool output") -> str:
-    try:
-        limit = int(max_chars) if max_chars is not None else 0
-    except (TypeError, ValueError):
-        limit = 0
+    limit = _char_limit(max_chars)
     if limit <= 0 or len(output) <= limit:
         return output
 
@@ -849,7 +848,6 @@ def execute_command(
 
 
 def _execute_command_fresh(command, timeout, cancellation_token, shell_state, on_output):
-
     process = None
     try:
         if cancellation_token is not None:
@@ -886,61 +884,17 @@ def _execute_command_fresh(command, timeout, cancellation_token, shell_state, on
             raise
         except subprocess.TimeoutExpired:
             process.kill_tree()
-            deadline = time.monotonic() + PROCESS_KILL_GRACE
-            for thread in (process._stdout_thread, process._stderr_thread):
-                thread.join(timeout=max(0.0, deadline - time.monotonic()))
+            process._join_readers(PROCESS_KILL_GRACE)
             snapshot = process.snapshot()
             return CommandResult(command, snapshot.stdout, snapshot.stderr,
                                  snapshot.exit_code, timed_out=True, timeout=timeout)
         finally:
             unregister()
-    except KeyboardInterrupt:
-        raise
-    except TurnCancelled:
+    except (KeyboardInterrupt, TurnCancelled):
         raise
     except Exception as e:
         return CommandResult(command, "", f"[error: {e}]", None, timeout=timeout)
     finally:
         if process is not None and (process.proc.poll() is None or process._capture is not None):
             process.kill_tree()
-
-
-def display_command_result(result: CommandResult) -> None:
-    console.print(command_result_renderable(result))
-
-
-def command_result_renderable(result: CommandResult):
-    parts = []
-    if result.stdout:
-        parts.append(output_renderable(compact_command_output(result.stdout)))
-    if result.stderr:
-        parts.append(Text("stderr:", style="bold red"))
-        parts.append(output_renderable(result.stderr.strip()))
-    if result.timed_out:
-        parts.append(
-            Text(f"Timed out after {result.timeout:g}s", style="bold red")
-        )
-    elif result.exit_code not in (None, 0):
-        exit_line = Text("exit ", style="bold red")
-        exit_line.append(str(result.exit_code))
-        parts.append(exit_line)
-    else:
-        parts.append(Text("exit 0", style="dim"))
-    if not result.stdout and not result.stderr:
-        parts.insert(0, Text("(no output)", style="dim"))
-    return Group(*parts)
-
-
-def compact_command_output(output: str) -> str:
-    """Trim shell padding and collapse a one-row table to a compact line."""
-    lines = [line.rstrip() for line in output.strip().splitlines()]
-    if (
-        len(lines) == 3
-        and lines[0].strip()
-        and lines[1].strip()
-        and set(lines[1].strip()) == {"-"}
-        and lines[2].strip()
-    ):
-        return f"{lines[0].strip()}  {lines[2].strip()}"
-    return "\n".join(lines)
 

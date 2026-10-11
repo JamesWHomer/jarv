@@ -22,6 +22,15 @@ class ReasoningCapabilities:
     sources: dict[str, str] = field(default_factory=dict)
 
 
+def _sourced(source: str, values: dict[str, Any], **unsourced: Any) -> ReasoningCapabilities:
+    """Capabilities whose non-None ``values`` are attributed to ``source``."""
+    return ReasoningCapabilities(
+        **values,
+        **unsourced,
+        sources={key: source for key, value in values.items() if value is not None},
+    )
+
+
 def _bool(value: Any) -> bool | None:
     return value if isinstance(value, bool) else None
 
@@ -93,18 +102,10 @@ def _capabilities_from_facts(facts: Any, source: str) -> ReasoningCapabilities:
             modes.append("budget")
 
     if facts.reasoning is False:
-        return ReasoningCapabilities(
-            supported=False,
-            efforts=(),
-            supports_disable=False,
-            native_effort=False,
+        return _sourced(
+            source,
+            {"supported": False, "efforts": (), "supports_disable": False, "native_effort": False},
             max_output_tokens=facts.output_limit,
-            sources={
-                "supported": source,
-                "efforts": source,
-                "supports_disable": source,
-                "native_effort": source,
-            },
         )
 
     if efforts is not None:
@@ -124,18 +125,14 @@ def _capabilities_from_facts(facts: Any, source: str) -> ReasoningCapabilities:
         modes = ["enabled" if mode == "budget" else mode for mode in modes]
     ordered_modes = tuple(dict.fromkeys(modes))
 
-    values = {
+    return _sourced(source, {
         "supported": facts.reasoning,
         "efforts": efforts,
         "modes": ordered_modes or None,
         "supports_disable": supports_disable,
         "native_effort": native_effort,
         "max_output_tokens": facts.output_limit,
-    }
-    return ReasoningCapabilities(
-        **values,
-        sources={key: source for key, value in values.items() if value is not None},
-    )
+    })
 
 
 def _catalog_capabilities(provider: str, model: str) -> ReasoningCapabilities:
@@ -182,20 +179,11 @@ def _openrouter_metadata_capabilities(metadata: dict[str, Any]) -> ReasoningCapa
         top_provider.get("max_completion_tokens")
         or metadata.get("max_completion_tokens")
     )
-    return ReasoningCapabilities(
-        supported=supported,
-        returns_reasoning=returns_reasoning,
-        max_output_tokens=max_output,
-        sources={
-            key: "OpenRouter model catalog"
-            for key, value in (
-                ("supported", supported),
-                ("returns_reasoning", returns_reasoning),
-                ("max_output_tokens", max_output),
-            )
-            if value is not None
-        },
-    )
+    return _sourced("OpenRouter model catalog", {
+        "supported": supported,
+        "returns_reasoning": returns_reasoning,
+        "max_output_tokens": max_output,
+    })
 
 
 def _anthropic_metadata_capabilities(metadata: dict[str, Any]) -> ReasoningCapabilities:
@@ -218,56 +206,32 @@ def _anthropic_metadata_capabilities(metadata: dict[str, Any]) -> ReasoningCapab
         efforts = EFFORT_LEVELS
     if supported is False or (efforts is None and native_effort is False):
         efforts = ()
-    elif efforts is None and native_effort is False:
-        efforts = ()
 
     supports_disable = None
     if supported is True and modes is not None:
         supports_disable = "enabled" in modes
 
-    max_output = _positive_int(metadata.get("max_tokens"))
-    source = "Anthropic Models API"
-    return ReasoningCapabilities(
-        supported=supported,
-        efforts=efforts,
-        modes=modes or None,
-        supports_disable=supports_disable,
-        returns_reasoning=supported,
-        native_effort=native_effort,
-        max_output_tokens=max_output,
-        sources={
-            key: source
-            for key, value in (
-                ("supported", supported),
-                ("efforts", efforts),
-                ("modes", modes or None),
-                ("supports_disable", supports_disable),
-                ("native_effort", native_effort),
-                ("max_output_tokens", max_output),
-            )
-            if value is not None
+    return _sourced(
+        "Anthropic Models API",
+        {
+            "supported": supported,
+            "efforts": efforts,
+            "modes": modes or None,
+            "supports_disable": supports_disable,
+            "native_effort": native_effort,
+            "max_output_tokens": _positive_int(metadata.get("max_tokens")),
         },
+        returns_reasoning=supported,
     )
 
 
 def _gemini_metadata_capabilities(metadata: dict[str, Any]) -> ReasoningCapabilities:
     supported = _bool(metadata.get("thinking"))
-    max_output = _positive_int(metadata.get("outputTokenLimit"))
-    source = "Gemini Models API"
-    return ReasoningCapabilities(
-        supported=supported,
-        returns_reasoning=supported,
-        max_output_tokens=max_output,
-        sources={
-            key: source
-            for key, value in (
-                ("supported", supported),
-                ("returns_reasoning", supported),
-                ("max_output_tokens", max_output),
-            )
-            if value is not None
-        },
-    )
+    return _sourced("Gemini Models API", {
+        "supported": supported,
+        "returns_reasoning": supported,
+        "max_output_tokens": _positive_int(metadata.get("outputTokenLimit")),
+    })
 
 
 def _merge(

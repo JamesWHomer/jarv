@@ -434,14 +434,6 @@ def clip_middle(lines: list, line_limit: int) -> tuple[list, list, int]:
     return lines[:head_count], lines[-tail_count:], hidden
 
 
-def clip_tail(lines: list, line_limit: int) -> tuple[list, int]:
-    """Split ``lines`` into (tail, hidden) keeping only the newest lines."""
-    if len(lines) <= line_limit:
-        return lines, 0
-    hidden = len(lines) - line_limit
-    return lines[hidden:], hidden
-
-
 def output_renderable(
     output: str,
     *,
@@ -502,7 +494,3 @@ def command_line_renderable(command: str, *, expanded: bool = False) -> Renderab
     else:
         hint = Text(f"… +{hidden_chars:,} chars", style="dim italic")
     return Group(header, Text("  ").append_text(hint))
-
-
-def display_output(output: str, *, max_lines: int | None = None) -> None:
-    console.print(output_renderable(output, max_lines=max_lines))

@@ -33,6 +33,7 @@ from .config import save_config
 from .display import console, terminal_size
 from .intro_animation import render_intro
 from .provider_catalog import LOCAL_PROVIDERS, PROVIDERS
+from .response_wait import spinner_frame
 from .settings_command import _settings_begin_edit, _settings_rows
 from .settings_editor import apply_catalog_refresh, apply_editor_key, render_editor_panel
 from .settings_refresher import _ModelCatalogRefresher
@@ -49,8 +50,6 @@ _SETUP_STEP_KEYS = {
     "model": "model",
     "base_url": "base_url",
 }
-
-_SPIN_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 _REPEATABLE_KEYS = frozenset(
     {"UP", "DOWN", "LEFT", "RIGHT", "HOME", "END", "PAGEUP", "PAGEDOWN"}
@@ -208,7 +207,6 @@ class SetupApp(AltScreenApp):
         self._brand_started_at = time.perf_counter()
         self._last_anim_frame = 0.0
         self.conn_status = "idle"  # idle | checking | ok | fail | nokey
-        self.conn_error = ""
 
         if self.single_step:
             self.phase = "step"
@@ -390,10 +388,9 @@ class SetupApp(AltScreenApp):
     def _probe_worker(self) -> None:
         self._apply_probe_result(*probe_connection(self.config))
 
-    def _apply_probe_result(self, ok: bool, error: str | None) -> None:
+    def _apply_probe_result(self, ok: bool, _error: str | None) -> None:
         with self.lock:
             self.conn_status = "ok" if ok else "fail"
-            self.conn_error = error or ""
         self.invalidate()
 
     # ------------------------------------------------------------------ #
@@ -558,7 +555,7 @@ class SetupApp(AltScreenApp):
         if status == "fail":
             return [Text("⚠ couldn't reach the provider — settings saved", style="yellow")]
         if status == "checking":
-            frame = _SPIN_FRAMES[int(time.perf_counter() * 10) % len(_SPIN_FRAMES)]
+            frame = spinner_frame()
             return [Text(f"{frame} verifying connection…", style="cyan")]
         return []
 

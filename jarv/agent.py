@@ -1,17 +1,12 @@
 from .storage import transaction, delete_json, StorageError
-import os
-import platform
 import sys
 import threading
 import time
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from dataclasses import dataclass
 
-from rich.control import Control, ControlType
 from rich.live import Live
-from rich.live_render import LiveRender
 from rich.markup import escape
-from rich.segment import Segment
 from rich.text import Text
 
 from .config import DEFAULT_CONFIG, get_setting
@@ -30,7 +25,6 @@ from .history import (
     artifact_file_for,
     ephemeral_session_context,
     forget_current_session,
-    get_shell_name,
     history_metadata,
     load_history,
     new_frame_id,
@@ -43,7 +37,6 @@ from .artifacts import ArtifactStore, load_artifact_store, save_artifact_store
 from .provider import (
     create_client,
     ProviderError,
-    RetryableStreamError,
     ReasoningDone,
     ReasoningStarted,
     TextDelta,
@@ -62,16 +55,14 @@ from .orchestrator import (
     RunCommandDispatchResult,
     SPAWN_TOOL,
     AgentNode,
-    SpawnObserver,
     ToolExecutionHooks,
+    check_run_command,
     execute_run_command,
     execute_tool_calls,
     filter_enabled_tools,
     history_has_web_search_read_nudge,
-    parse_spawn_children,
     prepare_run_command,
     run_command_tool_for_config,
-    spawn_tool_output,
 )
 from .edit_tool import EDIT_TOOL, dispatch_edit_tool
 from .read_tool import read_tool_for_config
@@ -80,15 +71,19 @@ from .retained_outputs import (
     load_retained_output_store,
     save_retained_output_store,
 )
-from .tool_outputs import ToolOutput, with_tool_outcome
+from .tool_outputs import with_tool_outcome
 from .terminal_text import safe_terminal_text
 from .unicode_safety import sanitize_json_value
-from .turn_loop import StreamCollection, collect_stream_response, run_tool_execution_round
+from .turn_loop import (
+    StreamCollection,
+    collect_stream_response,
+    request_kwargs,
+    run_tool_execution_round,
+)
 from .turn_stats import TurnSummaryStats
 from .turn_summary_settings import enabled_turn_summary_fields
 from .turn_records import (
     append_assistant_response_input_items,
-    append_reasoning_input_items,
     append_tool_result_input_items,
     stream_usage_output_text,
 )
@@ -134,6 +129,7 @@ from .agent_ui import (
     _dispatch_spawn_with_ui,
     _print_turn_summary_if_enabled,
     _print_tool_card,
+    _show_tool_error,
     _start_response_wait_indicator,
     _ui_call,
     get_system_info,
@@ -214,28 +210,12 @@ class SessionPersistence:
         self.save(clear_redo=True)
 
 
-def _agent_check_run_command(prepared, config: dict, **kwargs):
-    safety_level = config.get("command_safety", "risky")
-    audit = config.get("audit", True)
-    return check_command(
-        prepared.cmd,
-        safety_level,
-        audit=audit,
-        config=config,
-        history=kwargs.get("safety_history"),
-        usage_path=None if kwargs.get("incognito") else kwargs.get("usage_path"),
-        session_id=kwargs.get("session_id"),
-        cancellation_token=kwargs.get("cancellation_token"),
-    )
-
-
 from .interactive_command import (
     _MAX_CONSECUTIVE_INVALID,
     _TERMINAL_REPLY_INSTRUCTIONS,
     _attach_interactive_output_item,
     _continue_interactive_command,
     _finalize_interactive_record,
-    _format_elapsed_seconds,
     _format_finished_interactive_output,
     _interaction_marker_text,
     _interactive_check_in_seconds,
@@ -249,6 +229,11 @@ from .interactive_command import (
     _run_command_waiting_prompt,
     _terminal_action_display,
 )
+
+
+def _agent_check_run_command(prepared, config: dict, **kwargs):
+    # Resolve check_command here so patching jarv.agent.check_command still works.
+    return check_run_command(prepared, config, check=check_command, **kwargs)
 
 
 def _stop_interactive_card_live(live, live_depth_cm) -> None:
@@ -269,6 +254,22 @@ def _stop_interactive_card_live(live, live_depth_cm) -> None:
             live_depth_cm.__exit__(None, None, None)
         except Exception:
             pass
+
+
+def _start_card_live(card):
+    """Hold an inline ``Live`` open around a command card; returns ``(live, depth_cm)``."""
+    live_depth_cm = track_live_display()
+    live_depth_cm.__enter__()
+    live = Live(
+        card,
+        refresh_per_second=8,
+        console=console,
+        auto_refresh=True,
+        transient=False,
+        vertical_overflow="crop",
+    )
+    live.start()
+    return live, live_depth_cm
 
 
 def _close_interactive_card_live(pending) -> None:
@@ -324,17 +325,7 @@ def _dispatch_run_command_oneshot(
     if ui is not None:
         _ui_call(ui, "show_tool_card", card)
     else:
-        live_depth_cm = track_live_display()
-        live_depth_cm.__enter__()
-        live = Live(
-            card,
-            refresh_per_second=8,
-            console=console,
-            auto_refresh=True,
-            transient=False,
-            vertical_overflow="crop",
-        )
-        live.start()
+        live, live_depth_cm = _start_card_live(card)
 
     def on_output(stdout, stderr):
         if card.update_output(stdout, stderr) and ui is not None:
@@ -390,10 +381,7 @@ def _dispatch_run_command_with_ui(
 ):
     prepared = prepare_run_command(args, config)
     if isinstance(prepared, str):
-        if ui is not None:
-            _ui_call(ui, "show_error", prepared)
-        else:
-            console.print(f"[red]{prepared}[/red]")
+        _show_tool_error(ui, prepared)
         return prepared
 
     allowed, denial = _agent_check_run_command(
@@ -442,17 +430,7 @@ def _dispatch_run_command_with_ui(
         if ui is not None:
             _ui_call(ui, "show_tool_card", card)
         else:
-            live_depth_cm = track_live_display()
-            live_depth_cm.__enter__()
-            live = Live(
-                card,
-                refresh_per_second=8,
-                console=console,
-                auto_refresh=True,
-                transient=False,
-                vertical_overflow="crop",
-            )
-            live.start()
+            live, live_depth_cm = _start_card_live(card)
         if cancellation_token is not None:
             cancellation_token.throw_if_cancelled()
         process = InteractiveCommandProcess.start(prepared.cmd, shell_state=shell_state)
@@ -626,10 +604,13 @@ class _TurnRenderer:
         if self.tool_indicator is not None and self.spinner_live is not None:
             self.spinner_live.update(self.tool_indicator, refresh=True)
 
-    def stop_live(self) -> None:
+    def _stop_spinner(self) -> None:
         if self.spinner_live is not None:
             self.spinner_live.stop()
             self.spinner_live = None
+
+    def stop_live(self) -> None:
+        self._stop_spinner()
         if self.stream_live is not None:
             self.stream_live.stop()
             self.stream_live = None
@@ -665,9 +646,7 @@ class _TurnRenderer:
     def complete_response_phase(self) -> None:
         if self.response_phase_completed:
             return
-        if self.spinner_live is not None:
-            self.spinner_live.stop()
-            self.spinner_live = None
+        self._stop_spinner()
         self.wait_indicator = None
         self.response_phase_completed = True
         if self.interactive_continuation:
@@ -693,9 +672,7 @@ class _TurnRenderer:
     def complete_tool_phase(self) -> None:
         if self.tool_started_at is None or self.tool_phase_completed:
             return
-        if self.spinner_live is not None:
-            self.spinner_live.stop()
-            self.spinner_live = None
+        self._stop_spinner()
         self.tool_phase_completed = True
         status_text = tool_activity_complete_status(
             (self.tool_completed_at or time.perf_counter()) - self.tool_started_at,
@@ -785,17 +762,15 @@ class _TurnRenderer:
             if not self.got_text:
                 self.got_text = True
                 self.complete_tool_phase()
-                if self.interactive_continuation:
-                    # Keep the "Deciding next input…" footer animating until the
-                    # whole stream completes. The reply text is intentionally
-                    # hidden for interactive continuations, so completing the
-                    # response phase here at the first token would leave the rest
-                    # of a long, often minutes-long interleaved-reasoning stream
-                    # looking frozen — the gap the user sees after "Decided next
-                    # input". The final complete_response_phase after the stream
-                    # records the true turn duration.
-                    pass
-                else:
+                # During an interactive continuation keep the "Deciding next
+                # input…" footer animating until the whole stream completes. The
+                # reply text is intentionally hidden there, so completing the
+                # response phase at the first token would leave the rest of a
+                # long, often minutes-long interleaved-reasoning stream looking
+                # frozen — the gap the user sees after "Decided next input". The
+                # final complete_response_phase after the stream records the true
+                # turn duration.
+                if not self.interactive_continuation:
                     self.complete_response_phase()
                     if self.interactive:
                         # max_lines defaults to None so the crop bound is recomputed
@@ -870,12 +845,7 @@ class _TurnRenderer:
         # the checkpoint even when the overall response did not finish.
         self.tool_calls = result.tool_calls
         self.reasoning_items = result.reasoning_items
-        if self.spinner_live is not None:
-            self.spinner_live.stop()
-            self.spinner_live = None
-        if self.stream_live is not None:
-            self.stream_live.stop()
-            self.stream_live = None
+        self.stop_live()
 
     def on_stream_retry(self) -> None:
         self._reset_turn_state()
@@ -929,17 +899,20 @@ class TurnCheckpointer:
             self.persistence.history.extend(self.status_items)
             self.status_items.clear()
 
-    def flush_error_state(self) -> None:
-        self.flush_status_items()
-        history = self.persistence.history
+    def _append_unrecorded_reply(self) -> None:
+        """Keep text that streamed before the turn ended without being recorded."""
         renderer = self.renderer
         if renderer.reply_text and not renderer.response_recorded:
-            history.append(
+            self.persistence.history.append(
                 {"role": "assistant", "content": renderer.reply_text, **renderer.metadata,
                  **({"provider_metadata": renderer.provider_metadata}
                     if renderer.provider_metadata is not None else {})}
             )
-        if renderer.response_recorded:
+
+    def flush_error_state(self) -> None:
+        self.flush_status_items()
+        self._append_unrecorded_reply()
+        if self.renderer.response_recorded:
             self.append_unfinished_tool_results("interrupted by error")
         self.persistence.save()
 
@@ -960,11 +933,7 @@ class TurnCheckpointer:
                 stored_reasoning["summary"] = []
                 history.append(stored_reasoning)
 
-        if renderer.reply_text and not renderer.response_recorded:
-            history.append({"role": "assistant", "content": renderer.reply_text, **metadata,
-                            **({"provider_metadata": renderer.provider_metadata}
-                               if renderer.provider_metadata is not None else {})})
-
+        self._append_unrecorded_reply()
         self.append_unfinished_tool_results("cancelled by user", "cancelled")
         history.append({
             "role": "assistant",
@@ -1006,6 +975,18 @@ class TurnCheckpointer:
                 provider_metadata=pending_metadata,
             )
             pending_metadata = None
+
+
+def _reject_reply(pending, note: str) -> bool:
+    """Refund a round no process saw and count the invalid streak.
+
+    Returns True once the streak reaches the cap, so a model stuck on free
+    retries cannot loop forever.
+    """
+    pending.rounds -= 1
+    pending.invalid_streak += 1
+    _record_rejected_reply(pending, note)
+    return pending.invalid_streak >= _MAX_CONSECUTIVE_INVALID
 
 
 def _abort_interactive_command(pending, note: str, ui, input_items: list) -> list:
@@ -1066,14 +1047,10 @@ def _advance_interactive_continuation(
         # round after round. Refund the round (nothing touched the process)
         # but bound the streak like unparseable replies, or a tool-stuck
         # model loops on free retries.
-        pending.rounds -= 1
-        pending.invalid_streak += 1
         names = ", ".join(call.name for call in renderer.tool_calls)
-        _record_rejected_reply(
-            pending,
-            f"[reply rejected: tool call ({names}) instead of terminal input]",
-        )
-        if pending.invalid_streak >= _MAX_CONSECUTIVE_INVALID:
+        if _reject_reply(
+            pending, f"[reply rejected: tool call ({names}) instead of terminal input]"
+        ):
             return (
                 _abort_interactive_command(
                     pending, _invalid_streak_abort_note(), ui, input_items
@@ -1124,13 +1101,7 @@ def _advance_interactive_continuation(
         # goes into the collapsed record so the session sidecar shows why the
         # interaction stalled.
         if terminal_kind == "invalid":
-            # Refund the round — nothing touched the process — but bound the
-            # streak so a model stuck on the same bad token cannot loop
-            # forever on free retries.
-            pending.rounds -= 1
-            pending.invalid_streak += 1
-            _record_rejected_reply(pending, f"[reply rejected: {terminal_action}]")
-            if pending.invalid_streak >= _MAX_CONSECUTIVE_INVALID:
+            if _reject_reply(pending, f"[reply rejected: {terminal_action}]"):
                 return (
                     _abort_interactive_command(
                         pending, _invalid_streak_abort_note(), ui, input_items
@@ -1230,12 +1201,6 @@ def _build_tool_hooks(
     from .tool_progress import ParallelToolDisplay
     from .tool_outputs import summarize_tool_output
 
-    def _on_tool_error(message: str) -> None:
-        if ui is not None:
-            _ui_call(ui, "show_error", message)
-        else:
-            console.print(f"[red]{message}[/red]")
-
     parallel_display = ParallelToolDisplay(config, ui)
 
     def _run_edit(edit_args: dict) -> str:
@@ -1286,7 +1251,7 @@ def _build_tool_hooks(
             ui=ui,
         ),
         run_ask_user=lambda args: _dispatch_ask_user(args, config, ui=ui),
-        on_tool_error=_on_tool_error,
+        on_tool_error=lambda message: _show_tool_error(ui, message),
     )
 
 
@@ -1324,7 +1289,6 @@ def run_agent(
     query: str,
     config: dict,
     client=None,
-    propagate_keyboard_interrupt: bool = False,
     new_session: bool = False,
     incognito: bool = False,
     heads_up: bool = False,
@@ -1344,11 +1308,6 @@ def run_agent(
     history: list = []
     metadata: dict = {}
     session_context = None
-    artifact_file = None
-    artifact_store = None
-    reads_file = None
-    retained_store = None
-    usage_path = None
     pending_interactive_command: PendingRunCommand | None = None
     history_saved = getattr(ui, "history_saved", None)
     persistence = SessionPersistence(
@@ -1496,15 +1455,7 @@ def run_agent(
             retained_store=retained_store,
         )
 
-        kwargs = dict(
-            model=config["model"],
-            instructions=instructions,
-            tools=tools,
-            input=input_items,
-        )
-        effort = config.get("reasoning_effort")
-        if effort:
-            kwargs["reasoning"] = {"effort": effort}
+        kwargs = request_kwargs(config, instructions, tools, input_items)
 
         turn_number = 0
         while True:
@@ -1565,6 +1516,7 @@ def run_agent(
             control.check()
             renderer.adopt_stream_result(stream_result)
             final_response = stream_result.final_response
+            output_text = stream_usage_output_text(renderer.reply_text, renderer.tool_calls)
             if not incognito:
                 from .provider_catalog import configured_service_tier
 
@@ -1577,19 +1529,15 @@ def run_agent(
                     provider=str(config.get("provider") or "openai"),
                     requested_service_tier=configured_service_tier(config),
                     context_breakdown=_ctx_breakdown,
-                    output_text=stream_usage_output_text(
-                        renderer.reply_text, renderer.tool_calls
-                    ),
+                    output_text=output_text,
                 )
             renderer.complete_tool_phase()
             renderer.complete_response_phase()
             fallback_note = provider_response_notice(config, final_response)
             if fallback_note:
                 renderer.note_provider_notice(fallback_note)
-            if renderer.got_text:
-                if pending_interactive_command is not None:
-                    pass
-                elif ui is not None:
+            if renderer.got_text and pending_interactive_command is None:
+                if ui is not None:
                     _ui_call(ui, "finish_assistant_message", renderer.reply_text)
                 elif interactive:
                     from rich.markdown import Markdown
@@ -1605,9 +1553,7 @@ def run_agent(
                     elapsed_seconds=stream_result.elapsed_seconds,
                     stream_result=stream_result,
                     context_breakdown=_ctx_breakdown,
-                    output_text=stream_usage_output_text(
-                        renderer.reply_text, renderer.tool_calls
-                    ),
+                    output_text=output_text,
                     provider=config.get("provider"),
                 )
 
@@ -1713,9 +1659,7 @@ def run_agent(
             stream_result=stream_result,
             turn_stats=turn_stats,
             context_breakdown=_ctx_breakdown,
-            output_text=stream_usage_output_text(
-                renderer.reply_text, renderer.tool_calls
-            ),
+            output_text=output_text,
             usage_path=usage_path,
             session_id=session_context.session_id,
             ui=ui,
@@ -1734,7 +1678,7 @@ def run_agent(
         return AgentRunResult(cancelled=error is None, prompt=query, error=error,
                               session_id=session_context.session_id if session_context else None,
                               turns=control.turns, status=status)
-    except (ProviderError, Exception) as e:
+    except Exception as e:
         cancellation_token.cancel()
         cleanup_pending_command()
         label = "API error" if isinstance(e, ProviderError) else "Unexpected error"
@@ -1742,8 +1686,7 @@ def run_agent(
         if ui is not None:
             _ui_call(ui, "show_error", message)
         else:
-            style = "red"
-            console.print(f"[{style}]{label}:[/{style}] {escape(str(e))}")
+            console.print(f"[red]{label}:[/red] {escape(str(e))}")
         if not isinstance(e, StorageError) and persistence.session_context is not None:
             checkpointer.flush_error_state()
         return AgentRunResult(error=control.error or str(e), status=control.status or "error",

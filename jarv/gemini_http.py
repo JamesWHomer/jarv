@@ -95,7 +95,7 @@ def _to_gemini_schema(schema: Any) -> Any:
     converted = {
         key: value
         for key, value in schema.items()
-        if key not in {"additionalProperties"}
+        if key != "additionalProperties"
     }
     if isinstance(converted.get("properties"), dict):
         converted["properties"] = {
@@ -217,25 +217,17 @@ def _apply_reasoning(config: dict, payload: dict, model: str, reasoning: dict | 
     probe = dict(config)
     probe["provider"] = "gemini"
     probe["model"] = model
+    thinking: dict[str, Any]
     if not effort:
-        if get_reasoning_capabilities(probe).supported is True:
-            payload.setdefault("generationConfig", {})["thinkingConfig"] = {
-                "includeThoughts": True,
-            }
-        return
-    effort = require_reasoning_effort(probe, effort)
-    if effort == "none":
-        payload.setdefault("generationConfig", {})["thinkingConfig"] = {
-            "includeThoughts": False,
-            "thinkingBudget": 0,
-        }
-        return
-
-    thinking: dict[str, Any] = {"includeThoughts": True}
-    if model.lower().startswith("gemini-3"):
-        thinking["thinkingLevel"] = effort
+        if get_reasoning_capabilities(probe).supported is not True:
+            return
+        thinking = {"includeThoughts": True}
+    elif (effort := require_reasoning_effort(probe, effort)) == "none":
+        thinking = {"includeThoughts": False, "thinkingBudget": 0}
+    elif model.lower().startswith("gemini-3"):
+        thinking = {"includeThoughts": True, "thinkingLevel": effort}
     else:
-        thinking["thinkingBudget"] = _THINKING_BUDGETS.get(effort, -1)
+        thinking = {"includeThoughts": True, "thinkingBudget": _THINKING_BUDGETS.get(effort, -1)}
     payload.setdefault("generationConfig", {})["thinkingConfig"] = thinking
 
 
