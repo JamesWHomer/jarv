@@ -85,7 +85,7 @@ wheels = [
 
 [[package]]
 name = "jarv"
-version = "0.67.2"
+version = "0.68.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
